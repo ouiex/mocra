@@ -1,0 +1,23 @@
+[package]
+name = "queue"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+async-trait.workspace = true
+tokio.workspace = true
+redis.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+deadpool-redis.workspace = true
+rdkafka.workspace = true
+log.workspace = true
+futures.workspace = true
+uuid.workspace = true
+tracing.workspace = true
+
+
+
+errors.workspace = true
+utils.workspace = true
+common.workspace = true

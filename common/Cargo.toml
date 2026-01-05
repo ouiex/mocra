@@ -1,0 +1,28 @@
+[package]
+name = "common"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+async-trait.workspace = true
+futures.workspace = true
+log.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+thiserror.workspace = true
+polars.workspace = true
+env_logger.workspace = true
+sea-orm.workspace = true
+serde.workspace = true
+chrono.workspace = true
+reqwest.workspace = true
+reqwest_cookie_store.workspace = true
+url.workspace = true
+uuid.workspace = true
+toml.workspace = true
+utils.workspace = true
+proxy.workspace = true
+errors.workspace = true
+dyn-clone.workspace = true
+redis = "0.32.7"
+sync.workspace = true

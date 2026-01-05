@@ -1,0 +1,199 @@
+use crate::core::chain::{
+    ConfigProcessor, ProxyMiddlewareProcessor, RequestMiddlewareProcessor,
+};
+use crate::core::events::EventDownload::{
+    DownloadCompleted, DownloadFailed, DownloadRetry, DownloadStarted, DownloaderCreate,
+};
+use crate::core::events::{DownloadEvent, DynFailureEvent, DynRetryEvent, EventBus, SystemEvent};
+use crate::core::processors::event_processor::{EventAwareTypedChain, EventProcessorTrait};
+use async_trait::async_trait;
+use downloader::{DownloaderManager, WebSocketDownloader};
+use error::Error;
+use kernel::middleware::middleware_manager::MiddlewareManager;
+use kernel::sync::sync_service::SyncService;
+use kernel::{ModuleConfig, Request};
+use log::{error, warn};
+use message_queue::QueueManager;
+use processor_chain::processors::processor::{
+    ProcessorContext, ProcessorResult, ProcessorTrait, RetryPolicy,
+};
+use proxy::ProxyManager;
+use std::sync::Arc;
+
+struct WebSocketDownloadProcessor {
+    queue_manager: Arc<QueueManager>,
+    wss_downloader: Arc<WebSocketDownloader>,
+    middleware_manager: Arc<MiddlewareManager>,
+    sync_service: Arc<SyncService>,
+}
+#[async_trait]
+impl ProcessorTrait<(Request, Option<ModuleConfig>), ()> for WebSocketDownloadProcessor {
+    fn name(&self) -> &'static str {
+        "WebSocketDownloadProcessor"
+    }
+
+    async fn process(
+        &self,
+        input: (Request, Option<ModuleConfig>),
+        context: ProcessorContext,
+    ) -> ProcessorResult<()> {
+        let (request, _) = input;
+        let response = self.wss_downloader.send(request).await;
+        match response {
+            // web_socket_downloader需要持有一个与queue_manager不同的消息队列，需要取出Response进行middleware处理和发布
+            // 这种情况下，返回值为()，表示下载成功，需要在post_process中使用middleware处理和发布
+            // post_process
+            Ok(_resp) => ProcessorResult::Success(()),
+            Err(_) => {
+                // Handle download error
+                ProcessorResult::RetryableFailure(context.retry_policy.unwrap_or_default())
+            }
+        }
+    }
+    async fn post_process(
+        &self,
+        input: &(Request, Option<ModuleConfig>),
+        _output: &(),
+        _context: &ProcessorContext,
+    ) -> error::Result<()> {
+        // 从response_recv中取出Response进行middleware处理和发布
+        let (tx, mut rx) = tokio::sync::mpsc::channel(100);
+        let timeout = input.1.as_ref().map(|x|x.get_config::<u64>("wss_timeout")).flatten().unwrap_or(60);
+        let module_id = input.0.module_id();
+
+
+        // 注册监听器，确保只接收当前模块的消息
+        self.wss_downloader.subscribe(module_id.clone(), tx).await;
+
+        let sender = self.queue_manager.get_response_push_channel().clone();
+        let middleware_manager = self.middleware_manager.clone();
+        let config = input.1.clone();
+        let wss_downloader = self.wss_downloader.clone();
+        let module_id_clone = module_id.clone();
+        let sync_service = self.sync_service.clone();
+        let run_id = input.0.run_id;
+
+        tokio::spawn(async move {
+            use tokio::time::{Duration, interval};
+
+            let mut stop_check = interval(Duration::from_secs(5));
+            let mut last_activity = tokio::time::Instant::now();
+
+            loop {
+                tokio::select! {
+                    _ = stop_check.tick() => {
+                        let key = format!("run:{}:module:{}", run_id, module_id_clone);
+                        // 检查 Redis 中的 stop 字段
+                        if let Ok(Some(val)) = sync_service.get_sync().sync(&key, "stop").await {
+                             if val.as_bool().unwrap_or(false) {
+                                 log::info!("[ResponsePublish] Module {} stopped, closing connection...", module_id_clone);
+                                 wss_downloader.close(&module_id_clone).await;
+                                 break;
+                             }
+                        }
+                        
+                        // 检查空闲超时 (60s)
+                        if last_activity.elapsed() > Duration::from_secs(timeout) {
+                             let active = wss_downloader.active_count().await;
+                             if active == 0 {
+                                log::info!("[ResponsePublish] No active WebSocket connections and idle for 60s, exiting...");
+                                break;
+                             }
+                        }
+                    }
+                    res = rx.recv() => {
+                        last_activity = tokio::time::Instant::now();
+                        match res {
+                            Some(response) => {
+                                // 收到响应，进行处理
+                                let modified_response = middleware_manager.handle_response(response, &config).await;
+                                if let Err(e) = sender.send(modified_response).await {
+                                    error!("Failed to send response to queue: {e}");
+                                    warn!("[ResponsePublish] will retry due to queue send error");
+                                }
+                            }
+                            None => {
+                                // 通道已关闭，正常退出
+                                log::info!("[ResponsePublish] WebSocket response channel closed for module {}, exiting...", module_id_clone);
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            // 任务结束时取消注册
+            wss_downloader.unsubscribe(&module_id_clone).await;
+            log::info!("[ResponsePublish] Task completed for module {}", module_id_clone);
+        });
+
+        Ok(())
+    }
+}
+impl EventProcessorTrait<(Request, Option<ModuleConfig>), ()> for WebSocketDownloadProcessor {
+    fn pre_status(&self, input: &(Request, Option<ModuleConfig>)) -> Option<SystemEvent> {
+        let ev: DownloadEvent = (&input.0).into();
+        Some(SystemEvent::Download(DownloaderCreate(ev)))
+    }
+
+    fn finish_status(&self, input: &(Request, Option<ModuleConfig>), _output: &()) -> Option<SystemEvent> {
+        let ev: DownloadEvent = (&input.0).into();
+
+        Some(SystemEvent::Download(DownloadCompleted(ev)))
+    }
+
+    fn working_status(&self, input: &(Request, Option<ModuleConfig>)) -> Option<SystemEvent> {
+        let ev: DownloadEvent = (&input.0).into();
+        Some(SystemEvent::Download(DownloadStarted(ev)))
+    }
+
+    fn error_status(&self, input: &(Request, Option<ModuleConfig>), err: &Error) -> Option<SystemEvent> {
+        let ev: DownloadEvent = (&input.0).into();
+        let failure = DynFailureEvent {
+            data: ev,
+            error: err.to_string(),
+        };
+        Some(SystemEvent::Download(DownloadFailed(failure)))
+    }
+
+    fn retry_status(
+        &self,
+        input: &(Request, Option<ModuleConfig>),
+        retry_policy: &RetryPolicy,
+    ) -> Option<SystemEvent> {
+        let ev: DownloadEvent = (&input.0).into();
+        let retry = DynRetryEvent {
+            data: ev,
+            retry_count: retry_policy.current_retry,
+            reason: retry_policy.reason.clone().unwrap_or_default(),
+        };
+        Some(SystemEvent::Download(DownloadRetry(retry)))
+    }
+}
+
+pub async fn create_wss_download_chain(
+    downloader_manager: Arc<DownloaderManager>,
+    queue_manager: Arc<QueueManager>,
+    middleware_manager: Arc<MiddlewareManager>,
+    sync_service: Arc<SyncService>,
+    event_bus: Arc<EventBus>,
+    proxy_manager: Option<Arc<ProxyManager>>,
+) -> EventAwareTypedChain<Request, ()> {
+    let download_processor = WebSocketDownloadProcessor {
+        queue_manager: queue_manager.clone(),
+        wss_downloader: downloader_manager.wss_downloader.clone(),
+        middleware_manager: middleware_manager.clone(),
+        sync_service: sync_service.clone(),
+    };
+
+    let request_middleware = RequestMiddlewareProcessor {
+        middleware_manager: middleware_manager.clone(),
+    };
+    let config_processor = ConfigProcessor { sync_service };
+    let proxy_middleware = ProxyMiddlewareProcessor { proxy_manager };
+
+    EventAwareTypedChain::<Request, Request>::new(event_bus)
+        .then::<(Request, Option<ModuleConfig>), _>(config_processor)
+        .then::<(Request, Option<ModuleConfig>), _>(proxy_middleware)
+        .then::<(Request, Option<ModuleConfig>), _>(request_middleware)
+        .then::<(), _>(download_processor)
+}

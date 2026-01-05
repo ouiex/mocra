@@ -1,0 +1,17 @@
+[package]
+name = "sync"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+errors.workspace = true
+dashmap.workspace = true
+async-trait.workspace = true
+tokio.workspace = true
+utils.workspace = true
+redis.workspace = true
+deadpool-redis.workspace = true
+rdkafka.workspace = true
+uuid.workspace = true
