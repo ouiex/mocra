@@ -1,11 +1,10 @@
-
-use common::model::message::{ParserTaskModel, ErrorTaskModel};
-use utils::logger::LogModel;
 use common::model::message::TaskModel;
+use common::model::message::{ErrorTaskModel, ParserTaskModel};
 use common::model::{Request, Response};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::sync::mpsc::{Receiver, Sender, channel};
+use utils::logger::LogModel;
 
 /// 消息队列通道管理器
 ///

@@ -1,13 +1,13 @@
-use crate::{Downloader, WebSocketDownloader};
 use crate::request_downloader::RequestDownloader;
+use crate::{Downloader, WebSocketDownloader};
+use common::model::Request;
+use common::model::download_config::DownloadConfig;
+use common::state::State;
 use dashmap::DashMap;
 use redis::{AsyncCommands, Script};
 use std::sync::Arc;
 use std::time::SystemTime;
 use tokio::sync::RwLock;
-use common::model::download_config::DownloadConfig;
-use common::model::Request;
-use common::state::State;
 
 pub struct DownloaderManager {
     pub state: Arc<State>,
@@ -80,7 +80,8 @@ impl DownloaderManager {
         let key = format!("{}:downloader_expire", config_name);
 
         // Lua script to get and remove expired keys
-        let script = Script::new(r#"
+        let script = Script::new(
+            r#"
             local key = KEYS[1]
             local max_score = ARGV[1]
             local expired = redis.call('ZRANGEBYSCORE', key, '-inf', max_score)
@@ -88,13 +89,16 @@ impl DownloaderManager {
                 redis.call('ZREM', key, unpack(expired))
             end
             return expired
-        "#);
+        "#,
+        );
 
         let mut expired_keys: Vec<String> = Vec::new();
 
         // Execute Lua script
         let mut pool = self.state.locker.get_pool();
-        if let Some(pool) = pool && let Ok(mut conn) = pool.get().await {
+        if let Some(pool) = pool
+            && let Ok(mut conn) = pool.get().await
+        {
             let result: Result<Vec<String>, _> = script
                 .key(&key)
                 .arg(max_score)
@@ -112,7 +116,8 @@ impl DownloaderManager {
         }
 
         // 检查健康状态
-        let check_list: Vec<(String, Box<dyn Downloader>)> = self.task_downloader
+        let check_list: Vec<(String, Box<dyn Downloader>)> = self
+            .task_downloader
             .iter()
             .map(|r| (r.key().clone(), dyn_clone::clone_box(r.value().as_ref())))
             .collect();
@@ -120,8 +125,15 @@ impl DownloaderManager {
         for (key, downloader) in check_list {
             if downloader.health_check().await.is_err() {
                 self.task_downloader.remove(&key);
-                if let Some(pool) = pool && let Ok(mut conn) = pool.get().await {
-                    let _: () = redis::cmd("ZREM").arg(&key).arg(&key).query_async(&mut *conn).await.unwrap_or(());
+                if let Some(pool) = pool
+                    && let Ok(mut conn) = pool.get().await
+                {
+                    let _: () = redis::cmd("ZREM")
+                        .arg(&key)
+                        .arg(&key)
+                        .query_async(&mut *conn)
+                        .await
+                        .unwrap_or(());
                 }
             }
         }
@@ -151,7 +163,9 @@ impl DownloaderManager {
             let key = format!("{}:downloader_expire", config_name);
             let pool = self.state.locker.get_pool();
 
-            if let Some(pool) = pool && let Ok(mut conn) = pool.get().await {
+            if let Some(pool) = pool
+                && let Ok(mut conn) = pool.get().await
+            {
                 let _: () = redis::cmd("ZADD")
                     .arg(&key)
                     .arg(current_time)
@@ -160,12 +174,15 @@ impl DownloaderManager {
                     .await
                     .unwrap_or(());
 
-                self.expire_update_cache.insert(module_id.clone(), current_time);
+                self.expire_update_cache
+                    .insert(module_id.clone(), current_time);
             }
         }
 
         // 获取或插入配置
-        let config = self.config.entry(module_id.clone())
+        let config = self
+            .config
+            .entry(module_id.clone())
             .or_insert(download_config)
             .clone();
 
@@ -184,7 +201,10 @@ impl DownloaderManager {
             }
         };
 
-        self.task_downloader.insert(module_id.clone(), dyn_clone::clone_box(new_downloader.as_ref()));
+        self.task_downloader.insert(
+            module_id.clone(),
+            dyn_clone::clone_box(new_downloader.as_ref()),
+        );
 
         // 确保配置是最新的
         new_downloader.set_config(&request.limit_id, config).await;

@@ -16,7 +16,9 @@ pub fn xlsx_dataframe(
     if !sheet_names.contains(&sheet_name.to_string()) {
         return Err(format!("Sheet '{sheet_name}' not found in the workbook").into());
     }
-    let sheet = workbook.with_header_row(HeaderRow::Row(skip_rows as u32)).worksheet_range(sheet_name)?;
+    let sheet = workbook
+        .with_header_row(HeaderRow::Row(skip_rows as u32))
+        .worksheet_range(sheet_name)?;
     sheet_dataframe(sheet, first_row_as_title)
 }
 
@@ -48,7 +50,7 @@ fn sheet_dataframe(
         let column_data: Vec<_> = (0..sheet.height())
             .map(|row_idx| {
                 sheet
-                    .get((row_idx, col_index))  // 使用 get() 而不是 get_value()
+                    .get((row_idx, col_index)) // 使用 get() 而不是 get_value()
                     .unwrap_or(&Data::Empty)
                     .clone()
             })

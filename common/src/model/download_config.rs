@@ -1,6 +1,6 @@
 use crate::model::ModuleConfig;
-use serde::{Deserialize, Serialize};
 use crate::model::config::DownloadConfig as DefaultDownloadConfig;
+use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DownloadConfig {
@@ -10,11 +10,14 @@ pub struct DownloadConfig {
     pub rate_limit: f32,
     pub cache_ttl: u64,
     pub default_timeout: u32,
-    pub downloader:String,
+    pub downloader: String,
 }
 
 impl DownloadConfig {
-    pub fn load(module_config: &Option<ModuleConfig>, default_config: &DefaultDownloadConfig) -> Self {
+    pub fn load(
+        module_config: &Option<ModuleConfig>,
+        default_config: &DefaultDownloadConfig,
+    ) -> Self {
         if let Some(module_config) = module_config {
             Self {
                 enable_cache: module_config
@@ -25,15 +28,11 @@ impl DownloadConfig {
                     .is_some_and(|x| x.as_bool().unwrap_or(default_config.enable_locker)),
                 enable_rate_limit: module_config
                     .get_config_value("enable_rate_limit")
-                    .is_some_and(|v| {
-                        v.as_bool()
-                            .unwrap_or(default_config.enable_rate_limit)
-                    }),
+                    .is_some_and(|v| v.as_bool().unwrap_or(default_config.enable_rate_limit)),
                 rate_limit: module_config
                     .get_config_value("rate_limit")
                     .and_then(|v| v.as_f64())
-                    .unwrap_or(default_config.rate_limit as f64)
-                    as f32,
+                    .unwrap_or(default_config.rate_limit as f64) as f32,
                 cache_ttl: module_config
                     .get_config_value("cache_ttl")
                     .and_then(|v| v.as_u64())
@@ -46,7 +45,8 @@ impl DownloadConfig {
                 downloader: module_config
                     .get_config_value("downloader")
                     .and_then(|v| v.as_str())
-                    .unwrap_or("request_downloader").to_string(),
+                    .unwrap_or("request_downloader")
+                    .to_string(),
             }
         } else {
             Self {

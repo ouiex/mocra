@@ -1,17 +1,17 @@
-use tokio_tungstenite::{connect_async, tungstenite::Message};
-use std::sync::Arc;
-use std::collections::HashMap;
-use tokio::sync::{mpsc, Mutex};
+use error::{Error, Result};
 use futures_util::{SinkExt, StreamExt};
 use kernel::model::{Request, Response};
 use log::{error, info, warn};
-use error::{Error, Result};
-use uuid::Uuid;
 use reqwest::{Client, Proxy};
+use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::sync::{Mutex, mpsc};
+use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::handshake::client::generate_key;
 use tokio_tungstenite::tungstenite::protocol::Role;
-use tokio_tungstenite::WebSocketStream;
-use tokio::io::{AsyncRead, AsyncWrite};
+use tokio_tungstenite::{connect_async, tungstenite::Message};
+use uuid::Uuid;
 
 /// WebSocketDownloader 管理多个 WebSocket 连接
 /// 每个 module_id 对应一个连接
@@ -54,20 +54,26 @@ impl WebSocketDownloader {
         let mut listeners = self.listeners.lock().await;
         listeners.remove(module_id);
     }
-    
+
     /// 获取活跃连接数
     pub async fn active_count(&self) -> usize {
         *self.active_connections.lock().await
     }
-    fn spawn_task<S>(&self, stream: WebSocketStream<S>, module_id: String, request: Request, mut rx: mpsc::Receiver<Message>)
-    where S: AsyncRead + AsyncWrite + Unpin + Send + 'static 
+    fn spawn_task<S>(
+        &self,
+        stream: WebSocketStream<S>,
+        module_id: String,
+        request: Request,
+        mut rx: mpsc::Receiver<Message>,
+    ) where
+        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
         let (mut write, mut read) = stream.split();
         let listeners = self.listeners.clone();
         let module_id_clone = module_id.clone();
         let request_clone = request.clone();
         let active_connections = self.active_connections.clone();
-        
+
         tokio::spawn(async move {
             loop {
                 tokio::select! {
@@ -107,7 +113,7 @@ impl WebSocketDownloader {
                                     prefix_request: request_clone.id,
                                     request_hash: None,
                                 };
-                                
+
                                 // 分发消息给对应的监听器
                                 let listeners_guard = listeners.lock().await;
                                 if let Some(sender) = listeners_guard.get(&module_id_clone) {
@@ -135,13 +141,16 @@ impl WebSocketDownloader {
             }
             // 清理工作
             let _ = write.close().await;
-            
+
             // 减少活跃连接计数
             let mut count = active_connections.lock().await;
             if *count > 0 {
                 *count -= 1;
             }
-            info!("[WebSocketDownloader] Connection loop ended for module {}, active connections: {}", module_id_clone, *count);
+            info!(
+                "[WebSocketDownloader] Connection loop ended for module {}, active connections: {}",
+                module_id_clone, *count
+            );
         });
     }
 
@@ -159,7 +168,10 @@ impl WebSocketDownloader {
                 if let Some(body) = &request.body {
                     let msg = Message::Text(String::from_utf8_lossy(body).to_string().into());
                     if let Err(e) = sender.send(msg).await {
-                        warn!("[WebSocketDownloader] Failed to send message to existing connection: {}, reconnecting...", e);
+                        warn!(
+                            "[WebSocketDownloader] Failed to send message to existing connection: {}, reconnecting...",
+                            e
+                        );
                         // 发送失败，移除旧连接，准备重连
                         connections.remove(&module_id);
                     } else {
@@ -176,24 +188,35 @@ impl WebSocketDownloader {
         }
 
         // 建立新连接
-        info!("[WebSocketDownloader] Connecting to {} for module {}", request.url, module_id);
-        
+        info!(
+            "[WebSocketDownloader] Connecting to {} for module {}",
+            request.url, module_id
+        );
+
         // 增加活跃连接计数
         {
             let mut count = self.active_connections.lock().await;
             *count += 1;
         }
-        
+
         // 创建发送通道，用于向 WebSocket 发送消息
         let (tx, rx) = mpsc::channel::<Message>(32);
 
         if let Some(proxy_config) = &request.proxy {
             let proxy_url = proxy_config.to_string();
-            let proxy = Proxy::all(&proxy_url).map_err(|e| Error::download_failed(format!("Invalid proxy: {}", e)))?;
-            let client = Client::builder().proxy(proxy).build().map_err(|e| Error::download_failed(format!("Client build failed: {}", e)))?;
-            
-            let url = request.url.replace("ws://", "http://").replace("wss://", "https://");
-            let req = client.get(&url)
+            let proxy = Proxy::all(&proxy_url)
+                .map_err(|e| Error::download_failed(format!("Invalid proxy: {}", e)))?;
+            let client = Client::builder()
+                .proxy(proxy)
+                .build()
+                .map_err(|e| Error::download_failed(format!("Client build failed: {}", e)))?;
+
+            let url = request
+                .url
+                .replace("ws://", "http://")
+                .replace("wss://", "https://");
+            let req = client
+                .get(&url)
                 .header("Connection", "Upgrade")
                 .header("Upgrade", "websocket")
                 .header("Sec-WebSocket-Version", "13")
@@ -201,19 +224,25 @@ impl WebSocketDownloader {
                 .send()
                 .await
                 .map_err(|e| Error::download_failed(format!("Proxy request failed: {}", e)))?;
-                
+
             if req.status() != reqwest::StatusCode::SWITCHING_PROTOCOLS {
-                 return Err(Error::download_failed(format!("Proxy handshake failed: status {}", req.status())));
+                return Err(Error::download_failed(format!(
+                    "Proxy handshake failed: status {}",
+                    req.status()
+                )));
             }
-            
-            let upgraded = req.upgrade().await.map_err(|e| Error::download_failed(format!("Upgrade failed: {}", e)))?;
+
+            let upgraded = req
+                .upgrade()
+                .await
+                .map_err(|e| Error::download_failed(format!("Upgrade failed: {}", e)))?;
             let stream = WebSocketStream::from_raw_socket(upgraded, Role::Client, None).await;
-            
+
             self.spawn_task(stream, module_id.clone(), request.clone(), rx);
         } else {
-            let (ws_stream, _) = connect_async(&request.url).await.map_err(|e| {
-                Error::download_failed(format!("WebSocket connect failed: {}", e))
-            })?;
+            let (ws_stream, _) = connect_async(&request.url)
+                .await
+                .map_err(|e| Error::download_failed(format!("WebSocket connect failed: {}", e)))?;
             self.spawn_task(ws_stream, module_id.clone(), request.clone(), rx);
         }
 

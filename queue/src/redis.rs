@@ -1,33 +1,32 @@
 use crate::{Message, MqBackend};
 use async_trait::async_trait;
+use common::model::config::RedisConfig;
 use errors::Result;
 use errors::error::QueueError;
 use log::{error, info, warn};
 use redis::{AsyncCommands, FromRedisValue};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc;
-use common::model::config::RedisConfig;
 
 pub struct RedisQueue {
     pool: deadpool_redis::Pool,
     group_id: String,
     consumer_name: String,
-    minid_time:u64,
+    minid_time: u64,
     namespace: String,
 }
 
 impl RedisQueue {
-    pub fn new(redis_config: &RedisConfig,minid_time:u64, namespace: &str) -> Result<Self> {
+    pub fn new(redis_config: &RedisConfig, minid_time: u64, namespace: &str) -> Result<Self> {
         let pool = utils::connector::create_redis_pool(
             &redis_config.redis_host,
             redis_config.redis_port,
             redis_config.redis_db,
             &redis_config.redis_username,
             &redis_config.redis_password,
-            
         )
-            .ok_or(QueueError::ConnectionFailed)?;
-        
+        .ok_or(QueueError::ConnectionFailed)?;
+
         let consumer_name = uuid::Uuid::new_v4().to_string();
         // Use a default group ID or maybe pass it in?
         // The previous implementation didn't use group ID for lists, but streams need it.
@@ -52,7 +51,7 @@ impl MqBackend for RedisQueue {
             .get()
             .await
             .map_err(|_| QueueError::ConnectionFailed)?;
-        
+
         let topic_key = format!("{}:{}", self.namespace, topic);
 
         let _: String = redis::cmd("XADD")
@@ -138,7 +137,11 @@ impl MqBackend for RedisQueue {
                                             if ack_rx.recv().await.is_some() {
                                                 if let Ok(mut ack_conn) = pool_clone.get().await {
                                                     let _: redis::RedisResult<()> = ack_conn
-                                                        .xack(&topic_clone, &group_clone, &[&id_clone])
+                                                        .xack(
+                                                            &topic_clone,
+                                                            &group_clone,
+                                                            &[&id_clone],
+                                                        )
                                                         .await;
                                                 }
                                             }
@@ -190,20 +193,27 @@ impl MqBackend for RedisQueue {
         if self.minid_time == 0 {
             return Ok(());
         }
-        
-        let mut conn = self.pool.get().await.map_err(|_| QueueError::ConnectionFailed)?;
+
+        let mut conn = self
+            .pool
+            .get()
+            .await
+            .map_err(|_| QueueError::ConnectionFailed)?;
         let retention_period = self.minid_time as u128 * 60 * 60 * 1000;
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or(Duration::ZERO)
             .as_millis();
         let min_id = now.saturating_sub(retention_period);
-        
-        info!("Starting Redis storage cleanup for namespace {}, min_id: {}", self.namespace, min_id);
+
+        info!(
+            "Starting Redis storage cleanup for namespace {}, min_id: {}",
+            self.namespace, min_id
+        );
 
         let pattern = format!("{}:*", self.namespace);
         let mut keys: Vec<String> = Vec::new();
-        
+
         {
             let mut cursor = 0;
             loop {
@@ -227,9 +237,13 @@ impl MqBackend for RedisQueue {
         }
 
         for key in keys {
-             let key_type: String = redis::cmd("TYPE").arg(&key).query_async(&mut conn).await.unwrap_or("none".to_string());
-             if key_type == "stream" {
-                 let _: () = redis::cmd("XTRIM")
+            let key_type: String = redis::cmd("TYPE")
+                .arg(&key)
+                .query_async(&mut conn)
+                .await
+                .unwrap_or("none".to_string());
+            if key_type == "stream" {
+                let _: () = redis::cmd("XTRIM")
                     .arg(&key)
                     .arg("MINID")
                     .arg("~")
@@ -238,9 +252,9 @@ impl MqBackend for RedisQueue {
                     .await
                     .map_err(|e| warn!("Failed to trim stream {}: {}", key, e))
                     .unwrap_or(());
-             }
+            }
         }
-        
+
         Ok(())
     }
 }

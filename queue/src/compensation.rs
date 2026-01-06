@@ -1,11 +1,14 @@
 use async_trait::async_trait;
+use common::model::config::RedisConfig;
+use common::model::{
+    Request, Response,
+    message::{ErrorTaskModel, ParserTaskModel, TaskModel},
+};
 use errors::Result;
 use errors::error::QueueError;
-use common::model::{Request, Response, message::{TaskModel, ParserTaskModel, ErrorTaskModel}};
-use common::model::config::RedisConfig;
-use utils::logger::LogModel;
-use tokio::sync::mpsc;
 use log::error;
+use tokio::sync::mpsc;
+use utils::logger::LogModel;
 
 /// Trait for objects that can be uniquely identified for compensation purposes.
 pub trait Identifiable {
@@ -14,7 +17,9 @@ pub trait Identifiable {
 
 impl Identifiable for LogModel {
     fn get_id(&self) -> String {
-        self.request_id.map(|id| id.to_string()).unwrap_or_else(|| self.task_id.clone())
+        self.request_id
+            .map(|id| id.to_string())
+            .unwrap_or_else(|| self.task_id.clone())
     }
 }
 
@@ -57,8 +62,15 @@ pub trait Compensator: Send + Sync {
 }
 
 enum CompensationMessage {
-    Add { topic: String, id: String, payload: Vec<u8> },
-    Remove { topic: String, id: String },
+    Add {
+        topic: String,
+        id: String,
+        payload: Vec<u8>,
+    },
+    Remove {
+        topic: String,
+        id: String,
+    },
 }
 
 pub struct RedisCompensator {
@@ -102,9 +114,8 @@ impl RedisCompensator {
                             .as_secs();
 
                         let mut pipe = redis::pipe();
-                        pipe.zadd(&zset_key, &id, now)
-                            .hset(&hash_key, &id, payload);
-                        
+                        pipe.zadd(&zset_key, &id, now).hset(&hash_key, &id, payload);
+
                         if let Err(e) = pipe.query_async::<()>(&mut conn).await {
                             error!("Failed to add compensation task to Redis: {}", e);
                         }
@@ -114,8 +125,7 @@ impl RedisCompensator {
                         let hash_key = format!("{}:compensation:{}:data", namespace, topic);
 
                         let mut pipe = redis::pipe();
-                        pipe.zrem(&zset_key, &id)
-                            .hdel(&hash_key, &id);
+                        pipe.zrem(&zset_key, &id).hdel(&hash_key, &id);
 
                         if let Err(e) = pipe.query_async::<()>(&mut conn).await {
                             error!("Failed to remove compensation task from Redis: {}", e);
@@ -132,19 +142,25 @@ impl RedisCompensator {
 #[async_trait]
 impl Compensator for RedisCompensator {
     async fn add_task(&self, topic: &str, id: &str, payload: &[u8]) -> Result<()> {
-        self.sender.send(CompensationMessage::Add {
-            topic: topic.to_string(),
-            id: id.to_string(),
-            payload: payload.to_vec(),
-        }).await.map_err(|e| QueueError::PushFailed(Box::new(e)))?;
+        self.sender
+            .send(CompensationMessage::Add {
+                topic: topic.to_string(),
+                id: id.to_string(),
+                payload: payload.to_vec(),
+            })
+            .await
+            .map_err(|e| QueueError::PushFailed(Box::new(e)))?;
         Ok(())
     }
 
     async fn remove_task(&self, topic: &str, id: &str) -> Result<()> {
-        self.sender.send(CompensationMessage::Remove {
-            topic: topic.to_string(),
-            id: id.to_string(),
-        }).await.map_err(|e| QueueError::PushFailed(Box::new(e)))?;
+        self.sender
+            .send(CompensationMessage::Remove {
+                topic: topic.to_string(),
+                id: id.to_string(),
+            })
+            .await
+            .map_err(|e| QueueError::PushFailed(Box::new(e)))?;
         Ok(())
     }
 }

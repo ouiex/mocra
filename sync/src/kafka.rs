@@ -1,14 +1,14 @@
-use std::sync::Arc;
-use super::backend::{MqBackend};
+use super::backend::MqBackend;
 use async_trait::async_trait;
 use rdkafka::config::ClientConfig;
 use rdkafka::consumer::{Consumer, StreamConsumer};
 use rdkafka::message::Message;
 use rdkafka::producer::{FutureProducer, FutureRecord};
+use std::sync::Arc;
 // use std::sync::Arc;
+use crate::RedisBackend;
 use tokio::sync::mpsc;
 use uuid::Uuid;
-use crate::RedisBackend;
 
 #[derive(Clone)]
 pub struct KafkaBackend {
@@ -19,21 +19,17 @@ pub struct KafkaBackend {
 
 impl KafkaBackend {
     pub fn new(brokers: &str, redis_backend: Arc<RedisBackend>) -> Self {
-
         let mut config = ClientConfig::new();
         config.set("bootstrap.servers", brokers);
         config.set("message.timeout.ms", "5000");
 
-
         let producer: FutureProducer = config.create().expect("Producer creation error");
-
 
         // let producer: FutureProducer = ClientConfig::new()
         //     .set("bootstrap.servers", brokers)
         //     .set("message.timeout.ms", "5000")
         //     .create()
         //     .expect("Producer creation error");
-
 
         Self {
             producer,
@@ -122,8 +118,6 @@ impl MqBackend for KafkaBackend {
     async fn get(&self, key: &str) -> Result<Option<Vec<u8>>, String> {
         self.redis_backend.get(key).await
     }
-
-
 
     async fn cas(&self, key: &str, old_val: Option<&[u8]>, new_val: &[u8]) -> Result<bool, String> {
         self.redis_backend.cas(key, old_val, new_val).await

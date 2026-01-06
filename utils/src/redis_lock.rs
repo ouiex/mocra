@@ -1,4 +1,5 @@
 #![allow(unused)]
+use dashmap::DashMap;
 use deadpool_redis::{Config, Runtime};
 use log::trace;
 use redis::AsyncCommands;
@@ -10,8 +11,6 @@ use tokio::sync::RwLock;
 use tokio::time::sleep;
 use tracing::error;
 use uuid::Uuid;
-use dashmap::DashMap;
-
 
 #[derive(Debug)]
 pub enum LockError {
@@ -84,14 +83,8 @@ impl AdvancedDistributedLock {
         let start_time = Instant::now();
 
         loop {
-            let acquired = Self::try_acquire(
-                &pool,
-                &local_map,
-                &lock_key,
-                &unique_value,
-                ttl_seconds,
-            )
-            .await?;
+            let acquired =
+                Self::try_acquire(&pool, &local_map, &lock_key, &unique_value, ttl_seconds).await?;
 
             if acquired {
                 let lock_info = LockInfo {
@@ -383,7 +376,8 @@ impl DistributedLockManager {
         }
     }
     pub async fn acquire_lock_default(&self, lock_name: &str) -> Result<bool, LockError> {
-        self.acquire_lock(lock_name, 5, Duration::from_secs(10)).await
+        self.acquire_lock(lock_name, 5, Duration::from_secs(10))
+            .await
     }
 
     pub async fn release_lock(&self, lock_name: &str) -> Result<bool, LockError> {

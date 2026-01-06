@@ -1,9 +1,9 @@
+use crate::interface::StoreTrait;
+use crate::model::data::Data;
 use crate::model::{ExecutionMark, Response};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use uuid::Uuid;
-use crate::interface::StoreTrait;
-use crate::model::data::{Data};
 
 #[derive(Debug, Clone, Copy)]
 pub enum TopicType {
@@ -102,8 +102,11 @@ impl ParserTaskModel {
         self
     }
     // 为指定的模块创建一个新的ParserTaskModel，必须来自同一个account+platform
-    pub fn start_other_module(response:&Response,module_name:impl AsRef<str>) -> Self {
-        debug_assert!(!module_name.as_ref().is_empty(), "module_name must not be empty");
+    pub fn start_other_module(response: &Response, module_name: impl AsRef<str>) -> Self {
+        debug_assert!(
+            !module_name.as_ref().is_empty(),
+            "module_name must not be empty"
+        );
         ParserTaskModel {
             id: Uuid::now_v7(),
             account_task: TaskModel {
@@ -130,7 +133,10 @@ impl ParserTaskModel {
         module_name: impl AsRef<str>,
         ctx: ExecutionMark,
     ) -> Self {
-        debug_assert!(!module_name.as_ref().is_empty(), "module_name must not be empty");
+        debug_assert!(
+            !module_name.as_ref().is_empty(),
+            "module_name must not be empty"
+        );
         ParserTaskModel {
             id: Uuid::now_v7(),
             account_task: TaskModel {
@@ -227,10 +233,7 @@ fn default_run_id() -> Uuid {
     Uuid::now_v7()
 }
 
-
-
-#[derive(Debug)]
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct ParserData {
     pub data: Vec<Data>,
     pub parser_task: Option<ParserTaskModel>,
@@ -258,4 +261,3 @@ impl ParserData {
         self
     }
 }
-

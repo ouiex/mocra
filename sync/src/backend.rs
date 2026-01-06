@@ -9,4 +9,3 @@ pub trait MqBackend: Send + Sync {
     // Optimistic Lock (CAS)
     async fn cas(&self, key: &str, old_val: Option<&[u8]>, new_val: &[u8]) -> Result<bool, String>;
 }
-

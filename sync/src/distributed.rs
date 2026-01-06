@@ -1,9 +1,9 @@
 use super::backend::MqBackend;
-use serde::{de::DeserializeOwned, Serialize};
-use std::sync::{Arc, RwLock};
-use tokio::sync::{watch, broadcast};
-use std::time::Duration;
 use dashmap::DashMap;
+use serde::{Serialize, de::DeserializeOwned};
+use std::sync::{Arc, RwLock};
+use std::time::Duration;
+use tokio::sync::{broadcast, watch};
 
 pub trait SyncAble: Send + Sync + Sized + 'static + Serialize + DeserializeOwned {
     // 消息队列topic
@@ -105,7 +105,7 @@ impl SyncService {
             // Distributed Mode
             let stream_topic = self.stream_topic_for(&topic);
             let kv_key = self.kv_key_for(&topic);
-            
+
             let mut rx = backend.subscribe(&stream_topic).await?;
 
             let initial_data = backend.get(&kv_key).await?;
@@ -113,7 +113,10 @@ impl SyncService {
                 match serde_json::from_slice::<T>(&bytes) {
                     Ok(v) => Some(v),
                     Err(e) => {
-                        eprintln!("Failed to deserialize initial value for topic {}: {}", topic, e);
+                        eprintln!(
+                            "Failed to deserialize initial value for topic {}: {}",
+                            topic, e
+                        );
                         None
                     }
                 }
@@ -132,7 +135,11 @@ impl SyncService {
                             }
                         }
                         Err(e) => {
-                            eprintln!("Failed to deserialize update for topic {}: {}", T::topic(), e);
+                            eprintln!(
+                                "Failed to deserialize update for topic {}: {}",
+                                T::topic(),
+                                e
+                            );
                         }
                     }
                 }
@@ -142,7 +149,7 @@ impl SyncService {
         } else {
             // Local Mode
             let local_state = self.get_local_state(&topic);
-            
+
             // Initial value
             let initial_value = {
                 let lock = local_state.value.read().unwrap();
@@ -150,7 +157,10 @@ impl SyncService {
                     match serde_json::from_slice::<T>(bytes) {
                         Ok(v) => Some(v),
                         Err(e) => {
-                            eprintln!("Failed to deserialize local value for topic {}: {}", topic, e);
+                            eprintln!(
+                                "Failed to deserialize local value for topic {}: {}",
+                                topic, e
+                            );
                             None
                         }
                     }
@@ -171,7 +181,11 @@ impl SyncService {
                             }
                         }
                         Err(e) => {
-                            eprintln!("Failed to deserialize local update for topic {}: {}", T::topic(), e);
+                            eprintln!(
+                                "Failed to deserialize local update for topic {}: {}",
+                                T::topic(),
+                                e
+                            );
                         }
                     }
                 }
@@ -218,7 +232,7 @@ impl SyncService {
 
             loop {
                 let old_bytes_opt = backend.get(&kv_key).await?;
-                
+
                 let mut state = if let Some(ref bytes) = old_bytes_opt {
                     serde_json::from_slice::<T>(bytes).map_err(|e| e.to_string())?
                 } else {
@@ -240,10 +254,10 @@ impl SyncService {
         } else {
             // Local Mode: Just lock and update
             let local_state = self.get_local_state(&topic);
-            
+
             // We need to hold the write lock throughout the read-modify-write process to ensure atomicity
             let mut lock = local_state.value.write().unwrap();
-            
+
             let mut state = if let Some(ref bytes) = *lock {
                 serde_json::from_slice::<T>(bytes).map_err(|e| e.to_string())?
             } else {
@@ -254,10 +268,10 @@ impl SyncService {
 
             let new_bytes = serde_json::to_vec(&state).map_err(|e| e.to_string())?;
             *lock = Some(new_bytes.clone());
-            
+
             // Release lock before sending to avoid potential deadlocks (though unlikely here)
             drop(lock);
-            
+
             let _ = local_state.tx.send(new_bytes);
             Ok(state)
         }
@@ -268,12 +282,14 @@ impl SyncService {
         T: SyncAble,
     {
         let topic = T::topic();
-        
+
         if let Some(backend) = &self.backend {
             let kv_key = self.kv_key_for(&topic);
             let data = backend.get(&kv_key).await?;
             if let Some(bytes) = data {
-                serde_json::from_slice::<T>(&bytes).map(Some).map_err(|e| e.to_string())
+                serde_json::from_slice::<T>(&bytes)
+                    .map(Some)
+                    .map_err(|e| e.to_string())
             } else {
                 Ok(None)
             }
@@ -281,11 +297,12 @@ impl SyncService {
             let local_state = self.get_local_state(&topic);
             let lock = local_state.value.read().unwrap();
             if let Some(bytes) = &*lock {
-                serde_json::from_slice::<T>(bytes).map(Some).map_err(|e| e.to_string())
+                serde_json::from_slice::<T>(bytes)
+                    .map(Some)
+                    .map_err(|e| e.to_string())
             } else {
                 Ok(None)
             }
         }
     }
 }
-

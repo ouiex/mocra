@@ -129,7 +129,7 @@ impl DateUtils {
             .unwrap();
         ndt.signed_duration_since(epoch).num_milliseconds()
     }
-    pub fn range(start_date:NaiveDate, end_date:NaiveDate) -> Vec<NaiveDate> {
+    pub fn range(start_date: NaiveDate, end_date: NaiveDate) -> Vec<NaiveDate> {
         let mut dates = Vec::new();
         let mut current_date = start_date;
         while current_date <= end_date {
@@ -140,9 +140,7 @@ impl DateUtils {
     }
 }
 
-
-
-pub fn convert_to_seconds(s:&str)->Option<u64>{
+pub fn convert_to_seconds(s: &str) -> Option<u64> {
     if s.trim().is_empty() {
         return Some(0);
     }
@@ -195,7 +193,10 @@ pub fn convert_to_seconds(s:&str)->Option<u64>{
     let mut matched = false;
     for cap in re.captures_iter(&normalized) {
         matched = true;
-        let n: u64 = cap.get(1).and_then(|m| m.as_str().parse().ok()).unwrap_or(0);
+        let n: u64 = cap
+            .get(1)
+            .and_then(|m| m.as_str().parse().ok())
+            .unwrap_or(0);
         match cap.get(2).map(|m| m.as_str()).unwrap_or("") {
             "h" => total = total.saturating_add(n.saturating_mul(3600)),
             "m" => total = total.saturating_add(n.saturating_mul(60)),
@@ -205,8 +206,6 @@ pub fn convert_to_seconds(s:&str)->Option<u64>{
     }
     if matched { Some(total) } else { None }
 }
-
-
 
 #[cfg(test)]
 mod tests {
@@ -218,9 +217,8 @@ mod tests {
     #[test]
     fn test_convert_to_seconds() {
         let s = "17分23秒";
-        println!("{:?}",convert_to_seconds(s));
+        println!("{:?}", convert_to_seconds(s));
     }
-
 
     #[test]
     fn test_first_and_last_day_of_month() {
@@ -336,9 +334,7 @@ mod tests {
             .unwrap()
             .timestamp_millis();
         let end_ts = tz
-            .from_local_datetime(
-                &((end_date + Duration::days(1)).and_time(chrono::NaiveTime::MIN)),
-            )
+            .from_local_datetime(&((end_date + Duration::days(1)).and_time(chrono::NaiveTime::MIN)))
             .single()
             .unwrap()
             .timestamp_millis()
@@ -351,16 +347,18 @@ mod tests {
     }
     #[test]
     fn test_local_ts() {
-        let t =
-        chrono::DateTime::from_timestamp(1761062400,0).unwrap().with_timezone(&Local).naive_local();
+        let t = chrono::DateTime::from_timestamp(1761062400, 0)
+            .unwrap()
+            .with_timezone(&Local)
+            .naive_local();
         println!("{:?}", t);
     }
 
     #[test]
-    fn range(){
-        let start_date = DateUtils::add_days(-31,None);
-        let end_date = DateUtils::add_days(-1,None);
-        let range = DateUtils::range(start_date,end_date);
+    fn range() {
+        let start_date = DateUtils::add_days(-31, None);
+        let end_date = DateUtils::add_days(-1, None);
+        let range = DateUtils::range(start_date, end_date);
         println!("{:#?}", range);
     }
 }

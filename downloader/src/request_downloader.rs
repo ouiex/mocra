@@ -337,24 +337,23 @@ impl Downloader for RequestDownloader {
     async fn download(&self, request: Request) -> Result<Response> {
         if request.enable_cache
             && let Ok(Some(cached_response)) = self
-            .sync
-            .synchronizer
-            .sync(&request.hash(), "response_cache")
-            .await
+                .sync
+                .synchronizer
+                .sync(&request.hash(), "response_cache")
+                .await
             && let Ok(response) = serde_json::from_value::<Response>(cached_response)
         {
-
             info!("Cache hit for request: {}", request.id);
-            return Ok(Response{
+            return Ok(Response {
                 id: request.id,
                 platform: request.platform.clone(),
                 account: request.account.clone(),
                 module: request.module.clone(),
-                status_code:response.status_code,
+                status_code: response.status_code,
                 cookies: Cookies {
                     cookies: response.cookies.cookies,
                 },
-                content:response.content,
+                content: response.content,
                 headers: response.headers,
                 task_retry_times: request.task_retry_times,
                 metadata: request.meta.clone(),
@@ -369,8 +368,7 @@ impl Downloader for RequestDownloader {
                 } else {
                     None
                 },
-
-            })
+            });
         }
         let locker_enabled = *self.enable_locker.read().await;
         if locker_enabled {

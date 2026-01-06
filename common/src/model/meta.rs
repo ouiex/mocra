@@ -1,5 +1,5 @@
-use crate::model::login_info::LoginInfo;
 use crate::model::ModuleConfig;
+use crate::model::login_info::LoginInfo;
 use sea_orm::JsonValue;
 use serde::{Deserialize, Serialize};
 

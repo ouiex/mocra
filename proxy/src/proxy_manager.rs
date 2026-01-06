@@ -86,9 +86,9 @@ impl Default for ProxyManager {
 
 #[cfg(test)]
 mod tests {
-    
-    use tokio::fs;
+
     use crate::{ProxyConfig, ProxyManager};
+    use tokio::fs;
 
     #[tokio::test]
     async fn test() {
@@ -100,7 +100,7 @@ mod tests {
                 manager.add_tunnel(t).await;
             }
         }
-      let proxy = manager.get_tunnel().await.unwrap();
+        let proxy = manager.get_tunnel().await.unwrap();
         println!("{:?}", proxy.to_string());
     }
 }

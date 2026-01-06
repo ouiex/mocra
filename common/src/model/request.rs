@@ -6,8 +6,8 @@ use crate::model::{Cookies, Headers};
 use proxy::ProxyEnum;
 use serde::{Deserialize, Serialize};
 use std::fmt::Display;
-use uuid::Uuid;
 use utils::encrypt::md5;
+use uuid::Uuid;
 
 pub enum RequestMethod {
     Post,
@@ -17,7 +17,7 @@ pub enum RequestMethod {
     Put,
     Head,
     // 目前wss只是一个标志，用于区分WebSocket请求，实际wss请求里不需要该参数
-    Wss
+    Wss,
 }
 impl Display for RequestMethod {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -101,7 +101,7 @@ pub struct Request {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hash_str: Option<String>,
     pub enable_cache: bool,
-    pub downloader:String
+    pub downloader: String,
 }
 
 impl Request {

@@ -1,5 +1,6 @@
 use crate::{Message, MqBackend};
 use async_trait::async_trait;
+use common::model::config::KafkaConfig;
 use errors::Result;
 use errors::error::QueueError;
 use log::{error, info, warn};
@@ -10,12 +11,11 @@ use rdkafka::producer::{FutureProducer, FutureRecord, Producer};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
-use common::model::config::KafkaConfig;
 
-use rdkafka::admin::{AdminClient, AdminOptions, NewTopic, AlterConfig, ResourceSpecifier};
+use rdkafka::admin::{AdminClient, AdminOptions, AlterConfig, NewTopic, ResourceSpecifier};
 use rdkafka::client::DefaultClientContext;
 
-use std::collections::{HashSet, HashMap};
+use std::collections::{HashMap, HashSet};
 use std::sync::RwLock;
 
 #[derive(Clone)]
@@ -24,13 +24,13 @@ pub struct KafkaQueue {
     admin_client: Arc<AdminClient<DefaultClientContext>>,
     bootstrap_servers: String,
     group_id: String,
-    minid_time:u64,
+    minid_time: u64,
     namespace: String,
     known_topics: Arc<RwLock<HashSet<String>>>,
 }
 
 impl KafkaQueue {
-    pub fn new(kafka_config: &KafkaConfig,minid_time:u64, namespace: &str) -> Result<Self> {
+    pub fn new(kafka_config: &KafkaConfig, minid_time: u64, namespace: &str) -> Result<Self> {
         let mut config = ClientConfig::new();
         config.set("bootstrap.servers", kafka_config.brokers.as_str());
         config.set("message.timeout.ms", "5000");
@@ -44,7 +44,8 @@ impl KafkaQueue {
         }
 
         let producer: FutureProducer = config.create().map_err(|_| QueueError::ConnectionFailed)?;
-        let admin_client: AdminClient<DefaultClientContext> = config.create().map_err(|_| QueueError::ConnectionFailed)?;
+        let admin_client: AdminClient<DefaultClientContext> =
+            config.create().map_err(|_| QueueError::ConnectionFailed)?;
 
         Ok(Self {
             producer,
@@ -67,7 +68,8 @@ impl KafkaQueue {
 
         // Try to create topic using AdminClient
         // We do this optimistically. If it exists, we'll get an error which we can ignore/handle.
-        let mut new_topic = NewTopic::new(topic_name, 1, rdkafka::admin::TopicReplication::Fixed(1));
+        let mut new_topic =
+            NewTopic::new(topic_name, 1, rdkafka::admin::TopicReplication::Fixed(1));
         let retention_ms = (self.minid_time * 3600 * 1000).to_string();
         if self.minid_time > 0 {
             new_topic = new_topic.set("retention.ms", &retention_ms);
@@ -95,31 +97,43 @@ impl KafkaQueue {
         // Now wait for the producer to actually see the topic
         let producer = self.producer.clone();
         let topic = topic_name.to_string();
-        
+
         tokio::task::spawn_blocking(move || {
-             let client = producer.client();
-             let start = std::time::Instant::now();
-             // Poll for up to 10 seconds
-             while start.elapsed() < Duration::from_secs(10) {
-                 match client.fetch_metadata(Some(&topic), Duration::from_secs(1)) {
-                     Ok(meta) => {
-                         if meta.topics().iter().any(|t| t.name() == topic && t.error().is_none()) {
-                             return Ok(());
-                         }
-                     }
-                     Err(_) => {}
-                 }
-                 // Small sleep to avoid busy loop
-                 std::thread::sleep(Duration::from_millis(100));
-             }
-             Err(QueueError::OperationFailed(Box::new(std::io::Error::new(std::io::ErrorKind::TimedOut, format!("Topic {} creation timed out or metadata not propagated", topic)))))
-        }).await.map_err(|e| QueueError::OperationFailed(Box::new(e)))??;
-        
+            let client = producer.client();
+            let start = std::time::Instant::now();
+            // Poll for up to 10 seconds
+            while start.elapsed() < Duration::from_secs(10) {
+                match client.fetch_metadata(Some(&topic), Duration::from_secs(1)) {
+                    Ok(meta) => {
+                        if meta
+                            .topics()
+                            .iter()
+                            .any(|t| t.name() == topic && t.error().is_none())
+                        {
+                            return Ok(());
+                        }
+                    }
+                    Err(_) => {}
+                }
+                // Small sleep to avoid busy loop
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            Err(QueueError::OperationFailed(Box::new(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!(
+                    "Topic {} creation timed out or metadata not propagated",
+                    topic
+                ),
+            ))))
+        })
+        .await
+        .map_err(|e| QueueError::OperationFailed(Box::new(e)))??;
+
         // If we got here, topic exists and is visible to producer
         if let Ok(mut cache) = self.known_topics.write() {
             cache.insert(topic_name.to_string());
         }
-        
+
         Ok(())
     }
 }
@@ -128,13 +142,17 @@ impl KafkaQueue {
 impl MqBackend for KafkaQueue {
     async fn publish(&self, topic: &str, payload: &[u8]) -> Result<()> {
         let topic_key = format!("{}-{}", self.namespace, topic);
-        
+
         // Retry loop for publishing
         let mut retries = 3;
         loop {
             // 1. Check if we know the topic exists
-            let known = self.known_topics.read().map(|c| c.contains(&topic_key)).unwrap_or(false);
-            
+            let known = self
+                .known_topics
+                .read()
+                .map(|c| c.contains(&topic_key))
+                .unwrap_or(false);
+
             if !known {
                 // If not known, try to ensure it exists
                 if let Err(e) = self.ensure_topic_exists(&topic_key).await {
@@ -143,7 +161,7 @@ impl MqBackend for KafkaQueue {
                 }
             }
 
-            let record = FutureRecord::to(&topic_key).payload(payload).key(""); 
+            let record = FutureRecord::to(&topic_key).payload(payload).key("");
 
             // 2. Try to send
             return match self.producer.send(record, Duration::from_secs(5)).await {
@@ -151,12 +169,17 @@ impl MqBackend for KafkaQueue {
                 Err((e, _)) => {
                     // Check if it's an unknown topic error
                     let is_unknown = match &e {
-                        rdkafka::error::KafkaError::MessageProduction(rdkafka::types::RDKafkaErrorCode::UnknownTopic) => true,
-                        _ => false
+                        rdkafka::error::KafkaError::MessageProduction(
+                            rdkafka::types::RDKafkaErrorCode::UnknownTopic,
+                        ) => true,
+                        _ => false,
                     };
 
                     if is_unknown || retries > 0 {
-                        warn!("Publish failed for {}, retrying... ({}) Error: {:?}", topic_key, retries, e);
+                        warn!(
+                            "Publish failed for {}, retrying... ({}) Error: {:?}",
+                            topic_key, retries, e
+                        );
 
                         if is_unknown {
                             // Force re-check/creation
@@ -173,7 +196,7 @@ impl MqBackend for KafkaQueue {
                     error!("Kafka publish failed for topic {}: {:?}", topic_key, e);
                     Err(QueueError::PushFailed(Box::new(e)).into())
                 }
-            }
+            };
         }
     }
 
@@ -181,10 +204,13 @@ impl MqBackend for KafkaQueue {
         let bootstrap_servers = self.bootstrap_servers.clone();
         let group_id = self.group_id.clone();
         let topic = format!("{}-{}", self.namespace, topic);
-        
+
         // Ensure topic exists before subscribing
         if let Err(e) = self.ensure_topic_exists(&topic).await {
-             warn!("Failed to ensure topic {} exists before subscribing: {}", topic, e);
+            warn!(
+                "Failed to ensure topic {} exists before subscribing: {}",
+                topic, e
+            );
         }
 
         tokio::spawn(async move {
@@ -195,8 +221,8 @@ impl MqBackend for KafkaQueue {
                 .set("bootstrap.servers", &bootstrap_servers)
                 .set("enable.partition.eof", "false")
                 .set("session.timeout.ms", "6000")
-                .set("enable.auto.commit", "true") 
-                .set("auto.offset.reset", "earliest") 
+                .set("enable.auto.commit", "true")
+                .set("auto.offset.reset", "earliest")
                 .create()
             {
                 Ok(c) => c,
@@ -253,17 +279,26 @@ impl MqBackend for KafkaQueue {
             return Ok(());
         }
         let retention_ms = (self.minid_time * 3600 * 1000).to_string();
-        info!("Starting Kafka storage cleanup for namespace {}, retention: {}ms", self.namespace, retention_ms);
+        info!(
+            "Starting Kafka storage cleanup for namespace {}, retention: {}ms",
+            self.namespace, retention_ms
+        );
 
         let producer = self.producer.clone();
         let namespace = self.namespace.clone();
-        
+
         let metadata = tokio::task::spawn_blocking(move || {
-            producer.client().fetch_metadata(None, Duration::from_secs(10))
-        }).await.map_err(|e| QueueError::OperationFailed(Box::new(e)))?
+            producer
+                .client()
+                .fetch_metadata(None, Duration::from_secs(10))
+        })
+        .await
+        .map_err(|e| QueueError::OperationFailed(Box::new(e)))?
         .map_err(|e| QueueError::OperationFailed(Box::new(e)))?;
 
-        let topics: Vec<String> = metadata.topics().iter()
+        let topics: Vec<String> = metadata
+            .topics()
+            .iter()
             .map(|t| t.name().to_string())
             .filter(|n| n.starts_with(&format!("{}-", namespace)))
             .collect();
@@ -272,30 +307,33 @@ impl MqBackend for KafkaQueue {
             return Ok(());
         }
 
-        let resources: Vec<AlterConfig> = topics.iter().map(|t| {
-            let mut entries = HashMap::new();
-            entries.insert("retention.ms", retention_ms.as_str());
-            
-            AlterConfig {
-                specifier: ResourceSpecifier::Topic(t),
-                entries,
-            }
-        }).collect();
+        let resources: Vec<AlterConfig> = topics
+            .iter()
+            .map(|t| {
+                let mut entries = HashMap::new();
+                entries.insert("retention.ms", retention_ms.as_str());
+
+                AlterConfig {
+                    specifier: ResourceSpecifier::Topic(t),
+                    entries,
+                }
+            })
+            .collect();
 
         let opts = AdminOptions::new().operation_timeout(Some(Duration::from_secs(30)));
-        
+
         match self.admin_client.alter_configs(&resources, &opts).await {
-                Ok(results) => {
-                    for result in results {
-                        if let Err(e) = result {
-                            warn!("Failed to update retention for topic: {:?}", e);
-                        }
+            Ok(results) => {
+                for result in results {
+                    if let Err(e) = result {
+                        warn!("Failed to update retention for topic: {:?}", e);
                     }
                 }
-                Err(e) => {
-                    warn!("Failed to alter configs: {}", e);
-                    return Err(QueueError::OperationFailed(Box::new(e)).into());
-                }
+            }
+            Err(e) => {
+                warn!("Failed to alter configs: {}", e);
+                return Err(QueueError::OperationFailed(Box::new(e)).into());
+            }
         }
         Ok(())
     }

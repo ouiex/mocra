@@ -3,7 +3,7 @@ use crate::channel::Channel;
 use crate::compensation::{Compensator, Identifiable};
 use common::model::message::{ErrorTaskModel, ParserTaskModel, TaskModel};
 use common::model::{Request, Response};
-use log::{error, debug};
+use log::{debug, error};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::sync::mpsc::{Receiver, Sender};
@@ -138,21 +138,29 @@ impl QueueManager {
             while let Some(msg) = rx.recv().await {
                 if let Ok(item) = serde_json::from_slice::<T>(&msg.payload) {
                     let id = item.get_id();
-                    debug!("[QueueManager] subscribe_topic received: topic={} id={}", topic, id);
+                    debug!(
+                        "[QueueManager] subscribe_topic received: topic={} id={}",
+                        topic, id
+                    );
                     // Add to compensation queue if configured
                     if let Some(comp) = &compensator
-                        && let Err(e) =
-                            comp.add_task(&topic, &id, &msg.payload).await
+                        && let Err(e) = comp.add_task(&topic, &id, &msg.payload).await
                     {
                         error!(
                             "Failed to add task to compensation queue for topic {}: {}",
                             topic, e
                         );
                     }
-                    debug!("[QueueManager] subscribe_topic comp_done: topic={} id={}", topic, id);
+                    debug!(
+                        "[QueueManager] subscribe_topic comp_done: topic={} id={}",
+                        topic, id
+                    );
 
                     if sender.send(item).await.is_ok() {
-                        debug!("[QueueManager] subscribe_topic sent: topic={} id={}", topic, id);
+                        debug!(
+                            "[QueueManager] subscribe_topic sent: topic={} id={}",
+                            topic, id
+                        );
                         let _ = msg.ack().await;
                     }
                 } else {
@@ -175,12 +183,18 @@ impl QueueManager {
             let mut rx = receiver.lock().await;
             while let Some(item) = rx.recv().await {
                 let id = item.get_id();
-                debug!("[QueueManager] forward_channel received: topic={} id={}", topic, id);
+                debug!(
+                    "[QueueManager] forward_channel received: topic={} id={}",
+                    topic, id
+                );
                 if let Ok(payload) = serde_json::to_vec(&item) {
                     if let Err(e) = backend.publish(&topic, &payload).await {
                         error!("Failed to publish to topic {}: {}", topic, e);
                     } else {
-                        debug!("[QueueManager] forward_channel published: topic={} id={}", topic, id);
+                        debug!(
+                            "[QueueManager] forward_channel published: topic={} id={}",
+                            topic, id
+                        );
                     }
                 }
             }

@@ -1,4 +1,3 @@
-
 use reqwest::header::{HeaderMap, HeaderValue};
 use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -143,7 +142,6 @@ impl From<HeaderMap> for Headers {
         Headers { headers }
     }
 }
-
 
 #[test]
 fn test() {

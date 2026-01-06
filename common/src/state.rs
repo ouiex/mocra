@@ -5,8 +5,8 @@ use crate::model::config::Config;
 
 use log::info;
 use std::sync::Arc;
-use tokio::sync::RwLock;
 use sync::{RedisBackend, SyncService};
+use tokio::sync::RwLock;
 use utils::distributed_rate_limit::{DistributedSlidingWindowRateLimiter, RateLimitConfig};
 use utils::redis_lock::DistributedLockManager;
 
@@ -120,10 +120,7 @@ impl State {
             },
         ));
 
-        let sync_service = Arc::new(SyncService::new(
-            None,
-            format!("{}:cache", config.name),
-        ));
+        let sync_service = Arc::new(SyncService::new(None, format!("{}:cache", config.name)));
         let cookie_sync_service = Some(Arc::new(SyncService::new(
             None,
             format!("{}:cookie", config.name),

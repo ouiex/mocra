@@ -7,11 +7,12 @@ use message_queue::{Identifiable, RedisCompensator, RedisQueue};
 
 use crate::core::chain::{
     create_download_chain, create_error_task_chain, create_parser_chain, create_parser_task_chain,
-    create_task_model_chain, 
+    create_task_model_chain,
 };
 use crate::core::events::EventSystem::{ComponentHealthCheck, SystemShutdown, SystemStarted};
 
 use crate::core::chain::stream_chain::create_wss_download_chain;
+use futures::StreamExt;
 use kernel::middleware::data_middleware::DataStoreMiddleware;
 use kernel::middleware::middleware_manager::MiddlewareManager;
 use kernel::state::State;
@@ -25,7 +26,6 @@ use std::sync::Arc;
 use tokio::fs;
 use tokio::sync::broadcast;
 use utils::connector::create_redis_pool;
-use futures::StreamExt;
 
 /// channel->TaskModel->Task->Vec<Model>->Vec<Request>->channel
 /// channel->Request->Downloader->Response->channel

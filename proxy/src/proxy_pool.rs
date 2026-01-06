@@ -1,12 +1,12 @@
-use errors::Result;
-use errors::ProxyError;
 use async_trait::async_trait;
+use errors::ProxyError;
+use errors::Result;
 use serde::{Deserialize, Serialize};
 use std::cmp::{Ordering, PartialEq};
 use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use tokio::sync::{Mutex, RwLock};
@@ -435,7 +435,11 @@ impl ProxyItem {
         // 确定使用的限速值
         let actual_rate_limit = match &self.proxy {
             ProxyEnum::IpProxy(ip_proxy) => {
-                if ip_proxy.rate_limit > 0.0 { ip_proxy.rate_limit } else { self.provider_rate_limit }
+                if ip_proxy.rate_limit > 0.0 {
+                    ip_proxy.rate_limit
+                } else {
+                    self.provider_rate_limit
+                }
             }
             ProxyEnum::Tunnel(tunnel) => tunnel.rate_limit,
         };

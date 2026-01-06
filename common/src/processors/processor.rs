@@ -1,10 +1,10 @@
 #![allow(unused)]
 
+use async_trait::async_trait;
+use errors::error::{Error, Result};
 use std::collections::HashMap;
 use std::sync::Arc;
-use async_trait::async_trait;
 use tokio::sync::RwLock;
-use errors::error::{Result, Error};
 
 #[derive(Debug, Clone)]
 pub struct RetryPolicy {
@@ -12,7 +12,7 @@ pub struct RetryPolicy {
     pub retry_delay: u64,
     pub current_retry: u32,
     pub reason: Option<String>,
-    pub meta:serde_json::Value,
+    pub meta: serde_json::Value,
 }
 impl Default for RetryPolicy {
     fn default() -> Self {

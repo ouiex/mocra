@@ -20,9 +20,9 @@ pub struct Response {
     pub data_middleware: Vec<String>,
     pub task_finished: bool,
     pub context: ExecutionMark,
-    pub run_id:Uuid,
-    pub prefix_request:Uuid,
-    pub request_hash:Option<String>
+    pub run_id: Uuid,
+    pub prefix_request: Uuid,
+    pub request_hash: Option<String>,
 }
 impl Response {
     pub fn task_id(&self) -> String {
@@ -55,6 +55,11 @@ impl Response {
     {
         self.metadata.get_task_config::<T>(key)
     }
-    pub fn get_context(&self) -> &ExecutionMark { &self.context }
-    pub fn with_context(mut self, ctx: ExecutionMark) -> Self { self.context = ctx; self}
+    pub fn get_context(&self) -> &ExecutionMark {
+        &self.context
+    }
+    pub fn with_context(mut self, ctx: ExecutionMark) -> Self {
+        self.context = ctx;
+        self
+    }
 }

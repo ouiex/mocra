@@ -19,7 +19,7 @@ use tokio::sync::RwLock;
 pub type SyncBoxStream<'a, T> = Pin<Box<dyn Stream<Item = T> + Send + Sync + 'a>>;
 
 #[async_trait]
-pub trait Module: Send+Sync {
+pub trait Module: Send + Sync {
     fn should_login(&self) -> bool {
         true
     }
@@ -56,14 +56,12 @@ pub trait Module: Send+Sync {
     }
 }
 
-
-
 /// 目前ModuleStepNodeTrait负责每个节点的请求生成和响应解析，每个请求对应一个解析
 /// 问题1 多节点之间如何进行数据传递，目前是使用Meta字段进行传递 Request->Response->ParserData->Request
 /// 问题2 每个执行节点是一个单独的struct,理想情况下struct中的所有字段都是只读的，不允许在执行过程中进行修改
 ///      但是实际情况下无法保证这种情况，例如记录页码进行翻页，这种情况只能通过Meta进行传递
 #[async_trait]
-pub trait ModuleNode: Send+Sync {
+pub trait ModuleNode: Send + Sync {
     async fn generate(
         &self,
         _config: ModuleConfig,

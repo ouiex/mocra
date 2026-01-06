@@ -1,8 +1,8 @@
 #![allow(unused)]
 pub mod request_downloader;
-use errors::{Error, Result};
 use common::model::download_config::DownloadConfig;
 use common::model::{Request, Response};
+use errors::{Error, Result};
 use semver::Version;
 pub mod downloader_manager;
 mod remote_downloader;

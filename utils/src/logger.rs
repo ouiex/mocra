@@ -1,14 +1,16 @@
 #![allow(unused)]
 
 use chrono;
-use once_cell::sync::{OnceCell, Lazy};
+use once_cell::sync::{Lazy, OnceCell};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::sync::RwLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use time::{UtcOffset, format_description::well_known::Rfc3339};
 use tokio::sync::mpsc::Sender;
 use tokio::task;
+use tracing::Level;
 use tracing::field::{Field, Visit};
 use tracing::{Event, Subscriber, error};
 use tracing_appender::non_blocking::WorkerGuard;
@@ -18,8 +20,6 @@ use tracing_subscriber::fmt;
 use tracing_subscriber::fmt::time::OffsetTime;
 use tracing_subscriber::layer::{Context, Layer, SubscriberExt};
 use tracing_subscriber::{EnvFilter, util::SubscriberInitExt};
-use std::sync::RwLock;
-use tracing::Level;
 use uuid::Uuid;
 
 #[derive(Serialize, Deserialize)]
@@ -103,7 +103,7 @@ pub struct LoggerConfig {
 }
 impl LoggerConfig {
     /// Initialize the logger with this configuration
-    pub async fn init(self) -> Result<(),Box<dyn std::error::Error>> {
+    pub async fn init(self) -> Result<(), Box<dyn std::error::Error>> {
         init_logger(self).await
     }
 
@@ -176,7 +176,7 @@ struct DynamicSender {
 static DYNAMIC_SENDER: Lazy<RwLock<Option<DynamicSender>>> = Lazy::new(|| RwLock::new(None));
 
 /// 设置 / 更新日志队列发送者（可在引擎初始化后调用）
-pub fn set_log_sender(log_sender: LogSender) -> Result<(),Box<dyn std::error::Error>> {
+pub fn set_log_sender(log_sender: LogSender) -> Result<(), Box<dyn std::error::Error>> {
     let queue_level = log_sender
         .level
         .parse::<Level>()
@@ -211,10 +211,15 @@ where
         let Some(dynamic) = DYNAMIC_SENDER
             .read()
             .ok()
-            .and_then(|g| g.as_ref().map(|d| (d.sender.clone(), d.queue_level))) else { return; };
+            .and_then(|g| g.as_ref().map(|d| (d.sender.clone(), d.queue_level)))
+        else {
+            return;
+        };
 
         // 过滤级别（只有达到 queue_level 或更高级别才发送）
-        if *event.metadata().level() > dynamic.1 { return; }
+        if *event.metadata().level() > dynamic.1 {
+            return;
+        }
 
         let mut visitor = LogVisitor::new();
         event.record(&mut visitor);
@@ -316,14 +321,16 @@ impl Visit for LogVisitor {
 }
 
 /// Initialize and configure tracing logger
-pub async fn init_logger(config: LoggerConfig) -> Result<(),Box<dyn std::error::Error>> {
+pub async fn init_logger(config: LoggerConfig) -> Result<(), Box<dyn std::error::Error>> {
     if LOGGER_INITIALIZED.swap(true, Ordering::SeqCst) {
         tracing::warn!("Logger already initialized, skipping re-initialization");
         return Ok(());
     }
 
     // bridge log crate
-    let _ = LogTracer::builder().with_max_level(log::LevelFilter::Trace).init();
+    let _ = LogTracer::builder()
+        .with_max_level(log::LevelFilter::Trace)
+        .init();
 
     // Normalize provided level and don't force sqlx to error so we can see SQL & params when desired
     let default_level = config.level.to_lowercase();
@@ -338,15 +345,23 @@ pub async fn init_logger(config: LoggerConfig) -> Result<(),Box<dyn std::error::
     // prepare optional console layer
     let console_layer = if config.enable_console {
         Some(fmt::layer().pretty().with_timer(timer.clone()))
-    } else { None };
+    } else {
+        None
+    };
 
     // prepare optional file layer
     let file_layer = if let Some(file_path) = &config.file_path {
-        if let Some(parent) = file_path.parent() { std::fs::create_dir_all(parent)?; }
+        if let Some(parent) = file_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
         let file_appender = RollingFileAppender::new(
             Rotation::DAILY,
-            file_path.parent().unwrap_or_else(|| std::path::Path::new(".")),
-            file_path.file_name().unwrap_or_else(|| std::ffi::OsStr::new("app.log")),
+            file_path
+                .parent()
+                .unwrap_or_else(|| std::path::Path::new(".")),
+            file_path
+                .file_name()
+                .unwrap_or_else(|| std::ffi::OsStr::new("app.log")),
         );
         let (file_writer, guard) = tracing_appender::non_blocking(file_appender);
         let _ = FILE_GUARD.set(guard);
@@ -354,9 +369,11 @@ pub async fn init_logger(config: LoggerConfig) -> Result<(),Box<dyn std::error::
             fmt::layer()
                 .with_ansi(false)
                 .with_writer(file_writer)
-                .with_timer(timer.clone())
+                .with_timer(timer.clone()),
         )
-    } else { None };
+    } else {
+        None
+    };
 
     // Build registry with Option layers (Option<T: Layer> implements Layer)
     let registry = tracing_subscriber::registry()
@@ -376,7 +393,7 @@ pub async fn init_logger(config: LoggerConfig) -> Result<(),Box<dyn std::error::
 
 /// Initialize a simple logger with default configuration
 /// Useful for quick setup in development or testing environments
-pub async fn init_simple_logger() -> Result<(),Box<dyn std::error::Error>> {
+pub async fn init_simple_logger() -> Result<(), Box<dyn std::error::Error>> {
     let config = LoggerConfig::default();
     init_logger(config).await
 }

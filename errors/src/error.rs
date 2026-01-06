@@ -1,10 +1,10 @@
 #![allow(unused)]
+use rancor::Error as RancorError;
 use std::error::Error as StdError;
 use std::fmt;
 use std::num::ParseIntError;
 use std::str::ParseBoolError;
 use thiserror::Error;
-
 /// 通用错误详情类型
 pub type BoxError = Box<dyn StdError + Send + Sync + 'static>;
 
@@ -340,7 +340,7 @@ pub enum RequestError {
     #[error("{0}")]
     NotImplemented(#[source] BoxError),
     #[error("{0}")]
-    InvalidMetaForRemote(#[source] BoxError)
+    InvalidMetaForRemote(#[source] BoxError),
 }
 
 #[derive(Debug, Error)]
@@ -658,6 +658,20 @@ pub enum DynLibError {
     Other(#[source] BoxError),
 }
 
+#[derive(Error, Debug)]
+pub enum CacheError {
+    #[error("Redis error: {0}")]
+    Redis(#[from] deadpool_redis::redis::RedisError),
+    #[error("Pool error: {0}")]
+    Pool(String),
+    #[error("Serialization error: {0}")]
+    Serde(#[from] serde_json::Error),
+    #[error("rkyv error: {0}")]
+    Rkyv(#[from] RancorError),
+    #[error("Service not initialized")]
+    NotInitialized,
+}
+
 // 便利函数，用于创建常见的错误类型
 impl Error {
     pub fn request_timeout() -> Self {
@@ -702,13 +716,12 @@ impl From<std::io::Error> for Error {
     }
 }
 
-
 impl From<ParseIntError> for Error {
     fn from(value: ParseIntError) -> Self {
-        Error::new(ErrorKind::Parser,Some(value))
+        Error::new(ErrorKind::Parser, Some(value))
     }
 }
-impl From<ParseBoolError> for Error{
+impl From<ParseBoolError> for Error {
     fn from(value: ParseBoolError) -> Self {
         todo!()
     }

@@ -121,9 +121,7 @@ pub fn json_value_to_any_value(values: &'_ [Value]) -> Vec<AnyValue<'_>> {
                         AnyValue::StringOwned(s.clone().into())
                     }
                 }
-                Value::Array(_) | Value::Object(_) => {
-                    AnyValue::StringOwned(v.to_string().into())
-                }
+                Value::Array(_) | Value::Object(_) => AnyValue::StringOwned(v.to_string().into()),
             },
             Target::Boolean => match v {
                 Value::Bool(b) => AnyValue::Boolean(*b),
@@ -407,9 +405,7 @@ pub fn json_values_to_series_with_target(
                             buf.push(Some(s.clone()))
                         }
                     }
-                    Value::Array(_) | Value::Object(_) => {
-                        buf.push(Some(v.to_string()))
-                    }
+                    Value::Array(_) | Value::Object(_) => buf.push(Some(v.to_string())),
                 }
             }
             Series::new(name.into(), buf)

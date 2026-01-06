@@ -137,7 +137,6 @@ pub fn to_dot_case(s: &str) -> String {
     result
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -148,7 +147,10 @@ mod tests {
         assert_eq!(to_camel_case("alreadyCamelCase"), "alreadyCamelCase");
         assert_eq!(to_camel_case("_leading_underscore"), "LeadingUnderscore");
         assert_eq!(to_camel_case("trailing_underscore_"), "trailingUnderscore");
-        assert_eq!(to_camel_case("multiple__underscores"), "multipleUnderscores");
+        assert_eq!(
+            to_camel_case("multiple__underscores"),
+            "multipleUnderscores"
+        );
         assert_eq!(to_camel_case(""), "");
     }
     #[test]
@@ -158,7 +160,10 @@ mod tests {
         assert_eq!(to_snake_case("already_snake_case"), "already_snake_case");
         assert_eq!(to_snake_case("LeadingUnderscore"), "leading_underscore");
         assert_eq!(to_snake_case("trailingUnderscore"), "trailing_underscore");
-        assert_eq!(to_snake_case("multipleUpperCaseLetters"), "multiple_upper_case_letters");
+        assert_eq!(
+            to_snake_case("multipleUpperCaseLetters"),
+            "multiple_upper_case_letters"
+        );
         assert_eq!(to_snake_case(""), "");
     }
     #[test]
@@ -168,7 +173,10 @@ mod tests {
         assert_eq!(to_kebab_case("already-kebab-case"), "already-kebab-case");
         assert_eq!(to_kebab_case("LeadingUnderscore"), "leading-underscore");
         assert_eq!(to_kebab_case("trailingUnderscore"), "trailing-underscore");
-        assert_eq!(to_kebab_case("multipleUpperCaseLetters"), "multiple-upper-case-letters");
+        assert_eq!(
+            to_kebab_case("multipleUpperCaseLetters"),
+            "multiple-upper-case-letters"
+        );
         assert_eq!(to_kebab_case(""), "");
     }
     #[test]
@@ -178,7 +186,10 @@ mod tests {
         assert_eq!(to_pascal_case("alreadyPascalCase"), "AlreadyPascalCase");
         assert_eq!(to_pascal_case("_leading_underscore"), "LeadingUnderscore");
         assert_eq!(to_pascal_case("trailing_underscore_"), "TrailingUnderscore");
-        assert_eq!(to_pascal_case("multiple__underscores"), "MultipleUnderscores");
+        assert_eq!(
+            to_pascal_case("multiple__underscores"),
+            "MultipleUnderscores"
+        );
         assert_eq!(to_pascal_case(""), "");
     }
     #[test]
@@ -194,21 +205,39 @@ mod tests {
     #[test]
     fn test_to_sentence_case() {
         assert_eq!(to_sentence_case("helloWorld"), "HelloWorld");
-        assert_eq!(to_sentence_case("this is a test. another sentence! and a question?"), "This is a test. Another sentence! And a question?");
-        assert_eq!(to_sentence_case("already Sentence case."), "Already Sentence case.");
+        assert_eq!(
+            to_sentence_case("this is a test. another sentence! and a question?"),
+            "This is a test. Another sentence! And a question?"
+        );
+        assert_eq!(
+            to_sentence_case("already Sentence case."),
+            "Already Sentence case."
+        );
         assert_eq!(to_sentence_case(" leading space."), " Leading space.");
         assert_eq!(to_sentence_case("trailing space. "), "Trailing space. ");
-        assert_eq!(to_sentence_case("multiple sentences. here is another! and one more?"), "Multiple sentences. Here is another! And one more?");
+        assert_eq!(
+            to_sentence_case("multiple sentences. here is another! and one more?"),
+            "Multiple sentences. Here is another! And one more?"
+        );
         assert_eq!(to_sentence_case(""), "");
     }
     #[test]
     fn test_to_constant_case() {
         assert_eq!(to_constant_case("helloWorld"), "HELLO_WORLD");
         assert_eq!(to_constant_case("ThisIsATest"), "THIS_IS_A_TEST");
-        assert_eq!(to_constant_case("already_constant_case"), "ALREADY_CONSTANT_CASE");
+        assert_eq!(
+            to_constant_case("already_constant_case"),
+            "ALREADY_CONSTANT_CASE"
+        );
         assert_eq!(to_constant_case("LeadingUnderscore"), "LEADING_UNDERSCORE");
-        assert_eq!(to_constant_case("trailingUnderscore"), "TRAILING_UNDERSCORE");
-        assert_eq!(to_constant_case("multipleUpperCaseLetters"), "MULTIPLE_UPPER_CASE_LETTERS");
+        assert_eq!(
+            to_constant_case("trailingUnderscore"),
+            "TRAILING_UNDERSCORE"
+        );
+        assert_eq!(
+            to_constant_case("multipleUpperCaseLetters"),
+            "MULTIPLE_UPPER_CASE_LETTERS"
+        );
         assert_eq!(to_constant_case(""), "");
     }
     #[test]
@@ -218,7 +247,10 @@ mod tests {
         assert_eq!(to_dot_case("already.dot.case"), "already.dot.case");
         assert_eq!(to_dot_case("LeadingUnderscore"), "leading.underscore");
         assert_eq!(to_dot_case("trailingUnderscore"), "trailing.underscore");
-        assert_eq!(to_dot_case("multipleUpperCaseLetters"), "multiple.upper.case.letters");
+        assert_eq!(
+            to_dot_case("multipleUpperCaseLetters"),
+            "multiple.upper.case.letters"
+        );
         assert_eq!(to_dot_case(""), "");
     }
 }

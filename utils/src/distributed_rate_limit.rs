@@ -1,17 +1,17 @@
 #![allow(unused)]
 use crate::redis_lock::{AdvancedDistributedLock, DistributedLockManager};
-use errors::Result;
-use errors::error::RateLimitError;
+use dashmap::DashMap;
 use deadpool_redis::{
     Pool,
     redis::{AsyncCommands, cmd},
 };
+use errors::Result;
+use errors::error::RateLimitError;
 use log::error;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use dashmap::DashMap;
 use tokio::sync::RwLock;
 
 /// 限流器配置项
@@ -383,7 +383,8 @@ impl DistributedSlidingWindowRateLimiter {
                 // 设置TTL，基于实际请求间隔时间，确保下次验证时记录仍然存在
                 let config = self.get_key_config(identifier).await?;
                 let min_interval_millis = (config.window_size_millis as f64
-                    / config.max_requests_per_second as f64) as u64;
+                    / config.max_requests_per_second as f64)
+                    as u64;
                 let ttl_millis = min_interval_millis * 2;
                 let ttl_seconds = (ttl_millis / 1000).max(1);
                 // 更新最后请求时间
@@ -452,9 +453,7 @@ impl DistributedSlidingWindowRateLimiter {
                     .map_err(|e| RateLimitError::RedisError(e.into()))?
             } else {
                 // 本地模式
-                self.local_last_request
-                    .get(&last_request_key)
-                    .map(|v| *v)
+                self.local_last_request.get(&last_request_key).map(|v| *v)
             };
 
             let result = if let Some(last_time) = last_request_time {
@@ -479,7 +478,6 @@ impl DistributedSlidingWindowRateLimiter {
             Err(RateLimitError::RedisError("Failed to acquire lock".into()).into())
         }
     }
-
 
     /// 获取下次可以请求的时间间隔（毫秒）
     ///
@@ -548,34 +546,34 @@ impl DistributedSlidingWindowRateLimiter {
             // 本地模式清理
             let mut total_cleaned = 0u64;
             let current_time = Self::get_current_timestamp();
-            
+
             // 收集需要删除的key，避免在迭代时修改
             let mut keys_to_remove = Vec::new();
-            
+
             for entry in self.local_last_request.iter() {
                 let last_time = *entry.value();
-                
+
                 // 尝试获取对应的配置来计算过期时间
                 // 注意：这里简化处理，如果找不到特定配置就用默认配置
                 // 实际上identifier需要从key中解析出来，但这里key就是last_request_key
                 // 我们可以尝试解析identifier，或者简单地使用默认配置作为保守估计
-                
+
                 let min_interval_millis = (self.default_config.window_size_millis as f64
                     / self.default_config.max_requests_per_second as f64)
                     as u64;
                 let max_valid_age = min_interval_millis * 2;
-                
+
                 if current_time.saturating_sub(last_time) > max_valid_age {
                     keys_to_remove.push(entry.key().clone());
                 }
             }
-            
+
             for key in keys_to_remove {
                 if self.local_last_request.remove(&key).is_some() {
                     total_cleaned += 1;
                 }
             }
-            
+
             Ok(total_cleaned)
         }
     }
@@ -641,7 +639,6 @@ impl DistributedSlidingWindowRateLimiter {
 
         Ok(())
     }
-
 
     /// 获取key前缀（用于调试）
     pub fn get_key_prefix(&self) -> &str {

@@ -13,44 +13,34 @@ pub mod rel_module_data_middleware;
 pub mod rel_module_download_middleware;
 pub mod rel_module_platform;
 
-pub use account::{
-    Column as AccountColumn, Entity as AccountEntity,
-    Model as AccountModel,
-};
+pub use account::{Column as AccountColumn, Entity as AccountEntity, Model as AccountModel};
 
 pub use data_middleware::{
-    Column as DataMiddlewareColumn,
-    Entity as DataMiddlewareEntity, Model as DataMiddlewareModel,
+    Column as DataMiddlewareColumn, Entity as DataMiddlewareEntity, Model as DataMiddlewareModel,
 };
 
 pub use download_middleware::{
-    Column as DownloadMiddlewareColumn,
-    Entity as DownloadMiddlewareEntity, Model as DownloadMiddlewareModel,
+    Column as DownloadMiddlewareColumn, Entity as DownloadMiddlewareEntity,
+    Model as DownloadMiddlewareModel,
 };
 
-pub use module::{
-    Entity as ModuleEntity,
-    Model as ModuleModel,
-};
+pub use module::{Entity as ModuleEntity, Model as ModuleModel};
 
-pub use platform::{
-    Column as PlatformColumn, Entity as PlatformEntity,
-    Model as PlatformModel,
-};
+pub use platform::{Column as PlatformColumn, Entity as PlatformEntity, Model as PlatformModel};
 
 pub use rel_account_platform::{
-    Column as RelAccountPlatformColumn,
-    Entity as RelAccountPlatformEntity, Model as RelAccountPlatformModel,
+    Column as RelAccountPlatformColumn, Entity as RelAccountPlatformEntity,
+    Model as RelAccountPlatformModel,
 };
 
 pub use rel_module_account::{
-    Column as RelModuleAccountColumn,
-    Entity as RelModuleAccountEntity, Model as RelModuleAccountModel,
+    Column as RelModuleAccountColumn, Entity as RelModuleAccountEntity,
+    Model as RelModuleAccountModel,
 };
 
 pub use rel_module_data_middleware::{
-    Column as RelModuleDataMiddlewareColumn,
-    Entity as RelModuleDataMiddlewareEntity, Model as RelModuleDataMiddlewareModel,
+    Column as RelModuleDataMiddlewareColumn, Entity as RelModuleDataMiddlewareEntity,
+    Model as RelModuleDataMiddlewareModel,
 };
 
 pub use rel_module_download_middleware::{
@@ -59,6 +49,6 @@ pub use rel_module_download_middleware::{
 };
 
 pub use rel_module_platform::{
-    Column as RelModulePlatformColumn,
-    Entity as RelModulePlatformEntity, Model as RelModulePlatformModel,
+    Column as RelModulePlatformColumn, Entity as RelModulePlatformEntity,
+    Model as RelModulePlatformModel,
 };

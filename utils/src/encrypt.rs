@@ -1,8 +1,6 @@
-
 pub fn md5(input: &[u8]) -> String {
-    format!("{:x}",md5::compute(input))
+    format!("{:x}", md5::compute(input))
 }
-
 
 #[cfg(test)]
 mod tests {

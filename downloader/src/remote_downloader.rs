@@ -1,6 +1,9 @@
 use crate::Downloader;
 use async_trait::async_trait;
 use base64::Engine;
+use common::model::cookies::CookieItem;
+use common::model::download_config::DownloadConfig;
+use common::model::{Request, Response};
 use errors::DownloadError::DownloadFailed;
 use errors::{DownloadError, Error, RequestError, Result};
 use reqwest::Method;
@@ -10,9 +13,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashMap;
 use uuid::Uuid;
-use common::model::cookies::CookieItem;
-use common::model::download_config::DownloadConfig;
-use common::model::{Request, Response};
 
 /// 由远程下载服务器实现下载功能，目前远程服务器设计的是使用nodejs+express+playwright实现下载功能
 ///

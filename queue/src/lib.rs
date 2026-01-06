@@ -1,15 +1,15 @@
 pub mod channel;
+pub mod compensation;
 pub mod kafka;
 pub mod manager;
 pub mod redis;
-pub mod compensation;
 
 pub use crate::channel::Channel;
 use async_trait::async_trait;
+pub use compensation::{Compensator, Identifiable, RedisCompensator};
 use errors::Result;
 pub use manager::QueueManager;
 pub use redis::RedisQueue;
-pub use compensation::{Compensator, RedisCompensator, Identifiable};
 use tokio::sync::mpsc;
 
 /// Represents a message received from the queue.
@@ -31,10 +31,13 @@ impl std::fmt::Debug for Message {
 impl Message {
     pub async fn ack(&self) -> Result<()> {
         // Send a signal back to the backend to acknowledge the message
-        self.ack_tx
-            .send(())
-            .await
-            .map_err(|_| errors::error::QueueError::OperationFailed(Box::new(std::io::Error::new(std::io::ErrorKind::Other, "Failed to send ACK signal"))).into())
+        self.ack_tx.send(()).await.map_err(|_| {
+            errors::error::QueueError::OperationFailed(Box::new(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "Failed to send ACK signal",
+            )))
+            .into()
+        })
     }
 }
 

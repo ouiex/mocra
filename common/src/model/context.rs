@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 /// Strongly-typed distributed ExecutionMark for ModuleProcessor.
 /// This avoids generic maps and encodes key fields explicitly.
 
-#[derive(Clone,Debug,Serialize,Deserialize,Default)]
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct ExecutionMark {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub module_id: Option<String>,
@@ -16,9 +16,7 @@ pub struct ExecutionMark {
     pub stay_current_step: bool,
 }
 
-
 impl ExecutionMark {
-
     pub fn with_module_id(mut self, mid: impl AsRef<str>) -> Self {
         self.module_id = Some(mid.as_ref().into());
         self

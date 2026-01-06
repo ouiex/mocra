@@ -4,7 +4,9 @@ use sea_orm::{
 use std::sync::Arc;
 
 #[allow(unused)]
-pub async fn begin_write(db: &Arc<DatabaseConnection>) -> Result<DatabaseTransaction,Box<dyn std::error::Error>> {
+pub async fn begin_write(
+    db: &Arc<DatabaseConnection>,
+) -> Result<DatabaseTransaction, Box<dyn std::error::Error>> {
     Ok(db
         .begin_with_config(
             Some(IsolationLevel::ReadCommitted),
@@ -12,7 +14,9 @@ pub async fn begin_write(db: &Arc<DatabaseConnection>) -> Result<DatabaseTransac
         )
         .await?)
 }
-pub async fn begin_read(db: &Arc<DatabaseConnection>) -> Result<DatabaseTransaction,Box<dyn std::error::Error>> {
+pub async fn begin_read(
+    db: &Arc<DatabaseConnection>,
+) -> Result<DatabaseTransaction, Box<dyn std::error::Error>> {
     Ok(db
         .begin_with_config(
             Some(IsolationLevel::ReadCommitted),

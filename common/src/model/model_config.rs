@@ -1,6 +1,6 @@
+use crate::model::config::PostgresConfig;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use crate::model::config::PostgresConfig;
 
 /// 工作模块配置信息
 #[derive(Debug, Clone, Serialize, Deserialize)]

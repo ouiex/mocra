@@ -1,19 +1,16 @@
 #![allow(unused)]
-use errors::Error;
-use crate::processors::processor::{
-    ProcessorContext, ProcessorResult, ProcessorTrait,
-};
+use crate::processors::processor::{ProcessorContext, ProcessorResult, ProcessorTrait};
 use async_trait::async_trait;
-use futures::{StreamExt, stream, Stream};
+use errors::Error;
+use errors::ProcessorChainError;
+use futures::{Stream, StreamExt, stream};
 use log::{debug, error, info, warn};
 use std::any::{Any, TypeId};
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
-use errors::ProcessorChainError;
-use std::pin::Pin;
 
 pub type SyncBoxStream<'a, T> = Pin<Box<dyn Stream<Item = T> + Send + Sync + 'a>>;
-
 
 /// 处理器链
 ///
@@ -83,24 +80,36 @@ where
         // 2.1 should_process 判定
         // 跳过场景：仅当 Input 与 Output 类型相同（透传）。否则只能继续处理以避免类型断裂。
         let mut skip_processing = false;
-        let should_do = self.processor.should_process(&input, &current_context).await;
+        let should_do = self
+            .processor
+            .should_process(&input, &current_context)
+            .await;
         if !should_do {
             if TypeId::of::<Input>() == TypeId::of::<Output>() {
                 skip_processing = true;
             } else {
-                debug!("Processor {} skip requested but Input!=Output; will still process to maintain type chain", self.processor.name());
+                debug!(
+                    "Processor {} skip requested but Input!=Output; will still process to maintain type chain",
+                    self.processor.name()
+                );
             }
         }
-        
+
         if skip_processing {
-            debug!("Processor {} decided to skip; passthrough input", self.processor.name());
+            debug!(
+                "Processor {} decided to skip; passthrough input",
+                self.processor.name()
+            );
             // Input == Output, safe to cast via Any
             let any_in = Box::new(input) as Box<dyn Any + Send>;
             match any_in.downcast::<Output>() {
                 Ok(out) => return ProcessorResult::Success(*out),
                 Err(_) => {
                     return ProcessorResult::FatalFailure(
-                        ProcessorChainError::Unexpected("Failed to cast Input to Output despite TypeId match".into()).into()
+                        ProcessorChainError::Unexpected(
+                            "Failed to cast Input to Output despite TypeId match".into(),
+                        )
+                        .into(),
                     );
                 }
             }
@@ -122,7 +131,9 @@ where
 
             // 4) 执行处理器（可选超时）
             // 必须 clone input 给 process，因为 process 消耗所有权，而我们需要保留 typed_input 用于重试或错误处理
-            let fut = self.processor.process(input.clone(), current_context.clone());
+            let fut = self
+                .processor
+                .process(input.clone(), current_context.clone());
             let result = if let Some(ms) = current_context.step_timeout_ms {
                 match tokio::time::timeout(Duration::from_millis(ms), fut).await {
                     Ok(r) => r,
@@ -147,13 +158,22 @@ where
             match result {
                 ProcessorResult::Success(output) => {
                     // 后置处理失败可进入 handle_error 以允许补偿。
-                    if let Err(post_err) = self.processor.post_process(&input, &output, &current_context).await {
+                    if let Err(post_err) = self
+                        .processor
+                        .post_process(&input, &output, &current_context)
+                        .await
+                    {
                         error!("Post-processing failed for {}: {}", self.name(), post_err);
                         // 将 post_err 当作 Fatal 交给 handle_error
-                        let handled = self.processor.handle_error(&input, post_err, &current_context).await;
+                        let handled = self
+                            .processor
+                            .handle_error(&input, post_err, &current_context)
+                            .await;
                         return match handled {
                             ProcessorResult::Success(out2) => ProcessorResult::Success(out2),
-                            ProcessorResult::RetryableFailure(policy) => ProcessorResult::RetryableFailure(policy),
+                            ProcessorResult::RetryableFailure(policy) => {
+                                ProcessorResult::RetryableFailure(policy)
+                            }
                             ProcessorResult::FatalFailure(e) => ProcessorResult::FatalFailure(e),
                         };
                     }
@@ -185,22 +205,23 @@ where
                             "TypedProcessorExecutor {}: Max retries exceeded, giving up",
                             self.processor.name()
                         );
-                        
+
                         let err = ProcessorChainError::MaxRetriesExceeded(
                             format!(
                                 "Max retries exceeded for processor {}",
                                 self.processor.name()
                             )
-                                .into(),
+                            .into(),
                         )
-                            .into();
-                        
-                        let handled = self.processor.handle_error(&input, err, &current_context).await;
+                        .into();
+
+                        let handled = self
+                            .processor
+                            .handle_error(&input, err, &current_context)
+                            .await;
 
                         return match handled {
-                            ProcessorResult::Success(output) => {
-                                ProcessorResult::Success(output)
-                            }
+                            ProcessorResult::Success(output) => ProcessorResult::Success(output),
                             ProcessorResult::RetryableFailure(policy) => {
                                 ProcessorResult::RetryableFailure(policy)
                             }
@@ -210,10 +231,15 @@ where
                 }
                 ProcessorResult::FatalFailure(err) => {
                     // process 失败 -> 交给 handle_error
-                    let handled = self.processor.handle_error(&input, err, &current_context).await;
+                    let handled = self
+                        .processor
+                        .handle_error(&input, err, &current_context)
+                        .await;
                     return match handled {
                         ProcessorResult::Success(output) => ProcessorResult::Success(output),
-                        ProcessorResult::RetryableFailure(policy) => ProcessorResult::RetryableFailure(policy),
+                        ProcessorResult::RetryableFailure(policy) => {
+                            ProcessorResult::RetryableFailure(policy)
+                        }
                         ProcessorResult::FatalFailure(e) => ProcessorResult::FatalFailure(e),
                     };
                 }
@@ -320,15 +346,21 @@ where
         }
 
         let result = self.processor.process(typed_input, context).await;
-        
+
         match result {
             ProcessorResult::Success(output) => {
                 ProcessorResult::Success(Box::new(output) as Box<dyn Any + Send>)
             }
             ProcessorResult::FatalFailure(e) => ProcessorResult::FatalFailure(e),
             ProcessorResult::RetryableFailure(policy) => {
-                warn!("OneShotProcessorExecutor {}: Retry requested but not supported (Input not Clone). Failing.", self.processor.name());
-                let msg = policy.reason.map(|e| e.to_string()).unwrap_or_else(|| "Retry not supported".into());
+                warn!(
+                    "OneShotProcessorExecutor {}: Retry requested but not supported (Input not Clone). Failing.",
+                    self.processor.name()
+                );
+                let msg = policy
+                    .reason
+                    .map(|e| e.to_string())
+                    .unwrap_or_else(|| "Retry not supported".into());
                 ProcessorResult::FatalFailure(ProcessorChainError::Unexpected(msg.into()).into())
             }
         }
@@ -345,7 +377,9 @@ struct FlattenVecExecutor<T> {
 
 impl<T> FlattenVecExecutor<T> {
     fn new() -> Self {
-        Self { _phantom: std::marker::PhantomData }
+        Self {
+            _phantom: std::marker::PhantomData,
+        }
     }
 }
 
@@ -456,11 +490,7 @@ where
             VecMapMode::Sequential => {
                 let mut outputs = Vec::with_capacity(vec_input.len());
                 for (idx, elem) in vec_input.into_iter().enumerate() {
-                    match self
-                        .inner
-                        .execute_typed(elem, context.clone())
-                        .await
-                    {
+                    match self.inner.execute_typed(elem, context.clone()).await {
                         ProcessorResult::Success(v) => outputs.push(v),
                         ProcessorResult::RetryableFailure(_) => {
                             return ProcessorResult::FatalFailure(
@@ -488,10 +518,7 @@ where
                         .map(|(idx, elem)| {
                             let ctx = context.clone();
                             async move {
-                                let res = self
-                                    .inner
-                                    .execute_typed(elem, ctx)
-                                    .await;
+                                let res = self.inner.execute_typed(elem, ctx).await;
                                 (idx, res)
                             }
                         })
@@ -576,7 +603,10 @@ struct SyncWrapper<T>(T);
 unsafe impl<T: Send> Sync for SyncWrapper<T> {}
 impl<F: Future + Send + Unpin> Future for SyncWrapper<F> {
     type Output = F::Output;
-    fn poll(mut self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<Self::Output> {
+    fn poll(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
         Pin::new(&mut self.0).poll(cx)
     }
 }
@@ -662,30 +692,24 @@ where
             .map(move |elem| {
                 let ctx2 = ctx.clone();
                 let inner = inner_arc.clone();
-                let fut = Box::pin(async move {
-                    inner
-                        .execute_typed(elem, ctx2)
-                        .await
-                });
+                let fut = Box::pin(async move { inner.execute_typed(elem, ctx2).await });
                 SyncWrapper(fut)
             })
             .buffer_unordered(concurrency)
             .map({
                 let flag = stop_flag.clone();
-                move |res| {
-                    match res {
-                        ProcessorResult::Success(v) => Some(v),
-                        ProcessorResult::FatalFailure(e) => {
-                            error!("stream map: fatal failure: {e}");
-                            if matches!(strategy, ErrorStrategy::Stop) {
-                                flag.store(true, Ordering::Relaxed);
-                            }
-                            None
+                move |res| match res {
+                    ProcessorResult::Success(v) => Some(v),
+                    ProcessorResult::FatalFailure(e) => {
+                        error!("stream map: fatal failure: {e}");
+                        if matches!(strategy, ErrorStrategy::Stop) {
+                            flag.store(true, Ordering::Relaxed);
                         }
-                        ProcessorResult::RetryableFailure(_) => {
-                            error!("stream map: unexpected retry at stream stage");
-                            None
-                        }
+                        None
+                    }
+                    ProcessorResult::RetryableFailure(_) => {
+                        error!("stream map: unexpected retry at stream stage");
+                        None
                     }
                 }
             })
@@ -761,11 +785,7 @@ where
             .map(move |elem| {
                 let ctx2 = ctx.clone();
                 let inner2 = inner.clone();
-                let fut = Box::pin(async move {
-                    inner2
-                        .execute_typed(elem, ctx2)
-                        .await
-                });
+                let fut = Box::pin(async move { inner2.execute_typed(elem, ctx2).await });
                 SyncWrapper(fut)
             })
             .buffer_unordered(conc)
@@ -1041,7 +1061,8 @@ impl ProcessorChain {
             input_type_id: TypeId::of::<SyncBoxStream<'static, ElemIn>>(),
             output_type_id: TypeId::of::<SyncBoxStream<'static, Result<ElemOut, Error>>>(),
             input_type_name: std::any::type_name::<SyncBoxStream<'static, ElemIn>>(),
-            output_type_name: std::any::type_name::<SyncBoxStream<'static, Result<ElemOut, Error>>>(),
+            output_type_name: std::any::type_name::<SyncBoxStream<'static, Result<ElemOut, Error>>>(
+            ),
         });
         self
     }
@@ -1330,7 +1351,10 @@ where
     }
 
     /// 先扁平化为 Vec<T>，再对每个 T 应用处理器，得到 Vec<U>
-    pub fn then_map_nested_vec_flatten<ElemOut, P>(self, processor: P) -> TypedChain<In, Vec<ElemOut>>
+    pub fn then_map_nested_vec_flatten<ElemOut, P>(
+        self,
+        processor: P,
+    ) -> TypedChain<In, Vec<ElemOut>>
     where
         ElemOut: Send + 'static,
         P: ProcessorTrait<T, ElemOut> + Send + Sync + 'static,
@@ -2056,7 +2080,7 @@ mod tests {
     #[tokio::test]
     async fn pipeline_file_sum_numbers() {
         init_logger();
-        
+
         // Create a temp file
         let path = "test_pipeline_sum.txt";
         let content = "10\n20\n30\nnot_a_number\n40";
@@ -2074,7 +2098,7 @@ mod tests {
         // 运行
         let ctx = ProcessorContext::default();
         let res = chain.execute(path.to_string(), ctx).await;
-        
+
         // Cleanup
         let _ = tokio::fs::remove_file(path).await;
 
@@ -2139,11 +2163,13 @@ mod tests {
     #[tokio::test]
     async fn test_flatten_vec() {
         init_logger();
-        
+
         struct GenNested;
         #[async_trait]
         impl ProcessorTrait<(), Vec<Vec<i32>>> for GenNested {
-            fn name(&self) -> &'static str { "GenNested" }
+            fn name(&self) -> &'static str {
+                "GenNested"
+            }
             async fn process(&self, _: (), _: ProcessorContext) -> ProcessorResult<Vec<Vec<i32>>> {
                 ProcessorResult::Success(vec![vec![1, 2], vec![3], vec![], vec![4, 5]])
             }
@@ -2163,15 +2189,21 @@ mod tests {
     #[tokio::test]
     async fn test_one_shot() {
         init_logger();
-        
+
         struct NonCloneInput(i32);
         // Input is not Clone, so we must use add_one_shot_processor (or then_one_shot)
-        
+
         struct OneShotProc;
         #[async_trait]
         impl ProcessorTrait<NonCloneInput, i32> for OneShotProc {
-            fn name(&self) -> &'static str { "OneShotProc" }
-            async fn process(&self, input: NonCloneInput, _: ProcessorContext) -> ProcessorResult<i32> {
+            fn name(&self) -> &'static str {
+                "OneShotProc"
+            }
+            async fn process(
+                &self,
+                input: NonCloneInput,
+                _: ProcessorContext,
+            ) -> ProcessorResult<i32> {
                 ProcessorResult::Success(input.0 * 2)
             }
         }
@@ -2179,8 +2211,14 @@ mod tests {
         struct MakeNonClone;
         #[async_trait]
         impl ProcessorTrait<i32, NonCloneInput> for MakeNonClone {
-            fn name(&self) -> &'static str { "MakeNonClone" }
-            async fn process(&self, input: i32, _: ProcessorContext) -> ProcessorResult<NonCloneInput> {
+            fn name(&self) -> &'static str {
+                "MakeNonClone"
+            }
+            async fn process(
+                &self,
+                input: i32,
+                _: ProcessorContext,
+            ) -> ProcessorResult<NonCloneInput> {
                 ProcessorResult::Success(NonCloneInput(input))
             }
         }
@@ -2199,11 +2237,13 @@ mod tests {
     #[tokio::test]
     async fn test_context_metadata() {
         init_logger();
-        
+
         struct WriteMeta;
         #[async_trait]
         impl ProcessorTrait<(), ()> for WriteMeta {
-            fn name(&self) -> &'static str { "WriteMeta" }
+            fn name(&self) -> &'static str {
+                "WriteMeta"
+            }
             async fn process(&self, _: (), ctx: ProcessorContext) -> ProcessorResult<()> {
                 let mut meta = ctx.metadata.write().await;
                 meta.insert("key".to_string(), serde_json::json!("value"));
@@ -2214,10 +2254,16 @@ mod tests {
         struct ReadMeta;
         #[async_trait]
         impl ProcessorTrait<(), String> for ReadMeta {
-            fn name(&self) -> &'static str { "ReadMeta" }
+            fn name(&self) -> &'static str {
+                "ReadMeta"
+            }
             async fn process(&self, _: (), ctx: ProcessorContext) -> ProcessorResult<String> {
                 let meta = ctx.metadata.read().await;
-                let val = meta.get("key").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let val = meta
+                    .get("key")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
                 ProcessorResult::Success(val)
             }
         }

@@ -1,11 +1,11 @@
-use crate::model::meta::MetaData;
+use crate::interface::StoreTrait;
 use crate::model::Response;
-use polars::io::ipc::IpcWriter;
+use crate::model::meta::MetaData;
 use polars::io::SerWriter;
+use polars::io::ipc::IpcWriter;
 use polars::prelude::*;
 use std::fmt::Debug;
 use uuid::Uuid;
-use crate::interface::StoreTrait;
 #[derive(Clone, Debug, Default)]
 pub struct StoreContext {
     pub request_id: Uuid,
@@ -16,8 +16,12 @@ pub struct StoreContext {
     pub data_middleware: Vec<String>,
 }
 impl StoreContext {
-    pub fn task_id(&self) -> String { format!("{}-{}", self.account, self.platform) }
-    pub fn module_id(&self) -> String { format!("{}-{}-{}", self.account, self.platform, self.module) }
+    pub fn task_id(&self) -> String {
+        format!("{}-{}", self.account, self.platform)
+    }
+    pub fn module_id(&self) -> String {
+        format!("{}-{}-{}", self.account, self.platform, self.module)
+    }
 }
 #[derive(Clone, Debug)]
 pub struct FileStore {
@@ -43,7 +47,12 @@ impl StoreTrait for FileStore {
 }
 impl Default for FileStore {
     fn default() -> Self {
-        Self { ctx: StoreContext::default(), file_name: String::new(), file_path: String::new(), content: vec![] }
+        Self {
+            ctx: StoreContext::default(),
+            file_name: String::new(),
+            file_path: String::new(),
+            content: vec![],
+        }
     }
 }
 
@@ -81,7 +90,10 @@ impl FileStore {
         self.content = content;
         self
     }
-    pub fn with_ctx(mut self, ctx: StoreContext) -> Self { self.ctx = ctx; self }
+    pub fn with_ctx(mut self, ctx: StoreContext) -> Self {
+        self.ctx = ctx;
+        self
+    }
     pub fn with_name(mut self, file_name: impl AsRef<str>) -> Self {
         self.file_name = file_name.as_ref().to_string();
         self
@@ -91,8 +103,12 @@ impl FileStore {
         self
     }
     // Convenience alias for clarity in chaining.
-    pub fn with_file_name(self, file_name: impl AsRef<str>) -> Self { self.with_name(file_name) }
-    pub fn with_file_path(self, file_path: impl AsRef<str>) -> Self { self.with_path(file_path) }
+    pub fn with_file_name(self, file_name: impl AsRef<str>) -> Self {
+        self.with_name(file_name)
+    }
+    pub fn with_file_path(self, file_path: impl AsRef<str>) -> Self {
+        self.with_path(file_path)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -133,7 +149,12 @@ impl From<DataFrameStore> for Data {
 
 impl Default for DataFrameStore {
     fn default() -> Self {
-        Self { ctx: StoreContext::default(), data: vec![], schema: String::new(), table: String::new() }
+        Self {
+            ctx: StoreContext::default(),
+            data: vec![],
+            schema: String::new(),
+            table: String::new(),
+        }
     }
 }
 impl DataFrameStore {
@@ -155,12 +176,12 @@ impl DataFrameStore {
     }
 }
 
-#[derive(Debug,Clone)]
+#[derive(Debug, Clone)]
 pub enum DataType {
     DataFrame(DataFrameStore),
     File(FileStore),
 }
-#[derive(Debug,Clone)]
+#[derive(Debug, Clone)]
 pub struct Data {
     pub request_id: Uuid,
     pub platform: String,
@@ -185,8 +206,8 @@ impl Default for Data {
     }
 }
 impl Data {
-    pub fn from(response:&Response) -> Self {
-        Data{
+    pub fn from(response: &Response) -> Self {
+        Data {
             request_id: response.id,
             platform: response.platform.clone(),
             account: response.account.clone(),
@@ -229,7 +250,6 @@ impl Data {
             content: data,
         }
     }
-    
 }
 impl From<(DataFrame, &Response)> for Data {
     fn from(value: (DataFrame, &Response)) -> Self {

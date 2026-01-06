@@ -10,7 +10,9 @@ struct Impl {
 }
 
 impl Module for Impl {
-    fn name(&self) -> &str { &self.n }
+    fn name(&self) -> &str {
+        &self.n
+    }
 }
 
 fn bench_box_move_call(iter: usize) -> u128 {
