@@ -1,5 +1,5 @@
 #![allow(unused)]
-use rancor::Error as RancorError;
+use rkyv::rancor::Error as RancorError;
 use std::error::Error as StdError;
 use std::fmt;
 use std::num::ParseIntError;
