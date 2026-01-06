@@ -26,3 +26,6 @@ errors.workspace = true
 dyn-clone.workspace = true
 redis.workspace = true
 sync.workspace = true
+cacheable.workspace = true
+rkyv.workspace = true
+bytecheck.workspace = true

@@ -4,7 +4,7 @@ use common::model::Request;
 use common::model::download_config::DownloadConfig;
 use common::state::State;
 use dashmap::DashMap;
-use redis::{AsyncCommands, Script};
+use deadpool_redis::{redis::{AsyncCommands, Script}};
 use std::sync::Arc;
 use std::time::SystemTime;
 use tokio::sync::RwLock;
@@ -69,8 +69,7 @@ impl DownloaderManager {
             .config
             .read()
             .await
-            .defaults
-            .download
+            .download_config
             .downloader_expire;
 
         let current_time = Self::current_timestamp();
@@ -102,7 +101,7 @@ impl DownloaderManager {
             let result: Result<Vec<String>, _> = script
                 .key(&key)
                 .arg(max_score)
-                .invoke_async(&mut *conn)
+                .invoke_async(&mut conn)
                 .await;
 
             if let Ok(keys) = result {
@@ -128,10 +127,10 @@ impl DownloaderManager {
                 if let Some(pool) = pool
                     && let Ok(mut conn) = pool.get().await
                 {
-                    let _: () = redis::cmd("ZREM")
+                    let _: () = deadpool_redis::redis::cmd("ZREM")
                         .arg(&key)
                         .arg(&key)
-                        .query_async(&mut *conn)
+                        .query_async(&mut conn)
                         .await
                         .unwrap_or(());
                 }
@@ -166,11 +165,11 @@ impl DownloaderManager {
             if let Some(pool) = pool
                 && let Ok(mut conn) = pool.get().await
             {
-                let _: () = redis::cmd("ZADD")
+                let _: () = deadpool_redis::redis::cmd("ZADD")
                     .arg(&key)
                     .arg(current_time)
                     .arg(&module_id)
-                    .query_async(&mut *conn)
+                    .query_async(&mut conn)
                     .await
                     .unwrap_or(());
 

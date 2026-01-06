@@ -506,6 +506,7 @@ dependencies = [
  "ptr_meta 0.3.1",
  "rancor",
  "simdutf8",
+ "uuid",
 ]
 
 [[package]]
@@ -715,6 +716,8 @@ name = "common"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "bytecheck 0.8.2",
+ "cacheable",
  "chrono",
  "dyn-clone",
  "env_logger",
@@ -726,6 +729,7 @@ dependencies = [
  "redis 1.0.2",
  "reqwest 0.13.1",
  "reqwest_cookie_store",
+ "rkyv 0.8.13",
  "sea-orm",
  "serde",
  "serde_json",
@@ -1115,6 +1119,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "base64",
+ "cacheable",
  "common",
  "dashmap",
  "deadpool-redis",
@@ -3631,6 +3636,7 @@ version = "4.9.0+2.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5230dca48bc354d718269f3e4353280e188b610f7af7e2fcf54b7a79d5802872"
 dependencies = [
+ "cmake",
  "libc",
  "libz-sys",
  "num_enum",
@@ -4101,7 +4107,7 @@ dependencies = [
  "security-framework 3.5.1",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -4879,7 +4885,6 @@ dependencies = [
  "deadpool-redis",
  "errors",
  "rdkafka",
- "redis 1.0.2",
  "serde",
  "serde_json",
  "tokio",
@@ -5487,6 +5492,7 @@ dependencies = [
  "js-sys",
  "serde_core",
  "wasm-bindgen",
+ "zerocopy",
 ]
 
 [[package]]

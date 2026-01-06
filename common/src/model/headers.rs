@@ -1,11 +1,14 @@
+use bytecheck::CheckBytes;
 use reqwest::header::{HeaderMap, HeaderValue};
 use serde::{Deserialize, Serialize};
-#[derive(Debug, Clone, Serialize, Deserialize)]
+use cacheable::CacheAble;
+use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
+#[derive(Debug, Clone, Serialize, Deserialize,Archive,RkyvDeserialize,RkyvSerialize,CheckBytes)]
 pub struct HeaderItem {
     pub key: String,
     pub value: String,
 }
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize,Archive,RkyvDeserialize,RkyvSerialize,CheckBytes)]
 pub struct Headers {
     pub headers: Vec<HeaderItem>,
 }
@@ -142,6 +145,13 @@ impl From<HeaderMap> for Headers {
         Headers { headers }
     }
 }
+
+impl CacheAble for Headers{
+    fn field() -> impl AsRef<str> {
+        "headers"
+    }
+}
+
 
 #[test]
 fn test() {

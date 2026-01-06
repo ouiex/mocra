@@ -106,17 +106,17 @@ impl CacheBackend for RedisBackend {
     }
 }
 #[async_trait::async_trait]
-pub trait SyncAble: Send + Sync + Sized + 'static + Archive
+pub trait CacheAble: Send + Sync + Sized + 'static + Archive
 where
     Self: for<'a> Serialize<DefaultSerializer<'a>>,
     Self::Archived:
         for<'a> CheckBytes<DefaultValidator<'a>> + Deserialize<Self, DefaultDeserializer>,
 {
-    fn field() -> String;
+    fn field() -> impl AsRef<str>;
 
-    async fn send(&self, sync: &CacheService) -> Result<(), CacheError> {
+    async fn send(&self,id:&str, sync: &CacheService) -> Result<(), CacheError> {
         // Construct key: namespace:cache:field
-        let key = format!("{}:cache:{}", sync.namespace, Self::field());
+        let key = format!("{}:cache:{}:{id}", sync.namespace, Self::field().as_ref());
 
         let bytes = rkyv::to_bytes::<RancorError>(self).map_err(CacheError::Rkyv)?;
 
@@ -126,8 +126,8 @@ where
         Ok(())
     }
 
-    async fn sync(sync: &CacheService) -> Result<Option<Self>, CacheError> {
-        let key = format!("{}:cache:{}", sync.namespace, Self::field());
+    async fn sync(id:&str,sync: &CacheService) -> Result<Option<Self>, CacheError> {
+        let key = format!("{}:cache:{}:{id}", sync.namespace, Self::field().as_ref());
 
         if let Some(bytes) = sync.backend.get(&key).await? {
             // Use rkyv from_bytes with explicit error type
@@ -172,7 +172,7 @@ struct MyConfig {
     value: i32,
 }
 
-impl SyncAble for MyConfig {
+impl CacheAble for MyConfig {
     fn field() -> String {
         "global_config".to_string()
     }
@@ -202,12 +202,12 @@ mod tests {
         };
 
         // 2. Developer calls send()
-        if let Err(e) = config.send(sync_service.as_ref()).await {
+        if let Err(e) = config.send(&"test",sync_service.as_ref()).await {
             eprintln!("Failed to send: {}", e);
         }
 
         // 3. Developer calls sync()
-        match MyConfig::sync(sync_service.as_ref()).await {
+        match MyConfig::sync(&"test",sync_service.as_ref()).await {
             Ok(Some(fetched)) => println!("Synced: {:?}", fetched),
             Ok(None) => println!("No data found"),
             Err(e) => eprintln!("Error syncing: {}", e),

@@ -1,3 +1,4 @@
+use async_trait::async_trait;
 use chrono::{TimeZone, Utc};
 use errors::CookieError;
 use reqwest::cookie::Jar;
@@ -5,8 +6,12 @@ use reqwest::header::HeaderValue;
 use reqwest_cookie_store::CookieStore;
 use serde::{Deserialize, Deserializer, Serialize};
 use url::Url;
+use cacheable::CacheAble;
+use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
+use bytecheck::CheckBytes;
+
 /// cookie由外部来保证是否有效，这里只做简单的序列化和反序列化，不验证有效性
-#[derive(Serialize, Debug, Clone)]
+#[derive(Serialize, Debug, Clone,Archive,RkyvDeserialize,RkyvSerialize,CheckBytes)]
 pub struct CookieItem {
     pub name: String,
     pub value: String,
@@ -154,7 +159,7 @@ impl<'de> Deserialize<'de> for CookieItem {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Serialize, Debug, Clone,Archive,RkyvDeserialize,RkyvSerialize,CheckBytes)]
 pub struct Cookies {
     pub cookies: Vec<CookieItem>,
 }
@@ -404,5 +409,11 @@ impl TryFrom<&Cookies> for CookieStore {
 impl From<Vec<CookieItem>> for Cookies {
     fn from(value: Vec<CookieItem>) -> Self {
         Cookies { cookies: value }
+    }
+}
+#[async_trait]
+impl CacheAble for Cookies {
+    fn field() -> impl AsRef<str> {
+        "cookies".to_string()
     }
 }

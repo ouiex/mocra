@@ -1,23 +1,25 @@
+use bytecheck::CheckBytes;
+use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use crate::model::ModuleConfig;
 use crate::model::login_info::LoginInfo;
 use sea_orm::JsonValue;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize,Archive,RkyvDeserialize,RkyvSerialize,CheckBytes)]
 pub struct MetaData {
-    pub task: serde_json::Value,
-    pub login_info: serde_json::Value,
-    pub module_config: serde_json::Value,
-    pub trait_meta: serde_json::Value,
+    pub task: Vec<u8>,
+    pub login_info: Vec<u8>,
+    pub module_config: Vec<u8>,
+    pub trait_meta: Vec<u8>,
 }
 
 impl Default for MetaData {
     fn default() -> Self {
         Self {
-            task: serde_json::Map::new().into(),
-            login_info: serde_json::Map::new().into(),
-            module_config: serde_json::Map::new().into(),
-            trait_meta: serde_json::Map::new().into(),
+            task: vec![],
+            login_info:  vec![],
+            module_config:  vec![],
+            trait_meta:  vec![],
         }
     }
 }
@@ -25,8 +27,9 @@ impl MetaData {
     pub fn add(mut self, key: impl AsRef<str>, value: serde_json::Value, source: &str) -> Self {
         match source {
             "task" => {
-                if let Some(map) = self.task.as_object_mut() {
+                if let Ok(map) = serde_json::to_value(self.task.clone()) && let Some(map) = map.as_object_mut() {
                     map.insert(key.as_ref().into(), value);
+                    self.task = serde_json::to_vec(&map).unwrap_or_default();
                 }
             }
             "login_info" => {

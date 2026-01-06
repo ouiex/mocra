@@ -1,7 +1,7 @@
 use crate::MqBackend;
-use deadpool_redis::{Config, Pool, Runtime};
-use redis::AsyncCommands;
-use redis::streams::{StreamReadOptions, StreamReadReply};
+use deadpool_redis::redis::streams::{StreamReadOptions, StreamReadReply, };
+use deadpool_redis::redis::{AsyncCommands, RedisResult};
+use deadpool_redis::Pool;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
@@ -47,7 +47,7 @@ impl MqBackend for RedisBackend {
                 }
             };
 
-            let _: redis::RedisResult<()> =
+            let _: RedisResult<()> =
                 conn.xgroup_create_mkstream(&topic, &group_name, "$").await;
 
             let opts = StreamReadOptions::default()
@@ -56,17 +56,17 @@ impl MqBackend for RedisBackend {
                 .block(0);
 
             loop {
-                let result: redis::RedisResult<StreamReadReply> =
+                let result:RedisResult<StreamReadReply> =
                     conn.xread_options(&[&topic], &[">"], &opts).await;
                 match result {
                     Ok(reply) => {
                         for stream_key in reply.keys {
                             for element in stream_key.ids {
                                 let payload_val =
-                                    element.map.get("payload").unwrap_or(&redis::Value::Nil);
+                                    element.map.get("payload").unwrap_or(&deadpool_redis::redis::Value::Nil);
                                 let payload_vec: Vec<u8> =
-                                    match redis::FromRedisValue::from_redis_value(
-                                        payload_val.to_owned(),
+                                    match deadpool_redis::redis::FromRedisValue::from_redis_value(
+                                        payload_val,
                                     ) {
                                         Ok(v) => v,
                                         Err(_) => continue,
@@ -76,7 +76,7 @@ impl MqBackend for RedisBackend {
                                     return;
                                 }
 
-                                let _: redis::RedisResult<()> =
+                                let _: RedisResult<()> =
                                     conn.xack(&topic, &group_name, &[element.id.as_str()]).await;
                             }
                         }
@@ -110,7 +110,7 @@ impl MqBackend for RedisBackend {
         // Lua script for atomic CAS
         // Return 1 for success, 0 for failure
         let script = if let Some(_old) = old_val {
-            redis::Script::new(
+            deadpool_redis::redis::Script::new(
                 r"
                 if redis.call('get', KEYS[1]) == ARGV[1] then
                     redis.call('set', KEYS[1], ARGV[2])
@@ -121,7 +121,7 @@ impl MqBackend for RedisBackend {
             ",
             )
         } else {
-            redis::Script::new(
+            deadpool_redis::redis::Script::new(
                 r"
                 if redis.call('exists', KEYS[1]) == 0 then
                     redis.call('set', KEYS[1], ARGV[1])

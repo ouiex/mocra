@@ -4,18 +4,18 @@ members = ["cacheable","common", "downloader", "engine", "errors", "proxy", "que
 
 [workspace.dependencies]
 async-trait = "0.1"
-reqwest = { version = "0.13", features = ["cookies", "json", "socks", "gzip", "brotli", "deflate", "zstd"] }
+reqwest = { version = "0.13", features = ["default","brotli", "cookies", "json", "socks", "gzip", "deflate", "zstd"] }
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"
 toml = "0.9"
-uuid = { version = "1", features = ["serde", "v7"] }
+uuid = { version = "1", features = ["serde", "v7","zerocopy"] }
 url = "2"
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
-redis = {version = "1.0.1", features = ["tokio-comp"]}
-deadpool-redis = { version = "0.22", features = ["json", "script", "serde"] }
+redis = {version = "1.0.1", features = ["tokio-comp","aio"]}
+deadpool-redis = { version = "0.22", features = ["json", "script", "serde","streams"] }
 sea-orm = { version = "1", features = ["postgres-array", "runtime-tokio-native-tls", "sqlx-postgres"] }
-rdkafka = "0.38"
+rdkafka = { version = "0.38", features = ["cmake-build"] }
 futures = "0.3"
 log = "0.4"
 chrono = { version = "0.4", features = ["serde"] }
@@ -46,7 +46,7 @@ dashmap = "6"
 futures-util = "0.3"
 tokio-tungstenite = { version = "0.28", features = ["native-tls"] }
 bytecheck = "0.8"
-rkyv = { version = "0.8.13" }
+rkyv = { version = "0.8.13",features = ["default","uuid-1"] }
 rancor = "0.1"
 common = { path = "common" }
 downloader = { path = "downloader" }

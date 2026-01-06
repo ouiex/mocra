@@ -15,7 +15,7 @@ url.workspace = true
 dyn-clone.workspace = true
 semver.workspace = true
 base64.workspace = true
-
+cacheable.workspace = true
 common.workspace = true
 utils.workspace = true
 errors.workspace = true

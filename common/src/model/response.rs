@@ -1,10 +1,13 @@
+use crate::model::meta::MetaData;
 use crate::model::Cookies;
 use crate::model::ExecutionMark;
-use crate::model::meta::MetaData;
-use serde::{Deserialize, Serialize};
+use cacheable::CacheAble;
+use rkyv::bytecheck::CheckBytes;
+use rkyv::{Archive, Deserialize, Serialize};
+use serde::{Deserialize as SerdeDeserialize, Serialize as SerdeSerialize};
 use uuid::Uuid;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize,Archive,CheckBytes)]
 pub struct Response {
     pub id: Uuid,
     pub platform: String,
@@ -33,25 +36,25 @@ impl Response {
     }
     pub fn get_trait_config<T>(&self, key: &str) -> Option<T>
     where
-        T: for<'de> Deserialize<'de> + Serialize,
+        T: for<'de> SerdeDeserialize<'de> + SerdeSerialize,
     {
         self.metadata.get_trait_config::<T>(key)
     }
     pub fn get_login_config<T>(&self, key: &str) -> Option<T>
     where
-        T: for<'de> Deserialize<'de> + Serialize,
+        T: for<'de> SerdeDeserialize<'de> + SerdeSerialize,
     {
         self.metadata.get_login_config::<T>(key)
     }
     pub fn get_module_config<T>(&self, key: &str) -> Option<T>
     where
-        T: for<'de> Deserialize<'de> + Serialize,
+        T: for<'de> SerdeDeserialize<'de> + SerdeSerialize,
     {
         self.metadata.get_module_config::<T>(key)
     }
     pub fn get_task_config<T>(&self, key: &str) -> Option<T>
     where
-        T: for<'de> Deserialize<'de> + Serialize,
+        T: for<'de> SerdeDeserialize<'de> + SerdeSerialize,
     {
         self.metadata.get_task_config::<T>(key)
     }
@@ -61,5 +64,12 @@ impl Response {
     pub fn with_context(mut self, ctx: ExecutionMark) -> Self {
         self.context = ctx;
         self
+    }
+}
+
+
+impl CacheAble for Response{
+    fn field() -> impl AsRef<str> {
+        "response"
     }
 }

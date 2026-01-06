@@ -1,9 +1,10 @@
+use rkyv::Archive;
 use serde::{Deserialize, Serialize};
 
 /// Strongly-typed distributed ExecutionMark for ModuleProcessor.
 /// This avoids generic maps and encodes key fields explicitly.
 
-#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+#[derive(Clone, Debug, Serialize, Deserialize, Default,Archive)]
 pub struct ExecutionMark {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub module_id: Option<String>,

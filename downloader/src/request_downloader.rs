@@ -15,7 +15,11 @@ use url::Url;
 use utils::distributed_rate_limit::DistributedSlidingWindowRateLimiter;
 use utils::redis_lock::DistributedLockManager;
 use uuid::Uuid;
-
+use cacheable::{CacheService,CacheAble};
+use common::model::{Cookies, Headers, Request, Response};
+use common::model::cookies::CookieItem;
+use common::model::download_config::DownloadConfig;
+use common::model::headers::HeaderItem;
 /// RequestDownloader 实现了 Downloader trait，提供 HTTP 请求下载功能
 /// 支持 Cookie 和 Header 缓存、请求限速、任务锁等功能。
 /// 通过 enable_cache、enable_locker 和 enable_rate_limit 方法可以启用相应的功能。
@@ -27,7 +31,7 @@ pub struct RequestDownloader {
     pub limit: Arc<DistributedSlidingWindowRateLimiter>,
     // 状态记录器：为每个task_id维护一个互斥锁，确保相同task_id的请求串行执行
     pub locker: Arc<DistributedLockManager>,
-    sync: Arc<SyncService>,
+    cache_service: Arc<CacheService>,
     enable_cache: Arc<RwLock<bool>>,
     enable_locker: Arc<RwLock<bool>>,
     enable_rate_limit: Arc<RwLock<bool>>,
@@ -37,12 +41,12 @@ impl RequestDownloader {
     pub fn new(
         limit: Arc<DistributedSlidingWindowRateLimiter>,
         locker: Arc<DistributedLockManager>,
-        sync: Arc<SyncService>,
+        sync: Arc<CacheService>,
     ) -> Self {
         RequestDownloader {
             limit,
             locker,
-            sync,
+            cache_service: sync,
             enable_cache: Arc::new(RwLock::new(false)),
             enable_locker: Arc::new(RwLock::new(true)),
             enable_rate_limit: Arc::new(RwLock::new(true)),
@@ -85,7 +89,7 @@ impl RequestDownloader {
     ) -> Result<Option<Headers>> {
         if let Some(cache_headers) = cache_headers {
             let result = if let Ok(Some(headers)) =
-                Headers::sync(module_id, self.sync.synchronizer.clone()).await
+                Headers::sync(module_id, &self.cache_service).await
             {
                 let filtered_headers = Headers {
                     headers: headers
@@ -107,7 +111,7 @@ impl RequestDownloader {
     /// 加载缓存的cookies，使用细粒度锁
     async fn load_cached_cookies(&self, module_id: &str) -> Result<Option<Cookies>> {
         let result = if let Ok(Some(cache_cookies)) =
-            Cookies::sync(module_id, Arc::clone(&self.sync.synchronizer)).await
+            Cookies::sync(module_id, &self.cache_service).await
         {
             Some(cache_cookies)
         } else {
@@ -142,7 +146,7 @@ impl RequestDownloader {
                 }
             }
             update_headers
-                .send(&request.module_id(), self.sync.synchronizer.clone())
+                .send(&request.module_id(), &self.cache_service)
                 .await
                 .ok();
         }
@@ -292,7 +296,7 @@ impl RequestDownloader {
 
             if let Some(cookies) = cookies {
                 cookies
-                    .send(&request.module_id(), self.sync.synchronizer.clone())
+                    .send(&request.module_id(), &self.cache_service)
                     .await
                     .ok();
             }
@@ -337,7 +341,7 @@ impl Downloader for RequestDownloader {
     async fn download(&self, request: Request) -> Result<Response> {
         if request.enable_cache
             && let Ok(Some(cached_response)) = self
-                .sync
+                .cache_service
                 .synchronizer
                 .sync(&request.hash(), "response_cache")
                 .await

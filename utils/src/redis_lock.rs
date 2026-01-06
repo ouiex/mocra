@@ -1,9 +1,7 @@
 #![allow(unused)]
 use dashmap::DashMap;
-use deadpool_redis::{Config, Runtime};
+use deadpool_redis::{Config, Runtime,redis::{AsyncCommands,Script}};
 use log::trace;
-use redis::AsyncCommands;
-use redis::Script;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -14,7 +12,7 @@ use uuid::Uuid;
 
 #[derive(Debug)]
 pub enum LockError {
-    Redis(redis::RedisError),
+    Redis(deadpool_redis::redis::RedisError),
     Pool(deadpool_redis::PoolError),
     Timeout,
     InvalidOperation(String),
@@ -41,8 +39,8 @@ impl std::error::Error for LockError {
     }
 }
 
-impl From<redis::RedisError> for LockError {
-    fn from(error: redis::RedisError) -> Self {
+impl From<deadpool_redis::redis::RedisError> for LockError {
+    fn from(error: deadpool_redis::redis::RedisError) -> Self {
         LockError::Redis(error)
     }
 }
@@ -129,11 +127,11 @@ impl AdvancedDistributedLock {
             return redis.call("SET", KEYS[1], ARGV[1], "NX", "EX", ARGV[2])
         "#;
 
-            let result: Option<String> = Script::new(script)
+            let result: Option<String> = deadpool_redis::redis::Script::new(script)
                 .key(key)
                 .arg(value)
                 .arg(ttl)
-                .invoke_async(&mut *conn)
+                .invoke_async(&mut conn)
                 .await?;
 
             Ok(result.is_some())
@@ -199,7 +197,7 @@ impl AdvancedDistributedLock {
 
                     match pool.get().await {
                         Ok(mut conn) => {
-                            let result: Result<i32, _> = Script::new(script)
+                            let result: Result<i32, _> =  deadpool_redis::redis::Script::new(script)
                                 .key(&key)
                                 .arg(&value)
                                 .arg(ttl)
@@ -267,7 +265,7 @@ impl AdvancedDistributedLock {
         "#;
 
             let mut conn = pool.get().await?;
-            let result: i32 = Script::new(script)
+            let result: i32 =  deadpool_redis::redis::Script::new(script)
                 .key(&self.lock_info.key)
                 .arg(&self.lock_info.value)
                 .invoke_async(&mut *conn)

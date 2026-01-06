@@ -224,7 +224,7 @@ impl DistributedSlidingWindowRateLimiter {
                 .get()
                 .await
                 .map_err(|e| RateLimitError::RedisError(e.into()))?;
-            let mut pipe = redis::pipe();
+            let mut pipe = deadpool_redis::redis::pipe();
 
             for (key, config) in configs {
                 let config_key = self.get_config_key(&key);
