@@ -15,6 +15,7 @@ pub trait CacheBackend: Send + Sync {
     async fn get(&self, key: &str) -> Result<Option<Vec<u8>>, CacheError>;
     async fn set(&self, key: &str, value: &[u8], ttl: Option<Duration>) -> Result<(), CacheError>;
     async fn del(&self, key: &str) -> Result<(), CacheError>;
+    async fn keys(&self, pattern: &str) -> Result<Vec<String>, CacheError>;
 }
 
 struct LocalBackend {
@@ -62,6 +63,16 @@ impl CacheBackend for LocalBackend {
     async fn del(&self, key: &str) -> Result<(), CacheError> {
         self.store.remove(key);
         Ok(())
+    }
+
+    async fn keys(&self, pattern: &str) -> Result<Vec<String>, CacheError> {
+        let prefix = pattern.trim_end_matches('*');
+        let keys = self.store
+            .iter()
+            .filter(|r| r.key().starts_with(prefix))
+            .map(|r| r.key().clone())
+            .collect();
+        Ok(keys)
     }
 }
 
@@ -112,6 +123,22 @@ impl CacheBackend for RedisBackend {
             .map_err(|e| CacheError::Pool(e.to_string()))?;
         conn.del(key).await.map_err(CacheError::Redis)
     }
+
+    async fn keys(&self, pattern: &str) -> Result<Vec<String>, CacheError> {
+        let mut conn = self
+            .pool
+            .get()
+            .await
+            .map_err(|e| CacheError::Pool(e.to_string()))?;
+        
+        let mut keys: Vec<String> = Vec::new();
+        // Use scan_match to get an async iterator
+        let mut iter: deadpool_redis::redis::AsyncIter<String> = conn.scan_match(pattern).await.map_err(CacheError::Redis)?;
+        while let Some(key) = iter.next_item().await {
+            keys.push(key);
+        }
+        Ok(keys)
+    }
 }
 #[async_trait::async_trait]
 pub trait CacheAble: Send + Sync + Sized
@@ -147,6 +174,12 @@ where
         sync.backend.del(&key).await?;
         Ok(())
     }
+
+    async fn scan(pattern_suffix: &str, sync: &CacheService) -> Result<Vec<String>, CacheError> {
+         let pattern = format!("{}:{}:{}", sync.namespace, Self::field().as_ref(), pattern_suffix);
+         sync.backend.keys(&pattern).await
+    }
+
      fn cache_id(id:&str,cache:&CacheService) ->String{
         format!("{}:{}:{id}", cache.namespace, Self::field().as_ref())
     }
@@ -177,6 +210,9 @@ impl CacheService {
         }
     }
 
+    pub fn namespace(&self) -> &str {
+        &self.namespace
+    }
 }
 
 

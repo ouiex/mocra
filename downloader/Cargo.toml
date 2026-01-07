@@ -21,8 +21,7 @@ uuid.workspace = true
 tokio-tungstenite.workspace = true
 futures-util.workspace = true
 dashmap.workspace = true
-redis.workspace = true
 deadpool-redis.workspace = true
-
+url.workspace = true
 [dev-dependencies]
 proxy.workspace = true

@@ -22,3 +22,4 @@ queue.workspace = true
 common.workspace = true
 downloader.workspace = true
 cacheable.workspace = true
+proxy.workspace = true

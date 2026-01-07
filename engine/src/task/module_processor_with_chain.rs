@@ -264,17 +264,69 @@ impl ModuleProcessorWithChain {
 
     /// 查询所有活跃的门闸状态
     async fn query_active_gates(&self) -> Result<Vec<GateInfo>> {
-        let key = self.advance_key();
-        let gates = Vec::new();
+        let mut gates = Vec::new();
+        let id_base = self.advance_key(); // run:{run}:module:{mod}
+        let ns = self.cache.namespace();
 
-        // 这里简化处理：实际应该通过 Redis SCAN 命令扫描所有相关字段
-        // 目前返回空列表，具体实现需要根据 CacheAble (AdvanceGate/FallbackGate) 的键模式进行扫描
+        // 1. AdvanceGate: format {ns}:chain_advance:run:{run}:module:{mod}:step:{step}
+        let adv_keys = AdvanceGate::scan(&format!("{}*", id_base), &self.cache).await
+            .map_err(|e| RequestError::BuildFailed(e.into()))?;
+        
+        let adv_field = AdvanceGate::field();
+        let adv_field_str = adv_field.as_ref();
+        let adv_prefix = format!("{}:{}:", ns, adv_field_str);
+
+        for key in adv_keys {
+            if let Some(id) = key.strip_prefix(&adv_prefix) {
+                // id: run:...:step:123
+                if let Some(pos) = id.rfind(":step:") {
+                    if let Ok(step_idx) = id[pos+6..].parse::<usize>() {
+                         if let Ok(Some(val)) = AdvanceGate::sync(id, &self.cache).await {
+                             gates.push(GateInfo {
+                                 gate_type: "advance".to_string(),
+                                 step_idx: Some(step_idx),
+                                 field_name: adv_field_str.to_string(),
+                                 value: serde_json::to_value(val.0).unwrap_or(serde_json::Value::Null),
+                             });
+                         }
+                    }
+                }
+            }
+        }
+
+        // 2. FallbackGate: format {ns}:chain_fallback:run:{run}:module:{mod}:step:{step}:prefix:{uuid}
+        let fb_keys = FallbackGate::scan(&format!("{}*", id_base), &self.cache).await
+            .map_err(|e| RequestError::BuildFailed(e.into()))?;
+
+        let fb_field = FallbackGate::field();
+        let fb_field_str = fb_field.as_ref();
+        let fb_prefix = format!("{}:{}:", ns, fb_field_str);
+
+        for key in fb_keys {
+            if let Some(id) = key.strip_prefix(&fb_prefix) {
+                 if let Some(step_pos) = id.find(":step:") {
+                    let rest = &id[step_pos+6..];
+                    if let Some(prefix_pos) = rest.find(":prefix:") {
+                        let step_str = &rest[..prefix_pos];
+                        if let Ok(step_idx) = step_str.parse::<usize>() {
+                            if let Ok(Some(val)) = FallbackGate::sync(id, &self.cache).await {
+                                 gates.push(GateInfo {
+                                     gate_type: "fallback".to_string(),
+                                     step_idx: Some(step_idx),
+                                     field_name: fb_field_str.to_string(),
+                                     value: serde_json::to_value(val.0).unwrap_or(serde_json::Value::Null),
+                                 });
+                             }
+                        }
+                    }
+                }
+            }
+        }
+
         debug!(
-            "[chain] module={} run={} query_active_gates: key={}",
-            self.module_id, self.run_id, key
+            "[chain] module={} run={} query_active_gates: found {} gates",
+            self.module_id, self.run_id, gates.len()
         );
-
-        // TODO: 实现实际的门闸查询逻辑
         Ok(gates)
     }
 
