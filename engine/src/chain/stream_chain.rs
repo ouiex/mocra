@@ -1,30 +1,32 @@
-use crate::core::chain::{
+use crate::chain::{
     ConfigProcessor, ProxyMiddlewareProcessor, RequestMiddlewareProcessor,
 };
-use crate::core::events::EventDownload::{
+use crate::events::EventDownload::{
     DownloadCompleted, DownloadFailed, DownloadRetry, DownloadStarted, DownloaderCreate,
 };
-use crate::core::events::{DownloadEvent, DynFailureEvent, DynRetryEvent, EventBus, SystemEvent};
-use crate::core::processors::event_processor::{EventAwareTypedChain, EventProcessorTrait};
+use crate::events::{DownloadEvent, DynFailureEvent, DynRetryEvent, EventBus, SystemEvent};
+use crate::processors::event_processor::{EventAwareTypedChain, EventProcessorTrait};
 use async_trait::async_trait;
 use downloader::{DownloaderManager, WebSocketDownloader};
-use error::Error;
-use kernel::middleware::middleware_manager::MiddlewareManager;
-use kernel::sync::sync_service::SyncService;
-use kernel::{ModuleConfig, Request};
+use errors::Error;
 use log::{error, warn};
-use message_queue::QueueManager;
-use processor_chain::processors::processor::{
+use queue::QueueManager;
+use common::processors::processor::{
     ProcessorContext, ProcessorResult, ProcessorTrait, RetryPolicy,
 };
 use proxy::ProxyManager;
 use std::sync::Arc;
+use cacheable::{CacheAble, CacheService};
+use common::interface::MiddlewareManager;
+use common::model::{ModuleConfig, Request};
+use common::state::State;
+use common::stream_stats::StreamStats;
 
 struct WebSocketDownloadProcessor {
     queue_manager: Arc<QueueManager>,
     wss_downloader: Arc<WebSocketDownloader>,
     middleware_manager: Arc<MiddlewareManager>,
-    sync_service: Arc<SyncService>,
+    cache_service: Arc<CacheService>,
 }
 #[async_trait]
 impl ProcessorTrait<(Request, Option<ModuleConfig>), ()> for WebSocketDownloadProcessor {
@@ -55,7 +57,7 @@ impl ProcessorTrait<(Request, Option<ModuleConfig>), ()> for WebSocketDownloadPr
         input: &(Request, Option<ModuleConfig>),
         _output: &(),
         _context: &ProcessorContext,
-    ) -> error::Result<()> {
+    ) -> errors::Result<()> {
         // 从response_recv中取出Response进行middleware处理和发布
         let (tx, mut rx) = tokio::sync::mpsc::channel(100);
         let timeout = input.1.as_ref().map(|x|x.get_config::<u64>("wss_timeout")).flatten().unwrap_or(60);
@@ -70,22 +72,20 @@ impl ProcessorTrait<(Request, Option<ModuleConfig>), ()> for WebSocketDownloadPr
         let config = input.1.clone();
         let wss_downloader = self.wss_downloader.clone();
         let module_id_clone = module_id.clone();
-        let sync_service = self.sync_service.clone();
         let run_id = input.0.run_id;
-
+        let cache_service = self.cache_service.clone();
         tokio::spawn(async move {
             use tokio::time::{Duration, interval};
-
             let mut stop_check = interval(Duration::from_secs(5));
             let mut last_activity = tokio::time::Instant::now();
-
             loop {
                 tokio::select! {
                     _ = stop_check.tick() => {
                         let key = format!("run:{}:module:{}", run_id, module_id_clone);
                         // 检查 Redis 中的 stop 字段
-                        if let Ok(Some(val)) = sync_service.get_sync().sync(&key, "stop").await {
-                             if val.as_bool().unwrap_or(false) {
+                        let stream_stats = StreamStats::sync(&key,&cache_service).await;
+                        if let Ok(Some(val)) = stream_stats {
+                             if val.0{
                                  log::info!("[ResponsePublish] Module {} stopped, closing connection...", module_id_clone);
                                  wss_downloader.close(&module_id_clone).await;
                                  break;
@@ -171,10 +171,11 @@ impl EventProcessorTrait<(Request, Option<ModuleConfig>), ()> for WebSocketDownl
 }
 
 pub async fn create_wss_download_chain(
+    state:Arc<State>,
     downloader_manager: Arc<DownloaderManager>,
     queue_manager: Arc<QueueManager>,
     middleware_manager: Arc<MiddlewareManager>,
-    sync_service: Arc<SyncService>,
+    cache_service: Arc<CacheService>,
     event_bus: Arc<EventBus>,
     proxy_manager: Option<Arc<ProxyManager>>,
 ) -> EventAwareTypedChain<Request, ()> {
@@ -182,13 +183,13 @@ pub async fn create_wss_download_chain(
         queue_manager: queue_manager.clone(),
         wss_downloader: downloader_manager.wss_downloader.clone(),
         middleware_manager: middleware_manager.clone(),
-        sync_service: sync_service.clone(),
+        cache_service: cache_service.clone(),
     };
 
     let request_middleware = RequestMiddlewareProcessor {
         middleware_manager: middleware_manager.clone(),
     };
-    let config_processor = ConfigProcessor { sync_service };
+    let config_processor = ConfigProcessor { state: state.clone() };
     let proxy_middleware = ProxyMiddlewareProcessor { proxy_manager };
 
     EventAwareTypedChain::<Request, Request>::new(event_bus)

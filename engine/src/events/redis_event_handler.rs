@@ -1,13 +1,13 @@
 use super::SystemEvent;
 use super::event_bus::EventHandler;
 use async_trait::async_trait;
-use futures::StreamExt;
 use log::{error, warn};
 use serde_json::json;
 use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::timeout;
+use deadpool_redis::redis;
 
 /// Redis事件处理器，用于将事件保存到Redis供其他程序监控
 pub struct RedisEventHandler {

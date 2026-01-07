@@ -3,6 +3,7 @@ use dashmap::DashMap;
 use deadpool_redis::{Config, Runtime,redis::{AsyncCommands,Script}};
 use log::trace;
 use std::collections::HashMap;
+use std::future::Future;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
@@ -181,7 +182,7 @@ impl AdvancedDistributedLock {
         let ttl = self.lock_info.ttl;
 
         let handle = tokio::spawn(async move {
-            let renewal_interval = Duration::from_secs(ttl / 3); // 每 1/3 TTL 续期一次
+            let renewal_interval = Duration::from_millis(ttl * 1000 / 3); // 每 1/3 TTL 续期一次
 
             loop {
                 sleep(renewal_interval).await;
@@ -273,14 +274,17 @@ impl AdvancedDistributedLock {
 
             Ok(result == 1)
         } else if let Some(map) = &self.local_map {
-            if let Some(entry) = map.get(&self.lock_info.key) {
-                if entry.0 == self.lock_info.value {
-                    drop(entry); // Release read lock before removal
-                    map.remove(&self.lock_info.key);
-                    return Ok(true);
+            match map.entry(self.lock_info.key.clone()) {
+                dashmap::mapref::entry::Entry::Occupied(entry) => {
+                    if entry.get().0 == self.lock_info.value {
+                        entry.remove();
+                        Ok(true)
+                    } else {
+                        Ok(false)
+                    }
                 }
+                dashmap::mapref::entry::Entry::Vacant(_) => Ok(false),
             }
-            Ok(false)
         } else {
             Err(LockError::InvalidOperation(
                 "No pool or local map provided".to_string(),
@@ -396,7 +400,7 @@ impl DistributedLockManager {
         f: F,
     ) -> Result<Option<R>, LockError>
     where
-        F: std::future::Future<Output = R>,
+        F: Future<Output = R>,
     {
         if self.acquire_lock(lock_name, ttl_seconds, max_wait).await? {
             let result = f.await;

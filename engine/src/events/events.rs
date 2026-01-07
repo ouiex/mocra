@@ -2,11 +2,11 @@
 use serde::{Deserialize, Serialize};
 use std::fmt::Debug;
 use uuid::Uuid;
-use kernel::model::message::{ErrorTaskModel, ParserTaskModel, TaskModel};
-use kernel::model::{ModuleConfig, Request, Response};
+use common::model::message::{ErrorTaskModel, ParserTaskModel, TaskModel};
+use common::model::{ModuleConfig, Request, Response};
 use proxy::ProxyEnum;
-use kernel::Module;
-use kernel::Task;
+use crate::task::module::Module;
+use crate::task::Task;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum EventTaskModel {
@@ -415,8 +415,8 @@ pub struct DataMiddlewareEvent {
     pub schema_size: usize,
     pub after_size: Option<usize>,
 }
-impl From<&kernel::model::data::Data> for DataMiddlewareEvent {
-    fn from(value: &kernel::model::data::Data) -> Self {
+impl From<&common::model::data::Data> for DataMiddlewareEvent {
+    fn from(value: &common::model::data::Data) -> Self {
         Self {
             account: value.account.clone(),
             platform: value.platform.clone(),
@@ -438,8 +438,8 @@ pub struct DataStoreEvent {
     pub schema_size: (usize, usize),
     pub store_middleware: Option<String>,
 }
-impl From<&kernel::model::data::Data> for DataStoreEvent {
-    fn from(value: &kernel::model::data::Data) -> Self {
+impl From<&common::model::data::Data> for DataStoreEvent {
+    fn from(value: &common::model::data::Data) -> Self {
         Self {
             account: value.account.clone(),
             platform: value.platform.clone(),

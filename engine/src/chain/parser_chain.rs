@@ -1,35 +1,36 @@
-use crate::core::events::EventParser::ParserFailed;
-use crate::core::events::EventResponseModuleLoad::{ModuleGenerateFailed, ModuleGenerateRetry};
-use crate::core::events::{
+use common::status_tracker::ErrorDecision;
+use crate::events::EventParser::ParserFailed;
+use crate::events::EventResponseModuleLoad::{ModuleGenerateFailed, ModuleGenerateRetry};
+use crate::events::{
     DataMiddlewareEvent, DataStoreEvent, DynFailureEvent, DynRetryEvent, EventBus,
     EventDataMiddleware, EventDataStore, EventParser, EventResponseModuleLoad, ParserEvent,
     ResponseModuleLoad, SystemEvent,
 };
-use crate::core::processors::event_processor::{EventAwareTypedChain, EventProcessorTrait};
+use crate::processors::event_processor::{EventAwareTypedChain, EventProcessorTrait};
 use async_trait::async_trait;
-use error::{Error, Result};
-use kernel::Module;
-use kernel::TaskManager;
-use kernel::middleware::middleware_manager::MiddlewareManager;
-use kernel::model::data::Data;
-use kernel::model::message::{ErrorTaskModel, TaskModel};
-use kernel::model::{ModuleConfig, Response};
-use kernel::state::State;
-use kernel::sync::SyncAble;
-use kernel::sync::sync_service::SyncService;
+use errors::{Error, Result};
+use crate::task::TaskManager;
+use common::interface::middleware_manager::MiddlewareManager;
+use common::model::data::Data;
+use common::model::message::{ErrorTaskModel, TaskModel};
+use common::model::{ModuleConfig, Response};
+use common::state::State;
+
 use log::{debug, error, warn};
-use message_queue::QueueManager;
+use queue::QueueManager;
 use polars::polars_utils::parma::raw::Key;
-use processor_chain::processors::processor::{
+use common::processors::processor::{
     ProcessorContext, ProcessorResult, ProcessorTrait, RetryPolicy,
 };
-use processor_chain::processors::processor_chain::ErrorStrategy;
+use common::processors::processor_chain::ErrorStrategy;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
+use cacheable::{CacheAble, CacheService};
+use crate::task::module::Module;
 
 pub struct ResponseModuleProcessor {
     task_manager: Arc<TaskManager>,
-    sync_service: Arc<SyncService>,
+    cache_service: Arc<CacheService>,
     state: Arc<State>,
 }
 #[async_trait]
@@ -53,28 +54,28 @@ impl ProcessorTrait<Response, (Response, Arc<Module>)> for ResponseModuleProcess
         // 1. 检查 Task 级别
         match self
             .state
-            .error_tracker
+            .status_tracker
             .should_task_continue(&input.task_id())
             .await
         {
-            Ok(kernel::ErrorDecision::Continue) => {
+            Ok(ErrorDecision::Continue) => {
                 debug!(
                     "[ResponseModuleProcessor] task check passed: task_id={}",
                     input.task_id()
                 );
             }
-            Ok(kernel::ErrorDecision::Terminate(reason)) => {
+            Ok(ErrorDecision::Terminate(reason)) => {
                 error!(
                     "[ResponseModuleProcessor] task terminated before parsing: task_id={} reason={}",
                     input.task_id(),
                     reason
                 );
                 // 释放锁
-                self.sync_service
+                self.state.status_tracker
                     .release_module_locker(&input.module_id())
                     .await;
                 return ProcessorResult::FatalFailure(
-                    error::ModuleError::TaskMaxError(reason.into()).into(),
+                    errors::ModuleError::TaskMaxError(reason.into()).into(),
                 );
             }
             Err(e) => {
@@ -90,28 +91,28 @@ impl ProcessorTrait<Response, (Response, Arc<Module>)> for ResponseModuleProcess
         // 2. 检查 Module 级别
         match self
             .state
-            .error_tracker
+            .status_tracker
             .should_module_continue(&input.module_id())
             .await
         {
-            Ok(kernel::ErrorDecision::Continue) => {
+            Ok(ErrorDecision::Continue) => {
                 debug!(
                     "[ResponseModuleProcessor] module check passed: module_id={}",
                     input.module_id()
                 );
             }
-            Ok(kernel::ErrorDecision::Terminate(reason)) => {
+            Ok(ErrorDecision::Terminate(reason)) => {
                 error!(
                     "[ResponseModuleProcessor] module terminated before parsing: module_id={} reason={}",
                     input.module_id(),
                     reason
                 );
                 // 释放锁
-                self.sync_service
+                self.state.status_tracker
                     .release_module_locker(&input.module_id())
                     .await;
                 return ProcessorResult::FatalFailure(
-                    error::ModuleError::ModuleMaxError(reason.into()).into(),
+                    errors::ModuleError::ModuleMaxError(reason.into()).into(),
                 );
             }
             Err(e) => {
@@ -136,7 +137,7 @@ impl ProcessorTrait<Response, (Response, Arc<Module>)> for ResponseModuleProcess
                     // module trait在factory里进行了缓存，有可能不是最新的，缓存里每次生成任务都会设置config，理论上不会有问题
                     let config = match ModuleConfig::sync(
                         &module.id(),
-                        self.sync_service.synchronizer.clone(),
+                        &self.cache_service,
                     )
                         .await
                     {
@@ -178,7 +179,7 @@ impl ProcessorTrait<Response, (Response, Arc<Module>)> for ResponseModuleProcess
             "[ResponseModuleProcessor] lock module before parsing: module_id={}",
             input.module_id()
         );
-        self.sync_service.lock_module(&input.module_id()).await;
+        self.state.status_tracker.lock_module(&input.module_id()).await;
         Ok(())
     }
 }
@@ -223,7 +224,7 @@ impl EventProcessorTrait<Response, (Response, Arc<Module>)> for ResponseModulePr
 pub struct ResponseParserProcessor {
     queue_manager: Arc<QueueManager>,
     state: Arc<State>,
-    sync_service: Arc<SyncService>,
+    cache_service: Arc<CacheService>,
 }
 #[async_trait]
 impl ProcessorTrait<(Response, Arc<Module>), Vec<Data>> for ResponseParserProcessor {
@@ -265,7 +266,7 @@ impl ProcessorTrait<(Response, Arc<Module>), Vec<Data>> for ResponseParserProces
 
                 // 记录解析成功
                 self.state
-                    .error_tracker
+                    .status_tracker
                     .record_parse_success(&request_id)
                     .await
                     .ok();
@@ -278,12 +279,12 @@ impl ProcessorTrait<(Response, Arc<Module>), Vec<Data>> for ResponseParserProces
                 // 记录解析错误并获取决策
                 match self
                     .state
-                    .error_tracker
+                    .status_tracker
                     .record_parse_error(&task_id, &module_id, &request_id, &e)
                     .await
                 {
-                    Ok(kernel::ErrorDecision::Continue)
-                    | Ok(kernel::ErrorDecision::RetryAfter(_)) => {
+                    Ok(ErrorDecision::Continue)
+                    | Ok(ErrorDecision::RetryAfter(_)) => {
                         debug!(
                             "[ResponseParserProcessor] will retry parsing: request_id={}",
                             request_id
@@ -294,7 +295,7 @@ impl ProcessorTrait<(Response, Arc<Module>), Vec<Data>> for ResponseParserProces
                                 .unwrap_or(RetryPolicy::default().with_reason(e.to_string())),
                         );
                     }
-                    Ok(kernel::ErrorDecision::Skip) => {
+                    Ok(ErrorDecision::Skip) => {
                         warn!(
                             "[ResponseParserProcessor] skip parse after max retries: request_id={}",
                             request_id
@@ -302,7 +303,7 @@ impl ProcessorTrait<(Response, Arc<Module>), Vec<Data>> for ResponseParserProces
                         // 跳过该解析，返回空数据
                         return ProcessorResult::Success(vec![]);
                     }
-                    Ok(kernel::ErrorDecision::Terminate(reason)) => {
+                    Ok(ErrorDecision::Terminate(reason)) => {
                         error!("[ResponseParserProcessor] terminate: {}", reason);
                         return ProcessorResult::FatalFailure(e);
                     }
@@ -367,16 +368,11 @@ impl ProcessorTrait<(Response, Arc<Module>), Vec<Data>> for ResponseParserProces
 
         // 缓存响应结果，出现重复下载可跳过下载阶段
         if let Some(request_hash) = &input.0.request_hash
-            && let Ok(data) = serde_json::to_value(&input.0)
         {
-            self.sync_service
-                .synchronizer
-                .send(request_hash, "response_cache", &data)
-                .await
-                .ok();
+            input.0.send(request_hash, &self.cache_service).await.ok();
         }
 
-        self.sync_service
+        self.state.status_tracker
             .release_module_locker(&input.0.module_id())
             .await;
         debug!(
@@ -426,7 +422,7 @@ impl ProcessorTrait<(Response, Arc<Module>), Vec<Data>> for ResponseParserProces
 
         // 释放模块锁
         self.state
-            .sync_service
+            .status_tracker
             .release_module_locker(&input.0.module_id())
             .await;
 
@@ -647,17 +643,17 @@ pub async fn create_parser_chain(
     middleware_manager: Arc<MiddlewareManager>,
     queue_manager: Arc<QueueManager>,
     event_bus: Arc<EventBus>,
-    sync_service: Arc<SyncService>,
+    cache_service: Arc<CacheService>,
 ) -> EventAwareTypedChain<Response, Vec<()>> {
     let response_module_processor = ResponseModuleProcessor {
         task_manager,
-        sync_service: sync_service.clone(),
+        cache_service: cache_service.clone(),
         state: state.clone(),
     };
     let response_parser_processor = ResponseParserProcessor {
         queue_manager,
         state,
-        sync_service: sync_service.clone(),
+        cache_service: cache_service.clone(),
     };
     let data_middleware_processor = DataMiddlewareProcessor {
         middleware_manager: middleware_manager.clone(),

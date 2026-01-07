@@ -1,14 +1,12 @@
-use bytecheck::CheckBytes;
 use reqwest::header::{HeaderMap, HeaderValue};
 use serde::{Deserialize, Serialize};
 use cacheable::CacheAble;
-use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
-#[derive(Debug, Clone, Serialize, Deserialize,Archive,RkyvDeserialize,RkyvSerialize,CheckBytes)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HeaderItem {
     pub key: String,
     pub value: String,
 }
-#[derive(Debug, Clone, Serialize, Deserialize,Archive,RkyvDeserialize,RkyvSerialize,CheckBytes)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Headers {
     pub headers: Vec<HeaderItem>,
 }

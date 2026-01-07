@@ -1,4 +1,4 @@
-use bytecheck::CheckBytes;
+
 use dashmap::DashMap;
 use deadpool_redis::Pool;
 use errors::CacheError;
@@ -6,21 +6,15 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 // once_cell removed: global singleton not used
 use deadpool_redis::redis::AsyncCommands;
-use rkyv::api::high::{HighDeserializer, HighSerializer, HighValidator};
-use rkyv::rancor::Error as RancorError;
-use rkyv::ser::allocator::ArenaHandle;
-use rkyv::util::AlignedVec;
-use rkyv::{Archive, Deserialize, Serialize};
+use serde_json;
+use serde::{Serialize, Deserialize};
 
-// Define simplified aliases for the rkyv 0.8 High API
-pub type DefaultSerializer<'a> = HighSerializer<AlignedVec, ArenaHandle<'a>, RancorError>;
-pub type DefaultDeserializer = HighDeserializer<RancorError>;
-pub type DefaultValidator<'a> = HighValidator<'a, RancorError>;
 
 #[async_trait::async_trait]
 pub trait CacheBackend: Send + Sync {
     async fn get(&self, key: &str) -> Result<Option<Vec<u8>>, CacheError>;
     async fn set(&self, key: &str, value: &[u8], ttl: Option<Duration>) -> Result<(), CacheError>;
+    async fn del(&self, key: &str) -> Result<(), CacheError>;
 }
 
 struct LocalBackend {
@@ -64,6 +58,11 @@ impl CacheBackend for LocalBackend {
             .insert(key.to_string(), (value.to_vec(), expires_at));
         Ok(())
     }
+
+    async fn del(&self, key: &str) -> Result<(), CacheError> {
+        self.store.remove(key);
+        Ok(())
+    }
 }
 
 pub struct RedisBackend {
@@ -104,39 +103,54 @@ impl CacheBackend for RedisBackend {
         }
         Ok(())
     }
+
+    async fn del(&self, key: &str) -> Result<(), CacheError> {
+        let mut conn = self
+            .pool
+            .get()
+            .await
+            .map_err(|e| CacheError::Pool(e.to_string()))?;
+        conn.del(key).await.map_err(CacheError::Redis)
+    }
 }
 #[async_trait::async_trait]
-pub trait CacheAble: Send + Sync + Sized + 'static + Archive
+pub trait CacheAble: Send + Sync + Sized
 where
-    Self: for<'a> Serialize<DefaultSerializer<'a>>,
-    Self::Archived:
-        for<'a> CheckBytes<DefaultValidator<'a>> + Deserialize<Self, DefaultDeserializer>,
+    Self: Serialize+ for<'de> Deserialize<'de>,
 {
     fn field() -> impl AsRef<str>;
 
     async fn send(&self,id:&str, sync: &CacheService) -> Result<(), CacheError> {
         // Construct key: namespace:cache:field
-        let key = format!("{}:cache:{}:{id}", sync.namespace, Self::field().as_ref());
+        let key = Self::cache_id(id,sync);
 
-        let bytes = rkyv::to_bytes::<RancorError>(self).map_err(CacheError::Rkyv)?;
+        let content = serde_json::to_vec(&id)?;
 
         // Use default_ttl from CacheService
-        sync.backend.set(&key, &bytes, sync.default_ttl).await?;
-        println!("Sent {}: {} bytes", key, bytes.len());
+        sync.backend.set(&key, &content, sync.default_ttl).await?;
         Ok(())
     }
 
     async fn sync(id:&str,sync: &CacheService) -> Result<Option<Self>, CacheError> {
-        let key = format!("{}:cache:{}:{id}", sync.namespace, Self::field().as_ref());
-
+        let key =  Self::cache_id(id,sync);
         if let Some(bytes) = sync.backend.get(&key).await? {
-            // Use rkyv from_bytes with explicit error type
-            let val = rkyv::from_bytes::<Self, RancorError>(&bytes).map_err(CacheError::Rkyv)?;
+            let val = serde_json::from_slice(&bytes).map_err(CacheError::Serde)?;
             Ok(Some(val))
         } else {
             Ok(None)
         }
     }
+    async fn delete(id:&str,sync: &CacheService) -> Result<(), CacheError> {
+        let key =  Self::cache_id(id,sync);
+        // Note: CacheBackend does not have a delete method; this is a placeholder.
+        // You would need to implement delete in CacheBackend and its implementations.
+        sync.backend.del(&key).await?;
+        Ok(())
+    }
+     fn cache_id(id:&str,cache:&CacheService) ->String{
+        format!("{}:{}:{id}", cache.namespace, Self::field().as_ref())
+    }
+
 }
 
 pub struct CacheService {
@@ -150,36 +164,36 @@ impl CacheService {
         pool: Option<Pool>,
         namespace: String,
         default_ttl: Option<Duration>,
-    ) -> Result<Arc<Self>, CacheError> {
+    ) ->Self {
         let backend: Arc<dyn CacheBackend> = match pool {
             Some(p) => Arc::new(RedisBackend::new(p)),
             None => Arc::new(LocalBackend::new()),
         };
 
-        let service = Arc::new(CacheService {
+        CacheService {
             backend,
             namespace,
             default_ttl,
-        });
-        Ok(service)
+        }
     }
+
 }
 
-#[derive(Archive, Deserialize, Serialize, Debug, CheckBytes)]
-// #[check_bytes(crate = rkyv::bytecheck)]
-struct MyConfig {
-    name: String,
-    value: i32,
-}
 
-impl CacheAble for MyConfig {
-    fn field() -> String {
-        "global_config".to_string()
-    }
-}
 
 #[cfg(test)]
 mod tests {
+    #[derive(Deserialize, Serialize, Debug)]
+    struct MyConfig {
+        name: String,
+        value: i32,
+    }
+
+    impl CacheAble for MyConfig {
+        fn field() -> impl AsRef<str> {
+            "global_config".to_string()
+        }
+    }
     use super::*;
     use std::time::Duration;
     #[tokio::test]
@@ -188,13 +202,7 @@ mod tests {
 
         // 1. Initialize for Local Mode (DashMap) with namespace "myapp" and 60s TTL
         let sync_service =
-            match CacheService::new(None, "myapp".to_string(), Some(Duration::from_secs(60))) {
-                Ok(s) => s,
-                Err(e) => {
-                    eprintln!("Failed to initialize CacheService: {}", e);
-                    return;
-                }
-            };
+            Arc::new(CacheService::new(None, "myapp".to_string(), Some(Duration::from_secs(60)))) ;
 
         let config = MyConfig {
             name: "test".to_string(),

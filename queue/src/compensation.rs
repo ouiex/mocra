@@ -9,6 +9,7 @@ use errors::error::QueueError;
 use log::error;
 use tokio::sync::mpsc;
 use utils::logger::LogModel;
+use deadpool_redis::redis;
 
 /// Trait for objects that can be uniquely identified for compensation purposes.
 pub trait Identifiable {

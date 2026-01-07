@@ -1,4 +1,4 @@
-use message_queue::QueueManager;
+use queue::QueueManager;
 use std::sync::Arc;
 #[derive(Clone)]
 pub struct ApiState {

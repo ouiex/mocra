@@ -1,8 +1,9 @@
 #![allow(unused)]
-use redis::{AsyncCommands};
+use deadpool_redis::redis::{AsyncCommands};
 use serde_json::{json, Value};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
+use deadpool_redis::redis;
 
 /// Redis事件监控API，用于其他程序查询事件数据
 pub struct RedisEventMonitor {
@@ -52,7 +53,7 @@ impl RedisEventMonitor {
                 } else { 0.0 }
             },
             "event_counts": event_counts,
-            "timestamp": SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs()
+            "timestamp": SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs()
         }))
     }
 
@@ -94,7 +95,7 @@ impl RedisEventMonitor {
         Ok(json!({
             "tasks": tasks,
             "total_count": tasks.as_object().map(|o| o.len()).unwrap_or(0),
-            "timestamp": SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs()
+            "timestamp": SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs()
         }))
     }
 
@@ -135,7 +136,7 @@ impl RedisEventMonitor {
                 "total_duration_ms": total_duration,
                 "total_response_size": total_size
             },
-            "timestamp": SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs()
+            "timestamp": SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs()
         }))
     }
 
@@ -170,7 +171,7 @@ impl RedisEventMonitor {
         Ok(json!({
             "recent_errors": errors,
             "count": errors.len(),
-            "timestamp": SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs()
+            "timestamp": SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs()
         }))
     }
 
@@ -180,7 +181,7 @@ impl RedisEventMonitor {
             .map_err(|e| format!("Redis connection failed: {e}"))?;
         let ts_key = format!("{}:timeseries:{}", self.key_prefix, event_type);
 
-        let current_time = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        let current_time = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
         let start_time = current_time - (hours * 3600);
 
         let data: Vec<String> = redis::cmd("ZRANGEBYSCORE")
@@ -253,7 +254,7 @@ impl RedisEventMonitor {
             "healthy_components": healthy_components,
             "total_components": total_components,
             "components": health_data,
-            "timestamp": SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs()
+            "timestamp": SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs()
         }))
     }
 
@@ -261,7 +262,7 @@ impl RedisEventMonitor {
     pub async fn cleanup_expired_data(&self) -> Result<u64, Box<dyn std::error::Error + Send + Sync>> {
         let mut conn = self.redis_pool.get().await
             .map_err(|e| format!("Redis connection failed: {e}"))?;
-        let current_time = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        let current_time = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
         let cutoff_time = current_time - (24 * 3600); // 24小时前
 
         let mut cleaned_count = 0u64;

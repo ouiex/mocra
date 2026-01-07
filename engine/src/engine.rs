@@ -1,31 +1,31 @@
-use crate::core::events::{
+#![allow(unused)]
+use crate::events::{
     EventBus, RedisEventHandler,
     event_bus::{LogEventHandler, MetricsEventHandler},
 };
 use downloader::DownloaderManager;
-use message_queue::{Identifiable, RedisCompensator, RedisQueue};
+use queue::{Identifiable, RedisCompensator, RedisQueue};
 
-use crate::core::chain::{
+use crate::chain::{
     create_download_chain, create_error_task_chain, create_parser_chain, create_parser_task_chain,
     create_task_model_chain,
 };
-use crate::core::events::EventSystem::{ComponentHealthCheck, SystemShutdown, SystemStarted};
+use crate::events::EventSystem::{ComponentHealthCheck, SystemShutdown, SystemStarted};
 
-use crate::core::chain::stream_chain::create_wss_download_chain;
+use crate::chain::stream_chain::create_wss_download_chain;
 use futures::StreamExt;
-use kernel::middleware::data_middleware::DataStoreMiddleware;
-use kernel::middleware::middleware_manager::MiddlewareManager;
-use kernel::state::State;
-use kernel::{DataMiddleware, DownloadMiddleware, ModuleTrait, TaskManager};
+use common::state::State;
 use log::{error, info};
-use message_queue::QueueManager;
-use message_queue::kafka::KafkaQueue;
-use processor_chain::processors::processor::ProcessorContext;
+use queue::QueueManager;
+use queue::kafka::KafkaQueue;
+use common::processors::processor::ProcessorContext;
 use proxy::ProxyManager;
 use std::sync::Arc;
 use tokio::fs;
 use tokio::sync::broadcast;
+use common::interface::{DataMiddleware, DataStoreMiddleware, DownloadMiddleware, MiddlewareManager, ModuleTrait};
 use utils::connector::create_redis_pool;
+use crate::task::TaskManager;
 
 /// channel->TaskModel->Task->Vec<Model>->Vec<Request>->channel
 /// channel->Request->Downloader->Response->channel
@@ -172,8 +172,12 @@ impl Engine {
 
         // 如果配置了Redis，注册Redis事件处理器
         let config = self.state.config.read().await;
-        if let Some(redis_config) = &config.event_redis
-            && let Some(pool) = create_redis_pool(redis_config)
+        if let Some(redis_config) = &config.redis
+            && let Some(pool) = create_redis_pool(&redis_config.redis_host,
+                redis_config.redis_port,
+                redis_config.redis_db,
+                &redis_config.redis_username,
+                &redis_config.redis_password)
         {
             let redis_handler = RedisEventHandler::new(
                 Arc::new(pool),
@@ -211,7 +215,7 @@ impl Engine {
         // 发布系统启动事件
         if let Err(e) = self
             .event_bus
-            .publish(crate::core::events::SystemEvent::System(SystemStarted))
+            .publish(crate::events::SystemEvent::System(SystemStarted))
             .await
         {
             error!("Failed to publish system started event: {e}");
@@ -263,7 +267,7 @@ impl Engine {
                                 let _permit = permit;
                                 let id = account_task.get_id();
                                 match chain.execute(account_task, ProcessorContext::default()).await {
-                                    processor_chain::processors::processor::ProcessorResult::Success(mut stream) => {
+                                    common::processors::processor::ProcessorResult::Success(mut stream) => {
                                         while stream.next().await.is_some() {}
                                         if let Some(comp) = &queue_manager.compensator {
                                             let _ = comp.remove_task("task", &id).await;
@@ -300,10 +304,11 @@ impl Engine {
         );
         let wss_download_chain = Arc::new(
             create_wss_download_chain(
+                self.state.clone(),
                 self.downloader_manager.clone(),
                 self.queue_manager.clone(),
                 self.middleware_manager.clone(),
-                self.state.sync_service.clone(),
+                self.state.cache_service.clone(),
                 self.event_bus.clone(),
                 self.proxy_manager.clone(),
             )
@@ -389,7 +394,7 @@ impl Engine {
                                 let _permit = permit;
                                 let id = task.get_id();
                                 match chain.execute(task, ProcessorContext::default()).await {
-                                    processor_chain::processors::processor::ProcessorResult::Success(mut stream) => {
+                                    common::processors::processor::ProcessorResult::Success(mut stream) => {
                                         while stream.next().await.is_some() {}
                                         if let Some(comp) = &queue_manager.compensator {
                                             let _ = comp.remove_task("parser_task", &id).await;
@@ -442,7 +447,7 @@ impl Engine {
                                 let _permit = permit;
                                 let id = task.get_id();
                                 match chain.execute(task, ProcessorContext::default()).await {
-                                    processor_chain::processors::processor::ProcessorResult::Success(mut stream) => {
+                                    common::processors::processor::ProcessorResult::Success(mut stream) => {
                                         while stream.next().await.is_some() {}
                                         if let Some(comp) = &queue_manager.compensator {
                                             let _ = comp.remove_task("error_task", &id).await;
@@ -471,7 +476,7 @@ impl Engine {
                 self.middleware_manager.clone(),
                 self.queue_manager.clone(),
                 self.event_bus.clone(),
-                self.state.sync_service.clone(),
+                self.state.cache_service.clone(),
             )
             .await,
         );
@@ -527,8 +532,8 @@ impl Engine {
                 }
                 _ = interval.tick() => {
                     // 发布健康检查事件
-                    let health_event = crate::core::events::SystemEvent::System(ComponentHealthCheck(
-                        crate::core::events::HealthCheckEvent {
+                    let health_event = crate::events::SystemEvent::System(ComponentHealthCheck(
+                        crate::events::HealthCheckEvent {
                             component: "schedule".to_string(),
                             status: "healthy".to_string(),
                             metrics: serde_json::json!({
@@ -568,7 +573,7 @@ impl Engine {
         // 发布系统关闭事件
         if let Err(e) = self
             .event_bus
-            .publish(crate::core::events::SystemEvent::System(SystemShutdown))
+            .publish(crate::events::SystemEvent::System(SystemShutdown))
             .await
         {
             error!("Failed to publish system shutdown event: {e}");

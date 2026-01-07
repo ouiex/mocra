@@ -5,7 +5,7 @@ use reqwest::Client;
 use reqwest::Method;
 use reqwest::Proxy;
 use reqwest::header::HeaderMap;
-use reqwest_cookie_store::CookieStore;
+use reqwest::cookie::Jar;
 use semver::Version;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -236,14 +236,12 @@ impl RequestDownloader {
         }
 
         let request = self.process_request(request).await?;
-        let cookie_store =
-            reqwest_cookie_store::CookieStoreRwLock::new(CookieStore::try_from(&request.cookies)?);
-        let cookie_store = Arc::new(cookie_store);
+        let jar = Arc::new(Jar::from(request.cookies.clone()));
         let headers: HeaderMap = HeaderMap::from(&request.headers);
         // Build reqwest client with optional proxy
         let mut client_builder = Client::builder()
             .cookie_store(true)
-            .cookie_provider(cookie_store.clone())
+            .cookie_provider(jar.clone())
             .default_headers(headers)
             .timeout(Duration::from_secs(request.timeout));
 
@@ -273,7 +271,7 @@ impl RequestDownloader {
         }
 
         if let Some(form) = &request.form {
-            request_builder = request_builder.form(&form);
+            request_builder = request_builder.form(form);
         }
 
         if let Some(json) = &request.json {
@@ -283,23 +281,39 @@ impl RequestDownloader {
             .send()
             .await
             .map_err(|e| DownloadError::DownloadFailed(e.into()))?;
-        // 处理cookie，将cookie_store转为cookies并存储到缓存里
+        // 处理cookie，将response cookie合并到request cookie并存储到缓存里
         let cache_enabled = *self.enable_cache.read().await;
         if cache_enabled {
-            let cookies = {
-                if let Ok(store) = cookie_store.read() {
-                    Some(Cookies::from(store.clone()))
+            let mut current_cookies = request.cookies.clone();
+            for cookie in response.cookies() {
+                let item = CookieItem {
+                    name: cookie.name().to_string(),
+                    value: cookie.value().to_string(),
+                    domain: cookie.domain().unwrap_or("").to_string(),
+                    path: cookie.path().unwrap_or("/").to_string(),
+                    expires: cookie
+                        .expires()
+                        .and_then(|exp| exp.duration_since(UNIX_EPOCH).ok())
+                        .map(|d| d.as_secs()),
+                    max_age: cookie.max_age().map(|d| d.as_secs()),
+                    secure: cookie.secure(),
+                    http_only: Some(cookie.http_only()),
+                };
+                if let Some(existing) = current_cookies
+                    .cookies
+                    .iter_mut()
+                    .find(|c| c.name == item.name && c.domain == item.domain)
+                {
+                    *existing = item;
                 } else {
-                    None
+                    current_cookies.cookies.push(item);
                 }
-            };
-
-            if let Some(cookies) = cookies {
-                cookies
-                    .send(&request.module_id(), &self.cache_service)
-                    .await
-                    .ok();
             }
+
+            current_cookies
+                .send(&request.module_id(), &self.cache_service)
+                .await
+                .ok();
         }
 
         let response_processed = self.process_response(&request, response).await?;
@@ -340,12 +354,8 @@ impl Downloader for RequestDownloader {
     }
     async fn download(&self, request: Request) -> Result<Response> {
         if request.enable_cache
-            && let Ok(Some(cached_response)) = self
-                .cache_service
-                .synchronizer
-                .sync(&request.hash(), "response_cache")
+            && let Ok(Some(response)) = Response::sync(&request.hash(), &self.cache_service)
                 .await
-            && let Ok(response) = serde_json::from_value::<Response>(cached_response)
         {
             info!("Cache hit for request: {}", request.id);
             return Ok(Response {

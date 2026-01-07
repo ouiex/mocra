@@ -4,7 +4,8 @@ use common::model::config::RedisConfig;
 use errors::Result;
 use errors::error::QueueError;
 use log::{error, info, warn};
-use redis::{AsyncCommands, FromRedisValue};
+use deadpool_redis::redis::{AsyncCommands, FromRedisValue};
+use deadpool_redis::redis;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc;
 

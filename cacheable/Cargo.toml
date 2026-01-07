@@ -4,12 +4,10 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-bytecheck.workspace = true
 dashmap.workspace = true
-once_cell.workspace = true
-redis.workspace = true
-rkyv.workspace = true
 async-trait.workspace = true
 tokio.workspace = true
 deadpool-redis.workspace = true
 errors.workspace = true
+serde.workspace = true
+serde_json.workspace = true

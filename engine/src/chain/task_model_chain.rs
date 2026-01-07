@@ -1,49 +1,48 @@
-use crate::core::events::EventConfigLoad::{
+use common::status_tracker::ErrorDecision;
+use crate::events::EventConfigLoad::{
     ConfigLoadCompleted, ConfigLoadFailed, ConfigLoadPrepared, ConfigLoadRetry, ConfigLoadStarted,
 };
-use crate::core::events::EventParserError::{
+use crate::events::EventParserError::{
     ParserErrorCompleted, ParserErrorFailed, ParserErrorReceived, ParserErrorRetry,
     ParserErrorStarted,
 };
-use crate::core::events::EventParserTaskModel::{
+use crate::events::EventParserTaskModel::{
     ParserTaskModelCompleted, ParserTaskModelFailed, ParserTaskModelReceived, ParserTaskModelRetry,
     ParserTaskModelStarted,
 };
 
-use crate::core::events::EventRequestPublish::{
+use crate::events::EventRequestPublish::{
     RequestPublishCompleted, RequestPublishFailed, RequestPublishPrepared, RequestPublishRetry,
     RequestPublishSend,
 };
 
-use crate::core::events::EventTaskModel::{
+use crate::events::EventTaskModel::{
     TaskModelCompleted, TaskModelFailed, TaskModelReceived, TaskModelRetry, TaskModelStarted,
 };
-use crate::core::events::{
+use crate::events::{
     ConfigLoadEvent, EventModule, EventTask, ModuleEvent, ParserErrorEvent, ParserTaskModelEvent,
     RequestEvent, TaskEvent,
 };
-use crate::core::events::{DynFailureEvent, DynRetryEvent, EventBus, SystemEvent, TaskModelEvent};
-use crate::core::processors::event_processor::{EventAwareTypedChain, EventProcessorTrait};
-use kernel::Module;
-use kernel::{Task, TaskManager};
+use crate::events::{DynFailureEvent, DynRetryEvent, EventBus, SystemEvent, TaskModelEvent};
+use crate::processors::event_processor::{EventAwareTypedChain, EventProcessorTrait};
+
 
 use async_trait::async_trait;
-use error::{Error, ModuleError, Result};
-use kernel::model::login_info::LoginInfo;
-use kernel::model::message::{ErrorTaskModel, ParserTaskModel, TaskModel};
-use kernel::model::{ModuleConfig, Request};
-use kernel::state::State;
-use kernel::sync::SyncAble;
-use kernel::sync::sync_service::SyncService;
-use log::{debug, error, info, warn};
-use message_queue::QueueManager;
-use processor_chain::processors::processor::{
+use errors::{Error, ModuleError, Result};
+use common::model::login_info::LoginInfo;
+use common::model::message::{ErrorTaskModel, ParserTaskModel, TaskModel};
+use common::model::{ModuleConfig, Request};
+use common::state::State;
+
+use log::{debug, error, warn};
+use queue::QueueManager;
+use common::processors::processor::{
     ProcessorContext, ProcessorResult, ProcessorTrait, RetryPolicy,
 };
-use processor_chain::processors::processor_chain::ErrorStrategy;
+use common::processors::processor_chain::ErrorStrategy;
 use std::sync::Arc;
 use uuid::Uuid;
-use futures::stream::{BoxStream, StreamExt};
+use futures::stream::{StreamExt};
 use std::marker::PhantomData;
 
 pub struct TaskModelProcessor {
@@ -68,14 +67,14 @@ impl ProcessorTrait<TaskModel, Task> for TaskModelProcessor {
         // 首先检查 Task 是否已被标记为终止（在加载 Task 之前）
         // Task ID 格式：{platform}:{account}:{run_id}
         let task_id = format!("{}-{}", input.account, input.platform);
-        match self.state.error_tracker.should_task_continue(&task_id).await {
-            Ok(kernel::ErrorDecision::Continue) => {
+        match self.state.status_tracker.should_task_continue(&task_id).await {
+            Ok(ErrorDecision::Continue) => {
                 debug!(
                     "[TaskModelProcessor<TaskModel>] task can continue: task_id={}",
                     task_id
                 );
             }
-            Ok(kernel::ErrorDecision::Terminate(reason)) => {
+            Ok(ErrorDecision::Terminate(reason)) => {
                 error!(
                     "[TaskModelProcessor<TaskModel>] task terminated (pre-check): task_id={} reason={}",
                     task_id,
@@ -116,7 +115,7 @@ impl ProcessorTrait<TaskModel, Task> for TaskModelProcessor {
                 for m in task.modules.iter() {
                     if !self
                         .state
-                        .sync_service
+                        .status_tracker
                         .is_module_locker(m.id().as_ref(), default_locker_ttl)
                         .await
                     {
@@ -240,14 +239,14 @@ impl ProcessorTrait<ParserTaskModel, Task> for TaskModelProcessor {
 
         // 首先检查 Task 是否已被标记为终止
         let task_id = format!("{}:{}:{}", input.account_task.platform, input.account_task.account, input.run_id);
-        match self.state.error_tracker.should_task_continue(&task_id).await {
-            Ok(kernel::ErrorDecision::Continue) => {
+        match self.state.status_tracker.should_task_continue(&task_id).await {
+            Ok(ErrorDecision::Continue) => {
                 debug!(
                     "[TaskModelProcessor<ParserTaskModel>] task can continue: task_id={}",
                     task_id
                 );
             }
-            Ok(kernel::ErrorDecision::Terminate(reason)) => {
+            Ok(ErrorDecision::Terminate(reason)) => {
                 error!(
                     "[TaskModelProcessor<ParserTaskModel>] task terminated (pre-check): task_id={} reason={}",
                     task_id,
@@ -371,14 +370,14 @@ impl ProcessorTrait<ErrorTaskModel, Task> for TaskModelProcessor {
 
         // 首先检查 Task 是否已被标记为终止
         let task_id = format!("{}:{}:{}", input.account_task.platform, input.account_task.account, input.run_id);
-        match self.state.error_tracker.should_task_continue(&task_id).await {
-            Ok(kernel::ErrorDecision::Continue) => {
+        match self.state.status_tracker.should_task_continue(&task_id).await {
+            Ok(ErrorDecision::Continue) => {
                 debug!(
                     "[TaskModelProcessor<ErrorTaskModel>] task can continue: task_id={}",
                     task_id
                 );
             }
-            Ok(kernel::ErrorDecision::Terminate(reason)) => {
+            Ok(ErrorDecision::Terminate(reason)) => {
                 error!(
                     "[TaskModelProcessor<ErrorTaskModel>] task terminated (pre-check): task_id={} reason={}",
                     task_id,
@@ -451,7 +450,7 @@ impl ProcessorTrait<ErrorTaskModel, Task> for TaskModelProcessor {
                     );
                     let _ = self
                         .state
-                        .error_tracker
+                        .status_tracker
                         .record_parse_error(&task_id, &module_id, &request_id, &error)
                         .await;
                 } else {
@@ -515,7 +514,6 @@ impl EventProcessorTrait<ErrorTaskModel, Task> for TaskModelProcessor {
 
 pub struct TaskModuleProcessor {
     state: Arc<State>,
-    queue_manager: Arc<QueueManager>,
 }
 #[async_trait]
 impl ProcessorTrait<Task, Vec<Module>> for TaskModuleProcessor {
@@ -539,17 +537,17 @@ impl ProcessorTrait<Task, Vec<Module>> for TaskModuleProcessor {
             // 使用 ErrorTracker 检查 Module 是否应该继续
             match self
                 .state
-                .error_tracker
+                .status_tracker
                 .should_module_continue(&module.id())
                 .await
             {
-                Ok(kernel::ErrorDecision::Continue) => {
+                Ok(ErrorDecision::Continue) => {
                     debug!(
                         "[TaskModuleProcessor] module can continue: module_id={}",
                         module.id()
                     );
                 }
-                Ok(kernel::ErrorDecision::Terminate(reason)) => {
+                Ok(ErrorDecision::Terminate(reason)) => {
                     // Module 已达到错误阈值，跳过该 Module，继续处理其他 Module
                     error!(
                         "[TaskModuleProcessor] skip terminated module: module_id={} reason={}",
@@ -644,7 +642,6 @@ impl EventProcessorTrait<Task, Vec<Module>> for TaskModuleProcessor {
 }
 
 pub struct TaskProcessor {
-    sync_service: Arc<SyncService>,
     state: Arc<State>,
 }
 #[async_trait]
@@ -665,14 +662,14 @@ impl ProcessorTrait<Module, SyncBoxStream<'static, Request>> for TaskProcessor {
         );
 
         // 在生成 Request 之前检查 Module 是否已被终止
-        match self.state.error_tracker.should_module_continue(&input.id()).await {
-            Ok(kernel::ErrorDecision::Continue) => {
+        match self.state.status_tracker.should_module_continue(&input.id()).await {
+            Ok(ErrorDecision::Continue) => {
                 debug!(
                     "[TaskProcessor] module can continue generating requests: module_id={}",
                     input.id()
                 );
             }
-            Ok(kernel::ErrorDecision::Terminate(reason)) => {
+            Ok(ErrorDecision::Terminate(reason)) => {
                 error!(
                     "[TaskProcessor] module terminated, skip request generation: module_id={} reason={}",
                     input.id(),
@@ -772,7 +769,7 @@ impl ProcessorTrait<Module, SyncBoxStream<'static, Request>> for TaskProcessor {
     }
     async fn post_process(
         &self,
-        input: &Module,
+        _input: &Module,
         _output: &SyncBoxStream<'static, Request>,
         _context: &ProcessorContext,
     ) -> Result<()> {
@@ -818,7 +815,7 @@ impl EventProcessorTrait<Module, SyncBoxStream<'static, Request>> for TaskProces
 }
 pub struct RequestPublish {
     queue_manager: Arc<QueueManager>,
-    sync_service: Arc<SyncService>,
+    state: Arc<State>
 }
 
 #[async_trait]
@@ -837,17 +834,18 @@ impl ProcessorTrait<Request, ()> for RequestPublish {
         // 1. Persist request to Redis (for chain fallback)
         // Moved from ModuleProcessorWithChain to support streaming
         let id = input.id.to_string();
-        let val = match serde_json::to_value(&input) {
-            Ok(v) => v,
-            Err(e) => {
-                warn!("[RequestPublish] serialize failed: {e}");
-                return ProcessorResult::FatalFailure(e.into());
-            }
-        };
+        // let val = match serde_json::to_value(&input) {
+        //     Ok(v) => v,
+        //     Err(e) => {
+        //         warn!("[RequestPublish] serialize failed: {e}");
+        //         return ProcessorResult::FatalFailure(e.into());
+        //     }
+        // };
         
         // Use "request" as field name to match ModuleProcessorWithChain::request_field()
+
         debug!("[RequestPublish] start persist: request_id={}", input.id);
-        if let Err(e) = self.sync_service.synchronizer.send(&id, "request", &val).await {
+        if let Err(e) = input.send(&id, &self.state.cache_service).await {
              warn!("[RequestPublish] persist failed: {e}");
              return ProcessorResult::RetryableFailure(context.retry_policy.unwrap_or_default());
         }
@@ -879,7 +877,7 @@ impl ProcessorTrait<Request, ()> for RequestPublish {
     ) -> ProcessorResult<()> {
         // If we can't publish the request after retries, release the module lock
         // to avoid locking out future runs of this module.
-        self.sync_service
+        self.state.status_tracker
             .release_module_locker(&input.module_id())
             .await;
         ProcessorResult::FatalFailure(error)
@@ -917,7 +915,7 @@ impl EventProcessorTrait<Request, ()> for RequestPublish {
     }
 }
 pub struct ConfigProcessor {
-    pub sync_service: Arc<SyncService>,
+    pub state: Arc<State>
 }
 #[async_trait]
 impl ProcessorTrait<Request, (Request, Option<ModuleConfig>)> for ConfigProcessor {
@@ -932,7 +930,7 @@ impl ProcessorTrait<Request, (Request, Option<ModuleConfig>)> for ConfigProcesso
     ) -> ProcessorResult<(Request, Option<ModuleConfig>)> {
         // ModuleConfig在factory::load_with_model里进行了上传，使用module::id()作为唯一标识
         // 这里进行下载
-        match ModuleConfig::sync(&input.module_id(), self.sync_service.synchronizer.clone()).await {
+        match ModuleConfig::sync(&input.module_id(), &self.state.cache_service).await {
             Ok(Some(config)) => ProcessorResult::Success((input, Some(config))),
             Ok(None) => ProcessorResult::Success((input, None)),
             Err(e) => {
@@ -950,7 +948,7 @@ impl ProcessorTrait<Request, (Request, Option<ModuleConfig>)> for ConfigProcesso
         }
     }
     async fn pre_process(&self, _input: &Request, _context: &ProcessorContext) -> Result<()> {
-        self.sync_service.lock_module(&_input.module_id()).await;
+        self.state.status_tracker.lock_module(&_input.module_id()).await;
         Ok(())
     }
     async fn handle_error(
@@ -1005,6 +1003,9 @@ impl EventProcessorTrait<Request, (Request, Option<ModuleConfig>)> for ConfigPro
 
 use futures::stream::Stream;
 use std::pin::Pin;
+use cacheable::{CacheAble};
+use crate::task::{Task, TaskManager};
+use crate::task::module::Module;
 
 pub type SyncBoxStream<'a, T> = Pin<Box<dyn Stream<Item = T> + Send + Sync + 'a>>;
 
@@ -1142,7 +1143,6 @@ impl<T: Send + Sync + 'static> ProcessorTrait<SyncBoxStream<'static, T>, SyncBox
         input: SyncBoxStream<'static, T>,
         _context: ProcessorContext,
     ) -> ProcessorResult<SyncBoxStream<'static, T>> {
-        let name = self.name.clone();
         let logger = self.logger.clone();
         let stream = input.map(move |item| {
             if let Some(l) = &logger {
@@ -1217,14 +1217,12 @@ pub async fn create_task_model_chain(
     };
     let request_publish = RequestPublish {
         queue_manager: queue_manager.clone(),
-        sync_service: state.sync_service.clone(),
+        state: state.clone(),
     };
     let task_module_processor = TaskModuleProcessor {
         state: state.clone(),
-        queue_manager: queue_manager.clone(),
     };
     let task_processor = TaskProcessor {
-        sync_service: state.sync_service.clone(),
         state: state.clone(),
     };
     EventAwareTypedChain::<TaskModel, TaskModel>::new(event_bus)
@@ -1258,14 +1256,12 @@ pub async fn create_parser_task_chain(
     };
     let request_publish = RequestPublish {
         queue_manager: queue_manager.clone(),
-        sync_service: state.sync_service.clone(),
+        state: state.clone(),
     };
     let task_module_processor = TaskModuleProcessor {
         state: state.clone(),
-        queue_manager: queue_manager.clone(),
     };
     let task_processor = TaskProcessor {
-        sync_service: state.sync_service.clone(),
         state: state.clone(),
     };
     EventAwareTypedChain::<ParserTaskModel, ParserTaskModel>::new(event_bus)
@@ -1294,14 +1290,12 @@ pub async fn create_error_task_chain(
 
     let request_publish = RequestPublish {
         queue_manager: queue_manager.clone(),
-        sync_service: state.sync_service.clone(),
+        state: state.clone(),
     };
     let task_module_processor = TaskModuleProcessor {
         state: state.clone(),
-        queue_manager: queue_manager.clone(),
     };
     let task_processor = TaskProcessor {
-        sync_service: state.sync_service.clone(),
         state: state.clone(),
     };
     EventAwareTypedChain::<ErrorTaskModel, ErrorTaskModel>::new(event_bus)

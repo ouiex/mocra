@@ -1,13 +1,14 @@
-use crate::model::ExecutionMark;
-use crate::model::ModuleConfig;
 use crate::model::login_info::LoginInfo;
 use crate::model::meta::MetaData;
+use crate::model::ExecutionMark;
+use crate::model::ModuleConfig;
 use crate::model::{Cookies, Headers};
 use proxy::ProxyEnum;
 use serde::{Deserialize, Serialize};
 use std::fmt::Display;
 use utils::encrypt::md5;
 use uuid::Uuid;
+use cacheable::CacheAble;
 
 pub enum RequestMethod {
     Post,
@@ -53,7 +54,7 @@ impl From<RequestMethod> for String {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize,)]
 pub struct Request {
     pub id: Uuid,
     pub platform: String,
@@ -244,5 +245,12 @@ impl Request {
             self.hash_str = Some(md5(&hash_str.as_bytes()));
         }
         self
+    }
+}
+
+
+impl CacheAble for Request {
+    fn field() -> impl AsRef<str> {
+        "request"
     }
 }

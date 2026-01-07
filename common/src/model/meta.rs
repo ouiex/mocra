@@ -1,11 +1,17 @@
-use bytecheck::CheckBytes;
-use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use crate::model::ModuleConfig;
 use crate::model::login_info::LoginInfo;
-use sea_orm::JsonValue;
-use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize,Archive,RkyvDeserialize,RkyvSerialize,CheckBytes)]
+
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+#[derive(
+    Default,
+    Debug,
+    Clone,
+    Serialize,
+    Deserialize,
+)]
 pub struct MetaData {
     pub task: Vec<u8>,
     pub login_info: Vec<u8>,
@@ -13,37 +19,36 @@ pub struct MetaData {
     pub trait_meta: Vec<u8>,
 }
 
-impl Default for MetaData {
-    fn default() -> Self {
-        Self {
-            task: vec![],
-            login_info:  vec![],
-            module_config:  vec![],
-            trait_meta:  vec![],
-        }
-    }
-}
 impl MetaData {
     pub fn add(mut self, key: impl AsRef<str>, value: serde_json::Value, source: &str) -> Self {
         match source {
             "task" => {
-                if let Ok(map) = serde_json::to_value(self.task.clone()) && let Some(map) = map.as_object_mut() {
+                if let Ok(mut map) = serde_json::to_value(&self.task)
+                    && let Some(map) = map.as_object_mut()
+                {
                     map.insert(key.as_ref().into(), value);
                     self.task = serde_json::to_vec(&map).unwrap_or_default();
                 }
             }
             "login_info" => {
-                if let Some(map) = self.login_info.as_object_mut() {
+                if let Ok(mut map) = serde_json::to_value(&self.login_info)
+                    && let Some(map) = map.as_object_mut()
+                {
                     map.insert(key.as_ref().into(), value);
+                    self.login_info = serde_json::to_vec(&map).unwrap_or_default();
                 }
             }
             "module_config" => {
-                if let Some(map) = self.module_config.as_object_mut() {
+                if let Ok(mut map) = serde_json::to_value(&self.module_config)
+                    && let Some(map) = map.as_object_mut()
+                {
                     map.insert(key.as_ref().into(), value);
                 }
             }
             "trait_meta" => {
-                if let Some(map) = self.trait_meta.as_object_mut() {
+                if let Ok(mut map) = serde_json::to_value(&self.trait_meta)
+                    && let Some(map) = map.as_object_mut()
+                {
                     map.insert(key.as_ref().into(), value);
                 }
             }
@@ -55,15 +60,15 @@ impl MetaData {
     where
         T: Serialize + for<'de> Deserialize<'de>,
     {
-        self.task = serde_json::to_value(task_meta).unwrap();
+        self.task = serde_json::to_vec(&task_meta).unwrap_or_default();
         self
     }
     pub fn add_login_info(mut self, login_info: &LoginInfo) -> Self {
-        self.login_info = login_info.extra.clone();
+        self.login_info = serde_json::to_vec(&login_info.extra).unwrap_or_default();
         self
     }
     pub fn add_module_config(mut self, module_config: &ModuleConfig) -> Self {
-        if let Ok(value) = serde_json::to_value(module_config) {
+        if let Ok(value) = serde_json::to_vec(module_config) {
             self.module_config = value;
         };
 
@@ -73,9 +78,12 @@ impl MetaData {
     where
         T: Serialize + for<'de> Deserialize<'de>,
     {
-        if let Some(meta) = self.trait_meta.as_object_mut() {
+        if let Ok(mut map) = serde_json::to_value(&self.trait_meta)
+            && let Some(meta) = map.as_object_mut()
+        {
             let value = serde_json::to_value(value).unwrap();
             meta.insert(key.as_ref().into(), value);
+            self.trait_meta = serde_json::to_vec(&meta).unwrap_or_default();
         }
 
         self
@@ -84,12 +92,11 @@ impl MetaData {
     where
         T: Serialize + for<'de> Deserialize<'de>,
     {
-        if let Some(meta) = self.trait_meta.as_object() {
-            if let Some(value) = meta.get(key) {
-                if let Ok(value) = serde_json::from_value(value.clone()) {
-                    return value;
-                }
-            }
+        if let Ok(meta) = serde_json::to_value(&self.trait_meta)
+            && let Some(value) = meta.get(key)
+            && let Ok(value) = serde_json::from_value(value.clone())
+        {
+            return value;
         }
         None
     }
@@ -97,12 +104,11 @@ impl MetaData {
     where
         T: Serialize + for<'de> Deserialize<'de>,
     {
-        if let Some(meta) = self.login_info.as_object() {
-            if let Some(value) = meta.get(key) {
-                if let Ok(value) = serde_json::from_value(value.clone()) {
-                    return value;
-                }
-            }
+        if let Ok(meta) = serde_json::to_value(&self.login_info)
+            && let Some(value) = meta.get(key)
+            && let Ok(value) = serde_json::from_value(value.clone())
+        {
+            return value;
         }
         None
     }
@@ -110,12 +116,11 @@ impl MetaData {
     where
         T: Serialize + for<'de> Deserialize<'de>,
     {
-        if let Some(meta) = self.module_config.as_object() {
-            if let Some(value) = meta.get(key) {
-                if let Ok(value) = serde_json::from_value(value.clone()) {
-                    return value;
-                }
-            }
+        if let Ok(meta) = serde_json::to_value(&self.module_config)
+            && let Some(value) = meta.get(key)
+            && let Ok(value) = serde_json::from_value(value.clone())
+        {
+            return value;
         }
         None
     }
@@ -123,18 +128,17 @@ impl MetaData {
     where
         T: Serialize + for<'de> Deserialize<'de>,
     {
-        if let Some(meta) = self.task.as_object() {
-            if let Some(value) = meta.get(key) {
-                if let Ok(value) = serde_json::from_value(value.clone()) {
-                    return value;
-                }
-            }
+        if let Ok(meta) = serde_json::to_value(&self.task)
+            && let Some(value) = meta.get(key)
+            && let Ok(value) = serde_json::from_value(value.clone())
+        {
+            return value;
         }
         None
     }
 }
 
-impl From<MetaData> for JsonValue {
+impl From<MetaData> for Value {
     fn from(value: MetaData) -> Self {
         serde_json::to_value(value).unwrap_or_default()
     }

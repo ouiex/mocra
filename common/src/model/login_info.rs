@@ -2,8 +2,9 @@ use crate::model::cookies::CookieItem;
 use crate::model::headers::HeaderItem;
 use crate::model::{Cookies, Headers};
 use serde::{Deserialize, Serialize};
+use cacheable::CacheAble;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize,)]
 pub struct LoginInfo {
     pub cookies: Vec<CookieItem>,
     pub useragent: String,
@@ -49,5 +50,12 @@ impl LoginInfo {
     }
     pub fn get_shop_id(&self) -> Option<i64> {
         self.get_extra("shopid")
+    }
+}
+
+
+impl CacheAble for LoginInfo {
+    fn field() -> impl AsRef<str> {
+        "login_info"
     }
 }

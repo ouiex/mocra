@@ -31,6 +31,7 @@ pub enum ErrorKind {
     DataMiddleware,
     DataStore,
     DynamicLibrary,
+    CacheService,
 }
 
 impl fmt::Display for ErrorKind {
@@ -55,6 +56,7 @@ impl fmt::Display for ErrorKind {
             ErrorKind::DataStore => write!(f, "data store"),
             ErrorKind::Task => write!(f, "task"),
             ErrorKind::DynamicLibrary => write!(f, "dynamic library"),
+            ErrorKind::CacheService => write!(f, "cache service"),
         }
     }
 }
@@ -666,10 +668,10 @@ pub enum CacheError {
     Pool(String),
     #[error("Serialization error: {0}")]
     Serde(#[from] serde_json::Error),
-    #[error("rkyv error: {0}")]
-    Rkyv(#[from] RancorError),
     #[error("Service not initialized")]
     NotInitialized,
+    #[error("NotFound")]
+    NotFound
 }
 
 // 便利函数，用于创建常见的错误类型
@@ -715,7 +717,11 @@ impl From<std::io::Error> for Error {
         }
     }
 }
-
+impl From<CacheError> for Error {
+    fn from(err: CacheError) -> Self {
+        Error::new(ErrorKind::CacheService, Some(err))
+    }
+}
 impl From<ParseIntError> for Error {
     fn from(value: ParseIntError) -> Self {
         Error::new(ErrorKind::Parser, Some(value))

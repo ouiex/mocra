@@ -30,7 +30,7 @@ impl DownloaderManager {
             default_downloader: Box::new(RequestDownloader::new(
                 Arc::clone(&state.limiter),
                 Arc::clone(&state.locker),
-                Arc::clone(&state.sync_service),
+                Arc::clone(&state.cache_service),
             )),
             //下载器工厂列表
             downloader: Arc::new(DashMap::new()),

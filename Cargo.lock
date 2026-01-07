@@ -571,13 +571,11 @@ name = "cacheable"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "bytecheck 0.8.2",
  "dashmap",
  "deadpool-redis",
  "errors",
- "once_cell",
- "redis 1.0.2",
- "rkyv 0.8.13",
+ "serde",
+ "serde_json",
  "tokio",
 ]
 
@@ -716,9 +714,10 @@ name = "common"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "bytecheck 0.8.2",
  "cacheable",
  "chrono",
+ "dashmap",
+ "deadpool-redis",
  "dyn-clone",
  "env_logger",
  "errors",
@@ -726,15 +725,11 @@ dependencies = [
  "log",
  "polars",
  "proxy",
- "redis 1.0.2",
  "reqwest 0.13.1",
  "reqwest_cookie_store",
- "rkyv 0.8.13",
  "sea-orm",
  "serde",
  "serde_json",
- "sync",
- "thiserror 2.0.17",
  "tokio",
  "toml",
  "url",
@@ -1124,7 +1119,6 @@ dependencies = [
  "dashmap",
  "deadpool-redis",
  "dyn-clone",
- "engine",
  "errors",
  "futures-util",
  "log",
@@ -1178,27 +1172,20 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "axum",
+ "cacheable",
  "chrono",
- "chrono-tz",
  "common",
  "deadpool-redis",
+ "downloader",
  "errors",
  "futures",
- "libloading",
  "log",
  "polars",
- "polars-ops",
- "proxy",
  "queue",
- "redis 1.0.2",
- "reqwest 0.13.1",
- "reqwest_cookie_store",
  "sea-orm",
  "serde",
  "serde_json",
- "sync",
  "tokio",
- "url",
  "utils",
  "uuid",
 ]
@@ -2076,16 +2063,6 @@ name = "libc"
 version = "0.2.179"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c5a2d376baa530d1238d133232d15e239abad80d05838b4b59354e5268af431f"
-
-[[package]]
-name = "libloading"
-version = "0.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "754ca22de805bb5744484a5b151a9e1a8e837d5dc232c2d7d8c2e3492edc8b60"
-dependencies = [
- "cfg-if",
- "windows-link",
-]
 
 [[package]]
 name = "libm"
@@ -3408,7 +3385,6 @@ dependencies = [
  "futures",
  "log",
  "rdkafka",
- "redis 1.0.2",
  "serde",
  "serde_json",
  "tokio",
@@ -3870,6 +3846,7 @@ dependencies = [
  "rustls-platform-verifier",
  "serde",
  "serde_json",
+ "serde_urlencoded",
  "sync_wrapper",
  "tokio",
  "tokio-rustls",
@@ -4107,7 +4084,7 @@ dependencies = [
  "security-framework 3.5.1",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

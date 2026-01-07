@@ -1,6 +1,7 @@
 use crate::model::config::PostgresConfig;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use cacheable::CacheAble;
 
 /// 工作模块配置信息
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -280,5 +281,11 @@ impl ModuleConfig {
             }
         }
         None
+    }
+}
+
+impl CacheAble for ModuleConfig {
+    fn field() -> impl AsRef<str> {
+        "module_config"
     }
 }

@@ -1,39 +1,38 @@
-use crate::core::chain::ConfigProcessor;
-use crate::core::events::EventDownload::{
+use crate::chain::ConfigProcessor;
+use crate::events::EventDownload::{
     DownloadCompleted, DownloadFailed, DownloadRetry, DownloadStarted, DownloaderCreate,
 };
-use crate::core::events::EventProxy::{
+use crate::events::EventProxy::{
     ProxyCompleted, ProxyFailed, ProxyPrepared, ProxyRetry, ProxyStarted,
 };
-use crate::core::events::EventRequestMiddleware::{
+use crate::events::EventRequestMiddleware::{
     RequestMiddlewareCompleted, RequestMiddlewareFailed, RequestMiddlewarePrepared,
     RequestMiddlewareRetry, RequestMiddlewareStarted,
 };
-use crate::core::events::EventResponseMiddleware::{
+use crate::events::EventResponseMiddleware::{
     ResponseMiddlewareCompleted, ResponseMiddlewareFailed, ResponseMiddlewarePrepared,
     ResponseMiddlewareRetry, ResponseMiddlewareStarted,
 };
-use crate::core::events::EventResponsePublish::{
+use crate::events::EventResponsePublish::{
     ResponsePublishCompleted, ResponsePublishFailed, ResponsePublishPrepared, ResponsePublishRetry,
     ResponsePublishSend,
 };
-use crate::core::events::{
+use crate::events::{
     DownloadEvent, EventSystem, RequestMiddlewareEvent, ResponseEvent,
 };
-use crate::core::events::{DynFailureEvent, DynRetryEvent, EventBus, SystemEvent};
-use crate::core::processors::event_processor::{EventAwareTypedChain, EventProcessorTrait};
+use crate::events::{DynFailureEvent, DynRetryEvent, EventBus, SystemEvent};
+use crate::processors::event_processor::{EventAwareTypedChain, EventProcessorTrait};
 use async_trait::async_trait;
 use downloader::DownloaderManager;
-use error::{Error, ModuleError, Result};
-use kernel::middleware::middleware_manager::MiddlewareManager;
-use kernel::model::ModuleConfig;
-use kernel::model::download_config::DownloadConfig;
-use kernel::model::{Request, Response};
-use kernel::state::State;
-use kernel::sync::sync_service::SyncService;
+use errors::{Error, ModuleError, Result};
+use common::interface::middleware_manager::MiddlewareManager;
+use common::model::ModuleConfig;
+use common::model::download_config::DownloadConfig;
+use common::model::{Request, Response};
+use common::state::State;
 use log::{debug, warn, error};
-use message_queue::QueueManager;
-use processor_chain::processors::processor::{
+use queue::QueueManager;
+use common::processors::processor::{
     ProcessorContext, ProcessorResult, ProcessorTrait, RetryPolicy,
 };
 use proxy::ProxyManager;
@@ -41,8 +40,7 @@ use std::sync::Arc;
 use std::collections::HashMap;
 use tokio::sync::RwLock;
 use std::time::{Instant, Duration};
-use kernel::ErrorDecision;
-use log::info;
+use common::status_tracker::ErrorDecision;
 pub struct DownloadProcessor {
     pub(crate) downloader_manager: Arc<DownloaderManager>,
     pub(crate) state: Arc<State>,
@@ -96,7 +94,7 @@ for DownloadProcessor
             let task_decision_result = match cached_task_decision {
                 Some(res) => res,
                 None => {
-                    let res = self.state.error_tracker.should_task_continue(&task_id).await;
+                    let res = self.state.status_tracker.should_task_continue(&task_id).await;
                     if let Ok(ref d) = res {
                         let mut cache = self.decision_cache.write().await;
                         cache.insert(task_id.clone(), (Instant::now(), d.clone()));
@@ -106,10 +104,10 @@ for DownloadProcessor
             };
 
             match task_decision_result {
-                Ok(kernel::ErrorDecision::Continue) => {
+                Ok(ErrorDecision::Continue) => {
                     debug!("[DownloadProcessor] task check passed: task_id={}", input.0.task_id());
                 }
-                Ok(kernel::ErrorDecision::Terminate(reason)) => {
+                Ok(ErrorDecision::Terminate(reason)) => {
                     error!(
                         "[DownloadProcessor] task terminated before download: task_id={} reason={}",
                         input.0.task_id(),
@@ -150,7 +148,7 @@ for DownloadProcessor
             let decision_result = match cached_decision {
                 Some(res) => res,
                 None => {
-                    let res = self.state.error_tracker.should_module_continue(&module_id).await;
+                    let res = self.state.status_tracker.should_module_continue(&module_id).await;
                     if let Ok(ref d) = res {
                         let mut cache = self.decision_cache.write().await;
                         cache.insert(module_id.clone(), (Instant::now(), d.clone()));
@@ -160,10 +158,10 @@ for DownloadProcessor
             };
 
             match decision_result {
-                Ok(kernel::ErrorDecision::Continue) => {
+                Ok(ErrorDecision::Continue) => {
                     debug!("[DownloadProcessor] module check passed: module_id={}", input.0.module_id());
                 }
-                Ok(kernel::ErrorDecision::Terminate(reason)) => {
+                Ok(ErrorDecision::Terminate(reason)) => {
                     error!(
                         "[DownloadProcessor] module terminated before download: module_id={} reason={}",
                         input.0.module_id(),
@@ -171,7 +169,7 @@ for DownloadProcessor
                     );
                     // Module 已终止，释放锁并返回 None，让链路继续处理其他请求
                     self.state
-                        .sync_service
+                        .status_tracker
                         .release_module_locker(&input.0.module_id())
                         .await;
 
@@ -193,7 +191,7 @@ for DownloadProcessor
         }
 
         let download_config =
-            DownloadConfig::load(&input.1, &self.state.config.read().await.defaults);
+            DownloadConfig::load(&input.1, &self.state.config.read().await.download_config);
         let downloader = self
             .downloader_manager
             .get_downloader(&input.0, download_config)
@@ -219,7 +217,7 @@ for DownloadProcessor
 
                 // 记录下载成功（仅减少 Request 级别的错误计数）
                 self.state
-                    .error_tracker
+                    .status_tracker
                     .record_download_success(&request_id.to_string())
                     .await
                     .ok();
@@ -248,11 +246,11 @@ for DownloadProcessor
 
                 // 2. 超过重试次数，记录下载错误并获取决策
                 match self.state
-                    .error_tracker
+                    .status_tracker
                     .record_download_error(&task_id, &module_id, &request_id.to_string(), &e)
                     .await
                 {
-                    Ok(kernel::ErrorDecision::Terminate(reason)) => {
+                    Ok(ErrorDecision::Terminate(reason)) => {
                         error!("[DownloadProcessor] terminate: {}", reason);
                         ProcessorResult::FatalFailure(
                             ModuleError::ModuleMaxError(reason.into()).into()
@@ -291,7 +289,7 @@ for DownloadProcessor
         // Download failed terminally in this chain; no parser stage will release the lock.
         // Ensure we release the module lock to avoid stale locks.
         self.state
-            .sync_service
+            .status_tracker
             .release_module_locker(&_input.0.module_id())
             .await;
         ProcessorResult::Success((None, _input.1.clone()))
@@ -352,7 +350,7 @@ for DownloadProcessor
 
 pub struct ResponsePublishProcessor {
     pub(crate) queue_manager: Arc<QueueManager>,
-    pub(crate) sync_service: Arc<SyncService>,
+    pub(crate) state:Arc<State>,
 }
 
 #[async_trait]
@@ -405,7 +403,7 @@ impl ProcessorTrait<Option<Response>, ()> for ResponsePublishProcessor {
                 resp.module_id(),
                 resp.id
             );
-            self.sync_service.lock_module(&resp.module_id()).await;
+            self.state.status_tracker.lock_module(&resp.module_id()).await;
             debug!(
                 "[ResponsePublish] lock module acquired: module_id={} request_id={}",
                 resp.module_id(),
@@ -422,7 +420,7 @@ impl ProcessorTrait<Option<Response>, ()> for ResponsePublishProcessor {
     ) -> ProcessorResult<()> {
         if let Some(resp) = input {
             // Ensure we release the lock if publishing the response ultimately fails
-            self.sync_service
+            self.state.status_tracker
                 .release_module_locker(&resp.module_id())
                 .await;
 
@@ -745,7 +743,7 @@ for ProxyMiddlewareProcessor
     }
 
     fn error_status(&self, input: &(Request, Option<ModuleConfig>), err: &Error) -> Option<SystemEvent> {
-        let failure: DynFailureEvent<crate::core::events::ProxyEvent> = DynFailureEvent {
+        let failure: DynFailureEvent<crate::events::ProxyEvent> = DynFailureEvent {
             data: (&input.0).into(),
             error: err.to_string(),
         };
@@ -757,7 +755,7 @@ for ProxyMiddlewareProcessor
         input: &(Request, Option<ModuleConfig>),
         retry_policy: &RetryPolicy,
     ) -> Option<SystemEvent> {
-        let retry: DynRetryEvent<crate::core::events::ProxyEvent> = DynRetryEvent {
+        let retry: DynRetryEvent<crate::events::ProxyEvent> = DynRetryEvent {
             data: (&input.0).into(),
             retry_count: retry_policy.current_retry,
             reason: retry_policy.reason.clone().unwrap_or_default(),
@@ -781,13 +779,13 @@ pub async fn create_download_chain(
     };
     let response_publish = ResponsePublishProcessor {
         queue_manager,
-        sync_service: state.sync_service.clone(),
+        state:state.clone(),
     };
     let request_middleware = RequestMiddlewareProcessor {
         middleware_manager: middleware_manager.clone(),
     };
     let response_middleware = ResponseMiddlewareProcessor { middleware_manager };
-    let config_processor = ConfigProcessor {sync_service: state.sync_service.clone() };
+    let config_processor = ConfigProcessor {state: state.clone() };
     let proxy_middleware = ProxyMiddlewareProcessor { proxy_manager };
 
     EventAwareTypedChain::<Request, Request>::new(event_bus)

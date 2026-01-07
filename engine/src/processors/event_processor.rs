@@ -1,14 +1,14 @@
 #![allow(unused)]
-use crate::core::events::{EventBus, SystemEvent};
+use crate::events::{EventBus, SystemEvent};
 use async_trait::async_trait;
-use error::{Error, ProcessorChainError, Result};
+use errors::{Error, ProcessorChainError, Result};
 use log::{debug, error, info};
-use processor_chain::processors::processor::{
+use common::processors::processor::{
     ProcessorContext, ProcessorResult, ProcessorTrait, RetryPolicy,
 };
-use processor_chain::processors::processor_chain::{ErrorStrategy, TypedChain, SyncBoxStream};
+use common::processors::processor_chain::{ErrorStrategy, TypedChain, SyncBoxStream};
 use std::sync::Arc;
-use crate::core::chain::DataMiddlewareProcessor;
+use crate::chain::DataMiddlewareProcessor;
 
 /// 带事件发布的处理器
 pub struct EventAwareProcessor<P> {
@@ -47,48 +47,6 @@ impl<P> EventAwareProcessor<P> {
             .as_secs()
     }
 
-    // fn build_error_event(
-    //     &self,
-    //     error_type: &str,
-    //     message: String,
-    //     ctx: &ProcessorContext,
-    // ) -> SystemEvent {
-    //     // 尽量避免对 RetryPolicy 做直接序列化，手动采样关键信息
-    //     let retry_json = ctx.retry_policy.as_ref().map(|rp| {
-    //         json!({
-    //             "max_retries": rp.max_retries,
-    //             "retry_delay": rp.retry_delay,
-    //             "current_retry": rp.current_retry,
-    //         })
-    //     });
-    //     let context = json!({
-    //         "processor": std::any::type_name::<P>(),
-    //         "metadata": ctx.metadata,
-    //         "retry_policy": retry_json,
-    //         "step_timeout_ms": ctx.step_timeout_ms,
-    //         "cancelled": ctx.cancelled,
-    //     });
-    //     SystemEvent::ErrorOccurred(ErrorEvent {
-    //         error_id: uuid::Uuid::new_v4().to_string(),
-    //         error_type: error_type.to_string(),
-    //         message,
-    //         context,
-    //         timestamp: Self::now_ts(),
-    //     })
-    // }
-    //
-    // fn build_error_handled_event(&self, error_type: &str, message: String) -> SystemEvent {
-    //     let context = json!({
-    //         "processor": std::any::type_name::<P>(),
-    //     });
-    //     SystemEvent::ErrorHandled(ErrorEvent {
-    //         error_id: uuid::Uuid::new_v4().to_string(),
-    //         error_type: error_type.to_string(),
-    //         message,
-    //         context,
-    //         timestamp: Self::now_ts(),
-    //     })
-    // }
 }
 
 #[async_trait]

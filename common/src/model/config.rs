@@ -40,7 +40,7 @@ pub struct SyncConfig {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct CookieConfig {
+pub struct CacheConfig {
     pub ttl: u64,
     pub redis: RedisConfig,
 }
@@ -73,7 +73,7 @@ pub struct Config {
     pub name: String,
     pub db: PostgresConfig,
     pub download_config: DownloadConfig,
-    pub cookie: CookieConfig,
+    pub cache: CacheConfig,
     pub crawler: CrawlerConfig,
     pub redis: Option<RedisConfig>,
     pub channel_config: ChannelConfig,

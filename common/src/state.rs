@@ -5,20 +5,22 @@ use crate::model::config::Config;
 
 use log::info;
 use std::sync::Arc;
-use sync::{RedisBackend, SyncService};
+use std::time;
 use tokio::sync::RwLock;
+use cacheable::CacheService;
 use utils::distributed_rate_limit::{DistributedSlidingWindowRateLimiter, RateLimitConfig};
 use utils::redis_lock::DistributedLockManager;
+use crate::status_tracker::{StatusTracker, ErrorTrackerConfig};
 
 #[derive(Clone)]
 pub struct State {
     pub db: Arc<sea_orm::DatabaseConnection>,
     pub config: Arc<RwLock<Config>>,
-    pub sync_service: Arc<SyncService>,
-    pub cookie_sync_service: Option<Arc<SyncService>>,
+    pub cache_service: Arc<CacheService>,
+    pub cookie_service: Option<Arc<CacheService>>,
     pub locker: Arc<DistributedLockManager>,
     pub limiter: Arc<DistributedSlidingWindowRateLimiter>,
-    pub state_sync: Arc<SyncService>, // use SyncService as the global state backend
+    pub status_tracker: Arc<StatusTracker>,
 }
 impl State {
     pub async fn new(path: &str) -> Self {
@@ -52,7 +54,7 @@ impl State {
         {
             if let Some(pool) = cache_pool.as_ref() {
                 let mut cnn = pool.get().await.expect("Failed to get cache connection");
-                let _pong: String = redis::cmd("PING")
+                let _pong: String =deadpool_redis::redis::cmd("PING")
                     .query_async(&mut *cnn)
                     .await
                     .expect("Failed to ping");
@@ -67,11 +69,11 @@ impl State {
         info!("cache pool connect successfully");
         let cookie_pool = Arc::new(
             create_redis_pool(
-                &config.cookie.redis.redis_host,
-                config.cookie.redis.redis_port,
-                config.cookie.redis.redis_db,
-                &config.cookie.redis.redis_username,
-                &config.cookie.redis.redis_password,
+                &config.cache.redis.redis_host,
+                config.cache.redis.redis_port,
+                config.cache.redis.redis_db,
+                &config.cache.redis.redis_username,
+                &config.cache.redis.redis_password,
             )
             .expect("Failed to connect cookie"),
         );
@@ -120,42 +122,44 @@ impl State {
             },
         ));
 
-        let sync_service = Arc::new(SyncService::new(None, format!("{}:cache", config.name)));
-        let cookie_sync_service = Some(Arc::new(SyncService::new(
+        let cache_service = Arc::new(CacheService::new(None,format!("{}:cache",config.name),Some(time::Duration::from_secs(60))));
+        let cookie_service = Some(Arc::new(CacheService::new(
             None,
             format!("{}:cookie", config.name),
+            Some(time::Duration::from_secs(60))
         )));
         info!("Redis connection pool created successfully");
 
         // Use the same Redis-backed SyncService for global state operations
-        let state_sync = Arc::clone(&sync_service);
+        // let state_sync = Arc::clone(&cache_service);
 
         // 初始化错误跟踪器
-        // let error_tracker_config = ErrorTrackerConfig {
-        //     task_max_errors: config.crawler.task_max_errors,
-        //     module_max_errors: config.crawler.module_max_errors,
-        //     request_max_retries: config.crawler.request_max_retries,
-        //     parse_max_retries: config.crawler.request_max_retries, // 使用相同配置
-        //     enable_success_decay: true,
-        //     success_decay_amount: 1,
-        //     enable_time_window: false,
-        //     time_window_seconds: 3600,
-        //     consecutive_error_threshold: 3,
-        //     error_ttl: config.defaults.config.cache_ttl, // 从配置读取错误记录过期时间
-        // };
-        // let error_tracker = Arc::new(ErrorTracker::new(
-        //     sync_service.clone(),
-        //     error_tracker_config,
-        // ));
+        let error_tracker_config = ErrorTrackerConfig {
+            task_max_errors: config.crawler.task_max_errors,
+            module_max_errors: config.crawler.module_max_errors,
+            request_max_retries: config.crawler.request_max_retries,
+            parse_max_retries: config.crawler.request_max_retries, // 使用相同配置
+            enable_success_decay: true,
+            success_decay_amount: 1,
+            enable_time_window: false,
+            time_window_seconds: 3600,
+            consecutive_error_threshold: 3,
+            error_ttl: config.cache.ttl, // 从配置读取错误记录过期时间
+        };
+        let error_tracker = Arc::new(StatusTracker::new(
+            cache_service.clone(),
+            error_tracker_config,
+            locker.clone(),
+        ));
 
         State {
             db,
             config: Arc::new(RwLock::new(config)),
-            sync_service,
-            cookie_sync_service,
+            cache_service,
+            cookie_service,
             locker,
             limiter,
-            state_sync,
+            status_tracker: error_tracker
         }
     }
 }

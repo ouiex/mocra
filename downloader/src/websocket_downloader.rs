@@ -1,6 +1,6 @@
-use error::{Error, Result};
+use errors::{Error, Result};
 use futures_util::{SinkExt, StreamExt};
-use kernel::model::{Request, Response};
+use common::model::{Request, Response};
 use log::{error, info, warn};
 use reqwest::{Client, Proxy};
 use std::collections::HashMap;
