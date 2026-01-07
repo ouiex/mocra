@@ -1,3 +1,11 @@
+[package]
+name = "mocra"
+version = "0.1.0"
+edition = "2024"
+description = "Unified crate that re-exports mocra workspace crates"
+license = "MIT OR Apache-2.0"
+repository = "https://gitlab.ouiex.dev/eason/mocra"
+
 [workspace]
 resolver = "3"
 members = ["cacheable","common", "downloader", "engine", "errors", "proxy", "queue", "scheduler", "sync", "tests", "utils"]
@@ -54,3 +62,19 @@ utils = { path = "utils" }
 proxy = { path = "proxy" }
 errors = { path = "errors" }
 cacheable = { path = "cacheable" }
+
+[dependencies]
+common.workspace = true
+downloader.workspace = true
+engine.workspace = true
+queue.workspace = true
+scheduler.workspace = true
+sync.workspace = true
+utils.workspace = true
+proxy.workspace = true
+errors.workspace = true
+cacheable.workspace = true
+
+[lib]
+name = "mocra"
+path = "src/lib.rs"
