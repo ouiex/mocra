@@ -2,6 +2,8 @@
 //! This crate re-exports the internal crates so consumers can
 //! `use mocra::engine::...`, `mocra::common::...`, etc.
 
+pub mod prelude;
+
 pub mod common { pub use ::common::*; }
 pub mod downloader { pub use ::downloader::*; }
 pub mod engine { pub use ::engine::*; }
