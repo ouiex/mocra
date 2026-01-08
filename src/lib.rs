@@ -14,3 +14,7 @@ pub mod utils { pub use ::utils::*; }
 pub mod proxy { pub use ::proxy::*; }
 pub mod errors { pub use ::errors::*; }
 pub mod cacheable { pub use ::cacheable::*; }
+
+pub mod js_v8{
+    pub use ::js_v8::*;
+}

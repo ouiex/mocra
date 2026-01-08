@@ -8,7 +8,7 @@ repository = "https://gitlab.ouiex.dev/eason/mocra"
 
 [workspace]
 resolver = "3"
-members = ["cacheable","common", "downloader", "engine", "errors", "proxy", "queue", "scheduler", "sync", "tests", "utils"]
+members = ["cacheable","common", "downloader", "engine", "errors", "proxy", "queue", "scheduler", "sync", "tests", "utils","js-v8"]
 
 [workspace.dependencies]
 async-trait = "0.1"
@@ -62,6 +62,7 @@ utils = { path = "utils" }
 proxy = { path = "proxy" }
 errors = { path = "errors" }
 cacheable = { path = "cacheable" }
+js-v8 = { path = "js-v8" }
 
 [dependencies]
 common.workspace = true
