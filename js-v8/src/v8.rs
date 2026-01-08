@@ -37,7 +37,7 @@ fn host_registry() -> &'static Mutex<
     HOST_REG.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-fn to_jsvalue(scope: &mut v8::HandleScope, v: v8::Local<v8::Value>) -> Option<JsValue> {
+fn to_jsvalue(scope: &mut v8::PinScope, v: v8::Local<v8::Value>) -> Option<JsValue> {
     if v.is_boolean() {
         return Some(JsValue::Bool(v.boolean_value(scope)));
     }
@@ -51,7 +51,7 @@ fn to_jsvalue(scope: &mut v8::HandleScope, v: v8::Local<v8::Value>) -> Option<Js
     None
 }
 
-fn from_jsreturn<'s>(scope: &mut v8::HandleScope<'s>, r: JsReturn) -> v8::Local<'s, v8::Value> {
+fn from_jsreturn<'a, 's>(scope: &mut v8::PinnedRef<'a, v8::HandleScope<'s>>, r: JsReturn) -> v8::Local<'a, v8::Value> {
     match r {
         JsReturn::Text(s) => v8::String::new(scope, &s).unwrap().into(),
         JsReturn::Number(n) => v8::Number::new(scope, n).into(),
@@ -87,7 +87,7 @@ fn from_jsreturn<'s>(scope: &mut v8::HandleScope<'s>, r: JsReturn) -> v8::Local<
 }
 
 fn host_fn_dispatch(
-    scope: &mut v8::HandleScope,
+    scope: &mut v8::PinScope,
     args: v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
@@ -206,9 +206,9 @@ impl V8Engine {
 
         // Create context and promote to Global so we can use it across calls.
         let context_global = {
-            let mut hs = v8::HandleScope::new(&mut isolate);
-            let context = v8::Context::new(&mut hs, Default::default());
-            v8::Global::new(&mut hs, context)
+            v8::scope!(let hs, &mut isolate);
+            let context = v8::Context::new(hs, Default::default());
+            v8::Global::new(hs, context)
         };
 
         Ok(Self {
@@ -219,20 +219,20 @@ impl V8Engine {
 
     /// Execute a JS source string inside the engine's context.
     pub fn exec_script(&mut self, source: &str, _name: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
-        let mut hs = v8::HandleScope::new(&mut self.isolate);
-        let local_ctx = v8::Local::new(&mut hs, &self.context);
-        let mut cs = v8::ContextScope::new(&mut hs, local_ctx);
-        let mut tc = v8::TryCatch::new(&mut cs);
+        v8::scope!(let hs, &mut self.isolate);
+        let local_ctx = v8::Local::new(hs, &self.context);
+        let mut cs = v8::ContextScope::new(hs, local_ctx);
+        v8::tc_scope!(let tc, &mut cs);
 
-        let code = v8::String::new(&mut tc, source)
+        let code = v8::String::new(tc, source)
             .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "failed to create v8 string from source"))?;
 
         let script =
-            v8::Script::compile(&mut tc, code, None)
+            v8::Script::compile(tc, code, None)
                 .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "compile failed"))?;
 
         script
-            .run(&mut tc)
+            .run(tc)
             .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "run failed").into())
             .map(|_| ())
     }
@@ -266,9 +266,9 @@ impl V8Engine {
             .unwrap()
             .insert(key.clone(), Arc::new(callback));
 
-        let mut hs = v8::HandleScope::new(&mut self.isolate);
-        let local_ctx = v8::Local::new(&mut hs, &self.context);
-        let mut cs = v8::ContextScope::new(&mut hs, local_ctx);
+        v8::scope!(let hs, &mut self.isolate);
+        let local_ctx = v8::Local::new(hs, &self.context);
+        let mut cs = v8::ContextScope::new(hs, local_ctx);
 
         // Ensure native dispatcher is available
         ensure_host_dispatch_fn(&mut cs)?;
@@ -302,13 +302,13 @@ impl V8Engine {
         wasm_bytes: &[u8],
         imports_object_js: Option<&str>,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut hs = v8::HandleScope::new(&mut self.isolate);
-        let local_ctx = v8::Local::new(&mut hs, &self.context);
-        let mut cs = v8::ContextScope::new(&mut hs, local_ctx);
-        let mut tc = v8::TryCatch::new(&mut cs);
+        v8::scope!(let hs, &mut self.isolate);
+        let local_ctx = v8::Local::new(hs, &self.context);
+        let mut cs = v8::ContextScope::new(hs, local_ctx);
+        v8::tc_scope!(let tc, &mut cs);
 
         // 1) Create an ArrayBuffer with the wasm bytes and expose it to JS as a temporary global
-        let ab = v8::ArrayBuffer::new(&mut tc, wasm_bytes.len());
+        let ab = v8::ArrayBuffer::new(tc, wasm_bytes.len());
         {
             let bs = ab.get_backing_store();
             let dst = bs
@@ -323,11 +323,11 @@ impl V8Engine {
             }
         }
 
-        let global = tc.get_current_context().global(&mut tc);
+        let global = tc.get_current_context().global(tc);
         let tmp_key =
-            v8::String::new(&mut tc, "__wasm_bytes_tmp")
+            v8::String::new(tc, "__wasm_bytes_tmp")
                 .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "alloc tmp key"))?;
-        if global.set(&mut tc, tmp_key.into(), ab.into()).is_none() {
+        if global.set(tc, tmp_key.into(), ab.into()).is_none() {
             return Err(std::io::Error::new(std::io::ErrorKind::Other, "failed to set temporary wasm bytes on global").into());
         }
 
@@ -338,12 +338,12 @@ impl V8Engine {
             imports_expr, global_name, global_name,
         );
 
-        let code = v8::String::new(&mut tc, &js)
+        let code = v8::String::new(tc, &js)
             .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "failed to create v8 string for wasm bootstrap"))?;
-        let script = v8::Script::compile(&mut tc, code, None)
+        let script = v8::Script::compile(tc, code, None)
             .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "compile wasm bootstrap failed"))?;
         script
-            .run(&mut tc)
+            .run(tc)
             .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "run wasm bootstrap failed"))?;
         Ok(())
     }
@@ -355,18 +355,18 @@ impl V8Engine {
         export_name: &str,
         args: &[T],
     ) -> Result<JsReturn, Box<dyn std::error::Error>> {
-        let mut hs = v8::HandleScope::new(&mut self.isolate);
-        let local_ctx = v8::Local::new(&mut hs, &self.context);
-        let mut cs = v8::ContextScope::new(&mut hs, local_ctx);
-        let mut tc = v8::TryCatch::new(&mut cs);
+        v8::scope!(let hs, &mut self.isolate);
+        let local_ctx = v8::Local::new(hs, &self.context);
+        let mut cs = v8::ContextScope::new(hs, local_ctx);
+        v8::tc_scope!(let tc, &mut cs);
 
-        let global = tc.get_current_context().global(&mut tc);
+        let global = tc.get_current_context().global(tc);
 
         // instance object
-        let inst_key = v8::String::new(&mut tc, instance_global_name)
+        let inst_key = v8::String::new(tc, instance_global_name)
             .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "alloc instance name"))?;
         let inst_val = global
-            .get(&mut tc, inst_key.into())
+            .get(tc, inst_key.into())
             .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, format!("global has no wasm instance '{}': not found", instance_global_name)))?;
         let inst_obj = v8::Local::<v8::Object>::try_from(inst_val).map_err(|_| {
             std::io::Error::new(
@@ -377,20 +377,20 @@ impl V8Engine {
 
         // exports object
         let exports_key =
-            v8::String::new(&mut tc, "exports")
+            v8::String::new(tc, "exports")
                 .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "alloc 'exports'"))?;
         let exports_val = inst_obj
-            .get(&mut tc, exports_key.into())
+            .get(tc, exports_key.into())
             .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "instance.exports missing"))?;
         let exports_obj = v8::Local::<v8::Object>::try_from(exports_val)
             .map_err(|_| std::io::Error::new(std::io::ErrorKind::Other, "instance.exports is not an object"))?;
 
         // exported function
         let fn_key =
-            v8::String::new(&mut tc, export_name)
+            v8::String::new(tc, export_name)
                 .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "alloc export name"))?;
         let fn_val = exports_obj
-            .get(&mut tc, fn_key.into())
+            .get(tc, fn_key.into())
             .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, format!("export '{}' not found", export_name)))?;
         if !fn_val.is_function() {
             return Err(std::io::Error::new(std::io::ErrorKind::Other, format!("export '{}' is not a function", export_name)).into());
@@ -407,26 +407,26 @@ impl V8Engine {
         for a in args.iter().cloned() {
             match a.into() {
                 JsValue::Str(s) => {
-                    let v = v8::String::new(&mut tc, &s)
+                    let v = v8::String::new(tc, &s)
                         .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "arg to v8 string failed"))?;
                     argv.push(v.into());
                 }
-                JsValue::Number(n) => argv.push(v8::Number::new(&mut tc, n).into()),
-                JsValue::Bool(b) => argv.push(v8::Boolean::new(&mut tc, b).into()),
+                JsValue::Number(n) => argv.push(v8::Number::new(tc, n).into()),
+                JsValue::Bool(b) => argv.push(v8::Boolean::new(tc, b).into()),
             }
         }
 
-        let recv = v8::undefined(&mut tc).into();
+        let recv = v8::undefined(tc).into();
         let result = func
-            .call(&mut tc, recv, &argv)
+            .call(tc, recv, &argv)
             .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "wasm export call failed"))?;
 
         if result.is_boolean() {
-            return Ok(JsReturn::Bool(result.boolean_value(&mut tc)));
+            return Ok(JsReturn::Bool(result.boolean_value(tc)));
         }
         if result.is_number() {
             let n = result
-                .number_value(&mut tc)
+                .number_value(tc)
                 .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "number_value failed"))?;
             return Ok(JsReturn::Number(n));
         }
@@ -436,7 +436,7 @@ impl V8Engine {
             let offset = arr.byte_offset();
             let len = arr.byte_length();
             let buf = arr
-                .buffer(&mut tc)
+                .buffer(tc)
                 .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "Uint8Array.buffer() failed"))?;
             let bs = buf.get_backing_store();
             let base = bs.data().ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "backing store no data"))?;
@@ -457,8 +457,8 @@ impl V8Engine {
             }
         }
         if result.is_object() || result.is_array() {
-            if let Some(s) = v8::json::stringify(&mut tc, result) {
-                let json_str = s.to_rust_string_lossy(&mut tc);
+            if let Some(s) = v8::json::stringify(tc, result) {
+                let json_str = s.to_rust_string_lossy(tc);
                 return if let Ok(v) = serde_json::from_str::<JsonValue>(&json_str) {
                     Ok(JsReturn::Json(v))
                 } else {
@@ -467,9 +467,9 @@ impl V8Engine {
             }
         }
         let s = result
-            .to_string(&mut tc)
+            .to_string(tc)
             .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "export result.toString failed"))?;
-        Ok(JsReturn::Text(s.to_rust_string_lossy(&mut tc)))
+        Ok(JsReturn::Text(s.to_rust_string_lossy(tc)))
     }
     /// Call a global function with basic arguments.
     pub fn call_function<T: Into<JsValue> + Clone>(
@@ -477,17 +477,17 @@ impl V8Engine {
         name: &str,
         args: &[T],
     ) -> Result<JsReturn, Box<dyn std::error::Error>> {
-        let mut hs = v8::HandleScope::new(&mut self.isolate);
-        let local_ctx = v8::Local::new(&mut hs, &self.context);
-        let mut cs = v8::ContextScope::new(&mut hs, local_ctx);
-        let mut tc = v8::TryCatch::new(&mut cs);
+        v8::scope!(let hs, &mut self.isolate);
+        let local_ctx = v8::Local::new(hs, &self.context);
+        let mut cs = v8::ContextScope::new(hs, local_ctx);
+        v8::tc_scope!(let tc, &mut cs);
 
-        let global = tc.get_current_context().global(&mut tc);
-        let fname = v8::String::new(&mut tc, name)
+        let global = tc.get_current_context().global(tc);
+        let fname = v8::String::new(tc, name)
             .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "failed to create v8 string for function name"))?;
 
         let func_val = global
-            .get(&mut tc, fname.into())
+            .get(tc, fname.into())
             .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, format!("global has no property '{}': not defined", name)))?;
         if !func_val.is_function() {
             return Err(std::io::Error::new(std::io::ErrorKind::Other, format!("'{}' is not a function", name)).into());
@@ -503,31 +503,31 @@ impl V8Engine {
         for a in args.iter().cloned() {
             match a.into() {
                 JsValue::Str(s) => {
-                    let v = v8::String::new(&mut tc, &s)
+                    let v = v8::String::new(tc, &s)
                         .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "arg to v8 string failed"))?;
                     argv.push(v.into());
                 }
                 JsValue::Number(n) => {
-                    argv.push(v8::Number::new(&mut tc, n).into());
+                    argv.push(v8::Number::new(tc, n).into());
                 }
                 JsValue::Bool(b) => {
-                    argv.push(v8::Boolean::new(&mut tc, b).into());
+                    argv.push(v8::Boolean::new(tc, b).into());
                 }
             }
         }
 
         let recv = global.into();
         let result = func
-            .call(&mut tc, recv, &argv)
+            .call(tc, recv, &argv)
             .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "function call failed"))?;
 
         // Map V8 value to JsReturn
         if result.is_boolean() {
-            return Ok(JsReturn::Bool(result.boolean_value(&mut tc)));
+            return Ok(JsReturn::Bool(result.boolean_value(tc)));
         }
         if result.is_number() {
             let n = result
-                .number_value(&mut tc)
+                .number_value(tc)
                 .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "number_value failed"))?;
             return Ok(JsReturn::Number(n));
         }
@@ -537,7 +537,7 @@ impl V8Engine {
             let offset = arr.byte_offset();
             let len = arr.byte_length();
             let buf = arr
-                .buffer(&mut tc)
+                .buffer(tc)
                 .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "Uint8Array.buffer() failed"))?;
             let bs = buf.get_backing_store();
             let base = bs.data().ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "backing store no data"))?;
@@ -558,8 +558,8 @@ impl V8Engine {
             }
         }
         if result.is_object() || result.is_array() {
-            if let Some(s) = v8::json::stringify(&mut tc, result) {
-                let json_str = s.to_rust_string_lossy(&mut tc);
+            if let Some(s) = v8::json::stringify(tc, result) {
+                let json_str = s.to_rust_string_lossy(tc);
                 return if let Ok(v) = serde_json::from_str::<JsonValue>(&json_str) {
                     Ok(JsReturn::Json(v))
                 } else {
@@ -568,9 +568,9 @@ impl V8Engine {
             }
         }
         let s = result
-            .to_string(&mut tc)
+            .to_string(tc)
             .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "result.toString failed"))?;
-        Ok(JsReturn::Text(s.to_rust_string_lossy(&mut tc)))
+        Ok(JsReturn::Text(s.to_rust_string_lossy(tc)))
     }
 }
 

@@ -2422,6 +2422,7 @@ dependencies = [
  "downloader",
  "engine",
  "errors",
+ "js-v8",
  "proxy",
  "queue",
  "scheduler",

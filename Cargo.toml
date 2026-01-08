@@ -75,6 +75,11 @@ utils.workspace = true
 proxy.workspace = true
 errors.workspace = true
 cacheable.workspace = true
+js-v8 = { workspace = true, optional = true }
+
+[features]
+default = []
+js-v8 = ["dep:js-v8"]
 
 [lib]
 name = "mocra"
