@@ -354,15 +354,20 @@ pub async fn init_logger(config: LoggerConfig) -> Result<(), Box<dyn std::error:
         if let Some(parent) = file_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let file_appender = RollingFileAppender::new(
-            Rotation::DAILY,
-            file_path
-                .parent()
-                .unwrap_or_else(|| std::path::Path::new(".")),
-            file_path
-                .file_name()
-                .unwrap_or_else(|| std::ffi::OsStr::new("app.log")),
-        );
+        let file_path_prefix = file_path
+            .file_name()
+            .unwrap_or_else(|| std::ffi::OsStr::new("app"));
+        let file_appender = tracing_appender::rolling::Builder::new()
+            .rotation(Rotation::DAILY)
+            .filename_prefix(file_path_prefix)
+            .filename_suffix("log")
+            .build(
+                file_path
+                    .parent()
+                    .unwrap_or_else(|| std::path::Path::new(".")),
+            )
+            .expect("Failed to create rolling file appender");
+
         let (file_writer, guard) = tracing_appender::non_blocking(file_appender);
         let _ = FILE_GUARD.set(guard);
         Some(
