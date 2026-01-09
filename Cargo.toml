@@ -8,7 +8,7 @@ repository = "https://gitlab.ouiex.dev/eason/mocra"
 
 [workspace]
 resolver = "3"
-members = ["cacheable","common", "downloader", "engine", "errors", "proxy", "queue", "scheduler", "sync", "tests", "utils","js-v8"]
+members = ["cacheable","common", "downloader", "engine", "errors", "proxy", "queue", "sync", "tests", "utils","js-v8"]
 
 [workspace.dependencies]
 async-trait = "0.1"
@@ -22,6 +22,7 @@ serde_json = "1"
 tokio = { version = "1", features = ["full"] }
 deadpool-redis = { version = "0.22", features = ["json", "script", "serde","streams"] }
 sea-orm = { version = "1", features = ["postgres-array", "runtime-tokio-native-tls", "sqlx-postgres"] }
+redis = { version = "0.32", features = ["tokio-comp", "safe_iterators"] }
 rdkafka = { version = "0.38", features = ["cmake-build"] }
 futures = "0.3"
 log = "0.4"
@@ -56,7 +57,6 @@ common = { path = "common" }
 downloader = { path = "downloader" }
 engine = { path = "engine" }
 queue = { path = "queue" }
-scheduler = { path = "scheduler" }
 sync = { path = "sync" }
 utils = { path = "utils" }
 proxy = { path = "proxy" }
@@ -69,7 +69,6 @@ common.workspace = true
 downloader.workspace = true
 engine.workspace = true
 queue.workspace = true
-scheduler.workspace = true
 sync.workspace = true
 utils.workspace = true
 proxy.workspace = true

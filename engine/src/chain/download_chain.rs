@@ -1,4 +1,5 @@
 use crate::chain::ConfigProcessor;
+use log::info;
 use crate::events::EventDownload::{
     DownloadCompleted, DownloadFailed, DownloadRetry, DownloadStarted, DownloaderCreate,
 };
@@ -60,7 +61,7 @@ for DownloadProcessor
         input: (Request, Option<ModuleConfig>),
         context: ProcessorContext,
     ) -> ProcessorResult<(Option<Response>, Option<ModuleConfig>)> {
-        debug!(
+        info!(
             "[DownloadProcessor] begin process: request_id={} module_id={} task_id={} retry_count={}",
             input.0.id,
             input.0.module_id(),
@@ -105,7 +106,7 @@ for DownloadProcessor
 
             match task_decision_result {
                 Ok(ErrorDecision::Continue) => {
-                    debug!("[DownloadProcessor] task check passed: task_id={}", input.0.task_id());
+                    // [LOG_OPTIMIZATION] debug!("[DownloadProcessor] task check passed: task_id={}", input.0.task_id());
                 }
                 Ok(ErrorDecision::Terminate(reason)) => {
                     error!(
@@ -159,7 +160,7 @@ for DownloadProcessor
 
             match decision_result {
                 Ok(ErrorDecision::Continue) => {
-                    debug!("[DownloadProcessor] module check passed: module_id={}", input.0.module_id());
+                    // [LOG_OPTIMIZATION] debug!("[DownloadProcessor] module check passed: module_id={}", input.0.module_id());
                 }
                 Ok(ErrorDecision::Terminate(reason)) => {
                     error!(
@@ -187,7 +188,7 @@ for DownloadProcessor
                 _ => {}
             }
         } else {
-            debug!("[DownloadProcessor] skipping task/module checks for retry: request_id={}", input.0.id);
+            // [LOG_OPTIMIZATION] debug!("[DownloadProcessor] skipping task/module checks for retry: request_id={}", input.0.id);
         }
 
         let download_config =
@@ -196,7 +197,7 @@ for DownloadProcessor
             .downloader_manager
             .get_downloader(&input.0, download_config)
             .await;
-        debug!("[DownloadProcessor] acquired downloader, start download: request_id={}", input.0.id);
+        info!("[DownloadProcessor] acquired downloader, start download: request_id={}", input.0.id);
 
         let module_id = input.0.module_id();
         let task_id = input.0.task_id();
@@ -204,13 +205,14 @@ for DownloadProcessor
 
         match downloader.download(input.0).await {
             Ok(response) => {
-                debug!(
-                    "[DownloadProcessor] download success: status={} content_len={} module_id={}",
-                    response.status_code,
-                    response.content.len(),
-                    response.module_id()
-                );
-                debug!(
+                // [LOG_OPTIMIZATION]
+                // debug!(
+                //     "[DownloadProcessor] download success: status={} content_len={} module_id={}",
+                //     response.status_code,
+                //     response.content.len(),
+                //     response.module_id()
+                // );
+                info!(
                     "[DownloadProcessor] download finished: request_id={}",
                     request_id
                 );
@@ -369,12 +371,12 @@ impl ProcessorTrait<Option<Response>, ()> for ResponsePublishProcessor {
             None => return ProcessorResult::Success(()),
         };
         let id = input.id.to_string();
-        debug!(
+        info!(
             "[ResponsePublish] publishing response: request_id={} module_id={}",
             input.id,
             input.module_id()
         );
-        debug!("[ResponsePublish] start queue send: request_id={}", id);
+        // [LOG_OPTIMIZATION] debug!("[ResponsePublish] start queue send: request_id={}", id);
         if let Err(e) = self
             .queue_manager
             .get_response_push_channel()
@@ -390,6 +392,7 @@ impl ProcessorTrait<Option<Response>, ()> for ResponsePublishProcessor {
             );
         }
         debug!("[ResponsePublish] end queue send: request_id={}", id);
+        // [LOG_OPTIMIZATION] debug!("[ResponsePublish] end queue send: request_id={}", id);
         ProcessorResult::Success(())
     }
     async fn pre_process(
@@ -398,17 +401,19 @@ impl ProcessorTrait<Option<Response>, ()> for ResponsePublishProcessor {
         _context: &ProcessorContext,
     ) -> Result<()> {
         if let Some(resp) = _input {
-            debug!(
-                "[ResponsePublish] lock module before publish: module_id={} request_id={}",
-                resp.module_id(),
-                resp.id
-            );
+            // [LOG_OPTIMIZATION]
+            // debug!(
+            //     "[ResponsePublish] lock module before publish: module_id={} request_id={}",
+            //     resp.module_id(),
+            //     resp.id
+            // );
             self.state.status_tracker.lock_module(&resp.module_id()).await;
-            debug!(
-                "[ResponsePublish] lock module acquired: module_id={} request_id={}",
-                resp.module_id(),
-                resp.id
-            );
+            // [LOG_OPTIMIZATION]
+            // debug!(
+            //     "[ResponsePublish] lock module acquired: module_id={} request_id={}",
+            //     resp.module_id(),
+            //     resp.id
+            // );
         }
         Ok(())
     }

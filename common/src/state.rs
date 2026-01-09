@@ -3,14 +3,14 @@ use utils::connector::{create_redis_pool, postgres_connection};
 
 use crate::model::config::Config;
 
+use crate::status_tracker::{ErrorTrackerConfig, StatusTracker};
+use cacheable::CacheService;
 use log::info;
 use std::sync::Arc;
 use std::time;
 use tokio::sync::RwLock;
-use cacheable::CacheService;
 use utils::distributed_rate_limit::{DistributedSlidingWindowRateLimiter, RateLimitConfig};
 use utils::redis_lock::DistributedLockManager;
-use crate::status_tracker::{StatusTracker, ErrorTrackerConfig};
 
 #[derive(Clone)]
 pub struct State {
@@ -39,22 +39,20 @@ impl State {
             .expect("Failed to connect to postgres"),
         );
         info!("PostgresSQL database connected successfully");
-        let cache_pool = config.redis.as_ref().map(|redis| {
-            Arc::new(
-                create_redis_pool(
-                    &redis.redis_host,
-                    redis.redis_port,
-                    redis.redis_db,
-                    &redis.redis_username,
-                    &redis.redis_password,
-                )
-                .expect("Failed to connect cache"),
+        let cache_pool = config.cache.redis.as_ref().map(|redis| {
+            create_redis_pool(
+                &redis.redis_host,
+                redis.redis_port,
+                redis.redis_db,
+                &redis.redis_username,
+                &redis.redis_password,
             )
+            .expect("Failed to connect cache")
         });
         {
             if let Some(pool) = cache_pool.as_ref() {
                 let mut cnn = pool.get().await.expect("Failed to get cache connection");
-                let _pong: String =deadpool_redis::redis::cmd("PING")
+                let _pong: String = deadpool_redis::redis::cmd("PING")
                     .query_async(&mut *cnn)
                     .await
                     .expect("Failed to ping");
@@ -67,18 +65,18 @@ impl State {
             }
         }
         info!("cache pool connect successfully");
-        let cookie_pool = Arc::new(
+        let cookie_pool = config.cookie.as_ref().map(|redis| {
             create_redis_pool(
-                &config.cache.redis.redis_host,
-                config.cache.redis.redis_port,
-                config.cache.redis.redis_db,
-                &config.cache.redis.redis_username,
-                &config.cache.redis.redis_password,
+                &redis.redis_host,
+                redis.redis_port,
+                redis.redis_db,
+                &redis.redis_username,
+                &redis.redis_password,
             )
-            .expect("Failed to connect cookie"),
-        );
+                .expect("Failed to connect cache")
+        });
         info!("cookie pool connect successfully");
-        let locker_pool = config.redis.as_ref().map(|x| {
+        let locker_pool = config.cache.redis.as_ref().map(|x| {
             Arc::new(
                 create_redis_pool(
                     &x.redis_host,
@@ -92,7 +90,7 @@ impl State {
         });
 
         info!("locker pool connect successfully");
-        let limit_pool = config.redis.clone().map(|redis| {
+        let limit_pool = config.cache.redis.as_ref().map(|redis| {
             Arc::new(
                 create_redis_pool(
                     &redis.redis_host,
@@ -122,12 +120,27 @@ impl State {
             },
         ));
 
-        let cache_service = Arc::new(CacheService::new(None,format!("{}:cache",config.name),Some(time::Duration::from_secs(60))));
-        let cookie_service = Some(Arc::new(CacheService::new(
-            None,
-            format!("{}:cookie", config.name),
-            Some(time::Duration::from_secs(60))
-        )));
+        let cache_service = if let Some(pool) = cache_pool {
+            Arc::new(CacheService::new(
+                Some(pool),
+                format!("{}:cache", config.name),
+                Some(time::Duration::from_secs(60)),
+            ))
+        } else {
+            Arc::new(CacheService::new(
+                None,
+                format!("{}:cache", config.name),
+                Some(time::Duration::from_secs(60)),
+            ))
+        };
+
+        let cookie_service = cookie_pool.map(|pool|
+            Arc::new(CacheService::new(
+                Some(pool),
+                format!("{}:cookie", config.name),
+                Some(time::Duration::from_secs(60)),
+            ))
+        );
         info!("Redis connection pool created successfully");
 
         // Use the same Redis-backed SyncService for global state operations
@@ -159,7 +172,7 @@ impl State {
             cookie_service,
             locker,
             limiter,
-            status_tracker: error_tracker
+            status_tracker: error_tracker,
         }
     }
 }

@@ -8,7 +8,6 @@ pub mod common { pub use ::common::*; }
 pub mod downloader { pub use ::downloader::*; }
 pub mod engine { pub use ::engine::*; }
 pub mod queue { pub use ::queue::*; }
-pub mod scheduler { pub use ::scheduler::*; }
 pub mod sync { pub use ::sync::*; }
 pub mod utils { pub use ::utils::*; }
 pub mod proxy { pub use ::proxy::*; }

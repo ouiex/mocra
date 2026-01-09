@@ -1,4 +1,6 @@
+#![allow(unused)]
 use common::status_tracker::ErrorDecision;
+use log::info;
 use crate::events::EventConfigLoad::{
     ConfigLoadCompleted, ConfigLoadFailed, ConfigLoadPrepared, ConfigLoadRetry, ConfigLoadStarted,
 };
@@ -744,14 +746,12 @@ impl ProcessorTrait<Module, SyncBoxStream<'static, Request>> for TaskProcessor {
         };
         // TaskModel
         // ParserTaskModel.meta=>Task.metadata=>Context.meta=>Module.generate=>ModuleTrait.generate
-        debug!("[TaskProcessor] start generate: module_id={}", input.id());
+        // [LOG_OPTIMIZATION] debug!("[TaskProcessor] start generate: module_id={}", input.id());
         let requests: SyncBoxStream<'static, Request> = match input.generate(meta, login_info).await {
             Ok(stream) => {
-                debug!(
-                    "[TaskProcessor] generate completed (stream started)"
-                );
+                // [LOG_OPTIMIZATION] debug!("[TaskProcessor] generate completed (stream started)");
                 let stream = stream.map(|req| {
-                    debug!("[TaskProcessor] generate returned: request_id={}", req.id);
+                    info!("[TaskProcessor] generate returned: request_id={}", req.id);
                     req
                 });
                 Box::pin(stream)
@@ -825,7 +825,7 @@ impl ProcessorTrait<Request, ()> for RequestPublish {
     }
 
     async fn process(&self, input: Request, context: ProcessorContext) -> ProcessorResult<()> {
-        debug!(
+        info!(
             "[RequestPublish] publish request: request_id={} module_id={}",
             input.id,
             input.module_id()
@@ -844,14 +844,14 @@ impl ProcessorTrait<Request, ()> for RequestPublish {
         
         // Use "request" as field name to match ModuleProcessorWithChain::request_field()
 
-        debug!("[RequestPublish] start persist: request_id={}", input.id);
+        // [LOG_OPTIMIZATION] debug!("[RequestPublish] start persist: request_id={}", input.id);
         if let Err(e) = input.send(&id, &self.state.cache_service).await {
              warn!("[RequestPublish] persist failed: {e}");
              return ProcessorResult::RetryableFailure(context.retry_policy.unwrap_or_default());
         }
-        debug!("[RequestPublish] end persist: request_id={}", input.id);
+        // [LOG_OPTIMIZATION] debug!("[RequestPublish] end persist: request_id={}", input.id);
 
-        debug!("[RequestPublish] start queue send: request_id={}", input.id);
+        // [LOG_OPTIMIZATION] debug!("[RequestPublish] start queue send: request_id={}", input.id);
         if let Err(e) = self
             .queue_manager
             .get_request_push_channel()
@@ -866,7 +866,7 @@ impl ProcessorTrait<Request, ()> for RequestPublish {
                     .unwrap_or(RetryPolicy::default().with_reason(e.to_string())),
             );
         }
-        debug!("[RequestPublish] end queue send: request_id={}", id); // id is string here
+        // [LOG_OPTIMIZATION] debug!("[RequestPublish] end queue send: request_id={}", id); // id is string here
         ProcessorResult::Success(())
     }
     async fn handle_error(
@@ -1236,7 +1236,7 @@ pub async fn create_task_model_chain(
         )
         .then_one_shot(FlattenStreamProcessor::new())
         .then_one_shot(StreamLoggerProcessor::new("AfterFlatten").with_logger(|req: &Request| {
-            debug!(
+            info!(
                 "[FlattenStreamProcessor] yielding request: request_id={}",
                 req.id
             );

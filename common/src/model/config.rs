@@ -42,7 +42,7 @@ pub struct SyncConfig {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct CacheConfig {
     pub ttl: u64,
-    pub redis: RedisConfig,
+    pub redis: Option<RedisConfig>,
 }
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct CrawlerConfig {
@@ -75,7 +75,7 @@ pub struct Config {
     pub download_config: DownloadConfig,
     pub cache: CacheConfig,
     pub crawler: CrawlerConfig,
-    pub redis: Option<RedisConfig>,
+    pub cookie: Option<RedisConfig>,
     pub channel_config: ChannelConfig,
     pub api: Option<Api>,
 }

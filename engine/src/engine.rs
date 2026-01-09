@@ -172,7 +172,7 @@ impl Engine {
 
         // 如果配置了Redis，注册Redis事件处理器
         let config = self.state.config.read().await;
-        if let Some(redis_config) = &config.redis
+        if let Some(redis_config) = &config.cookie
             && let Some(pool) = create_redis_pool(&redis_config.redis_host,
                 redis_config.redis_port,
                 redis_config.redis_db,

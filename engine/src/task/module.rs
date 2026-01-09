@@ -124,7 +124,7 @@ impl Module {
                 else {
                     request.downloader = "request_downloader".to_string();
                 }
-                log::debug!("[Module] request prepared: request_id={}", request.id);
+                log::info!("[Module] request prepared: request_id={}", request.id);
                 request
             });
         Ok(Box::pin(stream))
@@ -170,7 +170,7 @@ impl Module {
 
         // If we've reached the last step and there's no further task to advance,
         // trigger the module-level post_process hook.
-        let total_steps = self.processor.get_execution_status().await?.total_steps;
+        let total_steps = self.processor.get_total_steps().await;
         let is_last_step = current_step + 1 >= total_steps && total_steps > 0;
         let no_next_task = data.parser_task.is_none();
         if is_last_step && no_next_task {

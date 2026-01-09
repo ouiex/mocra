@@ -16,7 +16,7 @@ use common::model::message::{ErrorTaskModel, TaskModel};
 use common::model::{ModuleConfig, Response};
 use common::state::State;
 
-use log::{debug, error, warn};
+use log::{debug, error, info, warn};
 use queue::QueueManager;
 use polars::polars_utils::parma::raw::Key;
 use common::processors::processor::{
@@ -44,7 +44,7 @@ impl ProcessorTrait<Response, (Response, Arc<Module>)> for ResponseModuleProcess
         input: Response,
         context: ProcessorContext,
     ) -> ProcessorResult<(Response, Arc<Module>)> {
-        debug!(
+        info!(
             "[ResponseModuleProcessor] start: request_id={} module_id={}",
             input.id,
             input.module_id()
@@ -59,10 +59,7 @@ impl ProcessorTrait<Response, (Response, Arc<Module>)> for ResponseModuleProcess
             .await
         {
             Ok(ErrorDecision::Continue) => {
-                debug!(
-                    "[ResponseModuleProcessor] task check passed: task_id={}",
-                    input.task_id()
-                );
+                // [LOG_OPTIMIZATION] debug!("[ResponseModuleProcessor] task check passed: task_id={}", input.task_id());
             }
             Ok(ErrorDecision::Terminate(reason)) => {
                 error!(
@@ -96,10 +93,7 @@ impl ProcessorTrait<Response, (Response, Arc<Module>)> for ResponseModuleProcess
             .await
         {
             Ok(ErrorDecision::Continue) => {
-                debug!(
-                    "[ResponseModuleProcessor] module check passed: module_id={}",
-                    input.module_id()
-                );
+                // [LOG_OPTIMIZATION] debug!("[ResponseModuleProcessor] module check passed: module_id={}", input.module_id());
             }
             Ok(ErrorDecision::Terminate(reason)) => {
                 error!(
@@ -237,7 +231,7 @@ impl ProcessorTrait<(Response, Arc<Module>), Vec<Data>> for ResponseParserProces
         input: (Response, Arc<Module>),
         context: ProcessorContext,
     ) -> ProcessorResult<Vec<Data>> {
-        debug!(
+        info!(
             "[ResponseParserProcessor] start parse: request_id={} module_id={}",
             input.0.id,
             input.0.module_id()
@@ -258,7 +252,7 @@ impl ProcessorTrait<(Response, Arc<Module>), Vec<Data>> for ResponseParserProces
         let data = module.parser(input.0.clone(), config).await;
         let mut data = match data {
             Ok(d) => {
-                debug!(
+                info!(
                     "[ResponseParserProcessor] parser returned: request_id={} data_len={}",
                     request_id,
                     d.data.len()
@@ -538,7 +532,7 @@ impl ProcessorTrait<Data, ()> for DataStoreProcessor {
     }
     /// 此阶段使用RetryableFailure来触发重试机制,并使用retry_policy的meta字段来传递一些重试的参数，供以后使用重试功能作参考
     async fn process(&self, input: Data, context: ProcessorContext) -> ProcessorResult<()> {
-        debug!(
+        info!(
             "[DataStoreProcessor] start store: request_id={} account={} platform={} module={} size={}",
             input.request_id,
             input.account,
@@ -574,7 +568,7 @@ impl ProcessorTrait<Data, ()> for DataStoreProcessor {
                 .await
         };
         if res.is_empty() {
-            debug!(
+            info!(
                 "[DataStoreProcessor] store success, request_id={}",
                 request_id
             );

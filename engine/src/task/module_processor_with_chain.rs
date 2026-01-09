@@ -1,3 +1,4 @@
+#![allow(unused)]
 // 模块链式处理器（无全局状态机版本）
 // 设计要点：
 // - 不维护全局 step 索引，所有上下文通过 Request/Response 自带的 ExecutionMark 传递（包含 module_id/step_idx）。
@@ -11,9 +12,10 @@ use common::model::ExecutionMark;
 use common::interface::module::{ModuleNodeTrait, SyncBoxStream};
 use common::model::{ ModuleConfig, Request, Response};
 use errors::{RequestError, Result};
-use log::{debug, warn};
+use log::{debug, info, warn};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock;
 use uuid::Uuid;
@@ -101,6 +103,7 @@ pub struct ModuleProcessorWithChain {
     run_id: Uuid,
     ttl: u64,
     stop: Arc<RwLock<bool>>,
+    last_stop_check: Arc<AtomicU64>,
 }
 
 impl ModuleProcessorWithChain {
@@ -116,7 +119,8 @@ impl ModuleProcessorWithChain {
             steps: Arc::new(RwLock::new(Vec::new())),
             run_id,
             ttl,
-            stop:Arc::new(RwLock::new(false)),
+            stop: Arc::new(RwLock::new(false)),
+            last_stop_check: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -249,6 +253,10 @@ impl ModuleProcessorWithChain {
         Ok(None)
     }
 
+    pub async fn get_total_steps(&self) -> usize {
+        self.steps.read().await.len()
+    }
+
     /// 获取当前执行状态（用于调试和监控）
     pub async fn get_execution_status(&self) -> Result<ExecutionStatus> {
         let steps_count = self.steps.read().await.len();
@@ -269,54 +277,47 @@ impl ModuleProcessorWithChain {
         let ns = self.cache.namespace();
 
         // 1. AdvanceGate: format {ns}:chain_advance:run:{run}:module:{mod}:step:{step}
-        let adv_keys = AdvanceGate::scan(&format!("{}*", id_base), &self.cache).await
-            .map_err(|e| RequestError::BuildFailed(e.into()))?;
-        
-        let adv_field = AdvanceGate::field();
-        let adv_field_str = adv_field.as_ref();
-        let adv_prefix = format!("{}:{}:", ns, adv_field_str);
-
-        for key in adv_keys {
-            if let Some(id) = key.strip_prefix(&adv_prefix) {
-                // id: run:...:step:123
-                if let Some(pos) = id.rfind(":step:") {
-                    if let Ok(step_idx) = id[pos+6..].parse::<usize>() {
-                         if let Ok(Some(val)) = AdvanceGate::sync(id, &self.cache).await {
-                             gates.push(GateInfo {
-                                 gate_type: "advance".to_string(),
-                                 step_idx: Some(step_idx),
-                                 field_name: adv_field_str.to_string(),
-                                 value: serde_json::to_value(val.0).unwrap_or(serde_json::Value::Null),
-                             });
-                         }
+        if let Ok(adv_keys) = AdvanceGate::scan(&format!("{}*", id_base), &self.cache).await {
+            let adv_field = AdvanceGate::field();
+            let adv_prefix = format!("{}:{}:", ns, adv_field.as_ref());
+    
+            for key in adv_keys {
+                if let Some(id) = key.strip_prefix(&adv_prefix) {
+                    if let Some(pos) = id.rfind(":step:") {
+                        if let Ok(step_idx) = id[pos+6..].parse::<usize>() {
+                            // OPTIMIZATION: Assume existence means true, skip individual GETs
+                            gates.push(GateInfo {
+                                gate_type: "advance".to_string(),
+                                step_idx: Some(step_idx),
+                                field_name: adv_field.as_ref().to_string(),
+                                value: serde_json::Value::Bool(true),
+                            });
+                        }
                     }
                 }
             }
         }
 
         // 2. FallbackGate: format {ns}:chain_fallback:run:{run}:module:{mod}:step:{step}:prefix:{uuid}
-        let fb_keys = FallbackGate::scan(&format!("{}*", id_base), &self.cache).await
-            .map_err(|e| RequestError::BuildFailed(e.into()))?;
-
-        let fb_field = FallbackGate::field();
-        let fb_field_str = fb_field.as_ref();
-        let fb_prefix = format!("{}:{}:", ns, fb_field_str);
-
-        for key in fb_keys {
-            if let Some(id) = key.strip_prefix(&fb_prefix) {
-                 if let Some(step_pos) = id.find(":step:") {
-                    let rest = &id[step_pos+6..];
-                    if let Some(prefix_pos) = rest.find(":prefix:") {
-                        let step_str = &rest[..prefix_pos];
-                        if let Ok(step_idx) = step_str.parse::<usize>() {
-                            if let Ok(Some(val)) = FallbackGate::sync(id, &self.cache).await {
-                                 gates.push(GateInfo {
-                                     gate_type: "fallback".to_string(),
-                                     step_idx: Some(step_idx),
-                                     field_name: fb_field_str.to_string(),
-                                     value: serde_json::to_value(val.0).unwrap_or(serde_json::Value::Null),
-                                 });
-                             }
+        if let Ok(fb_keys) = FallbackGate::scan(&format!("{}*", id_base), &self.cache).await {
+            let fb_field = FallbackGate::field();
+            let fb_prefix = format!("{}:{}:", ns, fb_field.as_ref());
+    
+            for key in fb_keys {
+                if let Some(id) = key.strip_prefix(&fb_prefix) {
+                     if let Some(step_pos) = id.find(":step:") {
+                        let rest = &id[step_pos+6..];
+                        if let Some(prefix_pos) = rest.find(":prefix:") {
+                            let step_str = &rest[..prefix_pos];
+                            if let Ok(step_idx) = step_str.parse::<usize>() {
+                                // OPTIMIZATION: Assume existence means true
+                                gates.push(GateInfo {
+                                    gate_type: "fallback".to_string(),
+                                    step_idx: Some(step_idx),
+                                    field_name: fb_field.as_ref().to_string(),
+                                    value: serde_json::Value::Bool(true),
+                                });
+                            }
                         }
                     }
                 }
@@ -562,7 +563,7 @@ impl ModuleProcessorWithChain {
                         req.id = Uuid::now_v7();
                     }
                     
-                    debug!(
+                    info!(
                         "[chain] module={} run={} execute_request_impl: generated request id={} step={} prefix={}",
                         module_id,
                         run_id,
@@ -815,6 +816,14 @@ impl ModuleProcessorWithChain {
             return Ok(true);
         }
 
+        // Rate limit Redis checks (e.g., every 1 seconds) to avoid I/O in hot path
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        let last_check = self.last_stop_check.load(Ordering::Relaxed);
+        
+        if now < last_check + 1 {
+            return Ok(false);
+        }
+
         // Check distributed state
         let id_str = self.advance_key();
         if let Ok(Some(signal)) = StopSignal::sync(&id_str, &self.cache).await {
@@ -824,6 +833,9 @@ impl ModuleProcessorWithChain {
                 return Ok(true);
             }
         }
+        
+        // Update last check time
+        self.last_stop_check.store(now, Ordering::Relaxed);
         Ok(false)
     }
 

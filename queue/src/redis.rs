@@ -102,11 +102,11 @@ impl MqBackend for RedisQueue {
             }
 
             loop {
-                // XREADGROUP GROUP group consumer BLOCK 0 COUNT 10 STREAMS topic >
+                // XREADGROUP GROUP group consumer BLOCK 0 COUNT 100 STREAMS topic >
                 let opts = redis::streams::StreamReadOptions::default()
                     .group(&group_id, &consumer_name)
                     .block(0)
-                    .count(10);
+                    .count(100);
 
                 let result: redis::RedisResult<redis::streams::StreamReadReply> =
                     conn.xread_options(&[&topic], &[">"], &opts).await;

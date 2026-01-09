@@ -670,7 +670,9 @@ pub enum CacheError {
     #[error("Service not initialized")]
     NotInitialized,
     #[error("NotFound")]
-    NotFound
+    NotFound,
+    #[error("IO error: {0}")]
+    Io(#[from] std::io::Error),
 }
 
 // 便利函数，用于创建常见的错误类型

@@ -8,6 +8,10 @@ use std::time::{Duration, Instant};
 use deadpool_redis::redis::AsyncCommands;
 use serde_json;
 use serde::{Serialize, Deserialize};
+use flate2::read::GzDecoder;
+use flate2::write::GzEncoder;
+use flate2::Compression;
+use std::io::prelude::*;
 
 
 #[async_trait::async_trait]
@@ -86,6 +90,9 @@ impl RedisBackend {
     }
 }
 
+
+const COMPRESSION_THRESHOLD: usize = 1024;
+
 #[async_trait::async_trait]
 impl CacheBackend for RedisBackend {
     async fn get(&self, key: &str) -> Result<Option<Vec<u8>>, CacheError> {
@@ -95,10 +102,30 @@ impl CacheBackend for RedisBackend {
             .await
             .map_err(|e| CacheError::Pool(e.to_string()))?;
         let result: Option<Vec<u8>> = conn.get(key).await.map_err(CacheError::Redis)?;
-        Ok(result)
+        
+        if let Some(bytes) = result {
+             // Check magic header for Gzip (0x1f, 0x8b)
+             if bytes.len() > 2 && bytes[0] == 0x1f && bytes[1] == 0x8b {
+                 let mut decoder = GzDecoder::new(&bytes[..]);
+                 let mut s = Vec::new();
+                 if decoder.read_to_end(&mut s).is_ok() {
+                     return Ok(Some(s));
+                 }
+             }
+             return Ok(Some(bytes));
+        }
+        Ok(None)
     }
 
     async fn set(&self, key: &str, value: &[u8], ttl: Option<Duration>) -> Result<(), CacheError> {
+        let final_value = if value.len() > COMPRESSION_THRESHOLD {
+            let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
+            encoder.write_all(value)?;
+            encoder.finish()?
+        } else {
+            value.to_vec()
+        };
+
         let mut conn = self
             .pool
             .get()
@@ -106,11 +133,11 @@ impl CacheBackend for RedisBackend {
             .map_err(|e| CacheError::Pool(e.to_string()))?;
         if let Some(duration) = ttl {
             let _: () = conn
-                .set_ex(key, value, duration.as_secs())
+                .set_ex(key, final_value, duration.as_secs())
                 .await
                 .map_err(CacheError::Redis)?;
         } else {
-            let _: () = conn.set(key, value).await.map_err(CacheError::Redis)?;
+            let _: () = conn.set(key, final_value).await.map_err(CacheError::Redis)?;
         }
         Ok(())
     }
@@ -135,7 +162,7 @@ impl CacheBackend for RedisBackend {
         // Use scan_match to get an async iterator
         let mut iter: deadpool_redis::redis::AsyncIter<String> = conn.scan_match(pattern).await.map_err(CacheError::Redis)?;
         while let Some(key) = iter.next_item().await {
-            keys.push(key);
+            keys.push(key.map_err(CacheError::Redis)?);
         }
         Ok(keys)
     }
@@ -151,7 +178,7 @@ where
         // Construct key: namespace:cache:field
         let key = Self::cache_id(id,sync);
 
-        let content = serde_json::to_vec(&id)?;
+        let content = serde_json::to_vec(self)?;
 
         // Use default_ttl from CacheService
         sync.backend.set(&key, &content, sync.default_ttl).await?;

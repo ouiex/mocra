@@ -5,7 +5,7 @@ use common::model::message::{ErrorTaskModel, ParserTaskModel, TaskModel};
 use common::model::{Request, Response};
 use log::{debug, error};
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Semaphore};
 use tokio::sync::mpsc::{Receiver, Sender};
 use utils::logger::LogModel;
 
@@ -179,22 +179,48 @@ impl QueueManager {
         T: serde::Serialize + Send + 'static + Identifiable,
     {
         let topic = topic.to_string();
+        // Concurrency limit for publishing
+        let semaphore = Arc::new(Semaphore::new(100));
+
         tokio::spawn(async move {
             let mut rx = receiver.lock().await;
             while let Some(item) = rx.recv().await {
                 let id = item.get_id();
-                debug!(
+                // [LOG_OPTIMIZATION] Upgraded to INFO for performance analysis
+                log::info!(
                     "[QueueManager] forward_channel received: topic={} id={}",
                     topic, id
                 );
-                if let Ok(payload) = serde_json::to_vec(&item) {
-                    if let Err(e) = backend.publish(&topic, &payload).await {
-                        error!("Failed to publish to topic {}: {}", topic, e);
-                    } else {
-                        debug!(
-                            "[QueueManager] forward_channel published: topic={} id={}",
-                            topic, id
-                        );
+                
+                // Acquire permit to limit concurrency
+                let permit = match semaphore.clone().acquire_owned().await {
+                    Ok(p) => p,
+                    Err(_) => break, // Semaphore closed
+                };
+
+                let backend = backend.clone();
+                let topic = topic.clone();
+
+                match serde_json::to_vec(&item) {
+                    Ok(payload) => {
+                        tokio::spawn(async move {
+                            // Permit is moved into the closure and dropped when task completes
+                            let _permit = permit;
+                            
+                            if let Err(e) = backend.publish(&topic, &payload).await {
+                                error!("Failed to publish to topic {}: {}", topic, e);
+                            } else {
+                                // [LOG_OPTIMIZATION] Upgraded to INFO for performance analysis
+                                log::info!(
+                                    "[QueueManager] forward_channel published: topic={} id={}",
+                                    topic, id
+                                );
+                            }
+                        });
+                    }
+                    Err(e) => {
+                        error!("Failed to serialize item for topic {}: {}", topic, e);
+                        // Permit is dropped here immediately
                     }
                 }
             }

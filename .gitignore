@@ -2,3 +2,7 @@ target/
 .idea/
 cargo.lock
 *.log
+proxy.toml
+logs/
+data/
+.vscode/

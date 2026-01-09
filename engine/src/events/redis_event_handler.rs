@@ -79,7 +79,7 @@ impl RedisEventHandler {
                 .await?;
 
             while let Some(key) = iter.next_item().await {
-                keys.push(key);
+                keys.push(key?);
             }
         } // iter dropped here, releasing borrow on conn
 

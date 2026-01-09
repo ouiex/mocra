@@ -1,0 +1,93 @@
+name = "crawler_name"
+
+[api]
+port = 8899
+
+[db]
+database_host = "localhost"
+database_port = 5432
+database_user = "eason"
+database_password = "Qaz.123456"
+database_name = "crawler"
+database_schema = "base"
+
+
+
+[download_config]
+# downloader_manager会根据task_id对下载器进行分组，downloader_expire用于设置缓存的下载器存活时间，单位秒，避免内存泄漏
+# 如果一个下载器在downloader_expire时间内没有被使用，则会被删除
+downloader_expire = 3600
+timeout = 15
+# 单位：次/秒
+rate_limit = 1
+# 如果enable_cache为true，则会对下载请求进行缓存，缓存的key是task_id，目前缓存的内容为headers和cookies
+# 需要注意的是headers和cookie在downloader.download的阶段会被更新覆盖，如果在download_middleware更新了headers和cookies
+# 需要注意不能与缓存的内容冲突，否则会middleware设置的内容被覆盖
+# 缓存的默认时间由cache_ttl参数控制，单位秒，如果需要更改缓存时间，可以在数据库的config字段中设置
+enable_cache = false
+# 根据 module_id + run_id 判断是否为同一运行中的模块任务，如果 enable_locker 为 true，则该模块在同一 run 中的下载请求会被串行化，使用分布式锁进行控制
+enable_locker = false
+# 如果enable_rate_limit为true，则会对同一任务的下载请求进行限速控制，具体的限速规则由rate_limit参数决定
+enable_rate_limit = false
+cache_ttl = 60
+# wss的默认超时时间，单位秒
+wss_timeout = 60
+
+
+[cache]
+# config_prefix用于设置配置数据的前缀，默认是"crawler_config"，可以根据需要修改
+# 不同module的config需要分布式同步，使用redis进行存储，并使用sync trait进行同步
+ttl = 60
+
+[cache.redis]
+ redis_host = "127.0.0.1"
+redis_port = 6379
+redis_db = 0
+redis_password = "Qaz.123456"
+pool_size = 1000
+# cookie用于存储请求的cookie信息，使用redis进行存储，并使用cookie trait进行管理
+# 这里配置的是存储cookie的redis信息
+[cookie]
+redis_host = "127.0.0.1"
+redis_port = 6379
+redis_db = 1
+redis_password = "Qaz.123456"
+pool_size = 1000
+
+[crawler]
+# 单个请求最大重试次数
+request_max_retries = 3
+# 任务最大错误次数，超过该次数任务将被标记为失败
+task_max_errors = 100
+# 模块最大错误次数，超过该次数模块将被标记为失败
+module_max_errors = 10
+# module_locker_ttl用于设置模块级别的分布式锁存活时间，单位秒，避免死锁，用于确保同一模块同一时间只有一个实例在运行，使用module_id作为锁的key
+module_locker_ttl = 5
+# 代理配置文件路径
+proxy_path = "./proxy.toml"
+
+
+# 核心，redis消息队列的配置
+[channel_config]
+# 该参数用于设置消息在队列中的最小存活时间，单位小时，防止消息过早被删除，早于该时间的消息将会被删除
+minid_time = 12
+# 该参数用于设置每个通道的容量，超过该容量的消息将会被阻塞，直到有空间为止，内部消息队列的大小
+capacity = 200
+
+[channel_config.redis]
+ redis_host = "127.0.0.1"
+redis_port = 6379
+redis_db = 0
+redis_password = "Qaz.123456"
+
+[channel_config.compensator]
+ redis_host = "127.0.0.1"
+redis_port = 6379
+redis_db = 0
+redis_password = "Qaz.123456"
+
+#[channel_config.kafka]
+#brokers = "127.0.0.1:9095"
+
+
+

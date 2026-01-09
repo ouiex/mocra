@@ -1,3 +1,5 @@
+#![allow(unused)]
+
 /// 多层级错误跟踪系统
 ///
 /// 设计原则：
@@ -16,6 +18,7 @@
 /// - Task 达到阈值：停止整个 Task
 use cacheable::{CacheAble, CacheService};
 use errors::{CacheError, Error, Result};
+use log::warn;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -80,7 +83,6 @@ pub struct ErrorStats {
     pub is_module_terminated: bool,
 }
 
-
 impl CacheAble for ErrorStats {
     fn field() -> impl AsRef<str> {
         "error_stats".to_string()
@@ -105,9 +107,9 @@ impl ErrorStats {
     }
 }
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct ModuleLocker{
-    pub is_locker:bool,
-    pub ts:u64
+pub struct ModuleLocker {
+    pub is_locker: bool,
+    pub ts: u64,
 }
 impl CacheAble for ModuleLocker {
     fn field() -> impl AsRef<str> {
@@ -270,18 +272,30 @@ impl StatusTracker {
     /// - Module 和 Task 级别的错误不减少（因为确实发生过错误）
     pub async fn record_download_success(&self, request_id: &str) -> Result<()> {
         let request_key = format!("request:{}:download", request_id);
+        let cache_id = ErrorStats::cache_id(&request_key, &self.cache_service);
 
-        // 1. 记录成功
-        self.increment_success(&request_key).await?;
+        self.locker
+            .with_lock(&cache_id, 10, Duration::from_secs(10), async {
+                let mut stats = self.get_stats(&request_key).await.unwrap_or_default();
 
-        // 2. 重置连续错误计数
-        self.reset_consecutive_errors(&request_key).await?;
+                // 1. 记录成功
+                stats.success_count += 1;
 
-        // 3. 如果启用了衰减，减少 Request 级别的错误计数
-        if self.config.enable_success_decay {
-            self.decrement_error(&request_key, self.config.success_decay_amount)
-                .await?;
-        }
+                // 2. 重置连续错误
+                stats.consecutive_errors = 0;
+
+                // 3. 错误衰减
+                if self.config.enable_success_decay {
+                    stats.total_errors = stats
+                        .total_errors
+                        .saturating_sub(self.config.success_decay_amount);
+                }
+
+                stats.last_success_time = Some(Self::now());
+                self.save_stats_with_ttl(&request_key, &stats).await.ok();
+            })
+            .await
+            .ok();
 
         Ok(())
     }
@@ -342,11 +356,9 @@ impl StatusTracker {
             // Module 达到错误阈值，释放锁
             self.release_module_locker(module_id).await;
 
-            log::warn!(
+            warn!(
                 "[ErrorTracker] module parse errors exceeded threshold: module_id={} errors={}/{}",
-                module_id,
-                module_errors,
-                self.config.module_max_errors
+                module_id, module_errors, self.config.module_max_errors
             );
 
             return Ok(ErrorDecision::Terminate(format!(
@@ -365,13 +377,23 @@ impl StatusTracker {
     /// 记录解析成功
     pub async fn record_parse_success(&self, request_id: &str) -> Result<()> {
         let request_key = format!("request:{}:parse", request_id);
-        self.increment_success(&request_key).await?;
-        self.reset_consecutive_errors(&request_key).await?;
+        let cache_id = ErrorStats::cache_id(&request_key, &self.cache_service);
 
-        if self.config.enable_success_decay {
-            self.decrement_error(&request_key, self.config.success_decay_amount)
-                .await?;
-        }
+        self.locker
+            .with_lock(&cache_id, 10, Duration::from_secs(10), async {
+                let mut stats = self.get_stats(&request_key).await.unwrap_or_default();
+                stats.success_count += 1;
+                stats.consecutive_errors = 0;
+                if self.config.enable_success_decay {
+                    stats.total_errors = stats
+                        .total_errors
+                        .saturating_sub(self.config.success_decay_amount);
+                }
+                stats.last_success_time = Some(Self::now());
+                self.save_stats_with_ttl(&request_key, &stats).await.ok();
+            })
+            .await
+            .ok();
 
         Ok(())
     }
@@ -382,7 +404,7 @@ impl StatusTracker {
     pub async fn should_module_continue(&self, module_id: &str) -> Result<ErrorDecision> {
         // 先检查是否已被标记为终止
         if self.is_module_terminated(module_id).await? {
-            log::warn!(
+            warn!(
                 "[ErrorTracker] module already terminated: module_id={}",
                 module_id
             );
@@ -434,7 +456,6 @@ impl StatusTracker {
             Ok(ErrorDecision::Continue)
         }
     }
-    
 
     /// 检查 Task 是否应该继续
     pub async fn should_task_continue(&self, task_id: &str) -> Result<ErrorDecision> {
@@ -487,9 +508,27 @@ impl StatusTracker {
 
     /// 检查 Task 是否已被标记为终止
     pub async fn is_task_terminated(&self, task_id: &str) -> Result<bool> {
-
-        let  error_stats = self.get_stats(task_id).await?;
-        Ok(error_stats.is_task_terminated)
+        match self.get_stats(task_id).await {
+            Ok(stats) => Ok(stats.is_task_terminated),
+            Err(e) => {
+                // 如果是 NotFound，说明还没有任何错误记录，肯定未终止
+                if let Some(cache_err) = e
+                    .inner
+                    .source
+                    .as_ref()
+                    .and_then(|s| s.downcast_ref::<CacheError>())
+                {
+                    if matches!(cache_err, CacheError::NotFound) {
+                        return Ok(false);
+                    }
+                }
+                warn!(
+                    "[ErrorTracker] task terminated check failed: task_id={}, error: {}",
+                    task_id, e
+                );
+                Err(e)
+            }
+        }
     }
 
     /// 标记 Module 为已终止
@@ -509,8 +548,27 @@ impl StatusTracker {
 
     /// 检查 Module 是否已被标记为终止
     pub async fn is_module_terminated(&self, module_id: &str) -> Result<bool> {
-        let  error_stats = self.get_stats(module_id).await?;
-        Ok(error_stats.is_module_terminated)
+        match self.get_stats(module_id).await {
+            Ok(stats) => Ok(stats.is_module_terminated),
+            Err(e) => {
+                // 如果是 NotFound，说明还没有任何错误记录，肯定未终止
+                if let Some(cache_err) = e
+                    .inner
+                    .source
+                    .as_ref()
+                    .and_then(|s| s.downcast_ref::<CacheError>())
+                {
+                    if matches!(cache_err, CacheError::NotFound) {
+                        return Ok(false);
+                    }
+                }
+                warn!(
+                    "[ErrorTracker] module terminated check failed: module_id={}, error: {}",
+                    module_id, e
+                );
+                Err(e)
+            }
+        }
     }
 
     // === 私有辅助方法 ===
@@ -603,7 +661,10 @@ impl StatusTracker {
 
     /// 保存统计信息（带 TTL）
     async fn save_stats_with_ttl(&self, key: &str, stats: &ErrorStats) -> Result<()> {
-        stats.send(key, &self.cache_service).await.map_err(|e|Error::from(e))
+        stats
+            .send(key, &self.cache_service)
+            .await
+            .map_err(|e| Error::from(e))
     }
 
     /// 错误严重程度分类
@@ -631,33 +692,38 @@ impl StatusTracker {
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap()
             .as_secs();
-        let module_locker = ModuleLocker{
-            is_locker:true,
-            ts
+        let module_locker = ModuleLocker {
+            is_locker: true,
+            ts,
         };
-        module_locker.send(module_id, &self.cache_service).await.ok();
+        module_locker
+            .send(module_id, &self.cache_service)
+            .await
+            .ok();
     }
     pub async fn is_module_locker(&self, module_id: &str, ttl: u64) -> bool {
-        ModuleLocker::sync(module_id,&self.cache_service).await.ok().map_or(false,|locker|{
-            if let Some(locker) = locker && locker.is_locker{
-                let now = SystemTime::now()
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .unwrap()
-                .as_secs();
-                if now - locker.ts <= ttl{
-                    true
-                }else{
+        ModuleLocker::sync(module_id, &self.cache_service)
+            .await
+            .ok()
+            .map_or(false, |locker| {
+                if let Some(locker) = locker
+                    && locker.is_locker
+                {
+                    let now = SystemTime::now()
+                        .duration_since(SystemTime::UNIX_EPOCH)
+                        .unwrap()
+                        .as_secs();
+                    if now - locker.ts <= ttl { true } else { false }
+                } else {
                     false
                 }
-            }else{
-                false
-            }
-        })
+            })
     }
     pub async fn release_module_locker(&self, module_id: &str) {
-        ModuleLocker::delete(module_id,&self.cache_service).await.ok();
+        ModuleLocker::delete(module_id, &self.cache_service)
+            .await
+            .ok();
     }
-
 }
 
 #[cfg(test)]

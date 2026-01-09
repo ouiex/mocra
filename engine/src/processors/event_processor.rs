@@ -32,7 +32,7 @@ impl<P> EventAwareProcessor<P> {
         if let Some(event) = event {
             // 优化：直接在 info! 中使用 {:?}，利用 log 宏的惰性求值特性
             // 只有当日志级别允许时才会进行格式化，避免无谓的 format! 开销
-            info!("Publishing event: {:?}", event);
+            // info!("Publishing event: {:?}", event);
             
             if let Err(e) = self.event_bus.publish(event).await {
                 error!("Failed to publish event: {e}");

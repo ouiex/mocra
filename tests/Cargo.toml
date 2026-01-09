@@ -4,3 +4,33 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+common.workspace = true
+downloader.workspace = true
+engine.workspace = true
+queue.workspace = true
+sync.workspace = true
+utils.workspace = true
+proxy.workspace = true
+errors.workspace = true
+cacheable.workspace = true
+js-v8.workspace = true
+
+async-trait = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+polars = { version = "0.52", features = ["json", "lazy","pivot", "serde", "csv", "timezones", "strings","ipc","dtype-decimal"] }
+polars-lazy = { version = "0.52", features = ["pivot"] }
+polars-ops = { version = "0.52", features = ["pivot"] }
+chrono-tz = "0.10"
+chrono = { version = "0.4", features = ["serde"] }
+tokio = { version = "1", features = ["full"] }
+log = "0.4"
+urlencoding = "2"
+sea-orm = { version = "1", features = ["postgres-array", "runtime-tokio-native-tls", "sqlx-postgres"] }
+rand = "0.8"
+serde_urlencoded = "0.7"
+regex = "1"
+sha1 = "0.10"
+md5 = "0.8"
+uuid = { version = "1", features = ["v4"] }
+futures = "0.3"

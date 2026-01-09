@@ -54,9 +54,6 @@ pub mod queue {
     pub use ::queue::RedisCompensator;
     pub use ::queue::RedisQueue;
 }
-pub mod scheduler {
-    pub use ::scheduler::*;
-}
 pub mod sync {
     pub use ::sync::DistributedSync;
     pub use ::sync::KafkaBackend;
