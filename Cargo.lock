@@ -2420,15 +2420,21 @@ dependencies = [
 name = "mocra"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "cacheable",
  "common",
  "downloader",
  "engine",
  "errors",
  "js-v8",
+ "log",
+ "polars",
  "proxy",
  "queue",
+ "rand 0.9.2",
+ "sea-orm",
  "sync",
+ "tokio",
  "utils",
 ]
 
@@ -5114,7 +5120,7 @@ dependencies = [
  "polars-ops",
  "proxy",
  "queue",
- "rand 0.8.5",
+ "rand 0.9.2",
  "regex",
  "sea-orm",
  "serde",

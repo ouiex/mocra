@@ -16,15 +16,15 @@ struct SignData {
 pub struct JdszEncryptMiddleware;
 impl JdszEncryptMiddleware {
     fn params_sign(url: String, cookie: String, ua: String, referer: String) -> SignData {
-        let mut rng = rand::thread_rng();
-        let s_rand: u64 = rng.gen_range(0..1_000_000_000u64);
+        let mut rng = rand::rng();
+        let s_rand: u64 = rng.random_range(0..1_000_000_000u64);
         let p_ms: u128 = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_millis();
 
-        let bw: u32 = rng.gen_range(1000..=2000);
-        let bh: u32 = rng.gen_range(1000..=2000);
+        let bw: u32 = rng.random_range(1000..=2000);
+        let bh: u32 = rng.random_range(1000..=2000);
 
         let c = format!(
             "{}{}-{}-{}-{}-{}-{}-{}",

@@ -356,7 +356,8 @@ pub async fn init_logger(config: LoggerConfig) -> Result<(), Box<dyn std::error:
         }
         let file_path_prefix = file_path
             .file_name()
-            .unwrap_or_else(|| std::ffi::OsStr::new("app"));
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_else(|| "app".to_string());
         let file_appender = tracing_appender::rolling::Builder::new()
             .rotation(Rotation::DAILY)
             .filename_prefix(file_path_prefix)

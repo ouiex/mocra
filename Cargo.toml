@@ -37,6 +37,7 @@ reqwest_cookie_store = { version = "0.9", features = ["serde"] }
 v8 = "142"
 time = { version = "0.3", features = ["local-offset", "formatting", "parsing"] }
 polars = { version = "0.52.0", features = ["json", "lazy", "serde", "csv", "timezones", "strings", "ipc", "dtype-decimal"] }
+polars-lazy = { version = "0.52.0", features = ["pivot"] }
 polars-ops = { version = "0.52.0", features = ["pivot"] }
 chrono-tz = "0.10"
 bytes = { version = "1", features = ["serde"] }
@@ -52,6 +53,9 @@ urlencoding = "2"
 axum = { version = "0.8", features = ["json"] }
 dashmap = "6"
 futures-util = "0.3"
+rand = "0.9.2"
+serde_urlencoded = "0.7"
+sha1 = "0.10"
 tokio-tungstenite = { version = "0.28", features = ["native-tls"] }
 common = { path = "common" }
 downloader = { path = "downloader" }
@@ -75,6 +79,12 @@ proxy.workspace = true
 errors.workspace = true
 cacheable.workspace = true
 js-v8 = { workspace = true, optional = true }
+tokio = "1.49.0"
+async-trait = "0.1.89"
+log = "0.4.29"
+rand = "0.9.2"
+polars = "0.52.0"
+sea-orm = "1.1.19"
 
 [features]
 default = []

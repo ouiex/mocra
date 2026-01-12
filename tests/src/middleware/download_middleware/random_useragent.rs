@@ -1,8 +1,9 @@
 use async_trait::async_trait;
 use common::interface::DownloadMiddleware;
-use common::model::{Request, Response, ModuleConfig};
+use common::model::{ModuleConfig, Request, Response};
+use rand::prelude::IndexedRandom;
+use rand::Rng;
 use std::sync::Arc;
-use rand::{seq::SliceRandom, Rng};
 
 pub struct RandomUserAgentMiddleware {
     user_agent: Vec<String>,
@@ -23,17 +24,17 @@ impl RandomUserAgentMiddleware {
             "Macintosh; Intel Mac OS X 13_4_1",
             "Macintosh; Intel Mac OS X 14_0_1"];
 
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
 
         // For each OS token, generate several UA variants across browsers
         for os_tok in os_list.iter() {
             for _ in 0..20 {
-                let choice = rng.gen_range(0..3);
+                let choice = rng.random_range(0..3);
                 let ua = match choice {
                     0 => {
                         // Chrome-like UA
-                        let major = rng.gen_range(90..=120);
-                        let build = rng.gen_range(0..=5999);
+                        let major = rng.random_range(90..=120);
+                        let build = rng.random_range(0..=5999);
                         format!(
                             "Mozilla/5.0 ({}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{}.0.{}.0 Safari/537.36",
                             os_tok, major, build
@@ -41,10 +42,10 @@ impl RandomUserAgentMiddleware {
                     }
                     1 => {
                         // Edge UA includes Chrome token + Edg token
-                        let chrome_major = rng.gen_range(90..=140);
-                        let chrome_build = rng.gen_range(0..=5999);
-                        let edg_major = rng.gen_range(90..=140);
-                        let edg_build = rng.gen_range(0..=5999);
+                        let chrome_major = rng.random_range(90..=140);
+                        let chrome_build = rng.random_range(0..=5999);
+                        let edg_major = rng.random_range(90..=140);
+                        let edg_build = rng.random_range(0..=5999);
                         format!(
                             "Mozilla/5.0 ({}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{}.0.{}.0 Safari/537.36 Edg/{}.0.{}.0",
                             os_tok, chrome_major, chrome_build, edg_major, edg_build
@@ -52,8 +53,8 @@ impl RandomUserAgentMiddleware {
                     }
                     _ => {
                         // Firefox UA
-                        let major = rng.gen_range(80..=140);
-                        let minor = rng.gen_range(0..=9);
+                        let major = rng.random_range(80..=140);
+                        let minor = rng.random_range(0..=9);
                         format!(
                             "Mozilla/5.0 ({}) Gecko/20100101 Firefox/{}.{}",
                             os_tok, major, minor
@@ -68,10 +69,9 @@ impl RandomUserAgentMiddleware {
     }
 
     fn random_user_agent(&self) -> String {
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         // Safe fallback in case list is empty
-        self.user_agent
-            .choose(&mut rng)
+        self.user_agent.choose(&mut rng)
             .map(|s| s.to_string())
             .unwrap_or_else(|| "Mozilla/5.0".to_string())
     }

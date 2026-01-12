@@ -66,11 +66,11 @@ impl DouyinEncryptMiddleware {
         r[23] = b'_';
         r[14] = b'4';
 
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         let t = E.len();
         for i in 0..36 {
             if r[i] == 0 {
-                let o: usize = rng.gen_range(0..t);
+                let o: usize = rng.random_range(0..t);
                 r[i] = if i == 19 {
                     E[((o & 3) | 8) as usize]
                 } else {
@@ -102,8 +102,8 @@ impl DouyinEncryptMiddleware {
 
         // Equivalent to Python: str(random.random())[2:6]
         // Use a 4-digit zero-padded random number [0000-9999]
-        let mut rng = rand::thread_rng();
-        let four = rng.gen_range(0..10000);
+        let mut rng = rand::rng();
+        let four = rng.random_range(0..10000);
         let rand_part = format!("{:04}", four);
 
         let mut out = String::with_capacity(tail.len() + 4);
@@ -116,12 +116,12 @@ impl DouyinEncryptMiddleware {
         use rand::Rng;
         // baseStr from Python version
         const BASE: &[u8] = b"ABCDEFGHIGKLMNOPQRSTUVWXYZabcdefghigklmnopqrstuvwxyz0123456789=_-";
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         // default random length = 132
         let len = 184usize;
         let mut out = String::with_capacity(len);
         for _ in 0..len {
-            let idx = rng.gen_range(0..BASE.len());
+            let idx = rng.random_range(0..BASE.len());
             out.push(BASE[idx] as char);
         }
         out
