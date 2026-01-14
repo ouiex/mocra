@@ -6,7 +6,7 @@ use serde_json::Map;
 use std::sync::Arc;
 use uuid::Uuid;
 use futures::StreamExt;
-use common::interface::{ModuleTrait, SyncBoxStream};
+use common::interface::{DataMiddleware, DataStoreMiddleware, ModuleTrait, StoreTrait, SyncBoxStream};
 use common::model::entity::{AccountModel, PlatformModel};
 use common::model::login_info::LoginInfo;
 use common::model::{Cookies, Headers, ModuleConfig, Response,Request};
@@ -205,5 +205,40 @@ impl Serialize for Module {
         state.serialize_field("download_middleware", &self.download_middleware)?;
         state.serialize_field("module", &self.module.name())?;
         state.end()
+    }
+}
+
+
+pub struct ModuleEntity{
+    pub module_work:Arc<dyn ModuleTrait>,
+    pub download_middleware:Vec<Arc<dyn ModuleTrait>>,
+    pub data_middleware:Vec<Arc<dyn DataMiddleware>>,
+    pub store_middleware:Vec<Arc<dyn DataStoreMiddleware>>,
+}
+
+impl From<Arc<dyn ModuleTrait>> for ModuleEntity {
+    fn from(module: Arc<dyn ModuleTrait>) -> Self {
+        ModuleEntity {
+            module_work: module,
+            download_middleware: vec![],
+            data_middleware: vec![],
+            store_middleware: vec![],
+        }
+    }
+}
+impl ModuleEntity {
+    pub fn add_download_middleware(mut self, middleware: Arc<dyn ModuleTrait>)->Self {
+        self.download_middleware.push(middleware);
+        self
+    }
+
+    pub fn add_data_middleware(mut self, middleware: Arc<dyn DataMiddleware>) ->Self{
+        self.data_middleware.push(middleware);
+        self
+    }
+
+    pub fn add_store_middleware(mut self, middleware: Arc<dyn DataStoreMiddleware>)->Self {
+        self.store_middleware.push(middleware);
+        self
     }
 }

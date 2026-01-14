@@ -247,6 +247,7 @@ mod test {
     use common::interface::StoreTrait;
     use polars::prelude::*;
     use std::sync::Arc;
+    use sea_orm::sqlx::types::chrono;
     use utils::connector::postgres_connection;
 
     #[tokio::test]

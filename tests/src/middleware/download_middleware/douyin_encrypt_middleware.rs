@@ -72,7 +72,7 @@ impl DouyinEncryptMiddleware {
             if r[i] == 0 {
                 let o: usize = rng.random_range(0..t);
                 r[i] = if i == 19 {
-                    E[((o & 3) | 8) as usize]
+                    E[(o & 3) | 8]
                 } else {
                     E[o]
                 };

@@ -4,6 +4,8 @@ use tokio::fs::File;
 use tokio::io::AsyncWriteExt;
 use common::interface::DownloadMiddleware;
 use common::model::{Request, Response, ModuleConfig};
+use serde_json;
+
 pub struct BinaryStoreMiddleware;
 #[async_trait]
 impl DownloadMiddleware for BinaryStoreMiddleware {

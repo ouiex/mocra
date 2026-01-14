@@ -8,6 +8,7 @@ use polars::io::SerReader;
 use polars::io::ipc::IpcReader;
 use polars::prelude::SerWriter;
 use std::sync::Arc;
+use chrono::prelude::*;
 
 pub struct ToFileMiddleware;
 #[async_trait]
@@ -56,7 +57,7 @@ impl DataStoreMiddleware for ToFileMiddleware {
                 return Err(DataStoreError::InvalidData("Not DataFrame".to_string().into()).into());
             }
         };
-        let file_name = format!("{}_{}_{}.csv", table, data.request_id, chrono::Local::now().timestamp_millis());
+        let file_name = format!("{}_{}_{}.csv", table, data.request_id, Local::now().timestamp_millis());
         let file_path = out_dir.join(&file_name);
         let mut file = std::fs::File::create(&file_path)?;
         let writer = polars::prelude::CsvWriter::new(&mut file);
