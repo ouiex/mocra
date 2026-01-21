@@ -119,20 +119,26 @@ impl Engine {
         // Arc无法获取dyn Downloader的所有权，为了确保每个task_id拥有单独的Downloader实例，只能使用Box<RequestDownloader>
         // 使用dyn_clone解决Box<dyn Downloader>无法克隆的问题，已完成
         let downloader_manager = DownloaderManager::new(Arc::clone(&state));
-        let proxy_path = state.config.read().await.crawler.proxy_path.clone();
-        let proxy_config = fs::read_to_string(proxy_path).await.unwrap();
-        let proxy_manager = Arc::new(
-            ProxyManager::from_config(&proxy_config)
+        let proxy_manager = if let Some(path) = state.config.read().await.crawler.proxy_path.clone() {
+            let proxy_config = fs::read_to_string(path)
                 .await
-                .expect("Failed to create ProxyManager"),
-        );
+                .expect("Failed to read proxy config");
+            Some(Arc::new(
+                ProxyManager::from_config(&proxy_config)
+                    .await
+                    .expect("Failed to create ProxyManager"),
+            ))
+        } else {
+            None
+        };
+
         let middleware_manager = MiddlewareManager::new(state.clone());
 
         Self {
             queue_manager: Arc::new(queue_manager),
             downloader_manager: Arc::new(downloader_manager),
             task_manager,
-            proxy_manager: Some(proxy_manager),
+            proxy_manager,
             middleware_manager: Arc::new(middleware_manager),
             event_bus,
             state,
@@ -174,10 +180,10 @@ impl Engine {
         let config = self.state.config.read().await;
         if let Some(redis_config) = &config.cookie
             && let Some(pool) = create_redis_pool(&redis_config.redis_host,
-                redis_config.redis_port,
-                redis_config.redis_db,
-                &redis_config.redis_username,
-                &redis_config.redis_password)
+                                                  redis_config.redis_port,
+                                                  redis_config.redis_db,
+                                                  &redis_config.redis_username,
+                                                  &redis_config.redis_password)
         {
             let redis_handler = RedisEventHandler::new(
                 Arc::new(pool),
@@ -257,7 +263,7 @@ impl Engine {
                 self.event_bus.clone(),
                 self.state.clone(),
             )
-            .await,
+                .await,
         );
         let capacity = self.state.config.read().await.channel_config.capacity;
         let semaphore = Arc::new(tokio::sync::Semaphore::new(capacity));
@@ -312,7 +318,7 @@ impl Engine {
                 self.event_bus.clone(),
                 self.proxy_manager.clone(),
             )
-            .await,
+                .await,
         );
         let wss_download_chain = Arc::new(
             create_wss_download_chain(
@@ -324,7 +330,7 @@ impl Engine {
                 self.event_bus.clone(),
                 self.proxy_manager.clone(),
             )
-            .await,
+                .await,
         );
         let capacity = self.state.config.read().await.channel_config.capacity;
         let semaphore = Arc::new(tokio::sync::Semaphore::new(capacity));
@@ -384,7 +390,7 @@ impl Engine {
                 self.event_bus.clone(),
                 self.state.clone(),
             )
-            .await,
+                .await,
         );
         let capacity = self.state.config.read().await.channel_config.capacity;
         let semaphore = Arc::new(tokio::sync::Semaphore::new(capacity));
@@ -437,7 +443,7 @@ impl Engine {
                 self.event_bus.clone(),
                 self.state.clone(),
             )
-            .await,
+                .await,
         );
         let capacity = self.state.config.read().await.channel_config.capacity;
         let semaphore = Arc::new(tokio::sync::Semaphore::new(capacity));
@@ -490,7 +496,7 @@ impl Engine {
                 self.event_bus.clone(),
                 self.state.cache_service.clone(),
             )
-            .await,
+                .await,
         );
         let capacity = self.state.config.read().await.channel_config.capacity;
         let semaphore = Arc::new(tokio::sync::Semaphore::new(capacity));

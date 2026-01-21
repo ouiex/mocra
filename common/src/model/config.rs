@@ -50,7 +50,7 @@ pub struct CrawlerConfig {
     pub task_max_errors: usize,
     pub module_max_errors: usize,
     pub module_locker_ttl: u64,
-    pub proxy_path: String,
+    pub proxy_path: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
