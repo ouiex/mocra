@@ -91,5 +91,10 @@ impl TaskManager {
     pub async fn clear_factory_cache(&self) {
         self.factory.clear_cache().await;
     }
+    
+    pub async fn get_all_modules(&self) -> Vec<Arc<dyn ModuleTrait>> {
+        let assembler = self.module_assembler.read().await;
+        assembler.get_all_modules()
+    }
 
 }

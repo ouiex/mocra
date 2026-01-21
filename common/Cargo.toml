@@ -25,3 +25,4 @@ errors.workspace = true
 dyn-clone.workspace = true
 cacheable.workspace = true
 deadpool-redis.workspace = true
+cron = "0.15"

@@ -194,6 +194,10 @@ impl ModuleAssembler {
     pub fn get_module(&self, name: &str) -> Option<Arc<dyn ModuleTrait>> {
         self.modules.get(name).map(|x| x.module.clone())
     }
+    
+    pub fn get_all_modules(&self) -> Vec<Arc<dyn ModuleTrait>> {
+        self.modules.values().map(|x| x.module.clone()).collect()
+    }
 
 }
 

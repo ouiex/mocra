@@ -9,7 +9,7 @@ use utils::logger;
 use utils::logger::{set_log_sender, LogSender, LoggerConfig};
 
 async fn build_engine() -> Engine {
-    let config_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("config.toml");
+    let config_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("config.dev.toml");
     let state = Arc::new(State::new(config_path.to_str().unwrap()).await);
     println!("Config loaded from {}", config_path.display());
 

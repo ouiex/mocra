@@ -1,6 +1,7 @@
 pub mod config;
 pub mod context;
 pub mod cookies;
+pub mod cron_config;
 pub mod data;
 pub mod download_config;
 pub mod entity;
@@ -14,6 +15,7 @@ pub mod response;
 
 pub use context::ExecutionMark;
 pub use cookies::Cookies;
+pub use cron_config::{CronConfig, CronInterval};
 pub use headers::Headers;
 pub use model_config::ModuleConfig;
 pub use request::Request;

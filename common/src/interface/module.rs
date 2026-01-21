@@ -1,6 +1,6 @@
 #![allow(unused)]
 use crate::model::login_info::LoginInfo;
-use crate::model::{Cookies, ExecutionMark, Headers, ModuleConfig, Request, Response};
+use crate::model::{Cookies, CronConfig, ExecutionMark, Headers, ModuleConfig, Request, Response};
 // use crate::parser::ParserTrait;
 use crate::model::message::ParserData;
 use async_trait::async_trait;
@@ -54,6 +54,11 @@ pub trait ModuleTrait: Send + Sync {
     // 注意此时所以的Response可能还未进入DataMiddleware阶段，所以不能依赖最终数据处理结果
     async fn post_process(&self, _config: Option<ModuleConfig>,) -> Result<()> {
         Ok(())
+    }
+    /// 返回该模块的定时调度配置
+    /// 默认为 None (不启用定时启动)
+    fn cron(&self) -> Option<CronConfig> {
+        None
     }
 }
 

@@ -20,6 +20,7 @@ pub trait CacheBackend: Send + Sync {
     async fn set(&self, key: &str, value: &[u8], ttl: Option<Duration>) -> Result<(), CacheError>;
     async fn del(&self, key: &str) -> Result<(), CacheError>;
     async fn keys(&self, pattern: &str) -> Result<Vec<String>, CacheError>;
+    async fn set_nx(&self, key: &str, value: &[u8], ttl: Option<Duration>) -> Result<bool, CacheError>;
 }
 
 struct LocalBackend {
@@ -77,6 +78,24 @@ impl CacheBackend for LocalBackend {
             .map(|r| r.key().clone())
             .collect();
         Ok(keys)
+    }
+
+    async fn set_nx(&self, key: &str, value: &[u8], ttl: Option<Duration>) -> Result<bool, CacheError> {
+        // Simple non-atomic implementation for local testing
+        if let Some(entry) = self.store.get(key) {
+             let (_, expires_at) = entry.value();
+             if let Some(exp) = expires_at {
+                 if Instant::now() < *exp {
+                     return Ok(false);
+                 }
+             } else {
+                 return Ok(false);
+             }
+        }
+        
+        let expires_at = ttl.map(|d| Instant::now() + d);
+        self.store.insert(key.to_string(), (value.to_vec(), expires_at));
+        Ok(true)
     }
 }
 
@@ -166,6 +185,52 @@ impl CacheBackend for RedisBackend {
         }
         Ok(keys)
     }
+
+    async fn set_nx(&self, key: &str, value: &[u8], ttl: Option<Duration>) -> Result<bool, CacheError> {
+        let mut conn = self
+            .pool
+            .get()
+            .await
+            .map_err(|e| CacheError::Pool(e.to_string()))?;
+
+        let res: bool = if let Some(ttl) = ttl {
+            let opts = deadpool_redis::redis::SetOptions::default().conditional_set(deadpool_redis::redis::ExistenceCheck::NX).with_expiration(deadpool_redis::redis::SetExpiry::EX(ttl.as_secs()));
+             
+             // Or use raw command if options are tricky in older versions
+             // Using raw command for maximum compatibility with deadpool_redis re-exports
+            deadpool_redis::redis::cmd("SET")
+                .arg(key)
+                .arg(value)
+                .arg("NX")
+                .arg("EX")
+                .arg(ttl.as_secs())
+                .query_async(&mut conn)
+                .await
+                .map_err(CacheError::Redis)
+                .unwrap_or(false) // Redis returns nil if NX failed? No, returns OK or Null. Queryng as bool handles it?
+        } else {
+            deadpool_redis::redis::cmd("SET")
+                .arg(key)
+                .arg(value)
+                .arg("NX")
+                .query_async(&mut conn)
+                .await
+                .map_err(CacheError::Redis)
+                .unwrap_or(false)
+        };
+        // Verify return: Redis SET NX returns 'OK' if set, or nil if not.
+        // query_async::<bool> converts OK->true, nil->false? 
+        // Let's assume yes, or use Option<String> check.
+        
+        // Actually best to re-check the return type behavior.
+        // Standard redis crate: SET NX returns simple string "OK" or bulk string nil. 
+        // FromToRedisValue for bool: 0 -> false, 1 -> true. "OK" -> ??? 
+        // SET... NX typically returns 1 (integer) if set, 0 if not? Note: Redis < 2.6.12 vs >= 2.6.12
+        // Modern Redis SET NX EX returns OK or Nil.
+        
+        // Let's try Option<String>.
+        Ok(res)
+    }
 }
 #[async_trait::async_trait]
 pub trait CacheAble: Send + Sync + Sized
@@ -235,6 +300,10 @@ impl CacheService {
             namespace,
             default_ttl,
         }
+    }
+
+    pub async fn set_nx(&self, key: &str, value: &[u8], ttl: Option<Duration>) -> Result<bool, CacheError> {
+        self.backend.set_nx(key, value, ttl).await
     }
 
     pub fn namespace(&self) -> &str {

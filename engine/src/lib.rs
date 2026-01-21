@@ -4,3 +4,4 @@ pub mod chain;
 pub mod events;
 pub mod processors;
 pub mod task;
+pub mod scheduler;

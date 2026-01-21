@@ -221,6 +221,18 @@ impl Engine {
             error!("Failed to publish system started event: {e}");
         }
 
+        // Start Cron Scheduler
+        {
+            use crate::scheduler::CronScheduler;
+            let cron_scheduler = Arc::new(CronScheduler::new(
+                self.task_manager.clone(),
+                self.state.clone(),
+                self.queue_manager.clone(),
+            ));
+            cron_scheduler.start();
+            info!("CronScheduler started in background");
+        }
+
         info!("Starting all processors concurrently...");
 
         // 并发启动所有处理器

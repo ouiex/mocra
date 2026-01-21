@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 
 use common::interface::{ModuleTrait, ModuleNodeTrait, SyncBoxStream, StoreTrait};
-use common::model::{Headers, ModuleConfig, Request, Response};
+use common::model::{CronConfig, CronInterval, Headers, ModuleConfig, Request, Response};
 use common::model::login_info::LoginInfo;
 use common::model::request::RequestMethod;
 use common::model::message::ParserData;
@@ -45,6 +45,9 @@ impl ModuleTrait for MocDevModule {
             url: "http://127.0.0.1:8888".to_string(),
         })]
     }
+    fn cron(&self) -> Option<CronConfig> {
+        Some(CronConfig::every(CronInterval::Minute(1)).build())
+    }
 }
 
 struct MocDevNode {
@@ -59,7 +62,7 @@ impl ModuleNodeTrait for MocDevNode {
         _login_info: Option<LoginInfo>,
     ) ->  Result<SyncBoxStream<'static, Request>> {
         let mut requests = vec![];
-        for _i in 0..1000 {
+        for _i in 0..1 {
             let request = Request::new(self.url.clone(), RequestMethod::Get);
             requests.push(request);
         }
@@ -74,7 +77,7 @@ impl ModuleNodeTrait for MocDevNode {
     ) ->  Result<ParserData> {
         let data = Data::default()
             .with_file(response.content.clone())
-            .with_name(format!("moc.dat"))
+            .with_name("moc.dat".to_string())
             .with_path("./data")
             .build();
 

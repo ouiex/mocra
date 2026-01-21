@@ -24,3 +24,4 @@ common.workspace = true
 downloader.workspace = true
 cacheable.workspace = true
 proxy.workspace = true
+cron = "0.15"
