@@ -83,3 +83,21 @@ pub trait ModuleNodeTrait: Send + Sync {
         true
     }
 }
+
+pub trait ToSyncBoxStream<T> {
+    fn to_stream(self) -> SyncBoxStream<'static, T>;
+    fn into_stream_ok(self) -> Result<SyncBoxStream<'static, T>>;
+}
+
+impl<T> ToSyncBoxStream<T> for Vec<T>
+where
+    T: Send + Sync + 'static,
+{
+    fn to_stream(self) -> SyncBoxStream<'static, T> {
+        Box::pin(futures::stream::iter(self))
+    }
+    
+    fn into_stream_ok(self) -> Result<SyncBoxStream<'static, T>> {
+        Ok(Box::pin(futures::stream::iter(self)))
+    }
+}

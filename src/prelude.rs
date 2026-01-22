@@ -28,6 +28,7 @@ pub mod common {
     pub use ::common::interface::ModuleTrait;
     pub use ::common::interface::StoreTrait;
     pub use ::common::interface::SyncBoxStream;
+    pub use ::common::interface::module::ToSyncBoxStream;
 
     pub use ::common::model::Cookies;
     pub use ::common::model::ExecutionMark;

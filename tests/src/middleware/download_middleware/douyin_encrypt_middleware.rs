@@ -216,8 +216,8 @@ impl DownloadMiddleware for DouyinEncryptMiddleware {
         Self: Sized,
     {
         // Default to loading bdms.js from the repository js folder (adjust if necessary)
-        let path = Path::new("/Users/eason/RustroverProjects/mocra/tests/js/bdms.js");
-        Arc::new(DouyinEncryptMiddleware::new(path))
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("js").join("bdms.js");
+        Arc::new(DouyinEncryptMiddleware::new(&path))
     }
 }
 
@@ -232,7 +232,7 @@ mod tests {
         let lid = DouyinEncryptMiddleware::lid_token();
         let ms = DouyinEncryptMiddleware::ms_token();
         println!("fp: {}, len={}", fp, fp.len());
-        let worker = JsWorker::new(Path::new("/Users/eason/crawler/crawler/js/bdms.js")).unwrap();
+        let worker = JsWorker::new(&Path::new(env!("CARGO_MANIFEST_DIR")).join("js").join("bdms.js")).unwrap();
 
         let js = json!(
             {"a_type":0,"date_type":24,"begin_date":1760371200,"end_date":1760371200,"version":"qc"}

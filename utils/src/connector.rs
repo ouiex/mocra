@@ -41,5 +41,12 @@ pub async fn postgres_connection(
         .sqlx_logging(true)
         // Show SQL statements and bound parameters. TRACE includes bind args.
         .sqlx_logging_level(log::LevelFilter::Trace);
-    Database::connect(db_options).await.ok()
+
+    match Database::connect(db_options).await{
+        Ok(db) => Some(db),
+        Err(e) => {
+            println!("Failed to connect to postgres database: {}", e);
+            None
+        }
+    }
 }

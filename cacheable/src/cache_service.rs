@@ -194,7 +194,7 @@ impl CacheBackend for RedisBackend {
             .map_err(|e| CacheError::Pool(e.to_string()))?;
 
         let res: bool = if let Some(ttl) = ttl {
-            let opts = deadpool_redis::redis::SetOptions::default().conditional_set(deadpool_redis::redis::ExistenceCheck::NX).with_expiration(deadpool_redis::redis::SetExpiry::EX(ttl.as_secs()));
+            let _opts = redis::SetOptions::default().conditional_set(redis::ExistenceCheck::NX).with_expiration(redis::SetExpiry::EX(ttl.as_secs()));
              
              // Or use raw command if options are tricky in older versions
              // Using raw command for maximum compatibility with deadpool_redis re-exports

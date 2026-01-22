@@ -6,7 +6,7 @@ use serde_json::Map;
 use std::sync::Arc;
 use uuid::Uuid;
 use futures::StreamExt;
-use common::interface::{DataMiddleware, DataStoreMiddleware, ModuleTrait, StoreTrait, SyncBoxStream};
+use common::interface::{DataMiddleware, DataStoreMiddleware, ModuleTrait, SyncBoxStream};
 use common::model::entity::{AccountModel, PlatformModel};
 use common::model::login_info::LoginInfo;
 use common::model::{Cookies, Headers, ModuleConfig, Response,Request};

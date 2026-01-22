@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 
-use common::interface::{ModuleTrait, ModuleNodeTrait, SyncBoxStream, StoreTrait};
+use common::interface::{ModuleTrait, ModuleNodeTrait, SyncBoxStream, StoreTrait, ToSyncBoxStream};
 use common::model::{CronConfig, CronInterval, Headers, ModuleConfig, Request, Response};
 use common::model::login_info::LoginInfo;
 use common::model::request::RequestMethod;
@@ -46,7 +46,7 @@ impl ModuleTrait for MocDevModule {
         })]
     }
     fn cron(&self) -> Option<CronConfig> {
-        Some(CronConfig::every(CronInterval::Minute(1)).build())
+        Some(CronConfig::every(CronInterval::Custom("0 3/2 * * * ?".to_string())).build())
     }
 }
 
@@ -67,7 +67,7 @@ impl ModuleNodeTrait for MocDevNode {
             requests.push(request);
         }
 
-        Ok(Box::pin(futures::stream::iter(requests)))
+        requests.into_stream_ok()
     }
 
     async fn parser(

@@ -88,17 +88,3 @@ impl Config {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    use std::fs;
-    use toml;
-    #[test]
-    fn test() {
-        let config_str = fs::read_to_string("/Users/eason/crawler/crawler/config.toml")
-            .expect("Failed to read config file");
-        let config: Config = toml::from_str(&config_str).expect("Failed to parse config");
-        println!("{config:#?}");
-    }
-}
