@@ -1,0 +1,55 @@
+name = "crawler_test"
+
+[api]
+port = 8905
+
+[db]
+# 推荐使用 url，减少冗余字段
+url = "postgres://eason:Qaz.123456@localhost:5433/crawler"
+database_schema = "base"
+pool_size = 10
+
+[download_config]
+# Increased pool size for 2000 concurrent requests
+pool_size = 500
+downloader_expire = 3600
+timeout = 30
+rate_limit = 1
+enable_cache = false
+enable_locker = false
+enable_rate_limit = false
+cache_ttl = 60
+wss_timeout = 60
+
+[cache]
+ttl = 60
+
+[cache.redis]
+redis_host = "127.0.0.1"
+redis_port = 6379
+redis_db = 0
+pool_size = 50
+
+[channel_config.redis]
+redis_host = "127.0.0.1"
+redis_port = 6379
+redis_db = 0
+pool_size = 100
+shards = 8
+listener_count = 8
+
+[crawler]
+request_max_retries = 3
+task_max_errors = 100
+module_max_errors = 10
+module_locker_ttl = 5
+# Increased concurrency for benchmark
+task_concurrency = 500
+
+[channel_config]
+minid_time = 12
+capacity = 5000
+compression_threshold = 1024
+
+[channel_config.blob_storage]
+path = "tmp/blob_storage"

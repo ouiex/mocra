@@ -1,0 +1,18 @@
+[package]
+name = "cacheable"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+dashmap.workspace = true
+async-trait.workspace = true
+tokio.workspace = true
+deadpool-redis.workspace = true
+redis.workspace = true
+errors.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+log.workspace = true
+metrics.workspace = true
+flate2 = "1.0"
+zstd = "0.13"

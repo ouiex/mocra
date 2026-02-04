@@ -1,0 +1,42 @@
+name = "crawler_mock_pure"
+
+[api]
+port = 8907
+
+[db]
+url = "sqlite://tests/tmp/mock_benchmark.db?mode=rwc"
+database_schema = "base"
+pool_size = 5
+
+[download_config]
+pool_size = 200
+downloader_expire = 3600
+timeout = 5
+rate_limit = 0
+enable_cache = false
+enable_locker = false
+enable_rate_limit = false
+cache_ttl = 30
+wss_timeout = 30
+
+[cache]
+ttl = 60
+
+[crawler]
+request_max_retries = 1
+task_max_errors = 50
+module_max_errors = 10
+module_locker_ttl = 5
+task_concurrency = 200
+
+[channel_config]
+minid_time = 12
+capacity = 10000
+compression_threshold = 1024
+
+[channel_config.blob_storage]
+path = "tmp/blob_storage_mock"
+
+[event_bus]
+capacity = 100000
+concurrency = 1000

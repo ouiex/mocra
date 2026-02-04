@@ -1,0 +1,64 @@
+name = "crawler_prod_like"
+
+[api]
+port = 8907
+
+[db]
+url = "postgres://eason:Qaz.123456@127.0.0.1:5433/crawler"
+database_schema = "base"
+pool_size = 20
+
+tls = false
+
+[download_config]
+pool_size = 200
+downloader_expire = 3600
+# Production-like timeouts
+timeout = 20
+rate_limit = 0
+enable_cache = false
+enable_locker = false
+enable_rate_limit = false
+cache_ttl = 60
+wss_timeout = 30
+max_response_size = 10485760
+
+[cache]
+ttl = 300
+
+[cache.redis]
+redis_host = "127.0.0.1"
+redis_port = 6379
+redis_db = 0
+pool_size = 100
+
+[crawler]
+request_max_retries = 2
+task_max_errors = 50
+module_max_errors = 10
+module_locker_ttl = 5
+task_concurrency = 200
+publish_concurrency = 200
+dedup_ttl_secs = 3600
+
+[channel_config]
+minid_time = 12
+capacity = 20000
+queue_codec = "msgpack"
+compression_threshold = 1024
+batch_concurrency = 500
+
+[channel_config.redis]
+redis_host = "127.0.0.1"
+redis_port = 6379
+redis_db = 0
+pool_size = 200
+shards = 8
+listener_count = 8
+
+[channel_config.blob_storage]
+path = "tmp/blob_storage_mock"
+
+[event_bus]
+capacity = 200000
+concurrency = 2000

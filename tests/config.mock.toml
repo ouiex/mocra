@@ -1,0 +1,54 @@
+name = "crawler_mock"
+
+[api]
+port = 8906
+
+[db]
+# 推荐使用 url，减少冗余字段
+url = "postgres://eason:Qaz.123456@127.0.0.1:5433/crawler"
+database_schema = "base"
+pool_size = 10
+
+[download_config]
+pool_size = 150
+downloader_expire = 3600
+# keep timeout small for mock
+timeout = 10
+rate_limit = 0
+enable_cache = false
+enable_locker = false
+enable_rate_limit = false
+cache_ttl = 30
+wss_timeout = 30
+
+[cache]
+ttl = 60
+
+[cache.redis]
+redis_host = "127.0.0.1"
+redis_port = 6379
+redis_db = 0
+pool_size = 50
+
+[crawler]
+request_max_retries = 1
+task_max_errors = 50
+module_max_errors = 10
+module_locker_ttl = 5
+task_concurrency = 150
+
+[channel_config]
+minid_time = 12
+capacity = 5000
+compression_threshold = 1024
+
+[channel_config.redis]
+redis_host = "127.0.0.1"
+redis_port = 6379
+redis_db = 0
+pool_size = 100
+shards = 8
+listener_count = 8
+
+[channel_config.blob_storage]
+path = "tmp/blob_storage_mock"
