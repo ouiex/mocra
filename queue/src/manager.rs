@@ -282,9 +282,12 @@ impl QueueManager {
                     let payload_slice = msg.payload.as_slice();
                     let decoded_payload = decompress_payload(payload_slice);
                     let item_res = match queue_codec() {
-                        QueueCodec::Json => serde_json::from_slice::<T>(decoded_payload.as_ref()).map_err(|e| e.into()),
-                        QueueCodec::Msgpack => rmps::from_slice::<T>(decoded_payload.as_ref()).map_err(|e| e.into()),
-                        QueueCodec::Bincode => bincode::deserialize::<T>(decoded_payload.as_ref()).map_err(|e| e.into()),
+                        QueueCodec::Json => serde_json::from_slice::<T>(decoded_payload.as_ref())
+                            .map_err(|e| errors::Error::new(errors::ErrorKind::Queue, Some(e))),
+                        QueueCodec::Msgpack => rmps::from_slice::<T>(decoded_payload.as_ref())
+                            .map_err(|e| errors::Error::new(errors::ErrorKind::Queue, Some(e))),
+                        QueueCodec::Bincode => bincode::deserialize::<T>(decoded_payload.as_ref())
+                            .map_err(|e| errors::Error::new(errors::ErrorKind::Queue, Some(e))),
                     };
                     (msg, item_res)
                 }).collect::<Vec<_>>()
@@ -294,9 +297,12 @@ impl QueueManager {
                 let payload_slice = msg.payload.as_slice();
                 let decoded_payload = decompress_payload(payload_slice);
                 let item_res = match queue_codec() {
-                    QueueCodec::Json => serde_json::from_slice::<T>(decoded_payload.as_ref()).map_err(|e| e.into()),
-                    QueueCodec::Msgpack => rmps::from_slice::<T>(decoded_payload.as_ref()).map_err(|e| e.into()),
-                    QueueCodec::Bincode => bincode::deserialize::<T>(decoded_payload.as_ref()).map_err(|e| e.into()),
+                    QueueCodec::Json => serde_json::from_slice::<T>(decoded_payload.as_ref())
+                        .map_err(|e| errors::Error::new(errors::ErrorKind::Queue, Some(e))),
+                    QueueCodec::Msgpack => rmps::from_slice::<T>(decoded_payload.as_ref())
+                        .map_err(|e| errors::Error::new(errors::ErrorKind::Queue, Some(e))),
+                    QueueCodec::Bincode => bincode::deserialize::<T>(decoded_payload.as_ref())
+                        .map_err(|e| errors::Error::new(errors::ErrorKind::Queue, Some(e))),
                 };
                 (msg, item_res)
             }).collect::<Vec<_>>();
@@ -577,9 +583,12 @@ impl QueueManager {
                         id_list.push(id.clone());
                     }
                     let encoded = match queue_codec() {
-                        QueueCodec::Json => serde_json::to_vec(&item.inner).map_err(|e| e.into()),
-                        QueueCodec::Msgpack => rmps::to_vec(&item.inner).map_err(|e| e.into()),
-                        QueueCodec::Bincode => bincode::serialize(&item.inner).map_err(|e| e.into()),
+                        QueueCodec::Json => serde_json::to_vec(&item.inner)
+                            .map_err(|e| errors::Error::new(errors::ErrorKind::Queue, Some(e))),
+                        QueueCodec::Msgpack => rmps::to_vec(&item.inner)
+                            .map_err(|e| errors::Error::new(errors::ErrorKind::Queue, Some(e))),
+                        QueueCodec::Bincode => bincode::serialize(&item.inner)
+                            .map_err(|e| errors::Error::new(errors::ErrorKind::Queue, Some(e))),
                     };
                     match encoded {
                         Ok(p) => {
@@ -611,9 +620,12 @@ impl QueueManager {
                     id_list.push(id.clone());
                 }
                 let encoded = match queue_codec() {
-                    QueueCodec::Json => serde_json::to_vec(&item.inner).map_err(|e| e.into()),
-                    QueueCodec::Msgpack => rmps::to_vec(&item.inner).map_err(|e| e.into()),
-                    QueueCodec::Bincode => bincode::serialize(&item.inner).map_err(|e| e.into()),
+                    QueueCodec::Json => serde_json::to_vec(&item.inner)
+                        .map_err(|e| errors::Error::new(errors::ErrorKind::Queue, Some(e))),
+                    QueueCodec::Msgpack => rmps::to_vec(&item.inner)
+                        .map_err(|e| errors::Error::new(errors::ErrorKind::Queue, Some(e))),
+                    QueueCodec::Bincode => bincode::serialize(&item.inner)
+                        .map_err(|e| errors::Error::new(errors::ErrorKind::Queue, Some(e))),
                 };
                 match encoded {
                     Ok(p) => {
