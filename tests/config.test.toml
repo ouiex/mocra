@@ -7,11 +7,11 @@ port = 8905
 # 推荐使用 url，减少冗余字段
 url = "postgres://eason:Qaz.123456@localhost:5433/crawler"
 database_schema = "base"
-pool_size = 10
+pool_size = 50
 
 [download_config]
 # Increased pool size for 2000 concurrent requests
-pool_size = 500
+pool_size = 800
 downloader_expire = 3600
 timeout = 30
 rate_limit = 1
@@ -28,28 +28,28 @@ ttl = 60
 redis_host = "127.0.0.1"
 redis_port = 6379
 redis_db = 0
-pool_size = 50
+pool_size = 200
 
 [channel_config.redis]
 redis_host = "127.0.0.1"
 redis_port = 6379
 redis_db = 0
-pool_size = 100
-shards = 8
-listener_count = 8
+pool_size = 300
+shards = 16
+listener_count = 16
 
 [crawler]
-request_max_retries = 3
+request_max_retries = 1
 task_max_errors = 100
 module_max_errors = 10
 module_locker_ttl = 5
 # Increased concurrency for benchmark
-task_concurrency = 500
+task_concurrency = 1000
 
 [channel_config]
 minid_time = 12
-capacity = 5000
-compression_threshold = 1024
+capacity = 20000
+compression_threshold = 1048576
 
 [channel_config.blob_storage]
 path = "tmp/blob_storage"

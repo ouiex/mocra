@@ -4,6 +4,7 @@ use errors::Result;
 use tokio::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use common::model::Request;
+use rmp_serde as rmps;
 
 #[derive(Clone)]
 struct MockBackend {
@@ -81,7 +82,7 @@ async fn test_queue_manager_integration() {
         
         // Verify payload is deserializable back to Request
         let payload = &messages[0].1;
-        let _req: Request = bincode::deserialize(payload).expect("Failed to deserialize payload");
+        let _req: Request = rmps::from_slice(payload).expect("Failed to deserialize payload");
     }
 
     // Test High Priority
@@ -126,7 +127,7 @@ async fn test_queue_compression() {
     assert_eq!(payload[2], 0x2F);
     assert_eq!(payload[3], 0xFD);
 
-    // Verify it is smaller than raw bincode (Request struct overhead + 2000 bytes)
+    // Verify it is smaller than raw MessagePack (Request struct overhead + 2000 bytes)
     // 2000 'a's compress very well.
     assert!(payload.len() < 1000, "Compressed payload should be small");
 }

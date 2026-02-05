@@ -793,7 +793,7 @@ pub async fn create_download_chain(
     downloader_manager: Arc<DownloaderManager>,
     queue_manager: Arc<QueueManager>,
     middleware_manager: Arc<MiddlewareManager>,
-    event_bus: Arc<EventBus>,
+    event_bus: Option<Arc<EventBus>>,
     proxy_manager: Option<Arc<ProxyManager>>,
 ) -> EventAwareTypedChain<Request, ()> {
     let download_processor = DownloadProcessor {

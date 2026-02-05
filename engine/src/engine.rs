@@ -58,7 +58,7 @@ pub struct Engine {
     pub task_manager: Arc<TaskManager>,
     pub proxy_manager: Option<Arc<ProxyManager>>,
     pub middleware_manager: Arc<MiddlewareManager>,
-    pub event_bus: Arc<EventBus>,
+    pub event_bus: Option<Arc<EventBus>>,
     pub state: Arc<State>,
     // 广播型关闭信号，所有处理器都能订阅到
     shutdown_tx: broadcast::Sender<()>,
@@ -89,12 +89,11 @@ impl Engine {
         let prometheus_handle = builder.install_recorder().ok();
 
         // 创建事件总线
-        let (capacity, concurrency) = if let Some(conf) = &state.config.read().await.event_bus {
-            (conf.capacity, conf.concurrency)
+        let event_bus = if let Some(conf) = &state.config.read().await.event_bus {
+            Some(Arc::new(EventBus::new(conf.capacity, conf.concurrency)))
         } else {
-            (10000, 1000)
+            None
         };
-        let event_bus = Arc::new(EventBus::new(capacity, concurrency));
         // 创建关闭信号通道
         let (shutdown_tx, _shutdown_rx) = broadcast::channel(1);
         
@@ -149,7 +148,7 @@ impl Engine {
         };
 
         // Initialize Logger/Event Handlers based on Config
-        if let Some(log_config) = &cfg.logger {
+        if let (Some(log_config), Some(event_bus)) = (&cfg.logger, event_bus.as_ref()) {
               use common::model::logger_config::LogOutputConfig;
               use crate::events::handlers::{queue_handler::QueueLogHandler, console_handler::ConsoleLogHandler};
 
@@ -176,6 +175,8 @@ impl Engine {
                       }
                   }
               }
+        } else if cfg.logger.is_some() {
+            info!("EventBus disabled; skipping logger EventBus handlers");
         }
 
         // Initialize DownloaderManager
@@ -282,17 +283,21 @@ impl Engine {
 
     /// Initialize event handlers.
     async fn setup_event_handlers(&self) {
+        let Some(event_bus) = &self.event_bus else {
+            info!("EventBus disabled; skipping event handlers");
+            return;
+        };
         // Register default event handlers
         
         // Console Log Handler
-        let log_rx = self.event_bus.subscribe("*".to_string()).await;
+        let log_rx = event_bus.subscribe("*".to_string()).await;
         crate::events::handlers::console_handler::ConsoleLogHandler::start(log_rx, "INFO".to_string()).await;
 
         // Metrics Handler
         // self.event_bus.subscribe("*".to_string(), MetricsEventHandler::new()).await;
 
         // DB Handler
-        let db_rx = self.event_bus.subscribe("*".to_string()).await;
+        let db_rx = event_bus.subscribe("*".to_string()).await;
         let db_handler = DbEventHandler::new(self.state.db.clone());
         db_handler.start(db_rx).await;
 
@@ -307,7 +312,7 @@ impl Engine {
                                                   redis_config.pool_size,
                                                   redis_config.tls.unwrap_or(false))
             {
-                let redis_rx = self.event_bus.subscribe("*".to_string()).await;
+                let redis_rx = event_bus.subscribe("*".to_string()).await;
                 let redis_handler = RedisEventHandler::new(
                     Arc::new(pool),
                     config.name.clone(),
@@ -348,22 +353,29 @@ impl Engine {
             }
         }
 
-        // 设置事件处理器
-        self.setup_event_handlers().await;
+        if self.event_bus.is_some() {
+            // 设置事件处理器
+            self.setup_event_handlers().await;
 
-        // 启动事件总线
-        self.event_bus.start().await;
+            // 启动事件总线
+            if let Some(event_bus) = &self.event_bus {
+                event_bus.start().await;
+            }
+        } else {
+            info!("EventBus disabled; skipping setup and start");
+        }
 
         // Start DownloaderManager background cleaner
         self.downloader_manager.clone().start_background_cleaner();
 
         // 发布系统启动事件
-        if let Err(e) = self
-            .event_bus
-            .publish(crate::events::SystemEvent::System(SystemStarted))
-            .await
-        {
-            error!("Failed to publish system started event: {e}");
+        if let Some(event_bus) = &self.event_bus {
+            if let Err(e) = event_bus
+                .publish(crate::events::SystemEvent::System(SystemStarted))
+                .await
+            {
+                error!("Failed to publish system started event: {e}");
+            }
         }
 
         // Spawn signal handler
@@ -721,7 +733,7 @@ impl Engine {
     async fn start_health_monitor(&self) {
         info!("Starting health monitor");
 
-        let event_bus = Arc::clone(&self.event_bus);
+        let event_bus = self.event_bus.clone();
         let mut shutdown = self.shutdown_tx.subscribe();
 
         // 每30秒进行一次健康检查
@@ -764,8 +776,10 @@ impl Engine {
                         },
                     ));
 
-                    if let Err(e) = event_bus.publish(health_event).await {
-                        error!("Failed to publish health check event: {e}");
+                    if let Some(event_bus) = &event_bus {
+                        if let Err(e) = event_bus.publish(health_event).await {
+                            error!("Failed to publish health check event: {e}");
+                        }
                     }
                 }
             }
@@ -785,16 +799,17 @@ impl Engine {
         let _ = self.shutdown_tx.send(());
 
         // 发布系统关闭事件
-        if let Err(e) = self
-            .event_bus
-            .publish(crate::events::SystemEvent::System(SystemShutdown))
-            .await
-        {
-            error!("Failed to publish system shutdown event: {e}");
-        }
+        if let Some(event_bus) = &self.event_bus {
+            if let Err(e) = event_bus
+                .publish(crate::events::SystemEvent::System(SystemShutdown))
+                .await
+            {
+                error!("Failed to publish system shutdown event: {e}");
+            }
 
-        // 停止事件总线
-        self.event_bus.stop();
+            // 停止事件总线
+            event_bus.stop();
+        }
 
         info!("Schedule shutdown completed");
     }
@@ -808,7 +823,7 @@ impl Engine {
                 "parser": "active",
                 "error": "active"
             },
-            "event_bus": "active",
+            "event_bus": if self.event_bus.is_some() { "active" } else { "disabled" },
             "uptime": std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()

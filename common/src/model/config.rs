@@ -219,7 +219,7 @@ pub struct ChannelConfig {
     pub minid_time: u64,
     /// Channel capacity
     pub capacity: usize,
-    /// Queue codec: bincode | json | msgpack
+    /// Queue codec: json | msgpack
     pub queue_codec: Option<String>,
     /// Concurrency limit for batch flushing (default: 10)
     pub batch_concurrency: Option<usize>,

@@ -697,7 +697,7 @@ pub async fn create_parser_chain(
     task_manager: Arc<TaskManager>,
     middleware_manager: Arc<MiddlewareManager>,
     queue_manager: Arc<QueueManager>,
-    event_bus: Arc<EventBus>,
+    event_bus: Option<Arc<EventBus>>,
     cache_service: Arc<CacheService>,
 ) -> EventAwareTypedChain<Response, Vec<()>> {
     let response_module_processor = ResponseModuleProcessor {

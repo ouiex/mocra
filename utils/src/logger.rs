@@ -213,7 +213,13 @@ const DEFAULT_APP_LOG_LEVEL: &str = "info,engine=debug;sqlx=warn,sea_orm=warn,h2
 
 /// Logging is always enabled when configured via TOML.
 pub fn is_logging_disabled() -> bool {
-    false
+    let value = env::var("DISABLE_LOGS")
+        .or_else(|_| env::var("MOCRA_DISABLE_LOGS"))
+        .unwrap_or_default();
+    matches!(
+        value.trim().to_lowercase().as_str(),
+        "1" | "true" | "yes" | "y" | "on"
+    )
 }
 
 /// Initialize logger with sensible defaults and env overrides.
@@ -351,6 +357,11 @@ impl Visit for LogVisitor {
 
 /// Initialize and configure tracing logger
 pub async fn init_logger(config: LoggerConfig) -> Result<(), Box<dyn std::error::Error>> {
+    if is_logging_disabled() {
+        // Mark initialized to avoid repeated attempts when logging is disabled.
+        let _ = LOGGER_INITIALIZED.swap(true, Ordering::SeqCst);
+        return Ok(());
+    }
     if LOGGER_INITIALIZED.swap(true, Ordering::SeqCst) {
         tracing::warn!("Logger already initialized, skipping re-initialization");
         return Ok(());

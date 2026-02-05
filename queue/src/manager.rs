@@ -24,9 +24,20 @@ use once_cell::sync::OnceCell;
 const DEFAULT_COMPRESSION_THRESHOLD: usize = 1024;
 const BLOCKING_PAYLOAD_BYTES: usize = 64 * 1024;
 
+fn msgpack_encode<T: serde::Serialize>(value: &T) -> Result<Vec<u8>, rmps::encode::Error> {
+    rmps::to_vec(value)
+}
+
+fn msgpack_decode<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T, rmps::decode::Error> {
+    rmps::from_slice(bytes)
+}
+
+fn msgpack_encoded_size<T: serde::Serialize>(value: &T) -> Result<usize, rmps::encode::Error> {
+    msgpack_encode(value).map(|bytes| bytes.len())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum QueueCodec {
-    Bincode,
     Json,
     Msgpack,
 }
@@ -37,7 +48,7 @@ fn queue_codec() -> QueueCodec {
     if let Some(codec) = QUEUE_CODEC_OVERRIDE.get() {
         return *codec;
     }
-    QueueCodec::Bincode
+    QueueCodec::Msgpack
 }
 
 fn set_queue_codec_from_config(cfg: &Config) {
@@ -45,13 +56,13 @@ fn set_queue_codec_from_config(cfg: &Config) {
         .channel_config
         .queue_codec
         .as_deref()
-        .unwrap_or("bincode")
+        .unwrap_or("msgpack")
         .to_lowercase();
 
     let mapped = match codec.as_str() {
         "json" => QueueCodec::Json,
         "msgpack" | "rmp" => QueueCodec::Msgpack,
-        _ => QueueCodec::Bincode,
+        _ => QueueCodec::Msgpack,
     };
 
     let _ = QUEUE_CODEC_OVERRIDE.set(mapped);
@@ -284,9 +295,7 @@ impl QueueManager {
                     let item_res = match queue_codec() {
                         QueueCodec::Json => serde_json::from_slice::<T>(decoded_payload.as_ref())
                             .map_err(|e| errors::Error::new(errors::ErrorKind::Queue, Some(e))),
-                        QueueCodec::Msgpack => rmps::from_slice::<T>(decoded_payload.as_ref())
-                            .map_err(|e| errors::Error::new(errors::ErrorKind::Queue, Some(e))),
-                        QueueCodec::Bincode => bincode::deserialize::<T>(decoded_payload.as_ref())
+                        QueueCodec::Msgpack => msgpack_decode::<T>(decoded_payload.as_ref())
                             .map_err(|e| errors::Error::new(errors::ErrorKind::Queue, Some(e))),
                     };
                     (msg, item_res)
@@ -299,9 +308,7 @@ impl QueueManager {
                 let item_res = match queue_codec() {
                     QueueCodec::Json => serde_json::from_slice::<T>(decoded_payload.as_ref())
                         .map_err(|e| errors::Error::new(errors::ErrorKind::Queue, Some(e))),
-                    QueueCodec::Msgpack => rmps::from_slice::<T>(decoded_payload.as_ref())
-                        .map_err(|e| errors::Error::new(errors::ErrorKind::Queue, Some(e))),
-                    QueueCodec::Bincode => bincode::deserialize::<T>(decoded_payload.as_ref())
+                    QueueCodec::Msgpack => msgpack_decode::<T>(decoded_payload.as_ref())
                         .map_err(|e| errors::Error::new(errors::ErrorKind::Queue, Some(e))),
                 };
                 (msg, item_res)
@@ -551,17 +558,27 @@ impl QueueManager {
         if !use_blocking {
             let mut estimated_total_bytes = 0usize;
             for item in &items {
-                match bincode::serialized_size(&item.inner) {
-                    Ok(size) => {
-                        estimated_total_bytes += size as usize;
-                        if estimated_total_bytes >= BLOCKING_PAYLOAD_BYTES {
-                            use_blocking = true;
-                            break;
+                match queue_codec() {
+                    QueueCodec::Json => match serde_json::to_vec(&item.inner) {
+                        Ok(bytes) => {
+                            estimated_total_bytes += bytes.len();
+                            if estimated_total_bytes >= BLOCKING_PAYLOAD_BYTES {
+                                use_blocking = true;
+                                break;
+                            }
                         }
-                    }
-                    Err(e) => {
-                        error!("Failed to estimate payload size: {}", e);
-                    }
+                        Err(e) => error!("Failed to estimate payload size: {}", e),
+                    },
+                    QueueCodec::Msgpack => match msgpack_encoded_size(&item.inner) {
+                        Ok(size) => {
+                            estimated_total_bytes += size;
+                            if estimated_total_bytes >= BLOCKING_PAYLOAD_BYTES {
+                                use_blocking = true;
+                                break;
+                            }
+                        }
+                        Err(e) => error!("Failed to estimate payload size: {}", e),
+                    },
                 }
             }
         }
@@ -585,9 +602,7 @@ impl QueueManager {
                     let encoded = match queue_codec() {
                         QueueCodec::Json => serde_json::to_vec(&item.inner)
                             .map_err(|e| errors::Error::new(errors::ErrorKind::Queue, Some(e))),
-                        QueueCodec::Msgpack => rmps::to_vec(&item.inner)
-                            .map_err(|e| errors::Error::new(errors::ErrorKind::Queue, Some(e))),
-                        QueueCodec::Bincode => bincode::serialize(&item.inner)
+                        QueueCodec::Msgpack => msgpack_encode(&item.inner)
                             .map_err(|e| errors::Error::new(errors::ErrorKind::Queue, Some(e))),
                     };
                     match encoded {
@@ -622,9 +637,7 @@ impl QueueManager {
                 let encoded = match queue_codec() {
                     QueueCodec::Json => serde_json::to_vec(&item.inner)
                         .map_err(|e| errors::Error::new(errors::ErrorKind::Queue, Some(e))),
-                    QueueCodec::Msgpack => rmps::to_vec(&item.inner)
-                        .map_err(|e| errors::Error::new(errors::ErrorKind::Queue, Some(e))),
-                    QueueCodec::Bincode => bincode::serialize(&item.inner)
+                    QueueCodec::Msgpack => msgpack_encode(&item.inner)
                         .map_err(|e| errors::Error::new(errors::ErrorKind::Queue, Some(e))),
                 };
                 match encoded {
@@ -686,8 +699,7 @@ impl QueueManager {
         if let Some(backend) = &self.backend {
              let payload = match queue_codec() {
                  QueueCodec::Json => serde_json::to_vec(item).map_err(|e| errors::error::QueueError::OperationFailed(Box::new(e)))?,
-                 QueueCodec::Msgpack => rmps::to_vec(item).map_err(|e| errors::error::QueueError::OperationFailed(Box::new(e)))?,
-                 QueueCodec::Bincode => bincode::serialize(item).map_err(|e| errors::error::QueueError::OperationFailed(Box::new(e)))?,
+                 QueueCodec::Msgpack => msgpack_encode(item).map_err(|e| errors::error::QueueError::OperationFailed(Box::new(e)))?,
              };
              backend.send_to_dlq(topic, &item.get_id(), &payload, reason).await?;
         }

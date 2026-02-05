@@ -17,9 +17,11 @@ use sea_orm::{ConnectionTrait, DatabaseBackend, Statement};
 use std::fs;
 use common::model::message::TaskModel;
 use common::model::Priority;
+use common::model::{ModuleConfig, Response};
 use chrono::Utc;
 use uuid::Uuid;
 use std::sync::atomic::{AtomicU64, Ordering};
+use common::interface::DownloadMiddleware;
 
 async fn seed_database(state: &Arc<State>) {
     let db_backend = state.db.get_database_backend();
@@ -32,15 +34,13 @@ async fn seed_database(state: &Arc<State>) {
     }
 
     // 1. Run Init SQL to reset schema
-    let init_filename = if db_backend == DatabaseBackend::Sqlite { "init_sqlite.sql" } else { "init.sql" };
+    let init_filename = if db_backend == DatabaseBackend::Sqlite { "init_sqlite_pure.sql" } else { "init.sql" };
     let init_path = Path::new(env!("CARGO_MANIFEST_DIR")).join(init_filename);
     
     if let Ok(sql) = fs::read_to_string(&init_path) {
         println!("Initializing database from {}", init_path.display());
         let stmts: Vec<&str> = sql.split(';').filter(|s| !s.trim().is_empty()).collect();
-        for (i, stmt) in stmts.iter().enumerate() {
-             let stmt_trimmed = stmt.trim();
-             // println!("Executing init statement {}: {}...", i, stmt_trimmed.split_whitespace().take(3).collect::<Vec<_>>().join(" "));
+        for stmt in stmts.iter() {
              if let Err(e) = state.db.execute(Statement::from_string(db_backend, stmt.to_string())).await {
                  eprintln!("Failed to execute init statement: {} \nError: {}", stmt, e);
              }
@@ -49,8 +49,8 @@ async fn seed_database(state: &Arc<State>) {
         eprintln!("Init file not found at {}", init_path.display());
     }
 
-    // 2. Run Seed SQL (Skip for SQLite for now unless we create seed_sqlite.sql)
-    if db_backend == DatabaseBackend::Postgres {
+    // 2. Run Seed SQL
+    if db_backend == DatabaseBackend::Postgres || db_backend == DatabaseBackend::Sqlite {
         let seed_path = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("seed_data.sql");
         if let Ok(sql) = fs::read_to_string(&seed_path) {
             println!("Seeding database from {}", seed_path.display());
@@ -134,7 +134,7 @@ async fn build_engine() -> Engine {
 
     // Seed DB (Moved after logger init to ensure logs are captured if using logger, though we use println here)
     // Wrap in timeout to prevent hanging on locks
-    if let Err(e) = tokio::time::timeout(std::time::Duration::from_secs(60), seed_database(&state)).await {
+    if let Err(_e) = tokio::time::timeout(std::time::Duration::from_secs(60), seed_database(&state)).await {
         eprintln!("Database seeding timed out! This usually means a table is locked by another process. Please restart PostgreSQL or kill stuck processes.");
         std::process::exit(1);
     }
@@ -186,6 +186,39 @@ async fn build_engine() -> Engine {
     engine
 }
 
+struct CounterDownloadMiddleware {
+    completed: Arc<AtomicU64>,
+    bytes: Arc<AtomicU64>,
+}
+
+#[async_trait::async_trait]
+impl DownloadMiddleware for CounterDownloadMiddleware {
+    fn name(&self) -> String {
+        "benchmark_counter_download_middleware".to_string()
+    }
+
+    async fn after_response(&self, response: Response, _config: &Option<ModuleConfig>) -> Response {
+        let count = self.completed.fetch_add(1, Ordering::Relaxed) + 1;
+        self.bytes.fetch_add(response.content.len() as u64, Ordering::Relaxed);
+
+        if count <= 5 || count % 500 == 0 {
+            println!("  [COUNT] Download completed #{} (status={})", count, response.status_code);
+        }
+
+        response
+    }
+
+    fn default_arc() -> Arc<dyn DownloadMiddleware>
+    where
+        Self: Sized,
+    {
+        Arc::new(CounterDownloadMiddleware {
+            completed: Arc::new(AtomicU64::new(0)),
+            bytes: Arc::new(AtomicU64::new(0)),
+        })
+    }
+}
+
 #[tokio::main]
 async fn main() {
     // Configuration for the benchmark
@@ -212,6 +245,44 @@ async fn main() {
     let bytes_counter = Arc::new(AtomicU64::new(0));
     let request_generated = Arc::new(AtomicU64::new(0));
 
+    // Subscribe to events for statistics (if enabled)
+    if let Some(event_bus) = engine.event_bus.clone() {
+        let mut rx = event_bus.subscribe("*".to_string()).await;
+        let completed_clone = completed_counter.clone();
+        let failed_clone = failed_counter.clone();
+        let bytes_clone = bytes_counter.clone();
+
+        tokio::spawn(async move {
+            while let Some(event) = rx.recv().await {
+                match &event {
+                    engine::events::SystemEvent::Download(engine::events::EventDownload::DownloadCompleted(info)) => {
+                        let count = completed_clone.fetch_add(1, Ordering::Relaxed) + 1;
+                        if let Some(size) = info.response_size {
+                            bytes_clone.fetch_add(size as u64, Ordering::Relaxed);
+                        }
+                        // Log first few and milestone completions
+                        if count <= 5 || count % 500 == 0 {
+                            println!("  [EVENT] Download completed #{}: {} ({})", count, info.url, info.status_code.unwrap_or(0));
+                        }
+                    }
+                    engine::events::SystemEvent::Download(engine::events::EventDownload::DownloadFailed(info)) => {
+                        let count = failed_clone.fetch_add(1, Ordering::Relaxed) + 1;
+                        println!("  [EVENT] Download FAILED #{}: {}", count, info.data.url);
+                    }
+                    _ => {}
+                }
+            }
+        });
+    } else {
+        engine
+            .register_download_middleware(Arc::new(CounterDownloadMiddleware {
+                completed: completed_counter.clone(),
+                bytes: bytes_counter.clone(),
+            }))
+            .await;
+        println!(">>> EventBus disabled; using download middleware counters");
+    }
+
     // Trigger initial task with moc.dev module
     let queue_manager = engine.queue_manager.clone();
     let gen_counter = request_generated.clone();
@@ -232,34 +303,6 @@ async fn main() {
             println!(">>> Task moc.dev injected successfully");
             // Mark that we expect TARGET_REQUESTS
             gen_counter.store(TARGET_REQUESTS, Ordering::Relaxed);
-        }
-    });
-
-    // Subscribe to events for statistics  
-    let mut rx = engine.event_bus.subscribe("*".to_string()).await;
-    let completed_clone = completed_counter.clone();
-    let failed_clone = failed_counter.clone();
-    let bytes_clone = bytes_counter.clone();
-    
-    tokio::spawn(async move {
-        while let Some(event) = rx.recv().await {
-            match &event {
-                engine::events::SystemEvent::Download(engine::events::EventDownload::DownloadCompleted(info)) => {
-                    let count = completed_clone.fetch_add(1, Ordering::Relaxed) + 1;
-                    if let Some(size) = info.response_size {
-                        bytes_clone.fetch_add(size as u64, Ordering::Relaxed);
-                    }
-                    // Log first few and milestone completions
-                    if count <= 5 || count % 500 == 0 {
-                        println!("  [EVENT] Download completed #{}: {} ({})", count, info.url, info.status_code.unwrap_or(0));
-                    }
-                }
-                engine::events::SystemEvent::Download(engine::events::EventDownload::DownloadFailed(info)) => {
-                    let count = failed_clone.fetch_add(1, Ordering::Relaxed) + 1;
-                    println!("  [EVENT] Download FAILED #{}: {}", count, info.data.url);
-                }
-                _ => {}
-            }
         }
     });
 

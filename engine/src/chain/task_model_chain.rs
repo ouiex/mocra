@@ -1438,7 +1438,7 @@ impl<T: Send + Sync + 'static> EventProcessorTrait<SyncBoxStream<'static, SyncBo
 pub async fn create_task_model_chain(
     task_manager: Arc<TaskManager>,
     queue_manager: Arc<QueueManager>,
-    event_bus: Arc<EventBus>,
+    event_bus: Option<Arc<EventBus>>,
     state: Arc<State>,
 ) -> EventAwareTypedChain<TaskModel, SyncBoxStream<'static, ()>> {
     let task_model_processor = TaskModelProcessor {
@@ -1482,7 +1482,7 @@ pub async fn create_task_model_chain(
 pub async fn create_parser_task_chain(
     task_manager: Arc<TaskManager>,
     queue_manager: Arc<QueueManager>,
-    event_bus: Arc<EventBus>,
+    event_bus: Option<Arc<EventBus>>,
     state: Arc<State>,
 ) -> EventAwareTypedChain<ParserTaskModel, SyncBoxStream<'static, ()>> {
     let task_model_processor = TaskModelProcessor {
@@ -1520,7 +1520,7 @@ pub async fn create_parser_task_chain(
 pub async fn create_error_task_chain(
     task_manager: Arc<TaskManager>,
     queue_manager: Arc<QueueManager>,
-    event_bus: Arc<EventBus>,
+    event_bus: Option<Arc<EventBus>>,
     state: Arc<State>,
 ) -> EventAwareTypedChain<ErrorTaskModel, SyncBoxStream<'static, ()>> {
     let task_model_processor = TaskModelProcessor {

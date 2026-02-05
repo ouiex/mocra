@@ -146,23 +146,27 @@ async fn main() {
     let completed_counter = Arc::new(AtomicU64::new(0));
     let failed_counter = Arc::new(AtomicU64::new(0));
 
-    let mut rx = engine.event_bus.subscribe("*".to_string()).await;
-    let completed_clone = completed_counter.clone();
-    let failed_clone = failed_counter.clone();
+    if let Some(event_bus) = engine.event_bus.clone() {
+        let mut rx = event_bus.subscribe("*".to_string()).await;
+        let completed_clone = completed_counter.clone();
+        let failed_clone = failed_counter.clone();
 
-    tokio::spawn(async move {
-        while let Some(event) = rx.recv().await {
-            match &event {
-                engine::events::SystemEvent::Download(engine::events::EventDownload::DownloadCompleted(_info)) => {
-                    let _ = completed_clone.fetch_add(1, Ordering::Relaxed) + 1;
+        tokio::spawn(async move {
+            while let Some(event) = rx.recv().await {
+                match &event {
+                    engine::events::SystemEvent::Download(engine::events::EventDownload::DownloadCompleted(_info)) => {
+                        let _ = completed_clone.fetch_add(1, Ordering::Relaxed) + 1;
+                    }
+                    engine::events::SystemEvent::Download(engine::events::EventDownload::DownloadFailed(_info)) => {
+                        let _ = failed_clone.fetch_add(1, Ordering::Relaxed) + 1;
+                    }
+                    _ => {}
                 }
-                engine::events::SystemEvent::Download(engine::events::EventDownload::DownloadFailed(_info)) => {
-                    let _ = failed_clone.fetch_add(1, Ordering::Relaxed) + 1;
-                }
-                _ => {}
             }
-        }
-    });
+        });
+    } else {
+        println!(">>> EventBus disabled; skipping event-based counters");
+    }
 
     let queue_manager = engine.queue_manager.clone();
     let task = TaskModel {

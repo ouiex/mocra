@@ -1,7 +1,7 @@
 use super::SystemEvent;
 use std::sync::Arc;
 use tokio::sync::mpsc;
-use tokio::sync::{RwLock, Semaphore};
+use tokio::sync::RwLock;
 use log::{error, info};
 use dashmap::DashMap;
 
@@ -11,18 +11,16 @@ pub struct EventBus {
     subscribers: Arc<DashMap<String, Vec<mpsc::Sender<SystemEvent>>>>,
     sender: mpsc::Sender<SystemEvent>,
     _receiver: Arc<RwLock<Option<mpsc::Receiver<SystemEvent>>>>,
-    concurrency_limit: Arc<Semaphore>,
 }
 
 impl EventBus {
-    pub fn new(capacity: usize, concurrency: usize) -> Self {
+    pub fn new(capacity: usize, _concurrency: usize) -> Self {
         let (sender, receiver) = mpsc::channel(capacity);
         
         Self {
             subscribers: Arc::new(DashMap::new()),
             sender,
             _receiver: Arc::new(RwLock::new(Some(receiver))),
-            concurrency_limit: Arc::new(Semaphore::new(concurrency)),
         }
     }
 

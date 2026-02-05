@@ -282,7 +282,7 @@ pub fn serde_values_to_series(name: &str, values: &[Value]) -> Series {
                     Value::Array(_) | Value::Object(_) => buf.push(Some(v.to_string())),
                 }
             }
-            Series::new(name, buf)
+            Series::new(name.into(), buf)
         }
         Target::Boolean => {
             let mut buf: Vec<Option<bool>> = Vec::with_capacity(values.len());
@@ -293,7 +293,7 @@ pub fn serde_values_to_series(name: &str, values: &[Value]) -> Series {
                     _ => buf.push(None),
                 }
             }
-            Series::new(name, buf)
+            Series::new(name.into(), buf)
         }
         Target::Float64 => {
             let mut buf: Vec<Option<f64>> = Vec::with_capacity(values.len());
@@ -314,7 +314,7 @@ pub fn serde_values_to_series(name: &str, values: &[Value]) -> Series {
                     _ => buf.push(None),
                 }
             }
-            Series::new(name, buf)
+            Series::new(name.into(), buf)
         }
         Target::Int64 => {
             let mut buf: Vec<Option<i64>> = Vec::with_capacity(values.len());
@@ -325,7 +325,7 @@ pub fn serde_values_to_series(name: &str, values: &[Value]) -> Series {
                     _ => buf.push(None),
                 }
             }
-            Series::new(name, buf)
+            Series::new(name.into(), buf)
         }
         Target::UInt64 => {
             let mut buf: Vec<Option<u64>> = Vec::with_capacity(values.len());
@@ -336,7 +336,7 @@ pub fn serde_values_to_series(name: &str, values: &[Value]) -> Series {
                     _ => buf.push(None),
                 }
             }
-            Series::new(name, buf)
+            Series::new(name.into(), buf)
         }
     }
 }
@@ -375,7 +375,7 @@ pub fn json_values_to_series_with_target(
                     Value::Array(_) | Value::Object(_) => buf.push(Some(v.to_string())),
                 }
             }
-            Series::new(name, buf)
+            Series::new(name.into(), buf)
         }
         JsonTarget::Boolean => {
             let mut buf: Vec<Option<bool>> = Vec::with_capacity(values.len());
@@ -386,7 +386,7 @@ pub fn json_values_to_series_with_target(
                     _ => buf.push(None),
                 }
             }
-            Series::new(name, buf)
+            Series::new(name.into(), buf)
         }
         JsonTarget::Float64 => {
             let mut buf: Vec<Option<f64>> = Vec::with_capacity(values.len());
@@ -410,7 +410,7 @@ pub fn json_values_to_series_with_target(
                     _ => buf.push(None),
                 }
             }
-            Series::new(name, buf)
+            Series::new(name.into(), buf)
         }
         JsonTarget::Int64 => {
             let mut buf: Vec<Option<i64>> = Vec::with_capacity(values.len());
@@ -424,7 +424,7 @@ pub fn json_values_to_series_with_target(
                     _ => buf.push(None),
                 }
             }
-            Series::new(name, buf)
+            Series::new(name.into(), buf)
         }
         JsonTarget::UInt64 => {
             let mut buf: Vec<Option<u64>> = Vec::with_capacity(values.len());
@@ -438,7 +438,7 @@ pub fn json_values_to_series_with_target(
                     _ => buf.push(None),
                 }
             }
-            Series::new(name, buf)
+            Series::new(name.into(), buf)
         }
     }
 }
@@ -541,7 +541,7 @@ pub fn calamine_value_to_series(name: &str, values: &[Data]) -> Series {
                     }
                 }
             }
-            Series::new(name, buf)
+            Series::new(name.into(), buf)
         }
         Target::Boolean => {
             let mut buf: Vec<Option<bool>> = Vec::with_capacity(values.len());
@@ -552,7 +552,7 @@ pub fn calamine_value_to_series(name: &str, values: &[Data]) -> Series {
                     _ => buf.push(None),
                 }
             }
-            Series::new(name, buf)
+            Series::new(name.into(), buf)
         }
         Target::Float64 => {
             let mut buf: Vec<Option<f64>> = Vec::with_capacity(values.len());
@@ -571,7 +571,7 @@ pub fn calamine_value_to_series(name: &str, values: &[Data]) -> Series {
                     Data::String(_) | Data::Bool(_) => buf.push(None),
                 }
             }
-            Series::new(name, buf)
+            Series::new(name.into(), buf)
         }
         Target::Int64 => {
             let mut buf: Vec<Option<i64>> = Vec::with_capacity(values.len());
@@ -583,7 +583,7 @@ pub fn calamine_value_to_series(name: &str, values: &[Data]) -> Series {
                     _ => buf.push(None),
                 }
             }
-            Series::new(name, buf)
+            Series::new(name.into(), buf)
         }
         Target::UInt64 => {
             let mut buf: Vec<Option<u64>> = Vec::with_capacity(values.len());
@@ -595,7 +595,7 @@ pub fn calamine_value_to_series(name: &str, values: &[Data]) -> Series {
                     _ => buf.push(None),
                 }
             }
-            Series::new(name, buf)
+            Series::new(name.into(), buf)
         }
     }
 }

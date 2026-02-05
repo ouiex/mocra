@@ -8,7 +8,6 @@ async-trait.workspace = true
 tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-bincode.workspace = true
 rmp-serde = { workspace = true }
 deadpool-redis.workspace = true
 rdkafka.workspace = true
@@ -25,5 +24,5 @@ utils.workspace = true
 common.workspace = true
 rand.workspace = true
 crc32fast = "1.5.0"
-flate2 = "1.1.5"
+flate2 = "1.1.9"
 zstd = { workspace = true }

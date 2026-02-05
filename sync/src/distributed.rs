@@ -2,9 +2,18 @@ use super::backend::CoordinationBackend;
 use dashmap::DashMap;
 use once_cell::sync::Lazy;
 use serde::{Serialize, de::DeserializeOwned};
+use rmp_serde as rmps;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::{broadcast, watch};
+
+fn msgpack_encode<T: Serialize>(value: &T) -> Result<Vec<u8>, rmps::encode::Error> {
+    rmps::to_vec(value)
+}
+
+fn msgpack_decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, rmps::decode::Error> {
+    rmps::from_slice(bytes)
+}
 
 pub trait SyncAble: Send + Sync + Sized + 'static + Serialize + DeserializeOwned {
     // 消息队列topic
@@ -115,7 +124,7 @@ impl SyncService {
 
             let initial_data = backend.get(&kv_key).await?;
             let initial_value = if let Some(bytes) = initial_data {
-                match bincode::deserialize::<T>(&bytes) {
+                match msgpack_decode::<T>(&bytes) {
                     Ok(v) => Some(v),
                     Err(e) => {
                         eprintln!(
@@ -139,7 +148,7 @@ impl SyncService {
                         recv = rx.recv() => {
                             match recv {
                                 Some(bytes) => {
-                                    match bincode::deserialize::<T>(&bytes) {
+                                    match msgpack_decode::<T>(&bytes) {
                                         Ok(value) => {
                                             if tx.send(Some(value)).is_err() {
                                                 break;
@@ -160,7 +169,7 @@ impl SyncService {
                         _ = interval.tick() => {
                             match backend.get(&kv_key).await {
                                 Ok(Some(bytes)) => {
-                                    match bincode::deserialize::<T>(&bytes) {
+                                    match msgpack_decode::<T>(&bytes) {
                                         Ok(value) => {
                                             if tx.send(Some(value)).is_err() {
                                                 break;
@@ -202,7 +211,7 @@ impl SyncService {
             let initial_value = {
                 let lock = local_state.value.read().unwrap();
                 if let Some(bytes) = &*lock {
-                    match bincode::deserialize::<T>(bytes) {
+                    match msgpack_decode::<T>(bytes) {
                         Ok(v) => Some(v),
                         Err(e) => {
                             eprintln!(
@@ -222,7 +231,7 @@ impl SyncService {
 
             tokio::spawn(async move {
                 while let Ok(bytes) = rx.recv().await {
-                    match bincode::deserialize::<T>(&bytes) {
+                    match msgpack_decode::<T>(&bytes) {
                         Ok(value) => {
                             if tx.send(Some(value)).is_err() {
                                 break;
@@ -248,7 +257,7 @@ impl SyncService {
         T: SyncAble,
     {
         let topic = T::topic();
-        let bytes = bincode::serialize(data).map_err(|e| e.to_string())?;
+        let bytes = msgpack_encode(data).map_err(|e| e.to_string())?;
 
         if let Some(backend) = &self.backend {
             let stream_topic = self.stream_topic_for(&topic);
@@ -283,14 +292,14 @@ impl SyncService {
                 let old_bytes_opt = backend.get(&kv_key).await?;
 
                 let mut state = if let Some(ref bytes) = old_bytes_opt {
-                    bincode::deserialize::<T>(bytes).map_err(|e| e.to_string())?
+                    msgpack_decode::<T>(bytes).map_err(|e| e.to_string())?
                 } else {
                     return Err("Cannot update non-existent state".to_string());
                 };
 
                 f(&mut state);
 
-                let new_bytes = bincode::serialize(&state).map_err(|e| e.to_string())?;
+                let new_bytes = msgpack_encode(&state).map_err(|e| e.to_string())?;
 
                 let old_bytes_slice = old_bytes_opt.as_deref();
                 if backend.cas(&kv_key, old_bytes_slice, &new_bytes).await? {
@@ -311,14 +320,14 @@ impl SyncService {
             let mut lock = local_state.value.write().unwrap();
 
             let mut state = if let Some(ref bytes) = *lock {
-                bincode::deserialize::<T>(bytes).map_err(|e| e.to_string())?
+                msgpack_decode::<T>(bytes).map_err(|e| e.to_string())?
             } else {
                 return Err("Cannot update non-existent state".to_string());
             };
 
             f(&mut state);
 
-            let new_bytes = bincode::serialize(&state).map_err(|e| e.to_string())?;
+            let new_bytes = msgpack_encode(&state).map_err(|e| e.to_string())?;
             *lock = Some(new_bytes.clone());
 
             // Release lock before sending to avoid potential deadlocks (though unlikely here)
@@ -339,7 +348,7 @@ impl SyncService {
             let kv_key = self.kv_key_for(&topic);
             let data = backend.get(&kv_key).await?;
             if let Some(bytes) = data {
-                bincode::deserialize::<T>(&bytes)
+                msgpack_decode::<T>(&bytes)
                     .map(Some)
                     .map_err(|e| e.to_string())
             } else {
@@ -349,7 +358,7 @@ impl SyncService {
             let local_state = self.get_local_state(&topic);
             let lock = local_state.value.read().unwrap();
             if let Some(bytes) = &*lock {
-                bincode::deserialize::<T>(bytes)
+                msgpack_decode::<T>(bytes)
                     .map(Some)
                     .map_err(|e| e.to_string())
             } else {

@@ -108,8 +108,17 @@ impl Module {
                 }
                 request.module = module_name.clone();
                 request.platform = platform_name.clone();
-                request.download_middleware = download_middleware.clone();
-                request.data_middleware = data_middleware.clone();
+                let mut merged_download_middleware = request.download_middleware.clone();
+                merged_download_middleware.extend(download_middleware.clone());
+                merged_download_middleware.sort();
+                merged_download_middleware.dedup();
+                request.download_middleware = merged_download_middleware;
+
+                let mut merged_data_middleware = request.data_middleware.clone();
+                merged_data_middleware.extend(data_middleware.clone());
+                merged_data_middleware.sort();
+                merged_data_middleware.dedup();
+                request.data_middleware = merged_data_middleware;
                 request.account = account_name.clone();
                 request.task_finished = finished;
                 // inherit run_id from Module/Task so ModuleProcessor and downstream can isolate state per run

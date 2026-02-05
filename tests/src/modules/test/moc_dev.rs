@@ -70,7 +70,10 @@ impl ModuleNodeTrait for MocDevNode {
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_nanos(), i);
-            let request = Request::new(url, RequestMethod::Get);
+            let mut request = Request::new(url, RequestMethod::Get);
+            request
+                .download_middleware
+                .push("benchmark_counter_download_middleware".to_string());
             requests.push(request);
         }
         requests.into_stream_ok()

@@ -20,8 +20,6 @@ pub struct Deduplicator {
     namespace: String,
     // L0: Bloom Filter (probabilistic, fast pre-filter)
     bloom: Arc<RwLock<Bloom<String>>>,
-    bloom_capacity: usize,
-    bloom_fp_rate: f64,
     // L1 Cache: hash -> expire_at (timestamp)
     // Stores KNOWN duplicates (present in Redis).
     local_cache: Arc<DashMap<String, i64>>,
@@ -52,10 +50,10 @@ impl Deduplicator {
         
         // Initialize Bloom Filter
         // With 10M capacity and 0.01 FP rate: ~11.98 MB memory, 7 hash functions
-        let bloom = Arc::new(RwLock::new(Bloom::new_for_fp_rate(
-            bloom_capacity,
-            bloom_fp_rate,
-        )));
+        let bloom = Arc::new(RwLock::new(
+            Bloom::new_for_fp_rate(bloom_capacity, bloom_fp_rate)
+                .expect("Failed to create Bloom filter"),
+        ));
         let bloom_clone = bloom.clone();
         
         info!(
@@ -112,8 +110,6 @@ impl Deduplicator {
             ttl,
             namespace: namespace.into(),
             bloom,
-            bloom_capacity,
-            bloom_fp_rate,
             local_cache,
         }
     }

@@ -13,11 +13,11 @@ use crate::chain::DataMiddlewareProcessor;
 /// 带事件发布的处理器
 pub struct EventAwareProcessor<P> {
     inner_processor: P,
-    event_bus: Arc<EventBus>,
+    event_bus: Option<Arc<EventBus>>,
 }
 
 impl<P> EventAwareProcessor<P> {
-    pub fn new<Input, Output>(processor: P, event_bus: Arc<EventBus>) -> Self
+    pub fn new<Input, Output>(processor: P, event_bus: Option<Arc<EventBus>>) -> Self
     where
         P: ProcessorTrait<Input, Output>,
     {
@@ -29,8 +29,8 @@ impl<P> EventAwareProcessor<P> {
 
     /// 发布事件
     async fn publish_event(&self, event: Option<SystemEvent>) {
-        if let Some(event) = event {
-            if let Err(_e) = self.event_bus.publish(event).await {
+        if let (Some(event), Some(event_bus)) = (event, &self.event_bus) {
+            if let Err(_e) = event_bus.publish(event).await {
                 // log::error!("Failed to publish event: {_e}");
             }
         }
@@ -112,7 +112,7 @@ where
 /// 事件感知的 TypedChain 包装器：保持 TypedChain 的完整功能，对每一步处理器进行事件增强
 pub struct EventAwareTypedChain<In, Out> {
     inner: TypedChain<In, Out>,
-    event_bus: Arc<EventBus>,
+    event_bus: Option<Arc<EventBus>>,
 }
 
 
@@ -120,7 +120,7 @@ impl<In> EventAwareTypedChain<In, In>
 where
     In: Send + Clone + 'static,
 {
-    pub fn new(event_bus: Arc<EventBus>) -> Self {
+    pub fn new(event_bus: Option<Arc<EventBus>>) -> Self {
         Self {
             inner: TypedChain::<In, In>::new(),
             event_bus,

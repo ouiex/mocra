@@ -8,7 +8,7 @@ pub mod option_value {
     where
         S: Serializer,
     {
-        // For Bincode compatibility, we serialize Value as String
+        // Serialize Value as String for cross-format compatibility
         match value {
             Some(v) => {
                  let s = serde_json::to_string(v).map_err(serde::ser::Error::custom)?;

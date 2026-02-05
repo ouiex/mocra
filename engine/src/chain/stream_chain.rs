@@ -183,7 +183,7 @@ pub async fn create_wss_download_chain(
     queue_manager: Arc<QueueManager>,
     middleware_manager: Arc<MiddlewareManager>,
     cache_service: Arc<CacheService>,
-    event_bus: Arc<EventBus>,
+    event_bus: Option<Arc<EventBus>>,
     proxy_manager: Option<Arc<ProxyManager>>,
 ) -> EventAwareTypedChain<Request, ()> {
     let download_processor = WebSocketDownloadProcessor {
