@@ -498,6 +498,19 @@ impl QueueManager {
         self.channel.log_sender.clone()
     }
 
+    /// Local pending message count across processor queues
+    pub async fn local_pending_count(&self) -> usize {
+        let mut total = 0usize;
+
+        total += self.channel.task_receiver.lock().await.len();
+        total += self.channel.download_request_receiver.lock().await.len();
+        total += self.channel.remote_response_receiver.lock().await.len();
+        total += self.channel.remote_parser_task_receiver.lock().await.len();
+        total += self.channel.remote_error_receiver.lock().await.len();
+
+        total
+    }
+
     async fn flush_batch_grouped<T>(
         base_topic: String,
         backend: Arc<dyn MqBackend>,

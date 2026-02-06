@@ -45,6 +45,7 @@ module_max_errors = 10
 module_locker_ttl = 5
 # Increased concurrency for benchmark
 task_concurrency = 1000
+idle_stop_secs = 0
 
 [channel_config]
 minid_time = 12

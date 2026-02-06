@@ -162,6 +162,8 @@ pub struct CrawlerConfig {
     pub publish_concurrency: Option<usize>,
     /// Request deduplication TTL in seconds (default: 3600)
     pub dedup_ttl_secs: Option<u64>,
+    /// Idle stop timeout in seconds (stop engine if local queues have no data for this duration)
+    pub idle_stop_secs: Option<u64>,
 }
 
 /// Scheduler Configuration

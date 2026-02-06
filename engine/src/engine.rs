@@ -34,7 +34,7 @@ use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use crate::scheduler::CronScheduler;
 use sync::{LeaderElector, RedisBackend};
 use uuid::Uuid;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Engine is the core component that orchestrates the crawling process.
 /// It manages the lifecycle of Tasks, Requests, Responses, and Parsers via a chain of responsibilities.
@@ -398,6 +398,47 @@ impl Engine {
         tokio::spawn(async move {
              SystemMonitor::new(15).run(state_for_monitor).await; // 15 seconds interval
         });
+
+        // Idle Stop Monitor (based on local queue pending data)
+        let idle_stop_secs = self
+            .state
+            .config
+            .read()
+            .await
+            .crawler
+            .idle_stop_secs
+            .unwrap_or(0);
+        if idle_stop_secs > 0 {
+            let queue_manager = self.queue_manager.clone();
+            let shutdown_tx = self.shutdown_tx.clone();
+            let mut shutdown_rx = self.shutdown_tx.subscribe();
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(Duration::from_secs(1));
+                let mut last_active = Instant::now();
+
+                loop {
+                    tokio::select! {
+                        _ = shutdown_rx.recv() => {
+                            info!("Idle stop monitor shutting down");
+                            break;
+                        }
+                        _ = interval.tick() => {
+                            let pending = queue_manager.local_pending_count().await;
+                            if pending > 0 {
+                                last_active = Instant::now();
+                                continue;
+                            }
+
+                            if last_active.elapsed().as_secs() >= idle_stop_secs {
+                                info!("No local queue data for {}s, initiating shutdown", idle_stop_secs);
+                                let _ = shutdown_tx.send(());
+                                break;
+                            }
+                        }
+                    }
+                }
+            });
+        }
 
         // Start Cron Scheduler
         self.start_cron_scheduler();

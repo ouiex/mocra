@@ -28,6 +28,7 @@ task_max_errors = 50
 module_max_errors = 10
 module_locker_ttl = 5
 task_concurrency = 200
+idle_stop_secs = 0
 
 [channel_config]
 minid_time = 12

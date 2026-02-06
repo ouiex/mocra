@@ -40,6 +40,7 @@ module_locker_ttl = 5
 task_concurrency = 200
 publish_concurrency = 200
 dedup_ttl_secs = 3600
+idle_stop_secs = 0
 
 [channel_config]
 minid_time = 12
