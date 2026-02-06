@@ -1,3 +1,5 @@
+create schema if not exists base;
+
 create table base.account
 (
     id         serial
