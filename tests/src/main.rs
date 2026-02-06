@@ -51,7 +51,7 @@ async fn seed_database(state: &Arc<State>) {
 
     // 2. Run Seed SQL
     if db_backend == DatabaseBackend::Postgres || db_backend == DatabaseBackend::Sqlite {
-        let seed_path = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("seed_data.sql");
+        let seed_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("seed_data.sql");
         if let Ok(sql) = fs::read_to_string(&seed_path) {
             println!("Seeding database from {}", seed_path.display());
             let stmts: Vec<&str> = sql.split(';').filter(|s| !s.trim().is_empty()).collect();
@@ -223,7 +223,7 @@ impl DownloadMiddleware for CounterDownloadMiddleware {
 async fn main() {
     // Configuration for the benchmark
     const TARGET_REQUESTS: u64 = 2000;
-    const TARGET_URL: &str = "https://moc.dev";
+    const TARGET_URL: &str = "https://baidu.com";
     const MAX_WAIT_SECONDS: u64 = 120; // 2 minutes max wait
     const IDLE_TIMEOUT_SECONDS: u64 = 15; // If no progress for 15s, assume done
     
