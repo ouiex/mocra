@@ -207,3 +207,29 @@ create table base.rel_module_platform
 );
 
 
+CREATE TABLE base.log (
+    id BIGSERIAL PRIMARY KEY,
+    task_id VARCHAR(255) NOT NULL,
+    request_id UUID,
+    status VARCHAR(50) NOT NULL,
+    level VARCHAR(20) NOT NULL,
+    message TEXT NOT NULL,
+    timestamp TIMESTAMP NOT NULL,
+    traceback TEXT
+);
+
+CREATE INDEX idx_log_task_id ON base.log(task_id);
+CREATE INDEX idx_log_timestamp ON base.log(timestamp);
+
+CREATE TABLE base.task_result (
+    id BIGSERIAL PRIMARY KEY,
+    task_id VARCHAR(255) NOT NULL,
+    status VARCHAR(50) NOT NULL,
+    start_time TIMESTAMP NOT NULL,
+    end_time TIMESTAMP,
+    result TEXT,
+    error TEXT,
+    updated_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE INDEX idx_task_result_task_id ON base.task_result(task_id);
