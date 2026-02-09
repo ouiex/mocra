@@ -70,83 +70,6 @@ impl ProcessorTrait<TaskModel, Task> for TaskModelProcessor {
             serde_json::Value::Object(serde_json::Map::new()),
         );
 
-        if input.account == "mock_user" {
-             // 1. Recover Mock Module Trait
-            let all_modules = self.task_manager.get_all_modules().await;
-            let mock_module_trait = all_modules.iter()
-                .find(|m| m.name() == "benchmark")
-                .map(|m| m.clone());
-
-            if let Some(module_trait) = mock_module_trait {
-                 // 2. Construct Entities
-                 let account = common::model::entity::AccountModel {
-                     id: 1,
-                     name: "mock_user".to_string(),
-                     modules: vec![],
-                     enabled: true,
-                     config: serde_json::Value::Object(serde_json::Map::new()),
-                     priority: 0,
-                     created_at: chrono::Utc::now().naive_utc(),
-                     updated_at: chrono::Utc::now().naive_utc(),
-                 };
-                 let platform = common::model::entity::PlatformModel {
-                     id: 1,
-                     name: "mock_platform".to_string(),
-                     description: None,
-                     base_url: None,
-                     enabled: true,
-                     config: serde_json::Value::Object(serde_json::Map::new()),
-                     created_at: chrono::Utc::now().naive_utc(),
-                     updated_at: chrono::Utc::now().naive_utc(),
-                 };
-                 
-                 // 3. Construct Module Processor
-                 let module_id = format!("{}-{}-{}", account.name, platform.name, module_trait.name());
-                 let processor = crate::task::module_processor_with_chain::ModuleProcessorWithChain::new(
-                     module_id.clone(),
-                     self.task_manager.cache_service.clone(),
-                     input.run_id,
-                     3600
-                 );
-                 
-                 // Add steps
-                 let nodes = module_trait.add_step().await;
-                 for node in nodes {
-                     processor.add_step_node(node).await;
-                 }
-
-                 // 4. Construct Module
-                 let module = crate::task::module::Module {
-                     config: std::sync::Arc::new(common::model::ModuleConfig::default()),
-                     account: account.clone(),
-                     platform: platform.clone(),
-                     error_times: 0,
-                     finished: false,
-                     data_middleware: vec![],
-                     download_middleware: vec![],
-                     module: module_trait,
-                     locker: false,
-                     locker_ttl: 0,
-                     processor,
-                     run_id: input.run_id,
-                     prefix_request: Uuid::nil(),
-                     pending_ctx: None,
-                 };
-                 
-                 let task = crate::task::Task {
-                     account,
-                     platform,
-                     login_info: None,
-                     modules: vec![module],
-                     metadata: serde_json::Map::new(),
-                     run_id: input.run_id,
-                     prefix_request: Uuid::new_v4(),
-                 };
-
-                 info!("[TaskModelProcessor] constructed task for benchmark");
-                 return ProcessorResult::Success(task);
-            }
-        }
 
         info!(
             "[TaskModelProcessor] Processing Task: account={} platform={} modules={:?} retry={}",
@@ -174,7 +97,7 @@ impl ProcessorTrait<TaskModel, Task> for TaskModelProcessor {
                 );
                 // 不要将已终止的 Task 重新入队，直接返回致命错误
                 if let Err(e) = self.queue_manager.send_to_dlq("task", &input, &reason).await {
-                     error!("[TaskModelProcessor<TaskModel>] failed to send to DLQ: {}", e);
+                    error!("[TaskModelProcessor<TaskModel>] failed to send to DLQ: {}", e);
                 }
                 return ProcessorResult::FatalFailure(
                     ModuleError::TaskMaxError(reason.into()).into(),
@@ -267,7 +190,6 @@ impl ProcessorTrait<TaskModel, Task> for TaskModelProcessor {
         error: Error,
         _context: &ProcessorContext,
     ) -> ProcessorResult<Task> {
-
         let sender = self.queue_manager.get_error_push_channel();
         let error_msg = ErrorTaskModel {
             id: Default::default(),
@@ -490,7 +412,7 @@ impl ProcessorTrait<ErrorTaskModel, Task> for TaskModelProcessor {
                     reason
                 );
                 if let Err(e) = self.queue_manager.send_to_dlq("error_task", &input, &reason).await {
-                     error!("[TaskModelProcessor<ErrorTaskModel>] failed to send to DLQ: {}", e);
+                    error!("[TaskModelProcessor<ErrorTaskModel>] failed to send to DLQ: {}", e);
                 }
                 return ProcessorResult::FatalFailure(
                     ModuleError::TaskMaxError(reason.into()).into(),
@@ -687,7 +609,6 @@ impl ProcessorTrait<Task, Vec<Module>> for TaskModuleProcessor {
         let mut filtered_modules: Vec<Module> = Vec::new();
         for x in modules.into_iter() {
             filtered_modules.push(x);
-
         }
         let modules = filtered_modules;
         if !modules.is_empty() {
@@ -699,7 +620,7 @@ impl ProcessorTrait<Task, Vec<Module>> for TaskModuleProcessor {
                     serde_json::to_value(login_info).unwrap(),
                 )
             })
-            .await
+                .await
             {
                 Ok(v) => v,
                 Err(e) => {
@@ -800,9 +721,9 @@ impl ProcessorTrait<Module, SyncBoxStream<'static, Request>> for TaskProcessor {
         // Task.metadata
         let meta = match context.metadata.read().await.get("task_meta") {
             Some(m) => {
-                 debug!("[TaskProcessor] Found task_meta");
-                 m.as_object().cloned().unwrap_or_default()
-            },
+                debug!("[TaskProcessor] Found task_meta");
+                m.as_object().cloned().unwrap_or_default()
+            }
             None => {
                 warn!("[TaskProcessor] task_meta missing in context, will retry");
                 return ProcessorResult::RetryableFailure(context.retry_policy.unwrap_or_default());
@@ -815,11 +736,11 @@ impl ProcessorTrait<Module, SyncBoxStream<'static, Request>> for TaskProcessor {
                     let info_res = tokio::task::spawn_blocking(move || {
                         serde_json::from_value::<LoginInfo>(m_clone)
                     })
-                    .await
-                    .map_err(|e| {
-                        warn!("[TaskProcessor] spawn_blocking failed: {e}");
-                        e
-                    });
+                        .await
+                        .map_err(|e| {
+                            warn!("[TaskProcessor] spawn_blocking failed: {e}");
+                            e
+                        });
 
                     match info_res {
                         Ok(Ok(info)) => Some(info),
@@ -833,7 +754,7 @@ impl ProcessorTrait<Module, SyncBoxStream<'static, Request>> for TaskProcessor {
                             );
                         }
                         Err(_) => {
-                             return ProcessorResult::RetryableFailure(
+                            return ProcessorResult::RetryableFailure(
                                 context
                                     .retry_policy
                                     .unwrap_or_default()
@@ -841,7 +762,7 @@ impl ProcessorTrait<Module, SyncBoxStream<'static, Request>> for TaskProcessor {
                             );
                         }
                     }
-                },
+                }
                 None => {
                     warn!("[TaskProcessor] missing login_info, will retry");
                     return ProcessorResult::RetryableFailure(
@@ -865,7 +786,7 @@ impl ProcessorTrait<Module, SyncBoxStream<'static, Request>> for TaskProcessor {
                 let queue_manager = self.queue_manager.clone();
                 let cache_service = self.state.cache_service.clone();
                 let concurrency = self.state.config.read().await.crawler.publish_concurrency.unwrap_or(100);
-                
+
                 let dedup_ttl = self
                     .state
                     .config
@@ -881,95 +802,95 @@ impl ProcessorTrait<Module, SyncBoxStream<'static, Request>> for TaskProcessor {
                     .get_pool()
                     .map(|p| Arc::new(Deduplicator::new(p.clone(), dedup_ttl, namespace)));
 
-                 let stream = stream.chunks(100)
-                  .map(move |batch: Vec<Request>| {
-                      let queue_manager = queue_manager.clone();
-                      let cache_service = cache_service.clone();
-                      let deduplicator = deduplicator.clone();
-                      
-                      async move {
-                          if batch.is_empty() {
-                              return Vec::new();
-                          }
+                let stream = stream.chunks(100)
+                    .map(move |batch: Vec<Request>| {
+                        let queue_manager = queue_manager.clone();
+                        let cache_service = cache_service.clone();
+                        let deduplicator = deduplicator.clone();
 
-                        let batch_len = batch.len();
-                        let hashes = if deduplicator.is_some() {
-                            Some(std::sync::Arc::new(
-                                batch.iter().map(|req| req.hash()).collect::<Vec<_>>(),
-                            ))
-                        } else {
-                            None
-                        };
+                        async move {
+                            if batch.is_empty() {
+                                return Vec::new();
+                            }
 
-                         let results = if let Some(dedup) = &deduplicator {
-                             let hashes = hashes.clone().unwrap_or_else(|| std::sync::Arc::new(Vec::new()));
-                             let dedup_clone = dedup.clone();
-                             tokio::spawn(async move {
-                                 match dedup_clone.check_and_set_batch(hashes.as_ref()).await {
-                                     Ok(res) => res,
-                                     Err(e) => {
-                                         error!("[TaskProcessor] batch deduplication check failed: {}, allowing requests", e);
-                                         vec![true; batch_len]
-                                     }
-                                 }
-                             })
-                             .await
-                             .unwrap_or_else(|e| {
-                                 error!("[TaskProcessor] batch deduplication spawn failed: {}, allowing requests", e);
-                                 vec![true; batch_len]
-                             })
-                         } else {
-                             vec![true; batch_len]
-                         };
+                            let batch_len = batch.len();
+                            let hashes = if deduplicator.is_some() {
+                                Some(std::sync::Arc::new(
+                                    batch.iter().map(|req| req.hash()).collect::<Vec<_>>(),
+                                ))
+                            } else {
+                                None
+                            };
 
-                        for (index, (req, is_new)) in batch.into_iter().zip(results).enumerate() {
-                              if !is_new {
-                                   let hash = hashes
-                                       .as_ref()
-                                       .and_then(|values| values.get(index).map(String::as_str))
-                                       .unwrap_or("unknown");
-                                   info!("[TaskProcessor] duplicate request skipped: request_id={} module_id={} hash={}", req.id, req.module_id(), hash);
-                                   continue;
-                              }
-                              
-                              let id = req.id.to_string();
-                              let module_id = req.module_id();
-                              let req_clone = req.clone();
-                              let cache_service = cache_service.clone();
-                              
-                              tokio::spawn(async move {
-                                 if let Err(e) = req_clone.send(&id, &cache_service).await {
-                                     debug!("[RequestPublish] persist failed (background): {e}");
-                                 }
-                              });
-                              
-                               let request_id = req.id;
-                               let item = QueuedItem::new(req);
-                               let tx = queue_manager.get_request_push_channel();
-                               match tx.try_send(item) {
-                                  Ok(_) => {
-                                      info!("[RequestPublish] publish request: request_id={} module_id={}", request_id, module_id);
-                                  }
-                                 Err(tokio::sync::mpsc::error::TrySendError::Full(item)) => {
-                                     if let Err(e) = tx.send(item).await {
-                                         error!("Failed to send request to queue: {e}");
-                                     } else {
-                                         info!("[RequestPublish] publish request: request_id={} module_id={}", request_id, module_id);
-                                     }
-                                 }
-                                 Err(e) => {
-                                     error!("Failed to send request to queue: {e}");
-                                 }
-                             }
+                            let results = if let Some(dedup) = &deduplicator {
+                                let hashes = hashes.clone().unwrap_or_else(|| std::sync::Arc::new(Vec::new()));
+                                let dedup_clone = dedup.clone();
+                                tokio::spawn(async move {
+                                    match dedup_clone.check_and_set_batch(hashes.as_ref()).await {
+                                        Ok(res) => res,
+                                        Err(e) => {
+                                            error!("[TaskProcessor] batch deduplication check failed: {}, allowing requests", e);
+                                            vec![true; batch_len]
+                                        }
+                                    }
+                                })
+                                    .await
+                                    .unwrap_or_else(|e| {
+                                        error!("[TaskProcessor] batch deduplication spawn failed: {}, allowing requests", e);
+                                        vec![true; batch_len]
+                                    })
+                            } else {
+                                vec![true; batch_len]
+                            };
+
+                            for (index, (req, is_new)) in batch.into_iter().zip(results).enumerate() {
+                                if !is_new {
+                                    let hash = hashes
+                                        .as_ref()
+                                        .and_then(|values| values.get(index).map(String::as_str))
+                                        .unwrap_or("unknown");
+                                    info!("[TaskProcessor] duplicate request skipped: request_id={} module_id={} hash={}", req.id, req.module_id(), hash);
+                                    continue;
+                                }
+
+                                let id = req.id.to_string();
+                                let module_id = req.module_id();
+                                let req_clone = req.clone();
+                                let cache_service = cache_service.clone();
+
+                                tokio::spawn(async move {
+                                    if let Err(e) = req_clone.send(&id, &cache_service).await {
+                                        debug!("[RequestPublish] persist failed (background): {e}");
+                                    }
+                                });
+
+                                let request_id = req.id;
+                                let item = QueuedItem::new(req);
+                                let tx = queue_manager.get_request_push_channel();
+                                match tx.try_send(item) {
+                                    Ok(_) => {
+                                        info!("[RequestPublish] publish request: request_id={} module_id={}", request_id, module_id);
+                                    }
+                                    Err(tokio::sync::mpsc::error::TrySendError::Full(item)) => {
+                                        if let Err(e) = tx.send(item).await {
+                                            error!("Failed to send request to queue: {e}");
+                                        } else {
+                                            info!("[RequestPublish] publish request: request_id={} module_id={}", request_id, module_id);
+                                        }
+                                    }
+                                    Err(e) => {
+                                        error!("Failed to send request to queue: {e}");
+                                    }
+                                }
+                            }
+
+                            Vec::<Request>::new()
                         }
-                        
-                        Vec::<Request>::new()
-                    }
-                })
-                .buffer_unordered(concurrency / 10 + 1)
-                .map(futures::stream::iter)
-                .flatten();
-                
+                    })
+                    .buffer_unordered(concurrency / 10 + 1)
+                    .map(futures::stream::iter)
+                    .flatten();
+
                 Box::pin(stream)
             }
             Err(e) => {
@@ -1031,7 +952,7 @@ impl EventProcessorTrait<Module, SyncBoxStream<'static, Request>> for TaskProces
 }
 pub struct RequestPublish {
     queue_manager: Arc<QueueManager>,
-    state: Arc<State>
+    state: Arc<State>,
 }
 
 #[async_trait]
@@ -1050,12 +971,12 @@ impl ProcessorTrait<Request, ()> for RequestPublish {
         // 1. Persist request to Redis (for chain fallback)
         // Moved from ModuleProcessorWithChain to support streaming
         let id = input.id.to_string();
-        
+
         // Performance Optimization: Fire-and-forget cache write using spawn
         // Offload serialization and IO to background task to unblock stream processing
         let cache_service = self.state.cache_service.clone();
         let request_clone = input.clone();
-        
+
         tokio::spawn(async move {
             if let Err(e) = request_clone.send(&id, &cache_service).await {
                 // Log at debug level to avoid spamming warns if cache is just busy
@@ -1127,7 +1048,7 @@ impl EventProcessorTrait<Request, ()> for RequestPublish {
     }
 }
 pub struct ConfigProcessor {
-    pub state: Arc<State>
+    pub state: Arc<State>,
 }
 #[async_trait]
 impl ProcessorTrait<Request, (Request, Option<ModuleConfig>)> for ConfigProcessor {
@@ -1219,7 +1140,7 @@ use cacheable::{CacheAble};
 use crate::task::{Task, TaskManager};
 use crate::task::module::Module;
 
-pub type SyncBoxStream<'a, T> = Pin<Box<dyn Stream<Item = T> + Send + Sync + 'a>>;
+pub type SyncBoxStream<'a, T> = Pin<Box<dyn Stream<Item=T> + Send + Sync + 'a>>;
 
 /// task_model -> task -> request -> () (publish request to queue)
 pub struct VecToStreamProcessor<T> {
@@ -1296,7 +1217,7 @@ impl<T> FlattenStreamVecProcessor<T> {
 
 #[async_trait]
 impl<T: Send + Sync + 'static> ProcessorTrait<SyncBoxStream<'static, Vec<T>>, SyncBoxStream<'static, T>>
-    for FlattenStreamVecProcessor<T>
+for FlattenStreamVecProcessor<T>
 {
     fn name(&self) -> &'static str {
         "FlattenStreamVecProcessor"
@@ -1357,7 +1278,7 @@ impl<T> StreamLoggerProcessor<T> {
 
 #[async_trait]
 impl<T: Send + Sync + 'static> ProcessorTrait<SyncBoxStream<'static, T>, SyncBoxStream<'static, T>>
-    for StreamLoggerProcessor<T>
+for StreamLoggerProcessor<T>
 {
     fn name(&self) -> &'static str {
         "StreamLoggerProcessor"
@@ -1409,7 +1330,7 @@ impl<T> FlattenStreamProcessor<T> {
 
 #[async_trait]
 impl<T: Send + Sync + 'static> ProcessorTrait<SyncBoxStream<'static, SyncBoxStream<'static, T>>, SyncBoxStream<'static, T>>
-    for FlattenStreamProcessor<T>
+for FlattenStreamProcessor<T>
 {
     fn name(&self) -> &'static str {
         "FlattenStreamProcessor"
@@ -1476,7 +1397,7 @@ pub async fn create_task_model_chain(
         .then_map_stream_in_with_strategy::<(), _>(
             request_publish,
             state.config.read().await.crawler.publish_concurrency.unwrap_or(1024),
-            ErrorStrategy::Skip
+            ErrorStrategy::Skip,
         )
 }
 pub async fn create_parser_task_chain(
@@ -1514,7 +1435,7 @@ pub async fn create_parser_task_chain(
         .then_map_stream_in_with_strategy::<(), _>(
             request_publish,
             state.config.read().await.crawler.publish_concurrency.unwrap_or(256),
-            ErrorStrategy::Skip
+            ErrorStrategy::Skip,
         )
 }
 pub async fn create_error_task_chain(
