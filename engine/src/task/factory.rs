@@ -54,7 +54,7 @@ impl TaskFactory {
     }
     pub async fn login_info(&self, id: &str) -> Option<LoginInfo> {
         if let Some(sync) = self.cookie_service.as_ref(){
-            return LoginInfo::sync_with_fallback(id, sync)
+            return LoginInfo::sync(id, sync)
                 .await
                 .ok()
                 .flatten()
