@@ -5,11 +5,9 @@ use super::config::{KafkaConfig, RedisConfig};
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum LogOutputConfig {
     Console {
-        level: Option<String>,
     },
     File {
         path: String,
-        level: Option<String>,
         rotation: Option<String>,
         max_size_mb: Option<u64>,
         max_files: Option<u32>,
@@ -17,7 +15,6 @@ pub enum LogOutputConfig {
     Mq {
         backend: String,
         topic: String,
-        level: Option<String>,
         format: Option<String>,
         buffer: Option<usize>,
         batch_size: Option<usize>,

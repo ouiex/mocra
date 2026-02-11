@@ -469,15 +469,12 @@ pub fn clear_log_sender() {
 #[derive(Debug, Clone)]
 pub enum LogOutputConfig {
     Console {
-        level: Option<String>,
     },
     File {
         path: PathBuf,
-        level: Option<String>,
         rotation: Option<String>,
     },
     Mq {
-        level: Option<String>,
     },
 }
 
@@ -520,10 +517,9 @@ impl LoggerConfig {
     pub fn for_app(namespace: &str) -> Self {
         let mut config = Self::default();
         config.outputs = vec![
-            LogOutputConfig::Console { level: None },
+            LogOutputConfig::Console {},
             LogOutputConfig::File {
                 path: PathBuf::from("logs").join(format!("mocra.{namespace}.log")),
-                level: None,
                 rotation: Some("daily".to_string()),
             },
         ];
@@ -540,7 +536,7 @@ impl Default for LoggerConfig {
             include: vec![],
             buffer: 10000,
             flush_interval_ms: 500,
-            outputs: vec![LogOutputConfig::Console { level: None }],
+            outputs: vec![LogOutputConfig::Console {}],
             prometheus: None,
         }
     }
@@ -613,15 +609,14 @@ fn build_sinks(config: &LoggerConfig) -> Result<Vec<Arc<dyn LogSink>>, LogError>
     }
 
     let mut sinks: Vec<Arc<dyn LogSink>> = Vec::new();
+    let base_level = base_level_from_filter(&config.level).unwrap_or(Level::INFO);
 
     for output in &config.outputs {
         match output {
-            LogOutputConfig::Console { level } => {
-                let min_level = parse_level(level.as_deref()).unwrap_or(Level::INFO);
-                sinks.push(Arc::new(ConsoleSink::new(min_level)));
+            LogOutputConfig::Console {} => {
+                sinks.push(Arc::new(ConsoleSink::new(base_level)));
             }
-            LogOutputConfig::File { path, level, rotation } => {
-                let min_level = parse_level(level.as_deref()).unwrap_or(Level::INFO);
+            LogOutputConfig::File { path, rotation } => {
                 let rotation = match rotation.as_deref() {
                     Some("daily") | None => Rotation::DAILY,
                     Some("hourly") => Rotation::HOURLY,
@@ -629,11 +624,10 @@ fn build_sinks(config: &LoggerConfig) -> Result<Vec<Arc<dyn LogSink>>, LogError>
                     Some("minutely") => Rotation::MINUTELY,
                     _ => Rotation::DAILY,
                 };
-                sinks.push(Arc::new(FileSink::new(path.as_path(), min_level, rotation)?));
+                sinks.push(Arc::new(FileSink::new(path.as_path(), base_level, rotation)?));
             }
-            LogOutputConfig::Mq { level } => {
-                let min_level = parse_level(level.as_deref()).unwrap_or(Level::WARN);
-                sinks.push(Arc::new(DynamicMqSink::new(min_level)));
+            LogOutputConfig::Mq {} => {
+                sinks.push(Arc::new(DynamicMqSink::new(base_level)));
             }
         }
     }
@@ -641,8 +635,7 @@ fn build_sinks(config: &LoggerConfig) -> Result<Vec<Arc<dyn LogSink>>, LogError>
     if let Some(prometheus) = &config.prometheus
         && prometheus.enabled
     {
-        let min_level = parse_level(Some(&config.level)).unwrap_or(Level::INFO);
-        sinks.push(Arc::new(PrometheusSink::new(min_level)));
+        sinks.push(Arc::new(PrometheusSink::new(base_level)));
     }
 
     Ok(sinks)
@@ -650,6 +643,15 @@ fn build_sinks(config: &LoggerConfig) -> Result<Vec<Arc<dyn LogSink>>, LogError>
 
 fn parse_level(level: Option<&str>) -> Option<Level> {
     level.and_then(|lvl| lvl.parse::<Level>().ok())
+}
+
+fn base_level_from_filter(level: &str) -> Option<Level> {
+    let candidate = level
+        .split(|ch| ch == ',' || ch == ';')
+        .next()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())?;
+    candidate.parse::<Level>().ok()
 }
 
 fn format_log_record_text(record: &LogRecord) -> String {
@@ -777,7 +779,7 @@ mod tests {
     fn test_logger_config_builder() {
         let config = LoggerConfig::new()
             .with_level("debug")
-            .with_output(LogOutputConfig::Console { level: None });
+            .with_output(LogOutputConfig::Console {});
 
         assert_eq!(config.level, "debug");
         assert!(!config.outputs.is_empty());
@@ -808,7 +810,7 @@ mod tests {
 
         let config = LoggerConfig::new()
             .with_level("info")
-            .with_output(LogOutputConfig::Mq { level: Some("warn".to_string()) });
+            .with_output(LogOutputConfig::Mq {});
 
         let _ = init_logger(config).await;
 

@@ -292,30 +292,24 @@ impl Engine {
             .outputs
             .iter()
             .filter_map(|output| match output {
-                common::model::logger_config::LogOutputConfig::Console { level } => Some(
-                    AppLogOutputConfig::Console {
-                        level: level.clone(),
-                    },
-                ),
+                common::model::logger_config::LogOutputConfig::Console {} => {
+                    Some(AppLogOutputConfig::Console {})
+                }
                 common::model::logger_config::LogOutputConfig::File {
                     path,
-                    level,
                     rotation,
                     ..
                 } => Some(AppLogOutputConfig::File {
                     path: PathBuf::from(path),
-                    level: level.clone(),
                     rotation: rotation.clone(),
                 }),
-                common::model::logger_config::LogOutputConfig::Mq { level, format, .. } => {
+                common::model::logger_config::LogOutputConfig::Mq { format, .. } => {
                     if let Some(format) = format
                         && format.to_lowercase() != "json"
                     {
                         eprintln!("logger.outputs.mq.format only supports json, got {format}");
                     }
-                    Some(AppLogOutputConfig::Mq {
-                        level: level.clone(),
-                    })
+                    Some(AppLogOutputConfig::Mq {})
                 }
             })
             .collect();
@@ -333,26 +327,33 @@ impl Engine {
         config
     }
 
+    fn base_level_from_filter(level: &str) -> Option<&str> {
+        level
+            .split(|ch| ch == ',' || ch == ';')
+            .map(|value| value.trim())
+            .find(|value| !value.is_empty())
+    }
+
     async fn setup_mq_log_sender(
         logger: &common::model::logger_config::LoggerConfig,
         queue_manager: Arc<QueueManager>,
     ) -> Option<AppLogSender> {
         let mq_output = logger.outputs.iter().find_map(|output| {
             match output {
-                common::model::logger_config::LogOutputConfig::Mq {
-                    level,
-                    buffer,
-                    ..
-                } => Some((level.clone(), *buffer)),
+                common::model::logger_config::LogOutputConfig::Mq { buffer, .. } => {
+                    Some(*buffer)
+                }
                 _ => None,
             }
         })?;
 
-        let buffer = mq_output.1.or(logger.buffer).unwrap_or(10000);
-        let level = mq_output
-            .0
-            .or_else(|| logger.level.clone())
-            .unwrap_or_else(|| "warn".to_string());
+        let buffer = mq_output.or(logger.buffer).unwrap_or(10000);
+        let level = logger
+            .level
+            .as_deref()
+            .and_then(Self::base_level_from_filter)
+            .unwrap_or("info")
+            .to_string();
 
         let (sender, mut receiver) = tokio::sync::mpsc::channel(buffer);
         let log_sender = AppLogSender::with_capacity(sender, level, buffer);
@@ -468,9 +469,15 @@ impl Engine {
                         QueueLogHandler::start(rx, queue_manager.clone(), "mq".to_string()).await;
                         info!("Registered MQ Logger for EventBus");
                     }
-                    LogOutputConfig::Console { level } => {
+                    LogOutputConfig::Console { .. } => {
                         let rx = event_bus.subscribe("*".to_string()).await;
-                        ConsoleLogHandler::start(rx, level.clone().unwrap_or_else(|| "INFO".to_string())).await;
+                        let level = log_config
+                            .level
+                            .as_deref()
+                            .and_then(Self::base_level_from_filter)
+                            .unwrap_or("info")
+                            .to_string();
+                        ConsoleLogHandler::start(rx, level).await;
                         info!("Registered Console Logger for EventBus");
                     }
                     LogOutputConfig::File { .. } => {

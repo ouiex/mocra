@@ -209,6 +209,55 @@ compression_threshold = 1024
 | outputs | 是 | array | 日志输出列表（见下文）。 | Output list (see below). |
 | prometheus | 否 | object | Prometheus 日志统计配置。 | Prometheus log stats settings. |
 
+#### logger_config 详细说明 (LoggerConfig Details)
+
+`logger` 作为统一入口，等价于 “logger_config”。它决定：
+- 日志是否启用、基础级别、格式
+- 具体输出目标（console/file/mq）
+- 输出缓冲与刷新行为
+
+常见约定：
+- `level` 影响全局默认级别
+- `format` 仅 `console/file` 支持 `text`；`mq` 只支持 `json`
+- `buffer` 与 `flush_interval_ms` 只影响 MQ 输出（批量写入）
+- `outputs[]` 至少配置一个，否则不会有输出
+
+最小可用示例：
+```toml
+[logger]
+enabled = true
+level = "info"
+
+[[logger.outputs]]
+type = "console"
+```
+
+多输出示例（console + file + mq）：
+```toml
+[logger]
+enabled = true
+level = "info"
+format = "text"
+buffer = 10000
+flush_interval_ms = 500
+
+[[logger.outputs]]
+type = "console"
+level = "debug"
+
+[[logger.outputs]]
+type = "file"
+path = "logs/app.log"
+rotation = "daily"
+
+[[logger.outputs]]
+type = "mq"
+backend = "kafka"
+topic = "mocra-logs"
+format = "json"
+kafka = { brokers = "localhost:9095" }
+```
+
 #### logger.outputs[] (LogOutputConfig)
 
 按 `type` 区分：`console` / `file` / `mq`。
@@ -217,14 +266,12 @@ compression_threshold = 1024
 
 | Key | 必填 | 类型 | 说明（中文） | Description (EN) |
 | --- | --- | --- | --- | --- |
-| level | 否 | string | 日志级别（debug/info/warn/error）。 | Log level (debug/info/warn/error). |
 
 **File**
 
 | Key | 必填 | 类型 | 说明（中文） | Description (EN) |
 | --- | --- | --- | --- | --- |
 | path | 是 | string | 文件路径。 | File path. |
-| level | 否 | string | 日志级别（debug/info/warn/error）。 | Log level (debug/info/warn/error). |
 | rotation | 否 | string | 轮转策略（daily/hourly/minutely/never）。 | Rotation policy (daily/hourly/minutely/never). |
 | max_size_mb | 否 | number | 最大文件大小（占位）。 | Max file size (placeholder). |
 | max_files | 否 | number | 最大文件数（占位）。 | Max file count (placeholder). |
@@ -235,7 +282,6 @@ compression_threshold = 1024
 | --- | --- | --- | --- | --- |
 | backend | 是 | string | MQ 类型：`kafka` 或 `redis`。 | MQ backend: `kafka` or `redis`. |
 | topic | 是 | string | Topic 名称。 | Topic name. |
-| level | 否 | string | 日志级别。 | Log level. |
 | format | 否 | string | 仅支持 `json`。 | Only supports `json`. |
 | buffer | 否 | number | 缓冲区大小（默认 10000）。 | Buffer size (default 10000). |
 | batch_size | 否 | number | 批量大小（占位）。 | Batch size (placeholder). |

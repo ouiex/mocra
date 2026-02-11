@@ -17,9 +17,7 @@ async fn main() {
 
     let config = LoggerConfig::new()
         .with_level("info")
-        .with_output(LogOutputConfig::Mq {
-            level: Some("info".to_string()),
-        });
+        .with_output(LogOutputConfig::Mq {});
     let _ = logger::init_logger(config).await;
 
     let consumed = Arc::new(AtomicUsize::new(0));
