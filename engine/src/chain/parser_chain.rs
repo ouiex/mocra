@@ -455,6 +455,16 @@ impl ProcessorTrait<(Response, Arc<Module>, Arc<ModuleConfig>, Option<LoginInfo>
         // 错误已经在 process() 方法中通过 error_tracker 记录
         // 这里只需要创建 ErrorTaskModel 并入队
 
+        let timestamp = match SystemTime::now().duration_since(UNIX_EPOCH) {
+            Ok(duration) => duration.as_secs(),
+            Err(e) => {
+                warn!(
+                    "[ResponseParserProcessor] system time before UNIX_EPOCH, fallback to 0: {}",
+                    e
+                );
+                0
+            }
+        };
         let error_task = ErrorTaskModel {
             id: input.0.id,
             account_task: TaskModel {
@@ -465,10 +475,7 @@ impl ProcessorTrait<(Response, Arc<Module>, Arc<ModuleConfig>, Option<LoginInfo>
                 priority: input.0.priority,
             },
             error_msg: error.to_string(),
-            timestamp: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_secs(),
+            timestamp,
             metadata: input.0.metadata.clone().into(),
             context: input.0.context.clone(),
             run_id: input.0.run_id,
@@ -564,7 +571,17 @@ impl ProcessorTrait<Data, Data> for DataMiddlewareProcessor {
             .read()
             .await
             .get("config")
-            .map(|x| serde_json::from_value::<ModuleConfig>(x.clone()).unwrap_or_default());
+            .map(|x| {
+                serde_json::from_value::<ModuleConfig>(x.clone()).unwrap_or_else(|e| {
+                    warn!(
+                        "[DataMiddlewareProcessor] config conversion failed, using default: request_id={} module={} error={}",
+                        input.request_id,
+                        input.module,
+                        e
+                    );
+                    ModuleConfig::default()
+                })
+            });
         let modified_data = self.middleware_manager.handle_data(input, &config).await;
         if start.elapsed().as_millis() > 10 {
             info!("[DataMiddlewareProcessor] SLOW middleware execution: {} ms", start.elapsed().as_millis());
@@ -653,7 +670,17 @@ impl ProcessorTrait<Data, ()> for DataStoreProcessor {
             .read()
             .await
             .get("config")
-            .map(|x| serde_json::from_value::<ModuleConfig>(x.clone()).unwrap_or_default());
+            .map(|x| {
+                serde_json::from_value::<ModuleConfig>(x.clone()).unwrap_or_else(|e| {
+                    warn!(
+                        "[DataStoreProcessor] config conversion failed, using default: request_id={} module={} error={}",
+                        input.request_id,
+                        input.module,
+                        e
+                    );
+                    ModuleConfig::default()
+                })
+            });
         let request_id = input.request_id;
         let res = if middleware.is_empty() {
             self.middleware_manager

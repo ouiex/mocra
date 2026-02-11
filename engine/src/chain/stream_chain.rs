@@ -40,14 +40,21 @@ impl ProcessorTrait<(Request, Option<ModuleConfig>), ()> for WebSocketDownloadPr
         context: ProcessorContext,
     ) -> ProcessorResult<()> {
         let (request, _) = input;
+        let request_id = request.id;
+        let module_id = request.module_id();
         let response = self.wss_downloader.send(request).await;
         match response {
             // web_socket_downloader需要持有一个与queue_manager不同的消息队列，需要取出Response进行middleware处理和发布
             // 这种情况下，返回值为()，表示下载成功，需要在post_process中使用middleware处理和发布
             // post_process
             Ok(_resp) => ProcessorResult::Success(()),
-            Err(_) => {
-                // Handle download error
+            Err(e) => {
+                warn!(
+                    "[WebSocketDownloadProcessor] download failed, will retry: request_id={} module_id={} error={}",
+                    request_id,
+                    module_id,
+                    e
+                );
                 ProcessorResult::RetryableFailure(context.retry_policy.unwrap_or_default())
             }
         }

@@ -38,8 +38,6 @@ redis_port = 6379
 redis_db = 0
 pool_size = 50
 
-[sync.kafka]
-brokers = "localhost:9095"
 
 [crawler]
 request_max_retries = 1
@@ -60,8 +58,6 @@ queue_codec = "msgpack"
 compression_threshold = 1048576
 batch_concurrency = 500
 
-[channel_config.kafka]
-brokers = "localhost:9095"
 
 [channel_config.compensator]
 redis_host = "127.0.0.1"

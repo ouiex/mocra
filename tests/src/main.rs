@@ -17,12 +17,7 @@ async fn build_engine_with_logger(enable_logger: bool) -> Engine {
     let state = Arc::new(State::new(config_path.to_str().unwrap()).await);
     println!("Config loaded from {}", config_path.display());
 
-    let _logging_enabled = if enable_logger {
-        let namespace = state.config.read().await.name.clone();
-        logger::init_app_logger(&namespace).await.unwrap_or(false)
-    } else {
-        false
-    };
+    let _logging_enabled = enable_logger;
 
     let engine: Engine = Engine::new(Arc::clone(&state), None).await;
     for middleware in middleware::register_data_middlewares(){

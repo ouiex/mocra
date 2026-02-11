@@ -579,6 +579,9 @@ impl ProcessorTrait<Task, Vec<Module>> for TaskModuleProcessor {
             input.id(),
             input.modules.len()
         );
+        let task_id = input.id();
+        let metadata = input.metadata.clone();
+        let login_info = input.login_info.clone();
         let mut modules: Vec<Module> = Vec::new();
         let default_locker_ttl = self.state.config.read().await.crawler.module_locker_ttl;
         for mut module in input.modules {
@@ -629,18 +632,31 @@ impl ProcessorTrait<Task, Vec<Module>> for TaskModuleProcessor {
         }
         let modules = filtered_modules;
         if !modules.is_empty() {
-            let metadata = input.metadata.clone();
-            let login_info = input.login_info.clone();
             let (task_meta_val, login_info_val) = match tokio::task::spawn_blocking(move || {
-                (
-                    serde_json::to_value(metadata).unwrap(),
-                    serde_json::to_value(login_info).unwrap(),
-                )
+                let task_meta_val = serde_json::to_value(metadata)
+                    .map_err(|e| format!("task_meta serialize failed: {e}"))?;
+                let login_info_val = serde_json::to_value(login_info)
+                    .map_err(|e| format!("login_info serialize failed: {e}"))?;
+                Ok::<_, String>((task_meta_val, login_info_val))
             })
                 .await
             {
-                Ok(v) => v,
+                Ok(Ok(v)) => v,
+                Ok(Err(e)) => {
+                    error!(
+                        "[TaskModuleProcessor] metadata serialization failed: task_id={} error={}",
+                        task_id, e
+                    );
+                    return ProcessorResult::FatalFailure(
+                        ModuleError::ModuleNotFound(format!("metadata serialize failed: {e}").into())
+                            .into(),
+                    );
+                }
                 Err(e) => {
+                    error!(
+                        "[TaskModuleProcessor] spawn_blocking failed: task_id={} error={}",
+                        task_id, e
+                    );
                     return ProcessorResult::FatalFailure(
                         ModuleError::ModuleNotFound(format!("spawn_blocking failed: {e}").into())
                             .into(),

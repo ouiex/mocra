@@ -1,8 +1,6 @@
 use cron::Schedule;
 use std::str::FromStr;
 
-use crate::config;
-
 #[derive(Debug, Clone)]
 pub struct CronConfig {
     pub schedule: Schedule,
