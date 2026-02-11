@@ -1,4 +1,4 @@
-use crate::{AckAction, Message, MqBackend};
+use crate::{AckAction, Message, MqBackend, NackPolicy, NackDisposition, decide_nack, parse_attempt, HEADER_ATTEMPT, HEADER_NACK_REASON};
 use async_trait::async_trait;
 use common::model::config::KafkaConfig;
 use errors::Result;
@@ -8,6 +8,7 @@ use rdkafka::config::ClientConfig;
 use rdkafka::consumer::{Consumer, StreamConsumer};
 use rdkafka::message::{Headers, OwnedHeaders, Message as KafkaMessageTrait};
 use rdkafka::producer::{FutureProducer, FutureRecord, Producer};
+use metrics::counter;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -28,10 +29,16 @@ pub struct KafkaQueue {
     namespace: String,
     known_topics: Arc<RwLock<HashSet<String>>>,
     config: KafkaConfig,
+    nack_policy: NackPolicy,
 }
 
 impl KafkaQueue {
-    pub fn new(kafka_config: &KafkaConfig, minid_time: u64, namespace: &str) -> Result<Self> {
+    pub fn new(
+        kafka_config: &KafkaConfig,
+        minid_time: u64,
+        namespace: &str,
+        nack_policy: NackPolicy,
+    ) -> Result<Self> {
         let mut config = ClientConfig::new();
         config.set("bootstrap.servers", kafka_config.brokers.as_str());
         config.set("message.timeout.ms", "5000");
@@ -65,6 +72,7 @@ impl KafkaQueue {
             namespace: namespace.to_string(),
             known_topics: Arc::new(RwLock::new(HashSet::new())),
             config: kafka_config.clone(),
+            nack_policy,
         })
     }
 
@@ -291,6 +299,7 @@ impl MqBackend for KafkaQueue {
         }
 
         let dlq_producer = self.producer.clone();
+        let nack_policy = self.nack_policy;
 
         tokio::spawn(async move {
             info!("Starting Kafka listener for topic: {}", topic);
@@ -350,18 +359,62 @@ impl MqBackend for KafkaQueue {
                 while let Some((id_str, action)) = ack_rx.recv().await {
                     let should_commit = match action {
                         AckAction::Ack => true,
-                        AckAction::Nack(reason, payload) => {
-                             // ... (DLQ logic) ...
+                        AckAction::Nack(reason, payload, headers) => {
+                             let attempt = parse_attempt(&headers);
+                             let disposition = decide_nack(nack_policy, attempt);
+                             let action_label = match disposition {
+                                 NackDisposition::Retry { .. } => "retry",
+                                 NackDisposition::Dlq => "dlq",
+                             };
+                             counter!(
+                                 "policy_decisions_total",
+                                 "domain" => "queue",
+                                 "event_type" => "nack",
+                                 "phase" => "failed",
+                                 "kind" => "queue",
+                                 "action" => action_label
+                             )
+                             .increment(1);
+
                              let parts: Vec<&str> = id_str.split(':').collect();
                              if !parts.is_empty() {
                                  let original_topic = parts[0];
-                                 let dlq_topic = format!("{}-dlq", original_topic);
-                                 let record = FutureRecord::to(&dlq_topic).payload(payload.as_slice()).key(&reason);
-                                 if let Err((e, _)) = dlq_producer.send(record, Duration::from_secs(5)).await {
-                                     error!("Failed to send to DLQ {}: {:?}", dlq_topic, e);
+
+                                 if let NackDisposition::Retry { next_attempt } = disposition {
+                                     if nack_policy.backoff_ms > 0 {
+                                         tokio::time::sleep(Duration::from_millis(nack_policy.backoff_ms)).await;
+                                     }
+
+                                     let mut next_headers = (*headers).clone();
+                                     next_headers.insert(HEADER_ATTEMPT.to_string(), next_attempt.to_string());
+                                     next_headers.insert(HEADER_NACK_REASON.to_string(), reason.clone());
+
+                                     let mut record = FutureRecord::to(original_topic).payload(payload.as_slice()).key("");
+                                     let mut kafka_headers = OwnedHeaders::new();
+                                     for (k, v) in &next_headers {
+                                         kafka_headers = kafka_headers.insert(rdkafka::message::Header { key: k, value: Some(v.as_bytes()) });
+                                     }
+                                     record = record.headers(kafka_headers);
+
+                                     if let Err((e, _)) = dlq_producer.send(record, Duration::from_secs(5)).await {
+                                         error!("Failed to retry publish to {}: {:?}", original_topic, e);
+                                         false
+                                     } else {
+                                         true
+                                     }
+                                 } else {
+                                     let dlq_topic = format!("{}-dlq", original_topic);
+                                     let record = FutureRecord::to(&dlq_topic).payload(payload.as_slice()).key(&reason);
+                                     if let Err((e, _)) = dlq_producer.send(record, Duration::from_secs(5)).await {
+                                         error!("Failed to send to DLQ {}: {:?}", dlq_topic, e);
+                                         false
+                                     } else {
+                                         true
+                                     }
                                  }
+                             } else {
+                                 true
                              }
-                             true
                         }
                     };
 

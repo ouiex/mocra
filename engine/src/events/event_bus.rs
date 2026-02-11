@@ -1,4 +1,4 @@
-use super::SystemEvent;
+use super::EventEnvelope;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::sync::RwLock;
@@ -8,9 +8,9 @@ use dashmap::DashMap;
 /// 事件总线
 pub struct EventBus {
     /// Subscribers map: EventType -> List of Senders
-    subscribers: Arc<DashMap<String, Vec<mpsc::Sender<SystemEvent>>>>,
-    sender: mpsc::Sender<SystemEvent>,
-    _receiver: Arc<RwLock<Option<mpsc::Receiver<SystemEvent>>>>,
+    subscribers: Arc<DashMap<String, Vec<mpsc::Sender<EventEnvelope>>>>,
+    sender: mpsc::Sender<EventEnvelope>,
+    _receiver: Arc<RwLock<Option<mpsc::Receiver<EventEnvelope>>>>,
 }
 
 impl EventBus {
@@ -26,7 +26,7 @@ impl EventBus {
 
     /// 订阅事件
     /// Returns a receiver that will receive events of the specified type.
-    pub async fn subscribe(&self, event_type: String) -> mpsc::Receiver<SystemEvent> {
+    pub async fn subscribe(&self, event_type: String) -> mpsc::Receiver<EventEnvelope> {
         let (tx, rx) = mpsc::channel(1000);
         self.subscribers
             .entry(event_type)
@@ -36,7 +36,7 @@ impl EventBus {
     }
 
     /// 发布事件
-    pub async fn publish(&self, event: SystemEvent) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    pub async fn publish(&self, event: EventEnvelope) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         match self.sender.try_send(event) {
             Ok(_) => Ok(()),
             Err(mpsc::error::TrySendError::Full(_)) => {
@@ -71,9 +71,9 @@ impl EventBus {
                     rt.block_on(async move {
                         info!("EventBus dedicated runtime started");
                         while let Some(event) = receiver.recv().await {
-                            let event_type = event.event_type().to_string();
+                            let event_type = event.event_key();
                             
-                            let broadcast_to = |senders: Vec<mpsc::Sender<SystemEvent>>| {
+                            let broadcast_to = |senders: Vec<mpsc::Sender<EventEnvelope>>| {
                                 for tx in senders {
                                     let event_clone = event.clone();
                                     tokio::spawn(async move {

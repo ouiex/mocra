@@ -22,6 +22,10 @@ wss_timeout = 30
 [cache]
 ttl = 60
 
+[sync]
+allow_rollback = true
+envelope_enabled = false
+
 [crawler]
 request_max_retries = 1
 task_max_errors = 50
@@ -41,3 +45,27 @@ path = "tmp/blob_storage_mock"
 [event_bus]
 capacity = 100000
 concurrency = 1000
+
+[logger]
+enabled = true
+level = "INFO"
+format = "text"
+buffer = 10000
+
+[[logger.outputs]]
+type = "console"
+
+[[logger.outputs]]
+type = "file"
+path = "logs/mock_pure.log"
+rotation = "daily"
+
+[[logger.outputs]]
+type = "mq"
+backend = "redis"
+topic = "mocra-logs"
+format = "json"
+redis = { redis_host = "127.0.0.1", redis_port = 6379, redis_db = 0 }
+
+[logger.prometheus]
+enabled = true

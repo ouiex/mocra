@@ -1,210 +1,166 @@
 
 use serde::{Deserialize, Serialize};
-use std::fmt::Debug;
 use uuid::Uuid;
 use common::model::message::{ErrorTaskModel, ParserTaskModel, TaskModel};
-use common::model::{ModuleConfig, Request, Response};
-use proxy::ProxyEnum;
+use common::model::{Request, Response};
 use crate::task::module::Module;
-use crate::task::Task;
+use errors::{Error, ErrorKind};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum EventTaskModel {
-    TaskModelReceived(TaskModelEvent),
-    TaskModelStarted(TaskModelEvent),
-    TaskModelCompleted(TaskModelEvent),
-    TaskModelFailed(DynFailureEvent<TaskModelEvent>),
-    TaskModelRetry(DynRetryEvent<TaskModelEvent>),
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub enum EventDomain {
+    Engine,
+    System,
 }
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum EventParserTaskModel {
-    ParserTaskModelReceived(ParserTaskModelEvent),
-    ParserTaskModelStarted(ParserTaskModelEvent),
-    ParserTaskModelCompleted(ParserTaskModelEvent),
-    ParserTaskModelFailed(DynFailureEvent<ParserTaskModelEvent>),
-    ParserTaskModelRetry(DynRetryEvent<ParserTaskModelEvent>),
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub enum EventType {
+    TaskModel,
+    ParserTaskModel,
+    RequestPublish,
+    RequestMiddleware,
+    Download,
+    ResponseMiddleware,
+    ResponsePublish,
+    ModuleGenerate,
+    Parser,
+    MiddlewareBefore,
+    DataStore,
+    SystemError,
+    SystemHealth,
 }
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum EventParserError {
-    ParserErrorReceived(ParserErrorEvent),
-    ParserErrorStarted(ParserErrorEvent),
-    ParserErrorCompleted(ParserErrorEvent),
-    ParserErrorFailed(DynFailureEvent<ParserErrorEvent>),
-    ParserErrorRetry(DynRetryEvent<ParserErrorEvent>),
-}
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum EventTask {
-    /// 任务相关事件
-    TaskReceived(TaskEvent),
-    TaskStarted(TaskEvent),
-    TaskCompleted(TaskEvent),
-    TaskFailed(DynFailureEvent<TaskEvent>),
-    TaskRetry(DynRetryEvent<TaskEvent>),
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub enum EventPhase {
+    Started,
+    Completed,
+    Failed,
+    Retry,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum EventModule {
-    /// 任务相关事件
-    ModuleGenerate(ModuleEvent),
-    ModuleStarted(ModuleEvent),
-    ModuleCompleted(ModuleEvent),
-    ModuleFailed(DynFailureEvent<ModuleEvent>),
-    ModuleRetry(DynRetryEvent<ModuleEvent>),
-}
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum EventRequest {
-    /// 请求相关事件
-    RequestReceived(RequestEvent),
-    RequestStarted(RequestEvent),
-    RequestCompleted(RequestEvent),
-    RequestFailed(DynFailureEvent<RequestEvent>),
-    RequestRetry(DynRetryEvent<RequestEvent>),
-}
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum EventRequestPublish {
-    RequestPublishPrepared(RequestEvent),
-    RequestPublishSend(RequestEvent),
-    RequestPublishCompleted(RequestEvent),
-    RequestPublishFailed(DynFailureEvent<RequestEvent>),
-    RequestPublishRetry(DynRetryEvent<RequestEvent>),
-}
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum EventConfigLoad {
-    ConfigLoadPrepared(ConfigLoadEvent),
-    ConfigLoadStarted(ConfigLoadEvent),
-    ConfigLoadCompleted(ConfigLoadEvent),
-    ConfigLoadFailed(DynFailureEvent<ConfigLoadEvent>),
-    ConfigLoadRetry(DynRetryEvent<ConfigLoadEvent>),
-}
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum EventProxy {
-    /// Proxy相关事件
-    ProxyPrepared(ProxyEvent),
-    ProxyStarted(ProxyEvent),
-    ProxyCompleted(ProxyEvent),
-    ProxyFailed(DynFailureEvent<ProxyEvent>),
-    ProxyRetry(DynRetryEvent<ProxyEvent>),
-}
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum EventRequestMiddleware {
-    /// 请求中间件
-    RequestMiddlewarePrepared(RequestMiddlewareEvent),
-    RequestMiddlewareStarted(RequestMiddlewareEvent),
-    RequestMiddlewareCompleted(RequestMiddlewareEvent),
-    RequestMiddlewareFailed(DynFailureEvent<RequestMiddlewareEvent>),
-    RequestMiddlewareRetry(DynRetryEvent<RequestMiddlewareEvent>),
-}
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum EventDownload {
-    /// 下载相关事件
-    DownloaderCreate(DownloadEvent),
-    DownloadStarted(DownloadEvent),
-    DownloadCompleted(DownloadEvent),
-    DownloadFailed(DynFailureEvent<DownloadEvent>),
-    DownloadRetry(DynRetryEvent<DownloadEvent>),
-}
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum EventResponseMiddleware {
-    /// 响应中间件
-    ResponseMiddlewarePrepared(ResponseEvent),
-    ResponseMiddlewareStarted(ResponseEvent),
-    ResponseMiddlewareCompleted(ResponseEvent),
-    ResponseMiddlewareFailed(DynFailureEvent<ResponseEvent>),
-    ResponseMiddlewareRetry(DynRetryEvent<ResponseEvent>),
+pub struct EventError {
+    pub kind: ErrorKind,
+    pub message: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum EventResponsePublish {
-    /// 响应发送事件
-    ResponsePublishPrepared(ResponseEvent),
-    ResponsePublishSend(ResponseEvent),
-    ResponsePublishCompleted(ResponseEvent),
-    ResponsePublishFailed(DynFailureEvent<ResponseEvent>),
-    ResponsePublishRetry(DynRetryEvent<ResponseEvent>),
-}
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum EventParser {
-    /// 解析相关事件
-    ParserReceived(ParserEvent),
-    ParserStarted(ParserEvent),
-    ParserCompleted(ParserEvent),
-    ParserFailed(DynFailureEvent<ParserEvent>),
-    ParserRetry(DynRetryEvent<ParserEvent>),
-}
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum EventDataStore {
-    /// 数据保存事件
-    StoreBefore(DataStoreEvent),
-    StoreStarted(DataStoreEvent),
-    StoreCompleted(DataStoreEvent),
-    StoreFailed(DynFailureEvent<DataStoreEvent>),
-    StoreRetry(DynRetryEvent<DataStoreEvent>),
+pub struct EventEnvelope {
+    pub domain: EventDomain,
+    pub event_type: EventType,
+    pub phase: EventPhase,
+    pub payload: serde_json::Value,
+    pub error: Option<EventError>,
+    pub timestamp_ms: u128,
+    pub trace_id: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum EventDataMiddleware {
-    /// 数据中间件事件
-    MiddlewareBefore(DataMiddlewareEvent),
-    MiddlewareStarted(DataMiddlewareEvent),
-    MiddlewareCompleted(DataMiddlewareEvent),
-    MiddlewareFailed(DynFailureEvent<DataMiddlewareEvent>),
-    MiddlewareRetry(DynRetryEvent<DataMiddlewareEvent>),
+impl EventDomain {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            EventDomain::Engine => "engine",
+            EventDomain::System => "system",
+        }
+    }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum EventResponseModuleLoad{
-    ModuleGenerate(ResponseModuleLoad),
-    ModuleGenerateStarted(ResponseModuleLoad),
-    ModuleGenerateCompleted(ResponseModuleLoad),
-    ModuleGenerateFailed(DynFailureEvent<ResponseModuleLoad>),
-    ModuleGenerateRetry(DynRetryEvent<ResponseModuleLoad>),
+impl EventType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            EventType::TaskModel => "task_model",
+            EventType::ParserTaskModel => "parser_task_model",
+            EventType::RequestPublish => "request_publish",
+            EventType::RequestMiddleware => "request_middleware",
+            EventType::Download => "download",
+            EventType::ResponseMiddleware => "response_middleware",
+            EventType::ResponsePublish => "response_publish",
+            EventType::ModuleGenerate => "module_generate",
+            EventType::Parser => "parser",
+            EventType::MiddlewareBefore => "middleware_before",
+            EventType::DataStore => "data_store",
+            EventType::SystemError => "system_error",
+            EventType::SystemHealth => "system_health",
+        }
+    }
 }
 
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum EventSystem {
-    ErrorOccurred(String),
-    ErrorHandled(String),
-    SystemStarted,
-    SystemShutdown,
-    ComponentHealthCheck(HealthCheckEvent),
-}
-/// 系统事件枚举
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum SystemEvent {
-    TaskModel(EventTaskModel),
-    ParserTaskModel(EventParserTaskModel),
-    ParserError(EventParserError),
-    Task(EventTask),
-    Module(EventModule),
-    Request(EventRequest),
-    RequestPublish(EventRequestPublish),
-    ConfigLoad(Box<EventConfigLoad>),
-    Proxy(EventProxy),
-    RequestMiddleware(EventRequestMiddleware),
-    Download(EventDownload),
-    ResponseMiddleware(EventResponseMiddleware),
-    ResponsePublish(EventResponsePublish),
-    ResponseModuleLoad(EventResponseModuleLoad),
-    Parser(EventParser),
-    DataMiddleware(EventDataMiddleware),
-    DataStore(EventDataStore),
-    System(EventSystem),
+impl EventPhase {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            EventPhase::Started => "started",
+            EventPhase::Completed => "completed",
+            EventPhase::Failed => "failed",
+            EventPhase::Retry => "retry",
+        }
+    }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DynRetryEvent<T>
-where
-    T: Serialize + Debug + Clone,
-{
-    pub data: T,
-    pub retry_count: u32,
-    pub reason: String,
-}
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DynFailureEvent<T> {
-    pub data: T,
-    pub error: String,
+impl EventEnvelope {
+    pub fn engine<T: Serialize>(event_type: EventType, phase: EventPhase, payload: T) -> Self {
+        Self {
+            domain: EventDomain::Engine,
+            event_type,
+            phase,
+            payload: serde_json::to_value(payload).unwrap_or_else(|_| serde_json::json!({})),
+            error: None,
+            timestamp_ms: Self::now_ms(),
+            trace_id: None,
+        }
+    }
+
+    pub fn engine_error<T: Serialize>(
+        event_type: EventType,
+        phase: EventPhase,
+        payload: T,
+        err: &Error,
+    ) -> Self {
+        Self {
+            domain: EventDomain::Engine,
+            event_type,
+            phase,
+            payload: serde_json::to_value(payload).unwrap_or_else(|_| serde_json::json!({})),
+            error: Some(EventError {
+                kind: err.kind().clone(),
+                message: err.to_string(),
+            }),
+            timestamp_ms: Self::now_ms(),
+            trace_id: None,
+        }
+    }
+
+    pub fn system_error(message: impl Into<String>, phase: EventPhase) -> Self {
+        Self {
+            domain: EventDomain::System,
+            event_type: EventType::SystemError,
+            phase,
+            payload: serde_json::json!({ "message": message.into() }),
+            error: None,
+            timestamp_ms: Self::now_ms(),
+            trace_id: None,
+        }
+    }
+
+    pub fn system_health(payload: HealthCheckEvent, phase: EventPhase) -> Self {
+        Self {
+            domain: EventDomain::System,
+            event_type: EventType::SystemHealth,
+            phase,
+            payload: serde_json::to_value(payload).unwrap_or_else(|_| serde_json::json!({})),
+            error: None,
+            timestamp_ms: Self::now_ms(),
+            trace_id: None,
+        }
+    }
+
+    pub fn event_key(&self) -> String {
+        format!("{}.{}.{}", self.domain.as_str(), self.event_type.as_str(), self.phase.as_str())
+    }
+
+    pub fn now_ms() -> u128 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -242,63 +198,31 @@ impl From<&ParserTaskModel> for ParserTaskModelEvent {
         }
     }
 }
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ParserErrorEvent {
-    pub account: String,
-    pub platform: String,
-    pub modules: Option<Vec<String>>,
-    pub error_msg: String,
-    #[serde(skip)]
-    pub metadata: serde_json::Value,
-}
-impl From<&ErrorTaskModel> for ParserErrorEvent {
+impl From<&ErrorTaskModel> for ParserTaskModelEvent {
     fn from(value: &ErrorTaskModel) -> Self {
         Self {
             account: value.account_task.account.clone(),
             platform: value.account_task.platform.clone(),
             modules: value.account_task.module.clone(),
-            error_msg: value.error_msg.clone(),
-            metadata: serde_json::to_value(value.metadata.clone()).unwrap_or_default(),
+            metadata: Some(serde_json::to_value(value.metadata.clone()).unwrap_or_default()),
         }
     }
 }
 
 
-/// 任务事件
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TaskEvent {
+pub struct ModuleGenerateEvent {
     pub account: String,
     pub platform: String,
-    pub modules: Vec<String>,
-    // pub error_times: usize,
-}
-impl From<&Task> for TaskEvent {
-    fn from(value: &Task) -> Self {
-        TaskEvent {
-            account: value.account.name.clone(),
-            platform: value.platform.name.clone(),
-            modules: value.modules.iter().map(|m| m.module.name()).collect(),
-            // error_times: value.error_times,
-        }
-    }
+    pub module: String,
 }
 
-
-/// Module事件
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ModuleEvent {
-    pub account: String,
-    pub platform: String,
-    pub modules: String,
-    pub error_times: u32,
-}
-impl From<&Module> for ModuleEvent {
+impl From<&Module> for ModuleGenerateEvent {
     fn from(value: &Module) -> Self {
-        ModuleEvent {
+        Self {
             account: value.account.name.clone(),
             platform: value.platform.name.clone(),
-            modules: value.module.name().clone(),
-            error_times: value.error_times,
+            module: value.module.name().clone(),
         }
     }
 }
@@ -331,32 +255,6 @@ impl From<&Request> for RequestEvent {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ConfigLoadEvent {
-    pub request_id: Uuid,
-    pub url: String,
-    pub account: String,
-    pub platform: String,
-    pub module: String,
-    pub method: String,
-    #[serde(skip)]
-    pub metadata: serde_json::Value,
-    pub config: Option<ModuleConfig>,
-}
-impl From<&(Request, Option<ModuleConfig>)> for ConfigLoadEvent {
-    fn from(value: &(Request, Option<ModuleConfig>)) -> Self {
-        ConfigLoadEvent {
-            request_id: value.0.id,
-            url: value.0.url.clone(),
-            account: value.0.account.clone(),
-            platform: value.0.platform.clone(),
-            module: value.0.module.clone(),
-            method: value.0.method.clone(),
-            metadata: serde_json::to_value(value.0.meta.clone()).unwrap_or_default(),
-            config: value.1.clone(),
-        }
-    }
-}
 /// 下载事件
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DownloadEvent {
@@ -452,29 +350,6 @@ impl From<&common::model::data::Data> for DataStoreEvent {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ProxyEvent {
-    pub request_id: Uuid,
-    pub url: String,
-    pub account: String,
-    pub platform: String,
-    pub module: String,
-    pub method: String,
-    pub proxy: Option<ProxyEnum>,
-}
-impl From<&Request> for ProxyEvent {
-    fn from(value: &Request) -> Self {
-        ProxyEvent {
-            request_id: value.id,
-            url: value.url.clone(),
-            account: value.account.clone(),
-            platform: value.platform.clone(),
-            module: value.module.clone(),
-            method: value.method.clone(),
-            proxy: value.proxy.clone(),
-        }
-    }
-}
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RequestMiddlewareEvent {
     pub request_id: Uuid,
     pub url: String,
@@ -520,22 +395,6 @@ impl From<&Response> for ResponseEvent {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ResponseModuleLoad{
-    pub account: String,
-    pub platform: String,
-    pub module: String,
-}
-impl From<&Response> for ResponseModuleLoad {
-    fn from(value: &Response) -> Self {
-        ResponseModuleLoad {
-            account: value.account.clone(),
-            platform: value.platform.clone(),
-            module: value.module.clone(),
-        }
-    }
-}
-
 
 
 /// 健康检查事件
@@ -546,45 +405,12 @@ pub struct HealthCheckEvent {
     pub metrics: serde_json::Value,
     pub timestamp: u64,
 }
-
-impl SystemEvent {
-    /// 获取事件的时间戳
-    pub fn timestamp(&self) -> u128 {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis()
-        // match self {
-        //     _ => {
-        //         std::time::SystemTime::now()
-        //             .duration_since(std::time::UNIX_EPOCH)
-        //             .unwrap()
-        //             .as_secs()
-        //     }
-        // }
-    }
-
-    /// 获取事件类型
-    pub fn event_type(&self) -> &'static str {
-        match self {
-            SystemEvent::TaskModel(_) => "task_model",
-            SystemEvent::ParserTaskModel(_) => "parser_task_model",
-            SystemEvent::ParserError(_) => "parser_error",
-            SystemEvent::Task(_) => "task",
-            SystemEvent::Request(_) => "request",
-            SystemEvent::RequestPublish(_) => "request_publish",
-            SystemEvent::ConfigLoad(_) => "config_load",
-            SystemEvent::Proxy(_) => "proxy",
-            SystemEvent::RequestMiddleware(_) => "request_middleware",
-            SystemEvent::Download(_) => "download",
-            SystemEvent::ResponseMiddleware(_) => "response_middleware",
-            SystemEvent::ResponsePublish(_) => "response_publish",
-            SystemEvent::Parser(_) => "parser",
-            SystemEvent::System(_) => "system",
-            SystemEvent::DataStore(_) => "data_store",
-            SystemEvent::ResponseModuleLoad(_) => "response_module_load",
-            SystemEvent::DataMiddleware(_) => "data_middleware",
-            SystemEvent::Module(_) => "module"
+impl From<&Response> for ModuleGenerateEvent {
+    fn from(value: &Response) -> Self {
+        Self {
+            account: value.account.clone(),
+            platform: value.platform.clone(),
+            module: value.module.clone(),
         }
     }
 }

@@ -1,16 +1,14 @@
-name = "crawler_test"
+name = "crawler_local"
 
 [api]
 port = 8905
 
 [db]
-# 推荐使用 url，减少冗余字段
 url = "postgres://eason:Qaz.123456@localhost:5433/crawler"
 database_schema = "base"
 pool_size = 50
 
 [download_config]
-# Increased pool size for 2000 concurrent requests
 pool_size = 800
 downloader_expire = 3600
 timeout = 30
@@ -34,20 +32,20 @@ pool_size = 200
 allow_rollback = true
 envelope_enabled = false
 
-[channel_config.redis]
+[sync.redis]
 redis_host = "127.0.0.1"
 redis_port = 6379
 redis_db = 0
-pool_size = 300
-shards = 16
-listener_count = 16
+pool_size = 50
+
+[sync.kafka]
+brokers = "localhost:9095"
 
 [crawler]
 request_max_retries = 1
 task_max_errors = 100
 module_max_errors = 10
 module_locker_ttl = 5
-# Increased concurrency for benchmark
 task_concurrency = 1000
 idle_stop_secs = 0
 
@@ -58,31 +56,18 @@ max_staleness_secs = 120
 [channel_config]
 minid_time = 12
 capacity = 20000
+queue_codec = "msgpack"
 compression_threshold = 1048576
+batch_concurrency = 500
+
+[channel_config.kafka]
+brokers = "localhost:9095"
+
+[channel_config.compensator]
+redis_host = "127.0.0.1"
+redis_port = 6379
+redis_db = 0
+pool_size = 100
 
 [channel_config.blob_storage]
 path = "tmp/blob_storage"
-
-[logger]
-enabled = true
-level = "INFO"
-format = "text"
-buffer = 20000
-
-[[logger.outputs]]
-type = "console"
-
-[[logger.outputs]]
-type = "file"
-path = "logs/test.log"
-rotation = "daily"
-
-[[logger.outputs]]
-type = "mq"
-backend = "kafka"
-topic = "mocra-logs"
-format = "json"
-kafka = { brokers = "localhost:9095" }
-
-[logger.prometheus]
-enabled = true

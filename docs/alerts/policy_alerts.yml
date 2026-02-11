@@ -1,0 +1,29 @@
+groups:
+  - name: policy_decisions
+    rules:
+      - alert: PolicyDlqSpike
+        expr: sum by (kind, event_type) (rate(policy_decisions_total{action="dlq"}[5m])) > 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Policy DLQ spike"
+          description: "DLQ rate high for kind={{ $labels.kind }} event_type={{ $labels.event_type }}"
+
+      - alert: PolicyRetryStorm
+        expr: sum by (kind, event_type) (rate(policy_decisions_total{action="retry"}[1m])) > 5
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Policy retry storm"
+          description: "Retry rate high for kind={{ $labels.kind }} event_type={{ $labels.event_type }}"
+
+      - alert: PolicyDropSpike
+        expr: sum by (kind, event_type) (rate(policy_decisions_total{action="ack"}[5m])) > 5
+        for: 5m
+        labels:
+          severity: info
+        annotations:
+          summary: "Policy drop spike"
+          description: "Ack/drop rate high for kind={{ $labels.kind }} event_type={{ $labels.event_type }}"

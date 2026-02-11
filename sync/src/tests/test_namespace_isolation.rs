@@ -57,8 +57,9 @@ async fn test_local_isolation() {
     //
     // Let's proceed with the test anyway, as it validates the API contract.
     
-    let service1 = sync::SyncService::new(None, "ns1".to_string());
-    let service2 = sync::SyncService::new(None, "ns2".to_string());
+    let config = common::model::config::SyncConfig::default();
+    let service1 = sync::SyncService::from_config(None, "ns1".to_string(), &config);
+    let service2 = sync::SyncService::from_config(None, "ns2".to_string(), &config);
 
     let state1 = TestState { val: "data_for_ns1".to_string() };
     let state2 = TestState { val: "data_for_ns2".to_string() };
@@ -90,8 +91,9 @@ async fn test_distributed_isolation() {
     let ns1 = format!("dist_ns1_{}", uuid::Uuid::new_v4());
     let ns2 = format!("dist_ns2_{}", uuid::Uuid::new_v4());
     
-    let service1 = sync::SyncService::new(Some(redis_backend.clone()), ns1.clone());
-    let service2 = sync::SyncService::new(Some(redis_backend.clone()), ns2.clone());
+    let config = common::model::config::SyncConfig::default();
+    let service1 = sync::SyncService::from_config(Some(redis_backend.clone()), ns1.clone(), &config);
+    let service2 = sync::SyncService::from_config(Some(redis_backend.clone()), ns2.clone(), &config);
 
     let state1 = TestState { val: "dist_data_1".to_string() };
     let state2 = TestState { val: "dist_data_2".to_string() };

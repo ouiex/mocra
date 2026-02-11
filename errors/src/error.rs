@@ -4,27 +4,25 @@ use std::fmt;
 use std::num::ParseIntError;
 use std::str::ParseBoolError;
 use thiserror::Error;
+use serde::{Deserialize, Serialize};
 /// 通用错误详情类型
 pub type BoxError = Box<dyn StdError + Send + Sync + 'static>;
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ErrorKind {
     Request,
     Response,
     Command,
     Service,
     Proxy,
-    Cookie,
     Download,
     Queue,
     Orm,
     Task,
     Module,
-    Header,
     RateLimit,
-    Sync,
     ProcessorChain,
     Parser,
     DataMiddleware,
@@ -41,14 +39,11 @@ impl fmt::Display for ErrorKind {
             ErrorKind::Command => write!(f, "command"),
             ErrorKind::Service => write!(f, "service"),
             ErrorKind::Proxy => write!(f, "proxy"),
-            ErrorKind::Cookie => write!(f, "cookie"),
             ErrorKind::Download => write!(f, "download"),
             ErrorKind::Queue => write!(f, "queue"),
             ErrorKind::Orm => write!(f, "orm"),
             ErrorKind::Module => write!(f, "task"),
-            ErrorKind::Header => write!(f, "header"),
             ErrorKind::RateLimit => write!(f, "rate limit"),
-            ErrorKind::Sync => write!(f, "sync"),
             ErrorKind::ProcessorChain => write!(f, "processor chain"),
             ErrorKind::Parser => write!(f, "parser"),
             ErrorKind::DataMiddleware => write!(f, "data middleware"),
@@ -119,10 +114,6 @@ impl Error {
 
     pub fn is_proxy(&self) -> bool {
         matches!(self.inner.kind, ErrorKind::Proxy)
-    }
-
-    pub fn is_cookie(&self) -> bool {
-        matches!(self.inner.kind, ErrorKind::Cookie)
     }
 
     pub fn is_download(&self) -> bool {
@@ -237,7 +228,7 @@ impl From<ProxyError> for Error {
 
 impl From<CookieError> for Error {
     fn from(err: CookieError) -> Self {
-        Error::new(ErrorKind::Cookie, Some(err))
+        Error::new(ErrorKind::Request, Some(err))
     }
 }
 
@@ -265,7 +256,7 @@ impl From<ModuleError> for Error {
 
 impl From<HeaderError> for Error {
     fn from(err: HeaderError) -> Self {
-        Error::new(ErrorKind::Header, Some(err))
+        Error::new(ErrorKind::Request, Some(err))
     }
 }
 impl From<RateLimitError> for Error {
@@ -275,7 +266,7 @@ impl From<RateLimitError> for Error {
 }
 impl From<SyncError> for Error {
     fn from(err: SyncError) -> Self {
-        Error::new(ErrorKind::Sync, Some(err))
+        Error::new(ErrorKind::CacheService, Some(err))
     }
 }
 impl From<ProcessorChainError> for Error {

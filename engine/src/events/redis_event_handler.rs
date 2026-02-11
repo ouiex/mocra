@@ -1,4 +1,4 @@
-use super::SystemEvent;
+use super::EventEnvelope;
 // use super::event_bus::EventHandler;
 // use async_trait::async_trait;
 use log::{error, warn};
@@ -109,10 +109,10 @@ impl RedisEventHandler {
 
 
     /// 序列化事件
-    fn serialize_event(&self, event: &SystemEvent) -> String {
+    fn serialize_event(&self, event: &EventEnvelope) -> String {
         json!({
-            "event_type": event.event_type(),
-            "timestamp": event.timestamp(),
+            "event_key": event.event_key(),
+            "timestamp_ms": event.timestamp_ms,
             "data": event,
         })
         .to_string()
@@ -146,16 +146,16 @@ impl RedisEventHandler {
         Err(last_error.unwrap_or_else(|| "All retry attempts failed".into()))
     }
 
-    pub async fn start(self, mut rx: tokio::sync::mpsc::Receiver<SystemEvent>) {
+    pub async fn start(self, mut rx: tokio::sync::mpsc::Receiver<EventEnvelope>) {
         let handler = Arc::new(self);
         tokio::spawn(async move {
             while let Some(event) = rx.recv().await {
-                    let event_type = event.event_type();
-                    let timestamp = event.timestamp();
+                    let event_type = event.event_key();
+                    let timestamp = event.timestamp_ms;
 
                     let event_data = handler.serialize_event(&event);
-                    let key = handler.generate_key(event_type);
-                    let ts_key = handler.generate_timeseries_key(event_type);
+                    let key = handler.generate_key(&event_type);
+                    let ts_key = handler.generate_timeseries_key(&event_type);
                     let score = timestamp as f64;
                     let member = &event_data;
 
@@ -186,28 +186,6 @@ impl RedisEventHandler {
         });
     }
 }
-
-
-// #[async_trait]
-// impl EventHandler for RedisEventHandler {
-//    async fn handle(
-//        &self,
-//        event: &SystemEvent,
-//    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-//        // debug!("Processing event for Redis storage: {}", event.event_type());
-//
-//        let event_type = event.event_type();
-//        let timestamp = event.timestamp();
-//
-//        // 1. 序列化一次，复用
-//        let event_data = self.serialize_event(event);
-//
-//        // 2. 准备 Key
-//        let key = self.generate_key(event_type);
-//        let ts_key = self.generate_timeseries_key(event_type);
-//
-//        // 3. 准备时间序列数据 (复用 event_data)
-//        let score = timestamp as f64;
 //        // 注意：原代码中 save_timeseries_data 的 member 结构与 serialize_event 是一致的
 //        let member = &event_data;
 //

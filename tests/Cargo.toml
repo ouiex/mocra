@@ -17,6 +17,7 @@ async-trait.workspace = true
 serde_json.workspace = true
 chrono.workspace = true
 tokio.workspace = true
+tracing.workspace = true
 sea-orm.workspace = true
 uuid.workspace = true
 mimalloc = { version = "0.1", default-features = false }
@@ -37,6 +38,10 @@ path = "src/mock_engine_benchmark.rs"
 [[bin]]
 name = "mock_prod_like_benchmark"
 path = "src/mock_prod_like_benchmark.rs"
+
+[[bin]]
+name = "log_stress"
+path = "src/log_stress.rs"
 
 
 

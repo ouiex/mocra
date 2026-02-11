@@ -8,3 +8,4 @@ pub mod registry;
 pub mod config;
 pub mod middleware;
 pub mod storage;
+pub mod policy;

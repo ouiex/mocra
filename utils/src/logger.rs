@@ -1,31 +1,24 @@
 #![allow(unused)]
 
-use chrono;
-use once_cell::sync::{Lazy, OnceCell};
+use async_trait::async_trait;
+use chrono::{SecondsFormat, Utc};
+use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
-use std::path::PathBuf;
-use std::sync::RwLock;
+use std::env;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use time::{UtcOffset, format_description::well_known::Rfc3339};
+use std::sync::{Arc, Mutex, RwLock};
 use tokio::sync::mpsc::Sender;
-use tokio::task;
-use tracing::Level;
 use tracing::field::{Field, Visit};
-use tracing::{Event, Subscriber, error};
+use tracing::{Event, Level, Subscriber};
 use tracing_appender::non_blocking::WorkerGuard;
-use tracing_appender::rolling::{RollingFileAppender, Rotation};
+use tracing_appender::rolling::Rotation;
 use tracing_log::LogTracer;
-use tracing_subscriber::fmt;
-use tracing_subscriber::fmt::time::OffsetTime;
 use tracing_subscriber::layer::{Context, Layer, SubscriberExt};
 use tracing_subscriber::{EnvFilter, util::SubscriberInitExt};
-use tracing_subscriber::registry::Registry;
 use uuid::Uuid;
-use crate::storage::{Offloadable, BlobStorage};
-use std::sync::Arc;
-use async_trait::async_trait;
-use std::env;
+
+use crate::storage::{BlobStorage, Offloadable};
 
 #[derive(Serialize, Deserialize)]
 pub struct LogModel {
@@ -35,9 +28,9 @@ pub struct LogModel {
     pub status: String,
     pub level: String,
     pub message: String,
-    pub timestamp: String, // 使用字符串格式化时间戳
+    pub timestamp: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub traceback: Option<String>, // 可选的错误追踪信息
+    pub traceback: Option<String>,
 }
 
 #[async_trait]
@@ -55,195 +48,401 @@ impl Offloadable for LogModel {
 
 impl crate::priority::Prioritizable for LogModel {
     fn get_priority(&self) -> crate::priority::Priority {
-        // Log priority could be mapped from level?
         match self.level.to_lowercase().as_str() {
-             "error" | "fatal" => crate::priority::Priority::High,
-             _ => crate::priority::Priority::Low, // Logs are generally low priority compared to tasks?
+            "error" | "fatal" => crate::priority::Priority::High,
+            _ => crate::priority::Priority::Low,
         }
     }
 }
 
-// Hold the non-blocking writer guard to keep the background logging thread alive
-static FILE_GUARD: OnceCell<WorkerGuard> = OnceCell::new();
+#[derive(Debug)]
+pub enum LogError {
+    Io(std::io::Error),
+    Send(String),
+    Init(tracing_appender::rolling::InitError),
+}
 
-/// Log sender configuration for message queue
+impl From<std::io::Error> for LogError {
+    fn from(err: std::io::Error) -> Self {
+        Self::Io(err)
+    }
+}
+
+impl From<tracing_appender::rolling::InitError> for LogError {
+    fn from(err: tracing_appender::rolling::InitError) -> Self {
+        Self::Init(err)
+    }
+}
+
+impl std::fmt::Display for LogError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LogError::Io(err) => write!(f, "{err}"),
+            LogError::Send(msg) => write!(f, "{msg}"),
+            LogError::Init(err) => write!(f, "{err}"),
+        }
+    }
+}
+
+impl std::error::Error for LogError {}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct LogRecord {
+    pub time: String,
+    #[serde(skip)]
+    pub level: Level,
+    #[serde(rename = "level")]
+    pub level_name: String,
+    pub module: String,
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub event_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub phase: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trace_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub queue_topic: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub policy_action: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub policy_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retry_count: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub traceback: Option<String>,
+}
+
+impl LogRecord {
+    fn new(level: Level, module: impl Into<String>, message: impl Into<String>) -> Self {
+        let time = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
+        let level_name = level.to_string();
+        Self {
+            time,
+            level,
+            level_name,
+            module: module.into(),
+            message: message.into(),
+            status: None,
+            event_type: None,
+            phase: None,
+            error_kind: None,
+            trace_id: None,
+            task_id: None,
+            request_id: None,
+            queue_topic: None,
+            policy_action: None,
+            policy_reason: None,
+            retry_count: None,
+            traceback: None,
+        }
+    }
+}
+
+pub trait LogSink: Send + Sync {
+    fn name(&self) -> &'static str;
+    fn enabled(&self) -> bool {
+        true
+    }
+    fn min_level(&self) -> Level;
+    fn emit(&self, record: &LogRecord) -> Result<(), LogError>;
+    fn flush(&self) -> Result<(), LogError> {
+        Ok(())
+    }
+}
+
+struct LogDispatcher {
+    sinks: Vec<Arc<dyn LogSink>>,
+}
+
+impl LogDispatcher {
+    fn new(sinks: Vec<Arc<dyn LogSink>>) -> Self {
+        Self { sinks }
+    }
+
+    fn emit(&self, record: LogRecord) {
+        if self.sinks.is_empty() {
+            return;
+        }
+
+        for sink in &self.sinks {
+            if !sink.enabled() || record.level < sink.min_level() {
+                continue;
+            }
+            if sink.emit(&record).is_err() {
+                metrics::counter!("log_sink_errors_total", "sink" => sink.name()).increment(1);
+            }
+        }
+    }
+}
+
+struct LogSinkLayer {
+    dispatcher: Arc<LogDispatcher>,
+}
+
+impl LogSinkLayer {
+    fn new(dispatcher: Arc<LogDispatcher>) -> Self {
+        Self { dispatcher }
+    }
+}
+
+impl<S> Layer<S> for LogSinkLayer
+where
+    S: Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+{
+    fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
+        let metadata = event.metadata();
+        let mut visitor = LogVisitor::new();
+        event.record(&mut visitor);
+
+        let message = if visitor.message.is_empty() {
+            metadata.name().to_string()
+        } else {
+            visitor.message
+        };
+
+        let mut record = LogRecord::new(*metadata.level(), metadata.target(), message);
+        record.status = visitor.status;
+        record.event_type = visitor.event_type;
+        record.phase = visitor.phase;
+        record.error_kind = visitor.error_kind;
+        record.trace_id = visitor.trace_id;
+        record.task_id = visitor.task_id;
+        record.request_id = visitor.request_id;
+        record.queue_topic = visitor.queue_topic;
+        record.policy_action = visitor.policy_action;
+        record.policy_reason = visitor.policy_reason;
+        record.retry_count = visitor.retry_count;
+        record.traceback = visitor.traceback;
+
+        self.dispatcher.emit(record);
+    }
+}
+
+struct ConsoleSink {
+    min_level: Level,
+    writer: Mutex<tracing_appender::non_blocking::NonBlocking>,
+    _guard: WorkerGuard,
+}
+
+impl ConsoleSink {
+    fn new(min_level: Level) -> Self {
+        let (writer, guard) = tracing_appender::non_blocking(std::io::stderr());
+        Self {
+            min_level,
+            writer: Mutex::new(writer),
+            _guard: guard,
+        }
+    }
+}
+
+impl LogSink for ConsoleSink {
+    fn name(&self) -> &'static str {
+        "console"
+    }
+
+    fn min_level(&self) -> Level {
+        self.min_level
+    }
+
+    fn emit(&self, record: &LogRecord) -> Result<(), LogError> {
+        let line = format_log_record_text(record);
+        if let Ok(mut writer) = self.writer.lock() {
+            use std::io::Write;
+            writeln!(writer, "{}", line)?;
+        }
+        metrics::counter!("log_events_total", "sink" => self.name(), "level" => record.level.as_str()).increment(1);
+        Ok(())
+    }
+}
+
+struct FileSink {
+    min_level: Level,
+    writer: Mutex<tracing_appender::non_blocking::NonBlocking>,
+    _guard: WorkerGuard,
+}
+
+impl FileSink {
+    fn new(path: &Path, min_level: Level, rotation: Rotation) -> Result<Self, LogError> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let file_prefix = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("app");
+        let file_appender = tracing_appender::rolling::Builder::new()
+            .rotation(rotation)
+            .filename_prefix(file_prefix)
+            .filename_suffix("log")
+            .build(path.parent().unwrap_or_else(|| Path::new(".")))?;
+        let (writer, guard) = tracing_appender::non_blocking(file_appender);
+        Ok(Self {
+            min_level,
+            writer: Mutex::new(writer),
+            _guard: guard,
+        })
+    }
+}
+
+impl LogSink for FileSink {
+    fn name(&self) -> &'static str {
+        "file"
+    }
+
+    fn min_level(&self) -> Level {
+        self.min_level
+    }
+
+    fn emit(&self, record: &LogRecord) -> Result<(), LogError> {
+        let line = format_log_record_text(record);
+        if let Ok(mut writer) = self.writer.lock() {
+            use std::io::Write;
+            writeln!(writer, "{}", line)?;
+        }
+        metrics::counter!("log_events_total", "sink" => self.name(), "level" => record.level.as_str()).increment(1);
+        Ok(())
+    }
+}
+
+struct DynamicMqSink {
+    min_level: Level,
+}
+
+impl DynamicMqSink {
+    fn new(min_level: Level) -> Self {
+        Self { min_level }
+    }
+}
+
+impl LogSink for DynamicMqSink {
+    fn name(&self) -> &'static str {
+        "mq"
+    }
+
+    fn min_level(&self) -> Level {
+        self.min_level
+    }
+
+    fn emit(&self, record: &LogRecord) -> Result<(), LogError> {
+        let Some(dynamic) = DYNAMIC_SENDER
+            .read()
+            .ok()
+            .and_then(|g| g.as_ref().map(|d| (d.sender.clone(), d.queue_level, d.capacity)))
+        else {
+            metrics::counter!("log_dropped_total", "sink" => self.name(), "reason" => "sender_unset").increment(1);
+            return Ok(());
+        };
+
+        if record.level < dynamic.1 {
+            return Ok(());
+        }
+
+        let status = record
+            .status
+            .clone()
+            .or_else(|| record.phase.clone())
+            .unwrap_or_else(|| "info".to_string());
+        let log_model = LogModel {
+            task_id: record.task_id.clone().unwrap_or_else(|| "unknown".to_string()),
+            request_id: record.request_id.as_ref().and_then(|s| s.parse().ok()),
+            status,
+            level: record.level_name.clone(),
+            message: record.message.clone(),
+            timestamp: record.time.clone(),
+            traceback: record.traceback.clone(),
+        };
+
+        if dynamic.0.try_send(log_model).is_err() {
+            metrics::counter!("log_dropped_total", "sink" => self.name(), "reason" => "channel_full").increment(1);
+        } else {
+            metrics::counter!("log_events_total", "sink" => self.name(), "level" => record.level.as_str()).increment(1);
+            metrics::gauge!("log_batch_size", "sink" => self.name()).set(1.0);
+        }
+
+        if let Some(capacity) = dynamic.2 {
+            let remaining = dynamic.0.capacity();
+            let lag = capacity.saturating_sub(remaining) as f64;
+            metrics::gauge!("log_queue_lag", "sink" => self.name()).set(lag);
+        }
+        Ok(())
+    }
+}
+
+struct PrometheusSink {
+    min_level: Level,
+}
+
+impl PrometheusSink {
+    fn new(min_level: Level) -> Self {
+        Self { min_level }
+    }
+}
+
+impl LogSink for PrometheusSink {
+    fn name(&self) -> &'static str {
+        "prometheus"
+    }
+
+    fn min_level(&self) -> Level {
+        self.min_level
+    }
+
+    fn emit(&self, record: &LogRecord) -> Result<(), LogError> {
+        metrics::counter!("log_events_total", "sink" => self.name(), "level" => record.level.as_str()).increment(1);
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct LogSender {
-    /// Sender channel for sending logs to message queue
     pub sender: Sender<LogModel>,
-    /// Minimum log level for queue sender (only logs at this level or higher will be sent to queue)
     pub level: String,
+    pub capacity: Option<usize>,
 }
 
 impl LogSender {
-    /// Create a new LogSender with sender and level
     pub fn new(sender: Sender<LogModel>, level: impl AsRef<str>) -> Self {
         Self {
             sender,
             level: level.as_ref().into(),
+            capacity: None,
         }
     }
 
-    /// Create a new LogSender with default warn level
+    pub fn with_capacity(
+        sender: Sender<LogModel>,
+        level: impl AsRef<str>,
+        capacity: usize,
+    ) -> Self {
+        Self {
+            sender,
+            level: level.as_ref().into(),
+            capacity: Some(capacity),
+        }
+    }
+
     pub fn with_warn_level(sender: Sender<LogModel>) -> Self {
         Self::new(sender, "warn")
     }
 }
 
-/// Logger configuration structure
-///
-/// # Examples
-///
-/// Basic usage with console and file output:
-/// ```
-/// use std::path::PathBuf;
-/// use crate::utils::logger::LoggerConfig;
-///
-/// let config = LoggerConfig::new()
-///     .with_level("debug")
-///     .with_file_path(PathBuf::from("./logs/app.log"))
-///     .with_console(true);
-/// ```
-///
-/// Using with message queue:
-/// ```
-/// use tokio::sync::mpsc;
-/// use utils::logger::{LoggerConfig, LogSender, LogModel};
-///
-/// let (sender, receiver) = mpsc::channel::<LogModel>(1000);
-/// let log_sender = LogSender::new(sender, "warn"); // Only send warn, error levels to queue
-/// let config = LoggerConfig::new()
-///     .with_level("info")
-///     .with_console(true)
-///     .with_log_sender(log_sender);
-/// ```
-#[derive(Debug)]
-pub struct LoggerConfig {
-    /// Log level filter (trace, debug, info, warn, error)
-    pub level: String,
-    /// Optional file path for system log output
-    pub file_path: Option<PathBuf>,
-    /// Whether to enable console output
-    pub enable_console: bool,
-    /// Optional log sender for sending logs to message queue
-    pub log_sender: Option<LogSender>,
-    /// Whether to use JSON format for logs
-    pub json_format: bool,
-}
-impl LoggerConfig {
-    /// Initialize the logger with this configuration
-    pub async fn init(self) -> Result<(), Box<dyn std::error::Error>> {
-        init_logger(self).await
-    }
-
-    /// Create a new logger configuration with default settings
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Set the log level
-    pub fn with_level(mut self, level: impl AsRef<str>) -> Self {
-        self.level = level.as_ref().into();
-        self
-    }
-
-    /// Set the file path for system log output
-    pub fn with_file_path(mut self, path: PathBuf) -> Self {
-        self.file_path = Some(path);
-        self
-    }
-
-    /// Enable or disable console output
-    pub fn with_console(mut self, enable: bool) -> Self {
-        self.enable_console = enable;
-        self
-    }
-    
-    /// Enable or disable JSON format
-    pub fn with_json(mut self, enable: bool) -> Self {
-        self.json_format = enable;
-        self
-    }
-
-    /// Set queue sender for sending logs to message queue
-    pub fn with_queue_sender(mut self, sender: Sender<LogModel>) -> Self {
-        self.log_sender = Some(LogSender::with_warn_level(sender));
-        self
-    }
-
-    /// Set log sender for sending logs to message queue
-    pub fn with_log_sender(mut self, log_sender: LogSender) -> Self {
-        self.log_sender = Some(log_sender);
-        self
-    }
-
-    /// Create a practical app config using namespace-based file name.
-    pub fn for_app(namespace: &str) -> Self {
-        let level = DEFAULT_APP_LOG_LEVEL.to_string();
-        let enable_console = true;
-        let json_format = false;
-        let file_path = Some(PathBuf::from("logs").join(format!("mocra.{namespace}")));
-
-        Self {
-            level,
-            file_path,
-            enable_console,
-            log_sender: None,
-            json_format,
-        }
-    }
-}
-
-// Logger initialization flag
-static LOGGER_INITIALIZED: AtomicBool = AtomicBool::new(false);
-
-impl Default for LoggerConfig {
-    fn default() -> Self {
-        Self {
-            level: "error".to_string(),
-            file_path: Some(PathBuf::from("./logs/app.log")),
-            enable_console: true,
-            log_sender: None,
-            json_format: false,
-        }
-    }
-}
-
-const DEFAULT_APP_LOG_LEVEL: &str = "info,engine=debug;sqlx=warn,sea_orm=warn,h2=warn,hyper=warn";
-
-/// Logging is always enabled when configured via TOML.
-pub fn is_logging_disabled() -> bool {
-    let value = env::var("DISABLE_LOGS")
-        .or_else(|_| env::var("MOCRA_DISABLE_LOGS"))
-        .unwrap_or_default();
-    matches!(
-        value.trim().to_lowercase().as_str(),
-        "1" | "true" | "yes" | "y" | "on"
-    )
-}
-
-/// Initialize logger with sensible defaults and env overrides.
-/// Returns Ok(true) if enabled, Ok(false) if disabled by env.
-pub async fn init_app_logger(namespace: &str) -> Result<bool, Box<dyn std::error::Error>> {
-    if is_logging_disabled() {
-        return Ok(false);
-    }
-
-    let config = LoggerConfig::for_app(namespace);
-    init_logger(config).await?;
-    Ok(true)
-}
-
-// ---------------- Dynamic queue sender support (方案3) ----------------
-
 struct DynamicSender {
     sender: Sender<LogModel>,
     queue_level: Level,
+    capacity: Option<usize>,
 }
 
 static DYNAMIC_SENDER: Lazy<RwLock<Option<DynamicSender>>> = Lazy::new(|| RwLock::new(None));
 
-/// 设置 / 更新日志队列发送者（可在引擎初始化后调用）
 pub fn set_log_sender(log_sender: LogSender) -> Result<(), Box<dyn std::error::Error>> {
     let queue_level = log_sender
         .level
@@ -255,11 +454,11 @@ pub fn set_log_sender(log_sender: LogSender) -> Result<(), Box<dyn std::error::E
     *guard = Some(DynamicSender {
         sender: log_sender.sender,
         queue_level,
+        capacity: log_sender.capacity,
     });
     Ok(())
 }
 
-/// 清除队列发送者（可选）
 #[allow(dead_code)]
 pub fn clear_log_sender() {
     if let Ok(mut guard) = DYNAMIC_SENDER.write() {
@@ -267,98 +466,113 @@ pub fn clear_log_sender() {
     }
 }
 
-/// 动态队列 Layer：初始化时添加一次，之后可随时 set_log_sender
-pub struct DynamicQueueLayer;
+#[derive(Debug, Clone)]
+pub enum LogOutputConfig {
+    Console {
+        level: Option<String>,
+    },
+    File {
+        path: PathBuf,
+        level: Option<String>,
+        rotation: Option<String>,
+    },
+    Mq {
+        level: Option<String>,
+    },
+}
 
-impl<S> Layer<S> for DynamicQueueLayer
-where
-    S: Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
-{
-    fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
-        // 如果还没有注入 sender，直接返回
-        let Some(dynamic) = DYNAMIC_SENDER
-            .read()
-            .ok()
-            .and_then(|g| g.as_ref().map(|d| (d.sender.clone(), d.queue_level)))
-        else {
-            return;
-        };
+#[derive(Debug, Clone)]
+pub struct PrometheusConfig {
+    pub enabled: bool,
+}
 
-        // 过滤级别（只有达到 queue_level 或更高级别才发送）
-        if *event.metadata().level() > dynamic.1 {
-            return;
-        }
+#[derive(Debug, Clone)]
+pub struct LoggerConfig {
+    pub enabled: bool,
+    pub level: String,
+    pub format: String,
+    pub include: Vec<String>,
+    pub buffer: usize,
+    pub flush_interval_ms: u64,
+    pub outputs: Vec<LogOutputConfig>,
+    pub prometheus: Option<PrometheusConfig>,
+}
 
-        let mut visitor = LogVisitor::new();
-        event.record(&mut visitor);
+impl LoggerConfig {
+    pub async fn init(self) -> Result<(), Box<dyn std::error::Error>> {
+        init_logger(self).await
+    }
 
-        let log_model = LogModel {
-            task_id: visitor.task_id.unwrap_or_else(|| "unknown".to_string()),
-            request_id: visitor.request_id.and_then(|s| s.parse().ok()),
-            status: visitor.status,
-            level: event.metadata().level().to_string(),
-            message: visitor.message,
-            timestamp: chrono::Local::now().format("%Y-%m-%dT%H:%M:%S%.3f%z").to_string(), // Slightly faster fixed format
-            traceback: visitor.traceback,
-        };
+    pub fn new() -> Self {
+        Self::default()
+    }
 
-        if let Err(e) = dynamic.0.try_send(log_model) {
-            // Use eprintln! instead of error! to avoid recursive logging loop
-            // if the queue is full or closed.
-            eprintln!("Failed to enqueue log for message queue: {e}");
-        }
+    pub fn with_level(mut self, level: impl AsRef<str>) -> Self {
+        self.level = level.as_ref().into();
+        self
+    }
+
+    pub fn with_output(mut self, output: LogOutputConfig) -> Self {
+        self.outputs.push(output);
+        self
+    }
+
+    pub fn for_app(namespace: &str) -> Self {
+        let mut config = Self::default();
+        config.outputs = vec![
+            LogOutputConfig::Console { level: None },
+            LogOutputConfig::File {
+                path: PathBuf::from("logs").join(format!("mocra.{namespace}.log")),
+                level: None,
+                rotation: Some("daily".to_string()),
+            },
+        ];
+        config
     }
 }
 
-/// Visitor for extracting log fields efficiently
-/// Optimized to avoid excessive allocations by targeting specific known fields
-struct LogVisitor {
-    task_id: Option<String>,
-    request_id: Option<String>,
-    status: String,
-    message: String,
-    traceback: Option<String>,
-}
-
-impl LogVisitor {
-    fn new() -> Self {
+impl Default for LoggerConfig {
+    fn default() -> Self {
         Self {
-            task_id: None,
-            request_id: None,
-            status: "info".to_string(), // Default status
-            message: String::with_capacity(64),
-            traceback: None,
+            enabled: true,
+            level: DEFAULT_APP_LOG_LEVEL.to_string(),
+            format: "text".to_string(),
+            include: vec![],
+            buffer: 10000,
+            flush_interval_ms: 500,
+            outputs: vec![LogOutputConfig::Console { level: None }],
+            prometheus: None,
         }
     }
 }
 
-impl Visit for LogVisitor {
-    fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
-        if field.name() == "message" {
-             use std::fmt::Write;
-             let _ = write!(self.message, "{:?}", value);
-        }
-        // Skip other complex fields to avoid formatting overhead unless critical
-    }
-    
-    fn record_str(&mut self, field: &Field, value: &str) {
-         match field.name() {
-            "message" => self.message.push_str(value),
-            "task_id" => self.task_id = Some(value.to_string()),
-            "request_id" => self.request_id = Some(value.to_string()),
-            "status" => self.status = value.to_string(),
-            "traceback" => self.traceback = Some(value.to_string()),
-            _ => {} // Ignore other fields for LogModel to save allocation
-        }
-    }
-    // Optimistic implementation for other types: generally task_id/req_id are strings
-    // If they are passed as numbers, add handlers if needed.
+const DEFAULT_APP_LOG_LEVEL: &str =
+    "info,engine=debug;sqlx=warn,sea_orm=warn,h2=warn,hyper=warn";
+
+static LOGGER_INITIALIZED: AtomicBool = AtomicBool::new(false);
+
+pub fn is_logging_disabled() -> bool {
+    let value = env::var("DISABLE_LOGS")
+        .or_else(|_| env::var("MOCRA_DISABLE_LOGS"))
+        .unwrap_or_default();
+    matches!(
+        value.trim().to_lowercase().as_str(),
+        "1" | "true" | "yes" | "y" | "on"
+    )
 }
 
-/// Initialize and configure tracing logger
+pub async fn init_app_logger(namespace: &str) -> Result<bool, Box<dyn std::error::Error>> {
+    if is_logging_disabled() {
+        return Ok(false);
+    }
+
+    let config = LoggerConfig::for_app(namespace);
+    init_logger(config).await?;
+    Ok(true)
+}
+
 pub async fn init_logger(config: LoggerConfig) -> Result<(), Box<dyn std::error::Error>> {
     if is_logging_disabled() {
-        // Mark initialized to avoid repeated attempts when logging is disabled.
         let _ = LOGGER_INITIALIZED.swap(true, Ordering::SeqCst);
         return Ok(());
     }
@@ -367,128 +581,214 @@ pub async fn init_logger(config: LoggerConfig) -> Result<(), Box<dyn std::error:
         return Ok(());
     }
 
-    // bridge log crate
     let _ = LogTracer::builder()
         .with_max_level(log::LevelFilter::Trace)
         .init();
 
-    // Normalize provided level and don't force sqlx to error so we can see SQL & params when desired
     let default_level = config.level.to_lowercase();
-    
     let filter = EnvFilter::try_from_default_env()
         .or_else(|_| EnvFilter::try_new(&default_level))
         .unwrap_or_else(|_| EnvFilter::new("info"));
-    
-    // timer
-    let local_offset = UtcOffset::current_local_offset().unwrap_or(UtcOffset::UTC);
-    let timer = OffsetTime::new(local_offset, Rfc3339);
 
-    let mut layers: Vec<Box<dyn Layer<Registry> + Send + Sync>> = Vec::new();
-    // layers.push(filter.boxed()); // Move filter out of the Vec to apply it globally AND strictly
+    let sinks = build_sinks(&config)?;
+    let dispatcher = Arc::new(LogDispatcher::new(sinks));
+    let layer = LogSinkLayer::new(dispatcher);
 
-    // prepare optional console layer
-    if config.enable_console {
-        if config.json_format {
-            layers.push(fmt::layer().json().with_timer(timer.clone()).boxed());
-        } else {
-            // Use compact formatting for cleaner/faster console output
-            layers.push(fmt::layer()
-                .compact()
-                .with_target(false) // Hide module path to reduce noise
-                .with_thread_ids(true)
-                .with_timer(timer.clone())
-                .boxed());
-        }
-    }
+    let _ = tracing_subscriber::registry()
+        .with(layer)
+        .with(filter)
+        .try_init();
 
-    // prepare optional system log file layer
-    if let Some(file_path) = config.file_path {
-        if let Some(parent) = file_path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let file_path_prefix = file_path
-            .file_name()
-            .map(|name| name.to_string_lossy().to_string())
-            .unwrap_or_else(|| "app".to_string());
-        let file_appender = tracing_appender::rolling::Builder::new()
-            .rotation(Rotation::DAILY)
-            .filename_prefix(file_path_prefix)
-            .filename_suffix("log")
-            .build(
-                file_path
-                    .parent()
-                    .unwrap_or_else(|| std::path::Path::new(".")),
-            )
-            .expect("Failed to create rolling file appender");
-
-        let (file_writer, guard) = tracing_appender::non_blocking(file_appender);
-        let _ = FILE_GUARD.set(guard);
-
-        // System Log Layer
-        let layer = if config.json_format {
-             fmt::layer()
-                .json()
-                .with_writer(file_writer)
-                .with_timer(timer.clone())
-                .boxed()
-        } else {
-            fmt::layer()
-                .with_ansi(false)
-                .with_writer(file_writer)
-                .with_timer(timer.clone())
-                .boxed()
-        };
-        layers.push(layer);
-    }
-
-    // Dynamic Queue Layer
-    layers.push(DynamicQueueLayer.boxed());
-
-    // If initial config already 提供了 log_sender 则立即设置
-    if let Some(log_sender) = config.log_sender {
-        let _ = set_log_sender(log_sender);
-    }
-
-    let _ = tracing_subscriber::registry().with(layers).with(filter).try_init();
     Ok(())
 }
 
-/// Initialize a simple logger with default configuration
-/// Useful for quick setup in development or testing environments
 pub async fn init_simple_logger() -> Result<(), Box<dyn std::error::Error>> {
     let config = LoggerConfig::default();
     init_logger(config).await
 }
 
+fn build_sinks(config: &LoggerConfig) -> Result<Vec<Arc<dyn LogSink>>, LogError> {
+    if !config.enabled {
+        return Ok(Vec::new());
+    }
+
+    let mut sinks: Vec<Arc<dyn LogSink>> = Vec::new();
+
+    for output in &config.outputs {
+        match output {
+            LogOutputConfig::Console { level } => {
+                let min_level = parse_level(level.as_deref()).unwrap_or(Level::INFO);
+                sinks.push(Arc::new(ConsoleSink::new(min_level)));
+            }
+            LogOutputConfig::File { path, level, rotation } => {
+                let min_level = parse_level(level.as_deref()).unwrap_or(Level::INFO);
+                let rotation = match rotation.as_deref() {
+                    Some("daily") | None => Rotation::DAILY,
+                    Some("hourly") => Rotation::HOURLY,
+                    Some("never") => Rotation::NEVER,
+                    Some("minutely") => Rotation::MINUTELY,
+                    _ => Rotation::DAILY,
+                };
+                sinks.push(Arc::new(FileSink::new(path.as_path(), min_level, rotation)?));
+            }
+            LogOutputConfig::Mq { level } => {
+                let min_level = parse_level(level.as_deref()).unwrap_or(Level::WARN);
+                sinks.push(Arc::new(DynamicMqSink::new(min_level)));
+            }
+        }
+    }
+
+    if let Some(prometheus) = &config.prometheus
+        && prometheus.enabled
+    {
+        let min_level = parse_level(Some(&config.level)).unwrap_or(Level::INFO);
+        sinks.push(Arc::new(PrometheusSink::new(min_level)));
+    }
+
+    Ok(sinks)
+}
+
+fn parse_level(level: Option<&str>) -> Option<Level> {
+    level.and_then(|lvl| lvl.parse::<Level>().ok())
+}
+
+fn format_log_record_text(record: &LogRecord) -> String {
+    let mut line = format!(
+        "{} [{}] {} - {}",
+        record.time, record.level_name, record.module, record.message
+    );
+
+    if let Some(value) = &record.event_type {
+        line.push_str(&format!(" event_type={value}"));
+    }
+    if let Some(value) = &record.status {
+        line.push_str(&format!(" status={value}"));
+    }
+    if let Some(value) = &record.phase {
+        line.push_str(&format!(" phase={value}"));
+    }
+    if let Some(value) = &record.error_kind {
+        line.push_str(&format!(" error_kind={value}"));
+    }
+    if let Some(value) = &record.trace_id {
+        line.push_str(&format!(" trace_id={value}"));
+    }
+    if let Some(value) = &record.task_id {
+        line.push_str(&format!(" task_id={value}"));
+    }
+    if let Some(value) = &record.request_id {
+        line.push_str(&format!(" request_id={value}"));
+    }
+    if let Some(value) = &record.queue_topic {
+        line.push_str(&format!(" queue_topic={value}"));
+    }
+    if let Some(value) = &record.policy_action {
+        line.push_str(&format!(" policy.action={value}"));
+    }
+    if let Some(value) = &record.policy_reason {
+        line.push_str(&format!(" policy.reason={value}"));
+    }
+    if let Some(value) = &record.retry_count {
+        line.push_str(&format!(" retry.count={value}"));
+    }
+    if let Some(value) = &record.traceback {
+        line.push_str(&format!(" traceback={value}"));
+    }
+
+    line
+}
+
+struct LogVisitor {
+    message: String,
+    status: Option<String>,
+    event_type: Option<String>,
+    phase: Option<String>,
+    error_kind: Option<String>,
+    trace_id: Option<String>,
+    task_id: Option<String>,
+    request_id: Option<String>,
+    queue_topic: Option<String>,
+    policy_action: Option<String>,
+    policy_reason: Option<String>,
+    retry_count: Option<u32>,
+    traceback: Option<String>,
+}
+
+impl LogVisitor {
+    fn new() -> Self {
+        Self {
+            message: String::with_capacity(64),
+            status: None,
+            event_type: None,
+            phase: None,
+            error_kind: None,
+            trace_id: None,
+            task_id: None,
+            request_id: None,
+            queue_topic: None,
+            policy_action: None,
+            policy_reason: None,
+            retry_count: None,
+            traceback: None,
+        }
+    }
+}
+
+impl Visit for LogVisitor {
+    fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+        if field.name() == "message" {
+            use std::fmt::Write;
+            let _ = write!(self.message, "{:?}", value);
+        }
+    }
+
+    fn record_str(&mut self, field: &Field, value: &str) {
+        match field.name() {
+            "message" => self.message.push_str(value),
+            "status" => self.status = Some(value.to_string()),
+            "event_type" => self.event_type = Some(value.to_string()),
+            "phase" => self.phase = Some(value.to_string()),
+            "error_kind" => self.error_kind = Some(value.to_string()),
+            "trace_id" => self.trace_id = Some(value.to_string()),
+            "task_id" => self.task_id = Some(value.to_string()),
+            "request_id" => self.request_id = Some(value.to_string()),
+            "queue_topic" => self.queue_topic = Some(value.to_string()),
+            "policy_action" => self.policy_action = Some(value.to_string()),
+            "policy_reason" => self.policy_reason = Some(value.to_string()),
+            "traceback" => self.traceback = Some(value.to_string()),
+            _ => {}
+        }
+    }
+
+    fn record_u64(&mut self, field: &Field, value: u64) {
+        if field.name() == "retry_count" {
+            self.retry_count = Some(value as u32);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
     use tokio::sync::mpsc;
     use tracing::{debug, error, info, warn};
 
-    /// Test the logger configuration builder pattern
     #[test]
     fn test_logger_config_builder() {
         let config = LoggerConfig::new()
             .with_level("debug")
-            .with_file_path(PathBuf::from("./test.log"))
-            .with_console(false);
+            .with_output(LogOutputConfig::Console { level: None });
 
         assert_eq!(config.level, "debug");
-        assert_eq!(config.file_path, Some(PathBuf::from("./test.log")));
-        assert!(!config.enable_console);
+        assert!(!config.outputs.is_empty());
     }
 
-    /// Test simple logger initialization
     #[tokio::test]
     async fn test_simple_logger_init() {
         let config = LoggerConfig::new().with_level("info");
-        // This should not panic
         let _ = init_logger(config).await;
     }
 
-    /// Test different log levels
     #[tokio::test]
     async fn test_log_levels() {
         let config = LoggerConfig::new().with_level("debug");
@@ -500,37 +800,23 @@ mod tests {
         error!("Error message");
     }
 
-    /// Test queue logger functionality
     #[tokio::test]
     async fn test_queue_logger() {
         let (sender, mut receiver) = mpsc::channel(100);
-        let log_sender = LogSender::new(sender, "warn"); // Only send warn and error to queue
+        let log_sender = LogSender::new(sender, "warn");
+        let _ = set_log_sender(log_sender);
 
         let config = LoggerConfig::new()
             .with_level("info")
-            .with_console(false)
-            .with_log_sender(log_sender);
+            .with_output(LogOutputConfig::Mq { level: Some("warn".to_string()) });
 
         let _ = init_logger(config).await;
 
-        // Test info level - should NOT be sent to queue (below warn level)
-        info!(
-            task_id = "test-task",
-            status = "success",
-            "Info message should not go to queue"
-        );
+        info!(task_id = "test-task", status = "success", "Info message should not go to queue");
+        warn!(task_id = "test-task", status = "warning", "Warning message for queue");
 
-        // Test warn level - should be sent to queue
-        warn!(
-            task_id = "test-task",
-            status = "warning",
-            "Warning message for queue"
-        );
-
-        // Wait a bit for the async task to process
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
-        // Check if we received a log in the queue (should only get the warn message)
         if let Ok(log_model) = receiver.try_recv() {
             assert_eq!(log_model.task_id, "test-task");
             assert_eq!(log_model.status, "warning");
@@ -538,7 +824,6 @@ mod tests {
             assert!(log_model.message.contains("Warning message for queue"));
         }
 
-        // Verify no more messages (info should not have been sent)
         assert!(receiver.try_recv().is_err());
     }
 }

@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use crate::policy::PolicyConfig;
 use std::fmt;
 
 /// API Configuration
@@ -122,6 +123,31 @@ pub struct SyncConfig {
     pub redis: Option<RedisConfig>,
     /// Kafka configuration for synchronization
     pub kafka: Option<KafkaConfig>,
+    /// Allow rollback to older versions (default: true)
+    #[serde(default = "default_sync_allow_rollback")]
+    pub allow_rollback: bool,
+    /// Enable versioned envelope for sync payloads (default: false)
+    #[serde(default = "default_sync_envelope_enabled")]
+    pub envelope_enabled: bool,
+}
+
+fn default_sync_allow_rollback() -> bool {
+    true
+}
+
+fn default_sync_envelope_enabled() -> bool {
+    false
+}
+
+impl Default for SyncConfig {
+    fn default() -> Self {
+        Self {
+            redis: None,
+            kafka: None,
+            allow_rollback: true,
+            envelope_enabled: false,
+        }
+    }
 }
 
 /// Cache Configuration
@@ -173,6 +199,10 @@ pub struct SchedulerConfig {
     pub misfire_tolerance_secs: Option<i64>,
     /// Max concurrency for processing scheduled contexts (default: 100)
     pub concurrency: Option<usize>,
+    /// Refresh interval in seconds for scheduler cache (default: 60)
+    pub refresh_interval_secs: Option<u64>,
+    /// Max allowed staleness in seconds before forcing refresh (default: 120)
+    pub max_staleness_secs: Option<u64>,
 }
 
 /// Kafka Configuration
@@ -227,6 +257,10 @@ pub struct ChannelConfig {
     pub batch_concurrency: Option<usize>,
     /// Compression threshold in bytes (payloads larger than this will be compressed)
     pub compression_threshold: Option<usize>,
+    /// Max retries for NACK before sending to DLQ (default: 0)
+    pub nack_max_retries: Option<u32>,
+    /// Backoff in milliseconds before retrying NACK (default: 0)
+    pub nack_backoff_ms: Option<u64>,
 }
 
 use super::logger_config::LoggerConfig;
@@ -261,6 +295,8 @@ pub struct Config {
     pub crawler: CrawlerConfig,
     /// Scheduler configuration
     pub scheduler: Option<SchedulerConfig>,
+    /// Synchronization configuration
+    pub sync: Option<SyncConfig>,
     /// Cookie storage configuration
     pub cookie: Option<RedisConfig>,
     /// Message channel configuration
@@ -271,6 +307,8 @@ pub struct Config {
     pub event_bus: Option<EventBusConfig>,
     /// Logger configuration
     pub logger: Option<LoggerConfig>,
+    /// Policy configuration (override default error strategies)
+    pub policy: Option<PolicyConfig>,
 }
 impl Config {
     /// Loads configuration from a TOML file

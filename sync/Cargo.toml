@@ -15,5 +15,7 @@ deadpool-redis.workspace = true
 rdkafka.workspace = true
 uuid.workspace = true
 tracing.workspace = true
+metrics.workspace = true
 rmp-serde = { workspace = true }
 once_cell.workspace = true
+common.workspace = true

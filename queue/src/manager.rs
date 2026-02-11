@@ -1,16 +1,18 @@
 use futures::StreamExt;
 use futures::future::join_all;
 use crate::batcher::Batcher;
-use crate::{MqBackend, QueuedItem};
+use crate::{MqBackend, QueuedItem, NackPolicy, HEADER_ATTEMPT, HEADER_CREATED_AT};
 use crate::channel::Channel;
 use crate::compression::{compress_payload_owned, decompress_payload};
 use crate::compensation::{Compensator, Identifiable, RedisCompensator};
 use crate::redis::RedisQueue;
 use crate::kafka::KafkaQueue;
+use common::policy::PolicyResolver;
 use common::model::message::{ErrorTaskModel, ParserTaskModel, TaskModel};
 use common::model::{Request, Response, Prioritizable, Priority};
 use common::model::config::Config;
 use common::interface::storage::{BlobStorage, Offloadable};
+use errors::ErrorKind;
 use utils::storage::FileSystemBlobStorage;
 use log::{error, info};
 use std::collections::HashMap;
@@ -23,6 +25,18 @@ use once_cell::sync::OnceCell;
 
 const DEFAULT_COMPRESSION_THRESHOLD: usize = 1024;
 const BLOCKING_PAYLOAD_BYTES: usize = 64 * 1024;
+
+fn default_headers() -> HashMap<String, String> {
+    let mut headers = HashMap::new();
+    headers.insert(HEADER_ATTEMPT.to_string(), "0".to_string());
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .to_string();
+    headers.insert(HEADER_CREATED_AT.to_string(), now_ms);
+    headers
+}
 
 fn msgpack_encode<T: serde::Serialize>(value: &T) -> Result<Vec<u8>, rmps::encode::Error> {
     rmps::to_vec(value)
@@ -75,6 +89,8 @@ pub struct QueueManager {
     pub blob_storage: Option<Arc<dyn BlobStorage>>,
     pub batch_concurrency: usize,
     pub compression_threshold: usize,
+    pub nack_policy: NackPolicy,
+    pub log_topic: String,
 }
 
 impl QueueManager {
@@ -86,22 +102,55 @@ impl QueueManager {
             blob_storage: None,
             batch_concurrency: 50,
             compression_threshold: DEFAULT_COMPRESSION_THRESHOLD,
+            nack_policy: NackPolicy::default(),
+            log_topic: "log".to_string(),
         }
     }
 
     pub fn from_config(cfg: &Config) -> Arc<Self> {
+        Self::from_config_with_log_topic(cfg, None)
+    }
+
+    pub fn from_config_with_log_topic(cfg: &Config, log_topic: Option<&str>) -> Arc<Self> {
         set_queue_codec_from_config(cfg);
         let channel_config = &cfg.channel_config;
         let namespace = &cfg.name;
 
+        let nack_policy = if let Some(policy_cfg) = &cfg.policy
+            && !policy_cfg.overrides.is_empty()
+        {
+            let resolver = PolicyResolver::new(Some(policy_cfg));
+            let decision = resolver.resolve_with_kind(
+                "queue",
+                Some("nack"),
+                Some("failed"),
+                ErrorKind::Queue,
+            );
+            NackPolicy {
+                max_retries: decision.policy.max_retries,
+                backoff_ms: decision.policy.backoff_ms,
+            }
+        } else {
+            NackPolicy {
+                max_retries: channel_config.nack_max_retries.unwrap_or(0),
+                backoff_ms: channel_config.nack_backoff_ms.unwrap_or(0),
+            }
+        };
+
         let mut queue_manager = if let Some(redis_config) = &channel_config.redis {
             let batch_size = channel_config.batch_concurrency.unwrap_or(500);
-            let redis_queue = RedisQueue::new(redis_config, channel_config.minid_time, namespace, batch_size)
+            let redis_queue = RedisQueue::new(
+                redis_config,
+                channel_config.minid_time,
+                namespace,
+                batch_size,
+                nack_policy,
+            )
                 .expect("Failed to create RedisQueue");
             info!("RedisQueue initialized successfully with batch_size: {}", batch_size);
             QueueManager::new(Some(Arc::new(redis_queue)), channel_config.capacity)
         } else if let Some(kafka_config) = &channel_config.kafka {
-            let kafka_queue = KafkaQueue::new(kafka_config, channel_config.minid_time, namespace)
+            let kafka_queue = KafkaQueue::new(kafka_config, channel_config.minid_time, namespace, nack_policy)
                 .expect("Failed to create KafkaQueue");
             info!("KafkaQueue initialized successfully");
             QueueManager::new(Some(Arc::new(kafka_queue)), channel_config.capacity)
@@ -109,6 +158,12 @@ impl QueueManager {
             info!("In-Memory Queue initialized (Single Node Mode)");
             QueueManager::new(None, 10000)
         };
+
+        if let Some(topic) = log_topic {
+            queue_manager.log_topic = topic.to_string();
+        }
+
+        queue_manager.nack_policy = nack_policy;
 
         if let Some(concurrency) = channel_config.batch_concurrency {
             queue_manager.with_concurrency(concurrency);
@@ -158,6 +213,10 @@ impl QueueManager {
         self.compression_threshold = threshold;
     }
 
+    pub fn with_log_topic(&mut self, topic: impl Into<String>) {
+        self.log_topic = topic.into();
+    }
+
     pub fn subscribe(&self) {
         if let Some(backend) = &self.backend {
             let backend = backend.clone();
@@ -174,7 +233,7 @@ impl QueueManager {
             self.spawn_forwarder("response", channel.response_receiver.clone(), backend.clone(), blob_storage.clone(), concurrency, compression_threshold);
             self.spawn_forwarder("parser_task", channel.parser_task_receiver.clone(), backend.clone(), blob_storage.clone(), concurrency, compression_threshold);
             self.spawn_forwarder("error_task", channel.error_receiver.clone(), backend.clone(), blob_storage.clone(), concurrency, compression_threshold);
-            self.spawn_forwarder("log", channel.log_receiver.clone(), backend.clone(), blob_storage.clone(), concurrency, compression_threshold);
+            self.spawn_forwarder(self.log_topic.as_str(), channel.log_receiver.clone(), backend.clone(), blob_storage.clone(), concurrency, compression_threshold);
 
             // Define inbound subscriptions (Remote -> Local)
             tokio::spawn(async move {
@@ -598,7 +657,7 @@ impl QueueManager {
         let payloads_result = if use_blocking {
             // Offload serialization and compression to a blocking thread to avoid blocking the async runtime
             tokio::task::spawn_blocking(move || {
-                let mut payloads = Vec::with_capacity(items.len());
+            let mut payloads: Vec<(Option<String>, Vec<u8>, HashMap<String, String>)> = Vec::with_capacity(items.len());
                 
                 // Only collect IDs if debug logging is enabled to avoid unnecessary allocation
                 let mut ids = if log::log_enabled!(log::Level::Debug) {
@@ -622,7 +681,8 @@ impl QueueManager {
                         Ok(p) => {
                             // Compression Logic (Threshold 1KB, Zstd)
                             let final_payload = compress_payload_owned(p, compression_threshold);
-                            payloads.push((Some(id), final_payload));
+                            let headers = default_headers();
+                            payloads.push((Some(id), final_payload, headers));
                         }
                         Err(e) => {
                             error!("Failed to serialize item: {}", e);
@@ -633,7 +693,7 @@ impl QueueManager {
             })
             .await
         } else {
-            let mut payloads = Vec::with_capacity(items.len());
+            let mut payloads: Vec<(Option<String>, Vec<u8>, HashMap<String, String>)> = Vec::with_capacity(items.len());
             
             // Only collect IDs if debug logging is enabled to avoid unnecessary allocation
             let mut ids = if log::log_enabled!(log::Level::Debug) {
@@ -657,7 +717,8 @@ impl QueueManager {
                     Ok(p) => {
                         // Compression Logic (Threshold 1KB, Zstd)
                         let final_payload = compress_payload_owned(p, compression_threshold);
-                        payloads.push((Some(id), final_payload));
+                        let headers = default_headers();
+                        payloads.push((Some(id), final_payload, headers));
                     }
                     Err(e) => {
                         error!("Failed to serialize item: {}", e);
@@ -673,7 +734,7 @@ impl QueueManager {
                     return;
                 }
 
-                if let Err(e) = backend.publish_batch(&topic, &payloads).await {
+                if let Err(e) = backend.publish_batch_with_headers(&topic, &payloads).await {
                     error!("Failed to publish batch to topic {}: {}", topic, e);
                 } else {
                     log::info!("[QueueManager] forward_channel published batch: topic={} count={}", topic, count);

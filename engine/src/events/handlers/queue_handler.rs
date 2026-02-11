@@ -4,14 +4,14 @@ use tokio::sync::mpsc::Receiver;
 // use common::model::logger_config::LogOutputConfig;
 use queue::{QueuedItem, QueueManager};
 use utils::logger::LogModel;
-use crate::events::SystemEvent;
+use crate::events::EventEnvelope;
 
 /// Universal queue handler for logs/events.
 pub struct QueueLogHandler;
 
 impl QueueLogHandler {
     pub async fn start(
-        mut rx: Receiver<SystemEvent>,
+        mut rx: Receiver<EventEnvelope>,
         queue_manager: Arc<QueueManager>,
         target_type: String
     ) {
@@ -25,7 +25,7 @@ impl QueueLogHandler {
                  let log_model = LogModel {
                     task_id: "system".to_string(),
                     request_id: None,
-                    status: event.event_type().to_string(),
+                    status: event.event_key(),
                     level: "INFO".to_string(),
                     message: json_content,
                     timestamp: chrono::Utc::now().to_rfc3339(),

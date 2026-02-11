@@ -1,60 +1,59 @@
 > 已合并至 `docs/README.md`，本文件保留为历史参考。
 
-# Engine Design Document
+# Engine 设计文档
 
-## Overview
-The Engine is the core orchestrator of the Mocra crawler framework. It manages the lifecycle of tasks, requests, and responses through a pipeline of processors, ensuring efficient, distributed, and resilient crawling.
+## 概览
+Engine 是 Mocra 的核心编排器，负责驱动任务、请求与响应在各处理链中流转，保证高效、分布式与可恢复的采集流程。
 
-## Architecture
+## 架构
+系统基于事件驱动的流水线模型，通过 `QueueManager` 进行消息传递，并用 `EventBus` 统一发布可观测事件。
 
-The system is built on an event-driven, pipeline-based architecture, coordinated by an `EventBus` and `QueueManager`.
+### Pipeline 阶段
+1. **Task Processor**：消费 `TaskModel` -> 生成 `Request`。
+   - 使用 `TaskModelChain` 执行模块级逻辑。
+2. **Download Processor**：消费 `Request` -> 下载内容 -> 生成 `Response`。
+   - 使用 `DownloadChain` 或 `WebSocketDownloadChain`。
+   - 支持下载中间件（`before_request`、`after_response`）。
+3. **Response Processor**：消费 `Response` -> 解析内容 -> 生成 `ParserTask`。
+   - 使用 `ParserChain` 执行解析逻辑。
+4. **Parser Processor**：消费 `ParserTask` -> 产出数据/新任务。
+   - 使用 `ParserTaskChain`。
+5. **Error Processor**：处理失败与重试，必要时写入 DLQ。
 
-### Pipeline Stages
-1.  **Task Processor**: Consumes `Task` -> Generates `Request`.
-    -   Uses `TaskModelChain` to execute module-specific logic.
-2.  **Download Processor**: Consumes `Request` -> Downloads content -> Generates `Response`.
-    -   Uses `DownloadChain` or `WebSocketDownloadChain`.
-    -   Supports Middleware (`before_request`, `after_response`).
-3.  **Response Processor**: Consumes `Response` -> Parses content -> Generates `ParserTask`.
-    -   Uses `ParserChain` to execute module-specific parsing logic.
-4.  **Parser Processor**: Consumes `ParserTask` -> Extracts data/new tasks.
-    -   Uses `ParserTaskChain`.
-5.  **Error Processor**: Handles failed tasks and retries.
-    -   Moves permanently failed tasks to DLQ.
-
-## Components
+## 组件
 
 ### Event Bus
-A centralized `EventBus` handles system events (Startup, Shutdown, HealthCheck, Metrics). It supports pluggable handlers:
--   `LogEventHandler`: Structured JSON logging.
--   `MetricsEventHandler`: Prometheus metrics.
--   `RedisEventHandler`/`DbEventHandler`: Persistence of event logs.
+`EventBus` 通过统一的 `EventEnvelope` 事件模型传播状态变化，包含 `domain`/`event_type`/`phase`/`payload`/`error`，并以 `event_key` 路由。
+可插拔处理器示例：
+- `ConsoleLogHandler`：控制台结构化日志。
+- `QueueLogHandler`：写入 Redis/Kafka 等队列。
+- `RedisEventHandler`/`DbEventHandler`：事件持久化。
 
 ### Middleware Manager
-Manages three types of middleware:
--   `DownloadMiddleware`: Intercepts requests/responses (e.g., Signatures, Auth).
--   `DataMiddleware`: Processes extracted data (e.g., Cleaning, Validation).
--   `DataStoreMiddleware`: Handles data persistence (e.g., MySQL, ElasticSearch).
+管理三类中间件：
+- `DownloadMiddleware`：请求/响应拦截（鉴权、签名、代理等）。
+- `DataMiddleware`：数据清洗/校验/去重。
+- `DataStoreMiddleware`：数据持久化（PG/ES/OSS 等）。
 
 ### Task Manager
-Registers and manages functional `Module`s which define the crawling logic (URL generation, Parsing rules).
+注册并管理 `Module`，负责定义 URL 生成与解析规则。
 
 ### Scheduler
--   **CronScheduler**: Handles distributed scheduled tasks using Redis for coordination and Leader Election to prevent duplicate triggers.
+- **CronScheduler**：基于 Redis 进行分布式调度与选主，防止重复触发。
 
 ### Node Registry
-Each Engine instance registers itself in Redis with a UUID and sends heartbeats. This allows the Control Plane to track active nodes.
+Engine 实例以 UUID 注册到 Redis，周期性上报心跳，便于控制面追踪节点状态。
 
 ### Control Plane
-Exposes HTTP APIs for management:
--   `GET /metrics`: Prometheus metrics.
--   `GET /api/nodes`: List active nodes.
--   `POST /api/control/pause`: Global pause.
--   `POST /api/control/resume`: Global resume.
--   `GET /api/dlq`: Inspect failed tasks.
+对外暴露管理接口：
+- `GET /metrics`：Prometheus 指标。
+- `GET /api/nodes`：节点列表。
+- `POST /api/control/pause`：全局暂停。
+- `POST /api/control/resume`：全局恢复。
+- `GET /api/dlq`：DLQ 查询。
 
-## Concurrency & Safety
--   **Processors**: Run in concurrent Tokio tasks, supervised for panic recovery.
--   **Channels**: Communicate via `QueueManager` (Redis/Kafka backed).
--   **Graceful Shutdown**: Handles SIGINT/SIGTERM, draining active tasks before exit.
--   **Idempotency**: Parser tasks are deduplicated using Redis to ensure exactly-once processing side-effects where possible.
+## 并发与安全
+- **Processors**：在 Tokio 任务中并发运行，支持 panic 保护。
+- **Channels**：通过 `QueueManager` 与 Redis/Kafka 传输消息。
+- **Graceful Shutdown**：支持 SIGINT/SIGTERM，尽量完成在途任务。
+- **Idempotency**：Parser 任务通过 Redis 去重，尽可能实现一次性副作用。

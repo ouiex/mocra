@@ -25,7 +25,8 @@ async fn main() {
     // Create SyncService in Local Mode (None)
     // Note: SyncService holds the state in `local_store`.
     // We must share the SAME SyncService instance across tasks for them to see the same state.
-    let sync_service = sync::SyncService::new(None, "local_bench".to_string());
+    let config = common::model::config::SyncConfig::default();
+    let sync_service = sync::SyncService::from_config(None, "local_bench".to_string(), &config);
     
     // 1. Reset/Init State
     let initial_state = BenchState { counter: 0 };

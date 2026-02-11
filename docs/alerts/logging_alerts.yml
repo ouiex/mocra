@@ -1,0 +1,27 @@
+groups:
+  - name: logging_alerts
+    rules:
+      - alert: LogDropRateHigh
+        expr: sum(rate(log_dropped_total[5m])) / (sum(rate(log_events_total[5m])) + sum(rate(log_dropped_total[5m]))) > 0.005
+        for: 10m
+        labels:
+          severity: warn
+        annotations:
+          summary: "Log drop rate high"
+          description: "Log drop rate > 0.5% for 10m"
+      - alert: LogQueueLagHigh
+        expr: max(log_queue_lag) > 5000
+        for: 5m
+        labels:
+          severity: warn
+        annotations:
+          summary: "Log queue lag high"
+          description: "log_queue_lag > 5000 for 5m"
+      - alert: LogSinkErrorsHigh
+        expr: sum(rate(log_sink_errors_total[5m])) > 1
+        for: 5m
+        labels:
+          severity: warn
+        annotations:
+          summary: "Log sink errors"
+          description: "log_sink_errors_total rate > 1/s for 5m"

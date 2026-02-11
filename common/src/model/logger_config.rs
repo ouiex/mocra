@@ -4,52 +4,44 @@ use super::config::{KafkaConfig, RedisConfig};
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum LogOutputConfig {
-    File {
-        /// Log file path
-        path: String,
-        /// Log level (debug, info, warn, error)
-        level: String,
-        /// Log format (json, text)
-        format: String,
-        /// Rotation policy (daily, none)
-        rotation: Option<String>,
-    },
-    RedisStream {
-        /// Redis connection config
-        config: RedisConfig,
-        /// Stream key name
-        key: String,
-        /// Log level
-        level: String,
-        /// Log format (json, text)
-        format: String,
-        /// Batch size for sending logs
-        batch_size: Option<usize>,
-    },
-    Kafka {
-        /// Kafka connection config
-        config: KafkaConfig,
-        /// Topic name
-        topic: String,
-        /// Log level
-        level: String,
-        /// Log format (json, text)
-        format: String,
-        /// Batch size for sending logs
-        batch_size: Option<usize>,
-    },
     Console {
-        /// Log level
-        level: String,
-        /// Log format (json, text)
-        format: String,
-    }
+        level: Option<String>,
+    },
+    File {
+        path: String,
+        level: Option<String>,
+        rotation: Option<String>,
+        max_size_mb: Option<u64>,
+        max_files: Option<u32>,
+    },
+    Mq {
+        backend: String,
+        topic: String,
+        level: Option<String>,
+        format: Option<String>,
+        buffer: Option<usize>,
+        batch_size: Option<usize>,
+        compression: Option<String>,
+        kafka: Option<KafkaConfig>,
+        redis: Option<RedisConfig>,
+    },
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct PrometheusLogConfig {
+    pub enabled: bool,
+    pub port: Option<u16>,
+    pub path: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct LoggerConfig {
-    /// List of output configurations
+    pub enabled: Option<bool>,
+    pub level: Option<String>,
+    pub format: Option<String>,
+    pub include: Option<Vec<String>>,
+    pub buffer: Option<usize>,
+    pub flush_interval_ms: Option<u64>,
     pub outputs: Vec<LogOutputConfig>,
-    /// Global channel capacity for the main log channel
-    pub channel_capacity: usize,
+    pub prometheus: Option<PrometheusLogConfig>,
 }

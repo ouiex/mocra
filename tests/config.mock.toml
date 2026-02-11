@@ -30,6 +30,10 @@ redis_port = 6379
 redis_db = 0
 pool_size = 50
 
+[sync]
+allow_rollback = true
+envelope_enabled = false
+
 [crawler]
 request_max_retries = 1
 task_max_errors = 50
@@ -53,3 +57,27 @@ listener_count = 8
 
 [channel_config.blob_storage]
 path = "tmp/blob_storage_mock"
+
+[logger]
+enabled = true
+level = "INFO"
+format = "text"
+buffer = 10000
+
+[[logger.outputs]]
+type = "console"
+
+[[logger.outputs]]
+type = "file"
+path = "logs/mock.log"
+rotation = "daily"
+
+[[logger.outputs]]
+type = "mq"
+backend = "redis"
+topic = "mocra-logs"
+format = "json"
+redis = { redis_host = "127.0.0.1", redis_port = 6379, redis_db = 0 }
+
+[logger.prometheus]
+enabled = true

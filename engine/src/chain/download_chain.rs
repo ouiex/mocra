@@ -1,27 +1,9 @@
 use queue::QueuedItem;
 use crate::chain::ConfigProcessor;
-use crate::events::EventDownload::{
-    DownloadCompleted, DownloadFailed, DownloadRetry, DownloadStarted, DownloaderCreate,
-};
-use crate::events::EventProxy::{
-    ProxyCompleted, ProxyFailed, ProxyPrepared, ProxyRetry, ProxyStarted,
-};
-use crate::events::EventRequestMiddleware::{
-    RequestMiddlewareCompleted, RequestMiddlewareFailed, RequestMiddlewarePrepared,
-    RequestMiddlewareRetry, RequestMiddlewareStarted,
-};
-use crate::events::EventResponseMiddleware::{
-    ResponseMiddlewareCompleted, ResponseMiddlewareFailed, ResponseMiddlewarePrepared,
-    ResponseMiddlewareRetry, ResponseMiddlewareStarted,
-};
-use crate::events::EventResponsePublish::{
-    ResponsePublishCompleted, ResponsePublishFailed, ResponsePublishPrepared, ResponsePublishRetry,
-    ResponsePublishSend,
-};
 use crate::events::{
-    DownloadEvent, EventSystem, RequestMiddlewareEvent, ResponseEvent,
+    DownloadEvent, EventBus, EventEnvelope, EventPhase, EventType, RequestMiddlewareEvent,
+    ResponseEvent,
 };
-use crate::events::{DynFailureEvent, DynRetryEvent, EventBus, SystemEvent};
 use crate::processors::event_processor::{EventAwareTypedChain, EventProcessorTrait};
 use async_trait::async_trait;
 use downloader::DownloaderManager;
@@ -41,6 +23,7 @@ use std::sync::Arc;
 use dashmap::DashMap;
 use std::time::{Instant, Duration};
 use common::status_tracker::ErrorDecision;
+use serde_json::json;
 pub struct DownloadProcessor {
     pub(crate) downloader_manager: Arc<DownloaderManager>,
     pub(crate) state: Arc<State>,
@@ -307,51 +290,55 @@ for DownloadProcessor
 impl EventProcessorTrait<(Request, Option<ModuleConfig>), (Option<Response>, Option<ModuleConfig>)>
 for DownloadProcessor
 {
-    fn pre_status(&self, input: &(Request, Option<ModuleConfig>)) -> Option<SystemEvent> {
+    fn pre_status(&self, input: &(Request, Option<ModuleConfig>)) -> Option<EventEnvelope> {
         let ev: DownloadEvent = (&input.0).into();
-        Some(SystemEvent::Download(DownloaderCreate(ev)))
+        Some(EventEnvelope::engine(EventType::Download, EventPhase::Started, ev))
     }
 
     fn finish_status(
         &self,
         input: &(Request, Option<ModuleConfig>),
         out: &(Option<Response>, Option<ModuleConfig>),
-    ) -> Option<SystemEvent> {
+    ) -> Option<EventEnvelope> {
         // Build a DownloadEvent; enrich with response info if available
         let mut ev: DownloadEvent = (&input.0).into();
         if let Some(resp) = &out.0 {
             ev.status_code = Some(resp.status_code);
             // Keeping duration_ms/response_size as None unless tracked elsewhere
         }
-        Some(SystemEvent::Download(DownloadCompleted(ev)))
+        Some(EventEnvelope::engine(EventType::Download, EventPhase::Completed, ev))
     }
 
-    fn working_status(&self, input: &(Request, Option<ModuleConfig>)) -> Option<SystemEvent> {
+    fn working_status(&self, input: &(Request, Option<ModuleConfig>)) -> Option<EventEnvelope> {
         let ev: DownloadEvent = (&input.0).into();
-        Some(SystemEvent::Download(DownloadStarted(ev)))
+        Some(EventEnvelope::engine(EventType::Download, EventPhase::Started, ev))
     }
 
-    fn error_status(&self, input: &(Request, Option<ModuleConfig>), err: &Error) -> Option<SystemEvent> {
+    fn error_status(&self, input: &(Request, Option<ModuleConfig>), err: &Error) -> Option<EventEnvelope> {
         let ev: DownloadEvent = (&input.0).into();
-        let failure = DynFailureEvent {
-            data: ev,
-            error: err.to_string(),
-        };
-        Some(SystemEvent::Download(DownloadFailed(failure)))
+        Some(EventEnvelope::engine_error(
+            EventType::Download,
+            EventPhase::Failed,
+            ev,
+            err,
+        ))
     }
 
     fn retry_status(
         &self,
         input: &(Request, Option<ModuleConfig>),
         retry_policy: &RetryPolicy,
-    ) -> Option<SystemEvent> {
+    ) -> Option<EventEnvelope> {
         let ev: DownloadEvent = (&input.0).into();
-        let retry = DynRetryEvent {
-            data: ev,
-            retry_count: retry_policy.current_retry,
-            reason: retry_policy.reason.clone().unwrap_or_default(),
-        };
-        Some(SystemEvent::Download(DownloadRetry(retry)))
+        Some(EventEnvelope::engine(
+            EventType::Download,
+            EventPhase::Retry,
+            json!({
+                "data": ev,
+                "retry_count": retry_policy.current_retry,
+                "reason": retry_policy.reason.clone().unwrap_or_default(),
+            }),
+        ))
     }
 }
 
@@ -464,55 +451,78 @@ impl ProcessorTrait<Option<Response>, ()> for ResponsePublishProcessor {
 }
 #[async_trait]
 impl EventProcessorTrait<Option<Response>, ()> for ResponsePublishProcessor {
-    fn pre_status(&self, input: &Option<Response>) -> Option<SystemEvent> {
+    fn pre_status(&self, input: &Option<Response>) -> Option<EventEnvelope> {
         match input {
-            Some(resp) => Some(SystemEvent::ResponsePublish(ResponsePublishPrepared(resp.into()))),
-            None => Some(SystemEvent::System(EventSystem::ErrorHandled("no_response_to_publish".into()))),
+            Some(resp) => Some(EventEnvelope::engine(
+                EventType::ResponsePublish,
+                EventPhase::Started,
+                ResponseEvent::from(resp),
+            )),
+            None => Some(EventEnvelope::system_error(
+                "no_response_to_publish",
+                EventPhase::Completed,
+            )),
         }
     }
 
-    fn finish_status(&self, input: &Option<Response>, _out: &()) -> Option<SystemEvent> {
+    fn finish_status(&self, input: &Option<Response>, _out: &()) -> Option<EventEnvelope> {
         match input {
-            Some(resp) => Some(SystemEvent::ResponsePublish(ResponsePublishCompleted(resp.into()))),
-            None => Some(SystemEvent::System(EventSystem::ErrorHandled("no_response_to_publish".into()))),
+            Some(resp) => Some(EventEnvelope::engine(
+                EventType::ResponsePublish,
+                EventPhase::Completed,
+                ResponseEvent::from(resp),
+            )),
+            None => Some(EventEnvelope::system_error(
+                "no_response_to_publish",
+                EventPhase::Completed,
+            )),
         }
     }
 
-    fn working_status(&self, input: &Option<Response>) -> Option<SystemEvent> {
+    fn working_status(&self, input: &Option<Response>) -> Option<EventEnvelope> {
         match input {
-            Some(resp) => Some(SystemEvent::ResponsePublish(ResponsePublishSend(resp.into()))),
-            None => Some(SystemEvent::System(EventSystem::ErrorHandled("no_response_to_publish".into()))),
+            Some(resp) => Some(EventEnvelope::engine(
+                EventType::ResponsePublish,
+                EventPhase::Started,
+                ResponseEvent::from(resp),
+            )),
+            None => Some(EventEnvelope::system_error(
+                "no_response_to_publish",
+                EventPhase::Completed,
+            )),
         }
     }
 
-    fn error_status(&self, input: &Option<Response>, err: &Error) -> Option<SystemEvent> {
+    fn error_status(&self, input: &Option<Response>, err: &Error) -> Option<EventEnvelope> {
         match input {
-            Some(resp) => {
-                let failure: DynFailureEvent<ResponseEvent> = DynFailureEvent {
-                    data: resp.into(),
-                    error: err.to_string(),
-                };
-                Some(SystemEvent::ResponsePublish(ResponsePublishFailed(failure)))
-            }
-            None => Some(SystemEvent::System(EventSystem::ErrorOccurred(format!(
-                "response_publish_error_without_response: {err}"
-            )))),
+            Some(resp) => Some(EventEnvelope::engine_error(
+                EventType::ResponsePublish,
+                EventPhase::Failed,
+                ResponseEvent::from(resp),
+                err,
+            )),
+            None => Some(EventEnvelope::system_error(
+                format!("response_publish_error_without_response: {err}"),
+                EventPhase::Failed,
+            )),
         }
     }
 
-    fn retry_status(&self, input: &Option<Response>, retry_policy: &RetryPolicy) -> Option<SystemEvent> {
+    fn retry_status(&self, input: &Option<Response>, retry_policy: &RetryPolicy) -> Option<EventEnvelope> {
         match input {
-            Some(resp) => {
-                let retry: DynRetryEvent<ResponseEvent> = DynRetryEvent {
-                    data: resp.into(),
-                    retry_count: retry_policy.current_retry,
-                    reason: retry_policy.reason.clone().unwrap_or_default(),
-                };
-                Some(SystemEvent::ResponsePublish(ResponsePublishRetry(retry)))
-            }
-            None => Some(SystemEvent::System(EventSystem::ErrorHandled(
-                "response_publish_retry_without_response".into(),
-            ))),
+            Some(resp) => Some(EventEnvelope::engine(
+                EventType::ResponsePublish,
+                EventPhase::Retry,
+                json!({
+                    "data": ResponseEvent::from(resp),
+                    "retry_count": retry_policy.current_retry,
+                    "reason": retry_policy.reason.clone().unwrap_or_default(),
+                }),
+            )),
+            None => Some(EventEnvelope::system_error(
+                "response_publish_retry_without_response",
+                EventPhase::Completed,
+            )),
         }
     }
 }
@@ -548,41 +558,57 @@ for RequestMiddlewareProcessor
 impl EventProcessorTrait<(Request, Option<ModuleConfig>), (Request, Option<ModuleConfig>)>
 for RequestMiddlewareProcessor
 {
-    fn pre_status(&self, input: &(Request, Option<ModuleConfig>)) -> Option<SystemEvent> {
-        Some(SystemEvent::RequestMiddleware(RequestMiddlewarePrepared((&input.0).into())))
+    fn pre_status(&self, input: &(Request, Option<ModuleConfig>)) -> Option<EventEnvelope> {
+        Some(EventEnvelope::engine(
+            EventType::RequestMiddleware,
+            EventPhase::Started,
+            RequestMiddlewareEvent::from(&input.0),
+        ))
     }
 
     fn finish_status(
         &self,
         _input: &(Request, Option<ModuleConfig>),
         out: &(Request, Option<ModuleConfig>),
-    ) -> Option<SystemEvent> {
-        Some(SystemEvent::RequestMiddleware(RequestMiddlewareCompleted((&out.0).into())))
+    ) -> Option<EventEnvelope> {
+        Some(EventEnvelope::engine(
+            EventType::RequestMiddleware,
+            EventPhase::Completed,
+            RequestMiddlewareEvent::from(&out.0),
+        ))
     }
 
-    fn working_status(&self, input: &(Request, Option<ModuleConfig>)) -> Option<SystemEvent> {
-        Some(SystemEvent::RequestMiddleware(RequestMiddlewareStarted((&input.0).into())))
+    fn working_status(&self, input: &(Request, Option<ModuleConfig>)) -> Option<EventEnvelope> {
+        Some(EventEnvelope::engine(
+            EventType::RequestMiddleware,
+            EventPhase::Started,
+            RequestMiddlewareEvent::from(&input.0),
+        ))
     }
 
-    fn error_status(&self, input: &(Request, Option<ModuleConfig>), err: &Error) -> Option<SystemEvent> {
-        let failure: DynFailureEvent<RequestMiddlewareEvent> = DynFailureEvent {
-            data: (&input.0).into(),
-            error: err.to_string(),
-        };
-        Some(SystemEvent::RequestMiddleware(RequestMiddlewareFailed(failure)))
+    fn error_status(&self, input: &(Request, Option<ModuleConfig>), err: &Error) -> Option<EventEnvelope> {
+        Some(EventEnvelope::engine_error(
+            EventType::RequestMiddleware,
+            EventPhase::Failed,
+            RequestMiddlewareEvent::from(&input.0),
+            err,
+        ))
     }
 
     fn retry_status(
         &self,
         input: &(Request, Option<ModuleConfig>),
         retry_policy: &RetryPolicy,
-    ) -> Option<SystemEvent> {
-        let retry: DynRetryEvent<RequestMiddlewareEvent> = DynRetryEvent {
-            data: (&input.0).into(),
-            retry_count: retry_policy.current_retry,
-            reason: retry_policy.reason.clone().unwrap_or_default(),
-        };
-        Some(SystemEvent::RequestMiddleware(RequestMiddlewareRetry(retry)))
+    ) -> Option<EventEnvelope> {
+        Some(EventEnvelope::engine(
+            EventType::RequestMiddleware,
+            EventPhase::Retry,
+            json!({
+                "data": RequestMiddlewareEvent::from(&input.0),
+                "retry_count": retry_policy.current_retry,
+                "reason": retry_policy.reason.clone().unwrap_or_default(),
+            }),
+        ))
     }
 }
 pub struct ResponseMiddlewareProcessor {
@@ -622,10 +648,17 @@ for ResponseMiddlewareProcessor
 impl EventProcessorTrait<(Option<Response>, Option<ModuleConfig>), Option<Response>>
 for ResponseMiddlewareProcessor
 {
-    fn pre_status(&self, input: &(Option<Response>, Option<ModuleConfig>)) -> Option<SystemEvent> {
+    fn pre_status(&self, input: &(Option<Response>, Option<ModuleConfig>)) -> Option<EventEnvelope> {
         match &input.0 {
-            Some(resp) => Some(SystemEvent::ResponseMiddleware(ResponseMiddlewarePrepared(resp.into()))),
-            None => Some(SystemEvent::System(EventSystem::ErrorHandled("no_response_to_process".into()))),
+            Some(resp) => Some(EventEnvelope::engine(
+                EventType::ResponseMiddleware,
+                EventPhase::Started,
+                ResponseEvent::from(resp),
+            )),
+            None => Some(EventEnvelope::system_error(
+                "no_response_to_process",
+                EventPhase::Completed,
+            )),
         }
     }
 
@@ -633,17 +666,31 @@ for ResponseMiddlewareProcessor
         &self,
         _input: &(Option<Response>, Option<ModuleConfig>),
         out: &Option<Response>,
-    ) -> Option<SystemEvent> {
+    ) -> Option<EventEnvelope> {
         match out {
-            Some(resp) => Some(SystemEvent::ResponseMiddleware(ResponseMiddlewareCompleted(resp.into()))),
-            None => Some(SystemEvent::System(EventSystem::ErrorHandled("no_response_to_process".into()))),
+            Some(resp) => Some(EventEnvelope::engine(
+                EventType::ResponseMiddleware,
+                EventPhase::Completed,
+                ResponseEvent::from(resp),
+            )),
+            None => Some(EventEnvelope::system_error(
+                "no_response_to_process",
+                EventPhase::Completed,
+            )),
         }
     }
 
-    fn working_status(&self, input: &(Option<Response>, Option<ModuleConfig>)) -> Option<SystemEvent> {
+    fn working_status(&self, input: &(Option<Response>, Option<ModuleConfig>)) -> Option<EventEnvelope> {
         match &input.0 {
-            Some(resp) => Some(SystemEvent::ResponseMiddleware(ResponseMiddlewareStarted(resp.into()))),
-            None => Some(SystemEvent::System(EventSystem::ErrorHandled("no_response_to_process".into()))),
+            Some(resp) => Some(EventEnvelope::engine(
+                EventType::ResponseMiddleware,
+                EventPhase::Started,
+                ResponseEvent::from(resp),
+            )),
+            None => Some(EventEnvelope::system_error(
+                "no_response_to_process",
+                EventPhase::Completed,
+            )),
         }
     }
 
@@ -651,18 +698,18 @@ for ResponseMiddlewareProcessor
         &self,
         input: &(Option<Response>, Option<ModuleConfig>),
         err: &Error,
-    ) -> Option<SystemEvent> {
+    ) -> Option<EventEnvelope> {
         match &input.0 {
-            Some(resp) => {
-                let failure: DynFailureEvent<ResponseEvent> = DynFailureEvent {
-                    data: resp.into(),
-                    error: err.to_string(),
-                };
-                Some(SystemEvent::ResponseMiddleware(ResponseMiddlewareFailed(failure)))
-            }
-            None => Some(SystemEvent::System(EventSystem::ErrorOccurred(format!(
-                "response_middleware_error_without_response: {err}"
-            )))),
+            Some(resp) => Some(EventEnvelope::engine_error(
+                EventType::ResponseMiddleware,
+                EventPhase::Failed,
+                ResponseEvent::from(resp),
+                err,
+            )),
+            None => Some(EventEnvelope::system_error(
+                format!("response_middleware_error_without_response: {err}"),
+                EventPhase::Failed,
+            )),
         }
     }
 
@@ -670,19 +717,21 @@ for ResponseMiddlewareProcessor
         &self,
         input: &(Option<Response>, Option<ModuleConfig>),
         retry_policy: &RetryPolicy,
-    ) -> Option<SystemEvent> {
+    ) -> Option<EventEnvelope> {
         match &input.0 {
-            Some(resp) => {
-                let retry: DynRetryEvent<ResponseEvent> = DynRetryEvent {
-                    data: resp.into(),
-                    retry_count: retry_policy.current_retry,
-                    reason: retry_policy.reason.clone().unwrap_or_default(),
-                };
-                Some(SystemEvent::ResponseMiddleware(ResponseMiddlewareRetry(retry)))
-            }
-            None => Some(SystemEvent::System(EventSystem::ErrorHandled(
-                "response_middleware_retry_without_response".into(),
-            ))),
+            Some(resp) => Some(EventEnvelope::engine(
+                EventType::ResponseMiddleware,
+                EventPhase::Retry,
+                json!({
+                    "data": ResponseEvent::from(resp),
+                    "retry_count": retry_policy.current_retry,
+                    "reason": retry_policy.reason.clone().unwrap_or_default(),
+                }),
+            )),
+            None => Some(EventEnvelope::system_error(
+                "response_middleware_retry_without_response",
+                EventPhase::Completed,
+            )),
         }
     }
 }
@@ -750,41 +799,32 @@ for ProxyMiddlewareProcessor
 impl EventProcessorTrait<(Request, Option<ModuleConfig>), (Request, Option<ModuleConfig>)>
 for ProxyMiddlewareProcessor
 {
-    fn pre_status(&self, input: &(Request, Option<ModuleConfig>)) -> Option<SystemEvent> {
-        Some(SystemEvent::Proxy(ProxyPrepared((&input.0).into())))
+    fn pre_status(&self, _input: &(Request, Option<ModuleConfig>)) -> Option<EventEnvelope> {
+        None
     }
 
     fn finish_status(
         &self,
         _input: &(Request, Option<ModuleConfig>),
-        out: &(Request, Option<ModuleConfig>),
-    ) -> Option<SystemEvent> {
-        Some(SystemEvent::Proxy(ProxyCompleted((&out.0).into())))
+        _out: &(Request, Option<ModuleConfig>),
+    ) -> Option<EventEnvelope> {
+        None
     }
 
-    fn working_status(&self, input: &(Request, Option<ModuleConfig>)) -> Option<SystemEvent> {
-        Some(SystemEvent::Proxy(ProxyStarted((&input.0).into())))
+    fn working_status(&self, _input: &(Request, Option<ModuleConfig>)) -> Option<EventEnvelope> {
+        None
     }
 
-    fn error_status(&self, input: &(Request, Option<ModuleConfig>), err: &Error) -> Option<SystemEvent> {
-        let failure: DynFailureEvent<crate::events::ProxyEvent> = DynFailureEvent {
-            data: (&input.0).into(),
-            error: err.to_string(),
-        };
-        Some(SystemEvent::Proxy(ProxyFailed(failure)))
+    fn error_status(&self, _input: &(Request, Option<ModuleConfig>), _err: &Error) -> Option<EventEnvelope> {
+        None
     }
 
     fn retry_status(
         &self,
-        input: &(Request, Option<ModuleConfig>),
-        retry_policy: &RetryPolicy,
-    ) -> Option<SystemEvent> {
-        let retry: DynRetryEvent<crate::events::ProxyEvent> = DynRetryEvent {
-            data: (&input.0).into(),
-            retry_count: retry_policy.current_retry,
-            reason: retry_policy.reason.clone().unwrap_or_default(),
-        };
-        Some(SystemEvent::Proxy(ProxyRetry(retry)))
+        _input: &(Request, Option<ModuleConfig>),
+        _retry_policy: &RetryPolicy,
+    ) -> Option<EventEnvelope> {
+        None
     }
 }
 

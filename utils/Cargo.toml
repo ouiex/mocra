@@ -28,3 +28,4 @@ regex.workspace = true
 errors.workspace = true
 dashmap.workspace = true
 async-trait.workspace = true
+metrics.workspace = true

@@ -14,13 +14,9 @@ The `utils` module is a collection of general-purpose utility functions, helper 
 
 ### 2. Infrastructure Helpers
 - **`connector`**: Functions to establish connections to PostgreSQL (`sea-orm`) and Redis (`deadpool-redis`), handling configuration and pool creation.
-- **`logger`**: Configures the application's logging system. Built on `tracing-subscriber`, supports JSON/text output, file rotation, and optional queue forwarding.
+- **`logger`**: Configures the application's logging system. Built on `tracing-subscriber`, supports text console/file output and MQ JSON forwarding.
 	- **简化初始化**: 使用 `init_app_logger(namespace)` 一行初始化，默认写入 `logs/mocra.{namespace}`。
 	- **环境变量**:
-		- `MOCRA_LOG_LEVEL` (默认: `info,engine=debug;sqlx=warn,sea_orm=warn,h2=warn,hyper=warn`)
-		- `MOCRA_LOG_FILE` (设为 `none/off/false` 可关闭文件输出)
-		- `MOCRA_LOG_CONSOLE` (`true/false/1/0`)
-		- `MOCRA_LOG_JSON` (`true/false/1/0`)
 		- `DISABLE_LOGS` / `MOCRA_DISABLE_LOGS` (禁用所有日志)
 - **`device_info`**: Retrieves system information (CPU, Memory, OS) for monitoring or fingerprinting.
 

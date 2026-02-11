@@ -3,7 +3,7 @@ use utils::device_info::get_primary_local_ip;
 use crate::zombie;
 use crate::monitor::SystemMonitor;
 use crate::events::{
-    EventBus, RedisEventHandler, DbEventHandler,
+    EventBus, RedisEventHandler,
 };
 use downloader::DownloaderManager;
 use queue::Identifiable;
@@ -12,16 +12,19 @@ use crate::chain::{
     create_download_chain, create_error_task_chain, create_parser_chain, create_parser_task_chain,
     create_task_model_chain,
 };
-use crate::events::EventSystem::{ComponentHealthCheck, SystemShutdown, SystemStarted};
+use crate::events::{EventEnvelope, EventPhase, EventType, HealthCheckEvent};
+use common::policy::{DlqPolicy, PolicyResolver};
+use metrics::counter;
 
 use crate::chain::stream_chain::create_wss_download_chain;
 use futures::{StreamExt, FutureExt};
 use common::state::State;
 use log::{error, info, warn};
-use queue::QueueManager;
+use queue::{QueueManager, QueuedItem};
 
-use common::processors::processor::ProcessorContext;
+use common::processors::processor::{ProcessorContext, RetryPolicy};
 use proxy::ProxyManager;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::fs;
 use tokio::sync::{broadcast, watch};
@@ -35,6 +38,8 @@ use crate::scheduler::CronScheduler;
 use sync::{LeaderElector, RedisBackend};
 use uuid::Uuid;
 use std::time::{Duration, Instant};
+use utils::logger as app_logger;
+use utils::logger::{LogOutputConfig as AppLogOutputConfig, LoggerConfig as AppLoggerConfig, LogSender as AppLogSender, PrometheusConfig as AppPrometheusConfig};
 
 /// Engine is the core component that orchestrates the crawling process.
 /// It manages the lifecycle of Tasks, Requests, Responses, and Parsers via a chain of responsibilities.
@@ -71,8 +76,298 @@ pub struct Engine {
 impl Engine {
     const NODE_HEARTBEAT_INTERVAL_SECS: u64 = 10;
     const NODE_HEARTBEAT_TTL_SECS: u64 = Self::NODE_HEARTBEAT_INTERVAL_SECS * 3;
+
+    fn policy_event_label(event_type: &str) -> &'static str {
+        match event_type {
+            "task_model" => "task_model",
+            "download" => "download",
+            "parser_task_model" => "parser_task_model",
+            "system_error" => "system_error",
+            "parser" => "parser",
+            _ => "unknown",
+        }
+    }
+
+    fn policy_kind_label(kind: &errors::ErrorKind) -> &'static str {
+        match kind {
+            errors::ErrorKind::Request => "request",
+            errors::ErrorKind::Response => "response",
+            errors::ErrorKind::Command => "command",
+            errors::ErrorKind::Service => "service",
+            errors::ErrorKind::Proxy => "proxy",
+            errors::ErrorKind::Download => "download",
+            errors::ErrorKind::Queue => "queue",
+            errors::ErrorKind::Orm => "orm",
+            errors::ErrorKind::Task => "task",
+            errors::ErrorKind::Module => "module",
+            errors::ErrorKind::RateLimit => "rate_limit",
+            errors::ErrorKind::ProcessorChain => "processor_chain",
+            errors::ErrorKind::Parser => "parser",
+            errors::ErrorKind::DataMiddleware => "data_middleware",
+            errors::ErrorKind::DataStore => "data_store",
+            errors::ErrorKind::DynamicLibrary => "dynamic_library",
+            errors::ErrorKind::CacheService => "cache_service",
+        }
+    }
+
+    async fn handle_policy_failure<T>(
+        policy_resolver: &PolicyResolver,
+        queue_manager: &QueueManager,
+        topic: &str,
+        event_type: &str,
+        item: &T,
+        err: &errors::Error,
+        ack_fn: &mut Option<queue::AckFn>,
+        nack_fn: &mut Option<queue::NackFn>,
+    ) where
+        T: serde::Serialize + queue::Identifiable + Send + Sync,
+    {
+        let decision = policy_resolver.resolve_with_error(
+            "engine",
+            Some(event_type),
+            Some("failed"),
+            err,
+        );
+        let action = if decision.policy.retryable {
+            "retry"
+        } else if decision.policy.dlq == DlqPolicy::Never {
+            "ack"
+        } else {
+            "dlq"
+        };
+
+        let event_label = Self::policy_event_label(event_type);
+        let kind_label = Self::policy_kind_label(err.kind());
+
+        counter!(
+            "policy_decisions_total",
+            "domain" => "engine",
+            "event_type" => event_label,
+            "phase" => "failed",
+            "kind" => kind_label,
+            "action" => action
+        )
+        .increment(1);
+
+        let reason = format!("{}: {}", decision.reason, err);
+
+        match action {
+            "retry" => {
+                if let Some(f) = nack_fn.take() {
+                    let _ = f(reason).await;
+                }
+            }
+            "dlq" => {
+                let _ = queue_manager.send_to_dlq(topic, item, &reason).await;
+                if let Some(f) = ack_fn.take() {
+                    let _ = f().await;
+                }
+            }
+            _ => {
+                if let Some(f) = ack_fn.take() {
+                    let _ = f().await;
+                }
+            }
+        }
+    }
+
+    async fn handle_policy_retry<T>(
+        policy_resolver: &PolicyResolver,
+        queue_manager: &QueueManager,
+        topic: &str,
+        event_type: &str,
+        item: &T,
+        retry_policy: &RetryPolicy,
+        ack_fn: &mut Option<queue::AckFn>,
+        nack_fn: &mut Option<queue::NackFn>,
+    ) where
+        T: serde::Serialize + queue::Identifiable + Send + Sync,
+    {
+        let reason = retry_policy
+            .reason
+            .clone()
+            .unwrap_or_else(|| "retryable failure".to_string());
+        let err = errors::Error::new(
+            errors::ErrorKind::ProcessorChain,
+            Some(std::io::Error::new(std::io::ErrorKind::Other, reason.clone())),
+        );
+
+        let decision = policy_resolver.resolve_with_error(
+            "engine",
+            Some(event_type),
+            Some("retry"),
+            &err,
+        );
+        let action = if decision.policy.retryable {
+            "retry"
+        } else if decision.policy.dlq == DlqPolicy::Never {
+            "ack"
+        } else {
+            "dlq"
+        };
+
+        let event_label = Self::policy_event_label(event_type);
+        let kind_label = Self::policy_kind_label(err.kind());
+
+        counter!(
+            "policy_decisions_total",
+            "domain" => "engine",
+            "event_type" => event_label,
+            "phase" => "retry",
+            "kind" => kind_label,
+            "action" => action
+        )
+        .increment(1);
+
+        let reason = format!("{}: {}", decision.reason, reason);
+
+        match action {
+            "retry" => {
+                if let Some(f) = nack_fn.take() {
+                    let _ = f(reason).await;
+                }
+            }
+            "dlq" => {
+                let _ = queue_manager.send_to_dlq(topic, item, &reason).await;
+                if let Some(f) = ack_fn.take() {
+                    let _ = f().await;
+                }
+            }
+            _ => {
+                if let Some(f) = ack_fn.take() {
+                    let _ = f().await;
+                }
+            }
+        }
+    }
     fn init_queue_manager(cfg: &common::model::config::Config) -> Arc<QueueManager> {
-        QueueManager::from_config(cfg)
+        let log_topic = cfg
+            .logger
+            .as_ref()
+            .and_then(|logger| Self::first_mq_topic(logger));
+        QueueManager::from_config_with_log_topic(cfg, log_topic.as_deref())
+    }
+
+    fn first_mq_topic(
+        logger: &common::model::logger_config::LoggerConfig,
+    ) -> Option<String> {
+        logger.outputs.iter().find_map(|output| {
+            match output {
+                common::model::logger_config::LogOutputConfig::Mq { topic, .. } => {
+                    Some(topic.clone())
+                }
+                _ => None,
+            }
+        })
+    }
+
+    fn build_app_logger_config(
+        logger: &common::model::logger_config::LoggerConfig,
+        namespace: &str,
+    ) -> AppLoggerConfig {
+        let mut config = AppLoggerConfig::for_app(namespace);
+        if let Some(enabled) = logger.enabled {
+            config.enabled = enabled;
+        }
+        if let Some(level) = &logger.level {
+            config.level = level.clone();
+        }
+        if let Some(format) = &logger.format {
+            if format.to_lowercase() != "text" {
+                eprintln!("logger.format only supports text for console/file, got {format}");
+            }
+            config.format = "text".to_string();
+        }
+        if let Some(include) = &logger.include {
+            config.include = include.clone();
+        }
+        if let Some(buffer) = logger.buffer {
+            config.buffer = buffer;
+        }
+        if let Some(interval) = logger.flush_interval_ms {
+            config.flush_interval_ms = interval;
+        }
+
+        config.outputs = logger
+            .outputs
+            .iter()
+            .filter_map(|output| match output {
+                common::model::logger_config::LogOutputConfig::Console { level } => Some(
+                    AppLogOutputConfig::Console {
+                        level: level.clone(),
+                    },
+                ),
+                common::model::logger_config::LogOutputConfig::File {
+                    path,
+                    level,
+                    rotation,
+                    ..
+                } => Some(AppLogOutputConfig::File {
+                    path: PathBuf::from(path),
+                    level: level.clone(),
+                    rotation: rotation.clone(),
+                }),
+                common::model::logger_config::LogOutputConfig::Mq { level, format, .. } => {
+                    if let Some(format) = format
+                        && format.to_lowercase() != "json"
+                    {
+                        eprintln!("logger.outputs.mq.format only supports json, got {format}");
+                    }
+                    Some(AppLogOutputConfig::Mq {
+                        level: level.clone(),
+                    })
+                }
+            })
+            .collect();
+
+        if config.outputs.is_empty() {
+            config.outputs = AppLoggerConfig::default().outputs;
+        }
+
+        if let Some(prometheus) = &logger.prometheus
+            && prometheus.enabled
+        {
+            config.prometheus = Some(AppPrometheusConfig { enabled: true });
+        }
+
+        config
+    }
+
+    async fn setup_mq_log_sender(
+        logger: &common::model::logger_config::LoggerConfig,
+        queue_manager: Arc<QueueManager>,
+    ) -> Option<AppLogSender> {
+        let mq_output = logger.outputs.iter().find_map(|output| {
+            match output {
+                common::model::logger_config::LogOutputConfig::Mq {
+                    level,
+                    buffer,
+                    ..
+                } => Some((level.clone(), *buffer)),
+                _ => None,
+            }
+        })?;
+
+        let buffer = mq_output.1.or(logger.buffer).unwrap_or(10000);
+        let level = mq_output
+            .0
+            .or_else(|| logger.level.clone())
+            .unwrap_or_else(|| "warn".to_string());
+
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(buffer);
+        let log_sender = AppLogSender::with_capacity(sender, level, buffer);
+        let queue_sender = queue_manager.get_log_push_channel();
+
+        tokio::spawn(async move {
+            while let Some(log) = receiver.recv().await {
+                let item = QueuedItem::new(log);
+                if let Err(e) = queue_sender.send(item).await {
+                    eprintln!("Failed to forward log to queue: {e}");
+                }
+            }
+        });
+
+        Some(log_sender)
     }
 
     /// Create a new Engine instance.
@@ -147,34 +442,43 @@ impl Engine {
             Self::init_queue_manager(&cfg)
         };
 
+        if let Some(logger_config) = &cfg.logger {
+            if logger_config.enabled.unwrap_or(true) {
+                let app_config = Self::build_app_logger_config(logger_config, &namespace);
+                let log_sender = Self::setup_mq_log_sender(logger_config, queue_manager.clone()).await;
+                let _ = app_logger::init_logger(app_config).await;
+                if let Some(sender) = log_sender {
+                    let _ = app_logger::set_log_sender(sender);
+                }
+            }
+        }
+
         // Initialize Logger/Event Handlers based on Config
         if let (Some(log_config), Some(event_bus)) = (&cfg.logger, event_bus.as_ref()) {
-              use common::model::logger_config::LogOutputConfig;
-              use crate::events::handlers::{queue_handler::QueueLogHandler, console_handler::ConsoleLogHandler};
+            if log_config.enabled == Some(false) {
+                info!("Logger disabled; skipping EventBus log handlers");
+            } else {
+            use common::model::logger_config::LogOutputConfig;
+            use crate::events::handlers::{queue_handler::QueueLogHandler, console_handler::ConsoleLogHandler};
 
-              for output in &log_config.outputs {
-                  match output {
-                      LogOutputConfig::RedisStream { .. } => {
-                           let rx = event_bus.subscribe("*".to_string()).await;
-                           QueueLogHandler::start(rx, queue_manager.clone(), "redis_stream".to_string()).await;
-                           info!("Registered RedisStream Logger for EventBus");
-                      }
-                      LogOutputConfig::Kafka { .. } => {
-                           let rx = event_bus.subscribe("*".to_string()).await;
-                           QueueLogHandler::start(rx, queue_manager.clone(), "kafka".to_string()).await;
-                           info!("Registered Kafka Logger for EventBus");
-                      }
-                      LogOutputConfig::Console { level, .. } => {
-                          let rx = event_bus.subscribe("*".to_string()).await;
-                          ConsoleLogHandler::start(rx, level.clone()).await;
-                          info!("Registered Console Logger for EventBus");
-                      }
-                      LogOutputConfig::File { .. } => {
-                          // File logging is handled by system logger
-                          info!("Registered File Logger for EventBus (Handled by Global Tracing)");
-                      }
-                  }
-              }
+            for output in &log_config.outputs {
+                match output {
+                    LogOutputConfig::Mq { .. } => {
+                        let rx = event_bus.subscribe("*".to_string()).await;
+                        QueueLogHandler::start(rx, queue_manager.clone(), "mq".to_string()).await;
+                        info!("Registered MQ Logger for EventBus");
+                    }
+                    LogOutputConfig::Console { level } => {
+                        let rx = event_bus.subscribe("*".to_string()).await;
+                        ConsoleLogHandler::start(rx, level.clone().unwrap_or_else(|| "INFO".to_string())).await;
+                        info!("Registered Console Logger for EventBus");
+                    }
+                    LogOutputConfig::File { .. } => {
+                        info!("Registered File Logger for EventBus (Handled by Global Tracing)");
+                    }
+                }
+            }
+            }
         } else if cfg.logger.is_some() {
             info!("EventBus disabled; skipping logger EventBus handlers");
         }
@@ -296,11 +600,6 @@ impl Engine {
         // Metrics Handler
         // self.event_bus.subscribe("*".to_string(), MetricsEventHandler::new()).await;
 
-        // DB Handler
-        let db_rx = event_bus.subscribe("*".to_string()).await;
-        let db_handler = DbEventHandler::new(self.state.db.clone());
-        db_handler.start(db_rx).await;
-
         // Redis Event Handler
         let config = self.state.config.read().await;
         if let Some(redis_config) = &config.cookie {
@@ -371,7 +670,11 @@ impl Engine {
         // 发布系统启动事件
         if let Some(event_bus) = &self.event_bus {
             if let Err(e) = event_bus
-                .publish(crate::events::SystemEvent::System(SystemStarted))
+                .publish(EventEnvelope::engine(
+                    EventType::SystemHealth,
+                    EventPhase::Started,
+                    serde_json::json!({ "event": "system_started" }),
+                ))
                 .await
             {
                 error!("Failed to publish system started event: {e}");
@@ -527,6 +830,7 @@ impl Engine {
                 .await,
         );
         let queue_manager = self.queue_manager.clone();
+        let policy_resolver = PolicyResolver::new(self.state.config.read().await.policy.as_ref());
 
         self.run_processor_loop(
             "Task",
@@ -534,18 +838,49 @@ impl Engine {
             move |task_item| {
                 let chain = task_model_chain.clone();
                 let queue_manager = queue_manager.clone();
+                let policy_resolver = policy_resolver.clone();
                 async move {
-                    let (task, mut ack_fn, _) = task_item.into_parts();
+                    let (task, mut ack_fn, mut nack_fn) = task_item.into_parts();
+                    let task_for_dlq = task.clone();
                     let id = task.get_id();
-                    if let common::processors::processor::ProcessorResult::Success(mut stream) = chain.execute(task, ProcessorContext::default()).await {
-                        while stream.next().await.is_some() {}
-                        if let Some(comp) = &queue_manager.compensator {
-                            let _ = comp.remove_task("task", &id).await;
-                        }
-                        if let Some(f) = ack_fn.take() {
-                            if let Err(e) = f().await {
-                                error!("Failed to ack task {}: {}", id, e);
+                    let result = chain.execute(task, ProcessorContext::default()).await;
+                    match result {
+                        common::processors::processor::ProcessorResult::Success(mut stream) => {
+                            while stream.next().await.is_some() {}
+                            if let Some(comp) = &queue_manager.compensator {
+                                let _ = comp.remove_task("task", &id).await;
                             }
+                            if let Some(f) = ack_fn.take() {
+                                if let Err(e) = f().await {
+                                    error!("Failed to ack task {}: {}", id, e);
+                                }
+                            }
+                        }
+                        common::processors::processor::ProcessorResult::RetryableFailure(retry_policy) => {
+                            Self::handle_policy_retry(
+                                &policy_resolver,
+                                &queue_manager,
+                                "task",
+                                "task_model",
+                                &task_for_dlq,
+                                &retry_policy,
+                                &mut ack_fn,
+                                &mut nack_fn,
+                            )
+                            .await;
+                        }
+                        common::processors::processor::ProcessorResult::FatalFailure(err) => {
+                            Self::handle_policy_failure(
+                                &policy_resolver,
+                                &queue_manager,
+                                "task",
+                                "task_model",
+                                &task_for_dlq,
+                                &err,
+                                &mut ack_fn,
+                                &mut nack_fn,
+                            )
+                            .await;
                         }
                     }
                 }
@@ -580,6 +915,7 @@ impl Engine {
                 .await,
         );
         let queue_manager = self.queue_manager.clone();
+        let policy_resolver = PolicyResolver::new(self.state.config.read().await.policy.as_ref());
 
         self.run_processor_loop(
             "Download",
@@ -588,8 +924,10 @@ impl Engine {
                 let download_chain = download_chain.clone();
                 let wss_chain = wss_download_chain.clone();
                 let queue_manager = queue_manager.clone();
+                let policy_resolver = policy_resolver.clone();
                 async move {
-                    let (request, mut ack_fn, _) = request_item.into_parts();
+                    let (request, mut ack_fn, mut nack_fn) = request_item.into_parts();
+                    let request_for_dlq = request.clone();
                     let id = request.get_id();
                     
                     let result = if request.downloader.eq_ignore_ascii_case("wss_downloader") {
@@ -598,7 +936,8 @@ impl Engine {
                         download_chain.execute(request, ProcessorContext::default()).await
                     };
 
-                    if result.is_success() {
+                    match result {
+                        common::processors::processor::ProcessorResult::Success(_) => {
                         if let Some(comp) = &queue_manager.compensator {
                             let _ = comp.remove_task("request", &id).await;
                         }
@@ -606,6 +945,33 @@ impl Engine {
                             if let Err(e) = f().await {
                                 error!("Failed to ack request {}: {}", id, e);
                             }
+                        }
+                        }
+                        common::processors::processor::ProcessorResult::RetryableFailure(retry_policy) => {
+                            Self::handle_policy_retry(
+                                &policy_resolver,
+                                &queue_manager,
+                                "request",
+                                "download",
+                                &request_for_dlq,
+                                &retry_policy,
+                                &mut ack_fn,
+                                &mut nack_fn,
+                            )
+                            .await;
+                        }
+                        common::processors::processor::ProcessorResult::FatalFailure(err) => {
+                            Self::handle_policy_failure(
+                                &policy_resolver,
+                                &queue_manager,
+                                "request",
+                                "download",
+                                &request_for_dlq,
+                                &err,
+                                &mut ack_fn,
+                                &mut nack_fn,
+                            )
+                            .await;
                         }
                     }
                 }
@@ -627,6 +993,7 @@ impl Engine {
         );
         let queue_manager = self.queue_manager.clone();
         let state = self.state.clone();
+        let policy_resolver = PolicyResolver::new(self.state.config.read().await.policy.as_ref());
 
         self.run_processor_loop(
             "Parser",
@@ -635,8 +1002,10 @@ impl Engine {
                 let chain = parser_model_chain.clone();
                 let queue_manager = queue_manager.clone();
                 let state = state.clone();
+                let policy_resolver = policy_resolver.clone();
                 async move {
-                    let (task, mut ack_fn, _) = task_item.into_parts();
+                    let (task, mut ack_fn, mut nack_fn) = task_item.into_parts();
+                    let task_for_dlq = task.clone();
                     let id = task.get_id();
                     
                     // Idempotency check: Prevent duplicate processing
@@ -649,7 +1018,7 @@ impl Engine {
                          if let Some(f) = ack_fn.take() {
                              let _ = f().await;
                          }
-                         return;
+                        return;
                     }
                     
                     // 2. Try to acquire lock to prevent concurrent processing
@@ -669,7 +1038,9 @@ impl Engine {
                     // Rust async drop doesn't guarantee this easily without a Guard struct.
                     // For now, relies on TTL (5m).
 
-                    if let common::processors::processor::ProcessorResult::Success(mut stream) = chain.execute(task, ProcessorContext::default()).await {
+                    let result = chain.execute(task, ProcessorContext::default()).await;
+                    match result {
+                        common::processors::processor::ProcessorResult::Success(mut stream) => {
                         while stream.next().await.is_some() {}
                         if let Some(comp) = &queue_manager.compensator {
                             let _ = comp.remove_task("parser_task", &id).await;
@@ -685,9 +1056,36 @@ impl Engine {
                                 error!("Failed to ack parser task {}: {}", id, e);
                             }
                         }
-                    } else {
+                        }
+                        common::processors::processor::ProcessorResult::RetryableFailure(retry_policy) => {
+                            let _ = state.cache_service.del(&lock_key).await;
+                            Self::handle_policy_retry(
+                                &policy_resolver,
+                                &queue_manager,
+                                "parser_task",
+                                "parser_task_model",
+                                &task_for_dlq,
+                                &retry_policy,
+                                &mut ack_fn,
+                                &mut nack_fn,
+                            )
+                            .await;
+                        }
+                        common::processors::processor::ProcessorResult::FatalFailure(err) => {
                         // Failed, release lock immediately so it can be retried
-                         let _ = state.cache_service.del(&lock_key).await;
+                            let _ = state.cache_service.del(&lock_key).await;
+                            Self::handle_policy_failure(
+                                &policy_resolver,
+                                &queue_manager,
+                                "parser_task",
+                                "parser_task_model",
+                                &task_for_dlq,
+                                &err,
+                                &mut ack_fn,
+                                &mut nack_fn,
+                            )
+                            .await;
+                        }
                     }
                 }
             },
@@ -707,6 +1105,7 @@ impl Engine {
                 .await,
         );
         let queue_manager = self.queue_manager.clone();
+        let policy_resolver = PolicyResolver::new(self.state.config.read().await.policy.as_ref());
 
         self.run_processor_loop(
             "Error",
@@ -714,18 +1113,49 @@ impl Engine {
             move |task_item| {
                 let chain = error_chain.clone();
                 let queue_manager = queue_manager.clone();
+                let policy_resolver = policy_resolver.clone();
                 async move {
-                    let (task, mut ack_fn, _) = task_item.into_parts();
+                    let (task, mut ack_fn, mut nack_fn) = task_item.into_parts();
+                    let task_for_dlq = task.clone();
                     let id = task.get_id();
-                    if let common::processors::processor::ProcessorResult::Success(mut stream) = chain.execute(task, ProcessorContext::default()).await {
-                        while stream.next().await.is_some() {}
-                        if let Some(comp) = &queue_manager.compensator {
-                            let _ = comp.remove_task("error_task", &id).await;
-                        }
-                        if let Some(f) = ack_fn.take() {
-                            if let Err(e) = f().await {
-                                error!("Failed to ack error task {}: {}", id, e);
+                    let result = chain.execute(task, ProcessorContext::default()).await;
+                    match result {
+                        common::processors::processor::ProcessorResult::Success(mut stream) => {
+                            while stream.next().await.is_some() {}
+                            if let Some(comp) = &queue_manager.compensator {
+                                let _ = comp.remove_task("error_task", &id).await;
                             }
+                            if let Some(f) = ack_fn.take() {
+                                if let Err(e) = f().await {
+                                    error!("Failed to ack error task {}: {}", id, e);
+                                }
+                            }
+                        }
+                        common::processors::processor::ProcessorResult::RetryableFailure(retry_policy) => {
+                            Self::handle_policy_retry(
+                                &policy_resolver,
+                                &queue_manager,
+                                "error_task",
+                                "system_error",
+                                &task_for_dlq,
+                                &retry_policy,
+                                &mut ack_fn,
+                                &mut nack_fn,
+                            )
+                            .await;
+                        }
+                        common::processors::processor::ProcessorResult::FatalFailure(err) => {
+                            Self::handle_policy_failure(
+                                &policy_resolver,
+                                &queue_manager,
+                                "error_task",
+                                "system_error",
+                                &task_for_dlq,
+                                &err,
+                                &mut ack_fn,
+                                &mut nack_fn,
+                            )
+                            .await;
                         }
                     }
                 }
@@ -746,6 +1176,7 @@ impl Engine {
                 .await,
         );
         let queue_manager = self.queue_manager.clone();
+        let policy_resolver = PolicyResolver::new(self.state.config.read().await.policy.as_ref());
 
         self.run_processor_loop(
             "Response",
@@ -753,17 +1184,48 @@ impl Engine {
             move |response_item| {
                 let chain = parser_chain.clone();
                 let queue_manager = queue_manager.clone();
+                let policy_resolver = policy_resolver.clone();
                 async move {
-                    let (response, mut ack_fn, _) = response_item.into_parts();
+                    let (response, mut ack_fn, mut nack_fn) = response_item.into_parts();
+                    let response_for_dlq = response.clone();
                     let id = response.get_id();
-                    if chain.execute(response, ProcessorContext::default()).await.is_success() {
-                        if let Some(comp) = &queue_manager.compensator {
-                            let _ = comp.remove_task("response", &id).await;
-                        }
-                        if let Some(f) = ack_fn.take() {
-                            if let Err(e) = f().await {
-                                 error!("Failed to ack response {}: {}", id, e);
+                    let result = chain.execute(response, ProcessorContext::default()).await;
+                    match result {
+                        common::processors::processor::ProcessorResult::Success(_) => {
+                            if let Some(comp) = &queue_manager.compensator {
+                                let _ = comp.remove_task("response", &id).await;
                             }
+                            if let Some(f) = ack_fn.take() {
+                                if let Err(e) = f().await {
+                                     error!("Failed to ack response {}: {}", id, e);
+                                }
+                            }
+                        }
+                        common::processors::processor::ProcessorResult::RetryableFailure(retry_policy) => {
+                            Self::handle_policy_retry(
+                                &policy_resolver,
+                                &queue_manager,
+                                "response",
+                                "parser",
+                                &response_for_dlq,
+                                &retry_policy,
+                                &mut ack_fn,
+                                &mut nack_fn,
+                            )
+                            .await;
+                        }
+                        common::processors::processor::ProcessorResult::FatalFailure(err) => {
+                            Self::handle_policy_failure(
+                                &policy_resolver,
+                                &queue_manager,
+                                "response",
+                                "parser",
+                                &response_for_dlq,
+                                &err,
+                                &mut ack_fn,
+                                &mut nack_fn,
+                            )
+                            .await;
                         }
                     }
                 }
@@ -794,8 +1256,8 @@ impl Engine {
                     }
 
                     // 发布健康检查事件
-                    let health_event = crate::events::SystemEvent::System(ComponentHealthCheck(
-                        crate::events::HealthCheckEvent {
+                    let health_event = EventEnvelope::system_health(
+                        HealthCheckEvent {
                             component: "schedule".to_string(),
                             status: "healthy".to_string(),
                             metrics: serde_json::json!({
@@ -815,7 +1277,8 @@ impl Engine {
                                 .unwrap()
                                 .as_secs(),
                         },
-                    ));
+                        EventPhase::Completed,
+                    );
 
                     if let Some(event_bus) = &event_bus {
                         if let Err(e) = event_bus.publish(health_event).await {
@@ -842,7 +1305,11 @@ impl Engine {
         // 发布系统关闭事件
         if let Some(event_bus) = &self.event_bus {
             if let Err(e) = event_bus
-                .publish(crate::events::SystemEvent::System(SystemShutdown))
+                .publish(EventEnvelope::engine(
+                    EventType::SystemHealth,
+                    EventPhase::Completed,
+                    serde_json::json!({ "event": "system_shutdown" }),
+                ))
                 .await
             {
                 error!("Failed to publish system shutdown event: {e}");
@@ -916,5 +1383,200 @@ impl Engine {
     pub fn start_cron_scheduler(&self) {
         info!("Starting cron scheduler");
         self.cron_scheduler.clone().start();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_trait::async_trait;
+    use common::model::Request;
+    use common::policy::{PolicyConfig, PolicyOverride};
+    use errors::ErrorKind;
+    use queue::{Message, MqBackend};
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use tokio::sync::mpsc;
+
+    #[derive(Clone, Default)]
+    struct TestBackend {
+        dlq_entries: Arc<Mutex<Vec<(String, String)>>>,
+    }
+
+    #[async_trait]
+    impl MqBackend for TestBackend {
+        async fn publish(&self, _topic: &str, _key: Option<&str>, _payload: &[u8]) -> errors::Result<()> {
+            Ok(())
+        }
+
+        async fn publish_with_headers(
+            &self,
+            _topic: &str,
+            _key: Option<&str>,
+            _payload: &[u8],
+            _headers: &HashMap<String, String>,
+        ) -> errors::Result<()> {
+            Ok(())
+        }
+
+        async fn publish_batch_with_headers(
+            &self,
+            _topic: &str,
+            _items: &[(Option<String>, Vec<u8>, HashMap<String, String>)],
+        ) -> errors::Result<()> {
+            Ok(())
+        }
+
+        async fn subscribe(&self, _topic: &str, _sender: mpsc::Sender<Message>) -> errors::Result<()> {
+            Ok(())
+        }
+
+        async fn clean_storage(&self) -> errors::Result<()> {
+            Ok(())
+        }
+
+        async fn send_to_dlq(
+            &self,
+            topic: &str,
+            _id: &str,
+            _payload: &[u8],
+            reason: &str,
+        ) -> errors::Result<()> {
+            self.dlq_entries
+                .lock()
+                .unwrap()
+                .push((topic.to_string(), reason.to_string()));
+            Ok(())
+        }
+
+        async fn read_dlq(&self, _topic: &str, _count: usize) -> errors::Result<Vec<(String, Vec<u8>, String, String)>> {
+            Ok(Vec::new())
+        }
+    }
+
+    #[tokio::test]
+    async fn retryable_failure_policy_can_route_to_dlq() {
+        let backend = Arc::new(TestBackend::default());
+        let queue_manager = QueueManager::new(Some(backend.clone()), 10);
+
+        let policy_cfg = PolicyConfig {
+            overrides: vec![PolicyOverride {
+                domain: Some("engine".to_string()),
+                event_type: Some("download".to_string()),
+                phase: Some("retry".to_string()),
+                kind: ErrorKind::ProcessorChain,
+                retryable: Some(false),
+                backoff: None,
+                dlq: Some(DlqPolicy::Always),
+                alert: None,
+                max_retries: Some(0),
+                backoff_ms: Some(0),
+            }],
+        };
+
+        let policy_resolver = PolicyResolver::new(Some(&policy_cfg));
+        let request = Request::new("http://example.com", "GET");
+
+        let acked = Arc::new(AtomicBool::new(false));
+        let nacked = Arc::new(AtomicBool::new(false));
+
+        let ack_flag = acked.clone();
+        let mut ack_fn: Option<queue::AckFn> = Some(Box::new(move || {
+            let ack_flag = ack_flag.clone();
+            Box::pin(async move {
+                ack_flag.store(true, Ordering::SeqCst);
+                Ok(())
+            })
+        }));
+
+        let nack_flag = nacked.clone();
+        let mut nack_fn: Option<queue::NackFn> = Some(Box::new(move |_reason| {
+            let nack_flag = nack_flag.clone();
+            Box::pin(async move {
+                nack_flag.store(true, Ordering::SeqCst);
+                Ok(())
+            })
+        }));
+
+        let retry_policy = RetryPolicy::default().with_reason("unit test".to_string());
+
+        Engine::handle_policy_retry(
+            &policy_resolver,
+            &queue_manager,
+            "request",
+            "download",
+            &request,
+            &retry_policy,
+            &mut ack_fn,
+            &mut nack_fn,
+        )
+        .await;
+
+        assert!(acked.load(Ordering::SeqCst));
+        assert!(!nacked.load(Ordering::SeqCst));
+
+        let dlq_entries = backend.dlq_entries.lock().unwrap();
+        assert_eq!(dlq_entries.len(), 1);
+        assert_eq!(dlq_entries[0].0, "request");
+    }
+
+    use queue::{QueuedItem, Identifiable};
+
+
+    #[derive(Clone)]
+    struct TestItem {
+        id: String,
+    }
+
+    impl Identifiable for TestItem {
+        fn get_id(&self) -> String {
+            self.id.clone()
+        }
+    }
+
+    #[tokio::test]
+    async fn test_processor_failure_triggers_nack() {
+        let ack_count = Arc::new(Mutex::new(0u32));
+        let nack_reason = Arc::new(Mutex::new(None::<String>));
+
+        let ack_count_clone = ack_count.clone();
+        let nack_reason_clone = nack_reason.clone();
+
+        let item = QueuedItem::with_ack(
+            TestItem { id: "test-1".to_string() },
+            move || {
+                let ack_count_clone = ack_count_clone.clone();
+                Box::pin(async move {
+                    *ack_count_clone.lock().unwrap() += 1;
+                    Ok(())
+                })
+            },
+            move |reason| {
+                let nack_reason_clone = nack_reason_clone.clone();
+                Box::pin(async move {
+                    *nack_reason_clone.lock().unwrap() = Some(reason);
+                    Ok(())
+                })
+            },
+        );
+
+        let (task, mut ack_fn, mut nack_fn) = item.into_parts();
+        let _id = task.get_id();
+        let failed = true;
+
+        if !failed {
+            if let Some(f) = ack_fn.take() {
+                let _ = f().await;
+            }
+        } else if let Some(f) = nack_fn.take() {
+            let _ = f("processor failed".to_string()).await;
+        }
+
+        assert_eq!(*ack_count.lock().unwrap(), 0);
+        assert_eq!(
+            nack_reason.lock().unwrap().as_deref(),
+            Some("processor failed")
+        );
     }
 }

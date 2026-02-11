@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-
+use common::model::cron_config::{CronConfig, CronInterval};
 use common::interface::{ModuleTrait, ModuleNodeTrait, SyncBoxStream, StoreTrait, ToSyncBoxStream};
 use common::model::{Headers, ModuleConfig, Request, Response};
 use common::model::login_info::LoginInfo;
@@ -43,12 +43,12 @@ impl ModuleTrait for MocDevModule {
     async fn add_step(&self) -> Vec<Arc<dyn ModuleNodeTrait>> {
         vec![Arc::new(MocDevNode {
             url: "https://moc.dev".to_string(),
-            request_count: 2000,
+            request_count: 10,
         })]
     }
-    // fn cron(&self) -> Option<CronConfig> {
-    //     Some(CronConfig::every(CronInterval::Minute(3)).build())
-    // }
+    fn cron(&self) -> Option<CronConfig> {
+        Some(CronConfig::every(CronInterval::Minute(1)).build())
+    }
 }
 
 struct MocDevNode {

@@ -1,11 +1,43 @@
 use super::backend::CoordinationBackend;
 use dashmap::DashMap;
 use once_cell::sync::Lazy;
-use serde::{Serialize, de::DeserializeOwned};
+use serde::{Serialize, Deserialize, de::DeserializeOwned};
+use common::model::config::SyncConfig;
+use common::policy::{DlqPolicy, PolicyResolver};
+use errors::ErrorKind;
+use metrics::counter;
 use rmp_serde as rmps;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::{broadcast, watch};
+
+fn record_sync_policy(event_type: &str, kind: ErrorKind) -> &'static str {
+    let resolver = PolicyResolver::new(None);
+    let decision = resolver.resolve_with_kind("sync", Some(event_type), Some("failed"), kind);
+    let action = if decision.policy.retryable {
+        "retry"
+    } else if decision.policy.dlq == DlqPolicy::Never {
+        "ack"
+    } else {
+        "dlq"
+    };
+    let event_label = match event_type {
+        "encode" => "encode",
+        "decode" => "decode",
+        _ => "unknown",
+    };
+    counter!(
+        "policy_decisions_total",
+        "domain" => "sync",
+        "event_type" => event_label,
+        "phase" => "failed",
+        "kind" => "service",
+        "action" => action
+    )
+    .increment(1);
+
+    action
+}
 
 fn msgpack_encode<T: Serialize>(value: &T) -> Result<Vec<u8>, rmps::encode::Error> {
     rmps::to_vec(value)
@@ -66,6 +98,40 @@ pub struct SyncService {
     backend: Option<Arc<dyn CoordinationBackend>>,
     local_store: Arc<DashMap<String, Arc<LocalTopicState>>>,
     namespace: String,
+    options: SyncOptions,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sync_policy_default_action_is_retry() {
+        let action = record_sync_policy("encode", ErrorKind::Service);
+        assert_eq!(action, "retry");
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct SyncOptions {
+    pub allow_rollback: bool,
+    pub envelope_enabled: bool,
+}
+
+impl Default for SyncOptions {
+    fn default() -> Self {
+        Self {
+            allow_rollback: true,
+            envelope_enabled: false,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+struct SyncEnvelope<T> {
+    version: u64,
+    timestamp_ms: u64,
+    value: T,
 }
 
 impl SyncService {
@@ -74,7 +140,86 @@ impl SyncService {
             backend,
             local_store: Arc::clone(&LOCAL_STORE),
             namespace,
+            options: SyncOptions::default(),
         }
+    }
+
+    pub fn from_config(
+        backend: Option<Arc<dyn CoordinationBackend>>,
+        namespace: String,
+        config: &SyncConfig,
+    ) -> Self {
+        let mut envelope_enabled = config.envelope_enabled;
+        if !config.allow_rollback && !envelope_enabled {
+            eprintln!("SyncConfig: allow_rollback=false requires envelope_enabled=true; enabling envelope automatically");
+            envelope_enabled = true;
+        }
+        let options = SyncOptions {
+            allow_rollback: config.allow_rollback,
+            envelope_enabled,
+        };
+
+        Self::new_with_options(backend, namespace, options)
+    }
+
+    pub fn new_with_options(
+        backend: Option<Arc<dyn CoordinationBackend>>,
+        namespace: String,
+        options: SyncOptions,
+    ) -> Self {
+        Self {
+            backend,
+            local_store: Arc::clone(&LOCAL_STORE),
+            namespace,
+            options,
+        }
+    }
+
+    fn now_ms() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64
+    }
+
+    fn encode_value<T>(options: SyncOptions, value: &T) -> Result<Vec<u8>, String>
+    where
+        T: SyncAble,
+    {
+        if options.envelope_enabled {
+            let now_ms = Self::now_ms();
+            let envelope = SyncEnvelope {
+                version: now_ms,
+                timestamp_ms: now_ms,
+                value,
+            };
+            msgpack_encode(&envelope).map_err(|e| {
+                record_sync_policy("encode", ErrorKind::Service);
+                e.to_string()
+            })
+        } else {
+            msgpack_encode(value).map_err(|e| {
+                record_sync_policy("encode", ErrorKind::Service);
+                e.to_string()
+            })
+        }
+    }
+
+    fn decode_value<T>(options: SyncOptions, bytes: &[u8]) -> Result<(T, u64), String>
+    where
+        T: SyncAble,
+    {
+        if options.envelope_enabled {
+            if let Ok(envelope) = msgpack_decode::<SyncEnvelope<T>>(bytes) {
+                return Ok((envelope.value, envelope.version));
+            }
+        }
+
+        let value = msgpack_decode::<T>(bytes).map_err(|e| {
+            record_sync_policy("decode", ErrorKind::Service);
+            e.to_string()
+        })?;
+        Ok((value, 0))
     }
 
     fn stream_topic_for(&self, topic: &str) -> String {
@@ -123,9 +268,14 @@ impl SyncService {
             let backend = Arc::clone(backend);
 
             let initial_data = backend.get(&kv_key).await?;
+            let options = self.options;
+            let mut last_version: u64 = 0;
             let initial_value = if let Some(bytes) = initial_data {
-                match msgpack_decode::<T>(&bytes) {
-                    Ok(v) => Some(v),
+                match Self::decode_value::<T>(options, &bytes) {
+                    Ok((v, version)) => {
+                        last_version = version;
+                        Some(v)
+                    }
                     Err(e) => {
                         eprintln!(
                             "Failed to deserialize initial value for topic {}: {}",
@@ -141,6 +291,7 @@ impl SyncService {
             let (tx, state) = watch::channel(initial_value);
 
             tokio::spawn(async move {
+                let mut last_version = last_version;
                 let mut interval = tokio::time::interval(Duration::from_secs(30));
                 interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
                 loop {
@@ -148,8 +299,12 @@ impl SyncService {
                         recv = rx.recv() => {
                             match recv {
                                 Some(bytes) => {
-                                    match msgpack_decode::<T>(&bytes) {
-                                        Ok(value) => {
+                                    match Self::decode_value::<T>(options, &bytes) {
+                                        Ok((value, version)) => {
+                                            if !options.allow_rollback && version < last_version {
+                                                continue;
+                                            }
+                                            last_version = version.max(last_version);
                                             if tx.send(Some(value)).is_err() {
                                                 break;
                                             }
@@ -169,8 +324,12 @@ impl SyncService {
                         _ = interval.tick() => {
                             match backend.get(&kv_key).await {
                                 Ok(Some(bytes)) => {
-                                    match msgpack_decode::<T>(&bytes) {
-                                        Ok(value) => {
+                                    match Self::decode_value::<T>(options, &bytes) {
+                                        Ok((value, version)) => {
+                                            if !options.allow_rollback && version < last_version {
+                                                continue;
+                                            }
+                                            last_version = version.max(last_version);
                                             if tx.send(Some(value)).is_err() {
                                                 break;
                                             }
@@ -208,11 +367,16 @@ impl SyncService {
             let local_state = self.get_local_state(&topic);
 
             // Initial value
+            let options = self.options;
+            let mut last_version: u64 = 0;
             let initial_value = {
                 let lock = local_state.value.read().unwrap();
                 if let Some(bytes) = &*lock {
-                    match msgpack_decode::<T>(bytes) {
-                        Ok(v) => Some(v),
+                    match Self::decode_value::<T>(options, bytes) {
+                        Ok((v, version)) => {
+                            last_version = version;
+                            Some(v)
+                        }
                         Err(e) => {
                             eprintln!(
                                 "Failed to deserialize local value for topic {}: {}",
@@ -230,9 +394,14 @@ impl SyncService {
             let mut rx = local_state.tx.subscribe();
 
             tokio::spawn(async move {
+                let mut last_version = last_version;
                 while let Ok(bytes) = rx.recv().await {
-                    match msgpack_decode::<T>(&bytes) {
-                        Ok(value) => {
+                    match Self::decode_value::<T>(options, &bytes) {
+                        Ok((value, version)) => {
+                            if !options.allow_rollback && version < last_version {
+                                continue;
+                            }
+                            last_version = version.max(last_version);
                             if tx.send(Some(value)).is_err() {
                                 break;
                             }
@@ -257,7 +426,7 @@ impl SyncService {
         T: SyncAble,
     {
         let topic = T::topic();
-        let bytes = msgpack_encode(data).map_err(|e| e.to_string())?;
+        let bytes = Self::encode_value(self.options, data)?;
 
         if let Some(backend) = &self.backend {
             let stream_topic = self.stream_topic_for(&topic);
@@ -292,14 +461,14 @@ impl SyncService {
                 let old_bytes_opt = backend.get(&kv_key).await?;
 
                 let mut state = if let Some(ref bytes) = old_bytes_opt {
-                    msgpack_decode::<T>(bytes).map_err(|e| e.to_string())?
+                    Self::decode_value::<T>(self.options, bytes).map(|(v, _)| v)?
                 } else {
                     return Err("Cannot update non-existent state".to_string());
                 };
 
                 f(&mut state);
 
-                let new_bytes = msgpack_encode(&state).map_err(|e| e.to_string())?;
+                let new_bytes = Self::encode_value(self.options, &state)?;
 
                 let old_bytes_slice = old_bytes_opt.as_deref();
                 if backend.cas(&kv_key, old_bytes_slice, &new_bytes).await? {
@@ -320,14 +489,14 @@ impl SyncService {
             let mut lock = local_state.value.write().unwrap();
 
             let mut state = if let Some(ref bytes) = *lock {
-                msgpack_decode::<T>(bytes).map_err(|e| e.to_string())?
+                Self::decode_value::<T>(self.options, bytes).map(|(v, _)| v)?
             } else {
                 return Err("Cannot update non-existent state".to_string());
             };
 
             f(&mut state);
 
-            let new_bytes = msgpack_encode(&state).map_err(|e| e.to_string())?;
+            let new_bytes = Self::encode_value(self.options, &state)?;
             *lock = Some(new_bytes.clone());
 
             // Release lock before sending to avoid potential deadlocks (though unlikely here)
@@ -348,9 +517,8 @@ impl SyncService {
             let kv_key = self.kv_key_for(&topic);
             let data = backend.get(&kv_key).await?;
             if let Some(bytes) = data {
-                msgpack_decode::<T>(&bytes)
-                    .map(Some)
-                    .map_err(|e| e.to_string())
+                Self::decode_value::<T>(self.options, &bytes)
+                    .map(|(v, _)| Some(v))
             } else {
                 Ok(None)
             }
@@ -358,9 +526,8 @@ impl SyncService {
             let local_state = self.get_local_state(&topic);
             let lock = local_state.value.read().unwrap();
             if let Some(bytes) = &*lock {
-                msgpack_decode::<T>(bytes)
-                    .map(Some)
-                    .map_err(|e| e.to_string())
+                Self::decode_value::<T>(self.options, bytes)
+                    .map(|(v, _)| Some(v))
             } else {
                 Ok(None)
             }

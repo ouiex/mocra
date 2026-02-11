@@ -1,10 +1,10 @@
 use crate::chain::{
     ConfigProcessor, ProxyMiddlewareProcessor, RequestMiddlewareProcessor,
 };
-use crate::events::EventDownload::{
-    DownloadCompleted, DownloadFailed, DownloadRetry, DownloadStarted, DownloaderCreate,
+use crate::events::{
+    DownloadEvent, EventBus, EventEnvelope, EventPhase, EventType,
 };
-use crate::events::{DownloadEvent, DynFailureEvent, DynRetryEvent, EventBus, SystemEvent};
+use serde_json::json;
 use crate::processors::event_processor::{EventAwareTypedChain, EventProcessorTrait};
 use async_trait::async_trait;
 use downloader::{DownloaderManager, WebSocketDownloader};
@@ -137,43 +137,47 @@ impl ProcessorTrait<(Request, Option<ModuleConfig>), ()> for WebSocketDownloadPr
     }
 }
 impl EventProcessorTrait<(Request, Option<ModuleConfig>), ()> for WebSocketDownloadProcessor {
-    fn pre_status(&self, input: &(Request, Option<ModuleConfig>)) -> Option<SystemEvent> {
+    fn pre_status(&self, input: &(Request, Option<ModuleConfig>)) -> Option<EventEnvelope> {
         let ev: DownloadEvent = (&input.0).into();
-        Some(SystemEvent::Download(DownloaderCreate(ev)))
+        Some(EventEnvelope::engine(EventType::Download, EventPhase::Started, ev))
     }
 
-    fn finish_status(&self, input: &(Request, Option<ModuleConfig>), _output: &()) -> Option<SystemEvent> {
+    fn finish_status(&self, input: &(Request, Option<ModuleConfig>), _output: &()) -> Option<EventEnvelope> {
         let ev: DownloadEvent = (&input.0).into();
 
-        Some(SystemEvent::Download(DownloadCompleted(ev)))
+        Some(EventEnvelope::engine(EventType::Download, EventPhase::Completed, ev))
     }
 
-    fn working_status(&self, input: &(Request, Option<ModuleConfig>)) -> Option<SystemEvent> {
+    fn working_status(&self, input: &(Request, Option<ModuleConfig>)) -> Option<EventEnvelope> {
         let ev: DownloadEvent = (&input.0).into();
-        Some(SystemEvent::Download(DownloadStarted(ev)))
+        Some(EventEnvelope::engine(EventType::Download, EventPhase::Started, ev))
     }
 
-    fn error_status(&self, input: &(Request, Option<ModuleConfig>), err: &Error) -> Option<SystemEvent> {
+    fn error_status(&self, input: &(Request, Option<ModuleConfig>), err: &Error) -> Option<EventEnvelope> {
         let ev: DownloadEvent = (&input.0).into();
-        let failure = DynFailureEvent {
-            data: ev,
-            error: err.to_string(),
-        };
-        Some(SystemEvent::Download(DownloadFailed(failure)))
+        Some(EventEnvelope::engine_error(
+            EventType::Download,
+            EventPhase::Failed,
+            ev,
+            err,
+        ))
     }
 
     fn retry_status(
         &self,
         input: &(Request, Option<ModuleConfig>),
         retry_policy: &RetryPolicy,
-    ) -> Option<SystemEvent> {
+    ) -> Option<EventEnvelope> {
         let ev: DownloadEvent = (&input.0).into();
-        let retry = DynRetryEvent {
-            data: ev,
-            retry_count: retry_policy.current_retry,
-            reason: retry_policy.reason.clone().unwrap_or_default(),
-        };
-        Some(SystemEvent::Download(DownloadRetry(retry)))
+        Some(EventEnvelope::engine(
+            EventType::Download,
+            EventPhase::Retry,
+            json!({
+                "data": ev,
+                "retry_count": retry_policy.current_retry,
+                "reason": retry_policy.reason.clone().unwrap_or_default(),
+            }),
+        ))
     }
 }
 

@@ -126,6 +126,13 @@ shards = 8
 listener_count = 8
 ```
 
+测试配置样例：
+- `tests/config.test.toml`
+- `tests/config.mock.toml`
+- `tests/config.mock.pure.toml`
+- `tests/config.mock.pure.engine.toml`
+- `tests/config.prod_like.toml`
+
 ---
 
 ## 6. 运行与部署建议
@@ -170,7 +177,7 @@ listener_count = 8
 ### 7.5 日志系统
 
 日志初始化：`init_app_logger()`，环境变量：
-`MOCRA_LOG_LEVEL` / `MOCRA_LOG_FILE` / `MOCRA_LOG_CONSOLE` / `MOCRA_LOG_JSON`。
+`DISABLE_LOGS` / `MOCRA_DISABLE_LOGS`。
 
 更多说明见：
 - [docs/design/utils.md](docs/design/utils.md)

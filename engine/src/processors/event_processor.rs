@@ -1,5 +1,5 @@
 #![allow(unused)]
-use crate::events::{EventBus, SystemEvent};
+use crate::events::{EventBus, EventEnvelope};
 use async_trait::async_trait;
 use errors::{Error, ProcessorChainError, Result};
 use log::{debug, error, info};
@@ -28,7 +28,7 @@ impl<P> EventAwareProcessor<P> {
     }
 
     /// 发布事件
-    async fn publish_event(&self, event: Option<SystemEvent>) {
+    async fn publish_event(&self, event: Option<EventEnvelope>) {
         if let (Some(event), Some(event_bus)) = (event, &self.event_bus) {
             if let Err(_e) = event_bus.publish(event).await {
                 // log::error!("Failed to publish event: {_e}");
@@ -187,11 +187,11 @@ where
             Input: Send + Sync + 'static,
             Output: Send + Sync + 'static,
         {
-            fn pre_status(&self, _: &Input) -> Option<SystemEvent> { None }
-            fn finish_status(&self, _: &Input, _: &Output) -> Option<SystemEvent> { None }
-            fn working_status(&self, _: &Input) -> Option<SystemEvent> { None }
-            fn error_status(&self, _: &Input, _: &Error) -> Option<SystemEvent> { None }
-            fn retry_status(&self, _: &Input, _: &RetryPolicy) -> Option<SystemEvent> { None }
+            fn pre_status(&self, _: &Input) -> Option<EventEnvelope> { None }
+            fn finish_status(&self, _: &Input, _: &Output) -> Option<EventEnvelope> { None }
+            fn working_status(&self, _: &Input) -> Option<EventEnvelope> { None }
+            fn error_status(&self, _: &Input, _: &Error) -> Option<EventEnvelope> { None }
+            fn retry_status(&self, _: &Input, _: &RetryPolicy) -> Option<EventEnvelope> { None }
         }
 
         let wrapped = SilentWrapper(processor);
@@ -203,29 +203,7 @@ where
     }
 
     pub async fn execute(&self, input: In, context: ProcessorContext) -> ProcessorResult<Out> {
-        let res = self.inner.execute(input, context.clone()).await;
-        // 链级别的致命错误事件
-        if let ProcessorResult::FatalFailure(ref _e) = res {
-            // 尝试发布链错误事件（不阻塞返回）
-            // let ctx_json = json!({
-            //     "step_timeout_ms": context.step_timeout_ms,
-            //     "cancelled": context.cancelled,
-            //     "metadata": context.metadata,
-            // });
-            // let event = SystemEvent::ErrorOccurred(ErrorEvent {
-            //     error_id: uuid::Uuid::new_v4().to_string(),
-            //     error_type: "processor_chain_fatal".to_string(),
-            //     message: format!("{}", e),
-            //     context: ctx_json,
-            //     timestamp: EventAwareProcessor::<Dummy>::now_ts(),
-            // });
-            // // Fire and forget
-            // let bus = self.event_bus.clone();
-            // tokio::spawn(async move {
-            //     let _ = bus.publish(event).await;
-            // });
-        }
-        res
+        self.inner.execute(input, context.clone()).await
     }
 }
 
@@ -299,11 +277,11 @@ where
             Input: Send + Sync + 'static,
             Output: Send + Sync + 'static,
         {
-            fn pre_status(&self, _: &Input) -> Option<SystemEvent> { None }
-            fn finish_status(&self, _: &Input, _: &Output) -> Option<SystemEvent> { None }
-            fn working_status(&self, _: &Input) -> Option<SystemEvent> { None }
-            fn error_status(&self, _: &Input, _: &Error) -> Option<SystemEvent> { None }
-            fn retry_status(&self, _: &Input, _: &RetryPolicy) -> Option<SystemEvent> { None }
+            fn pre_status(&self, _: &Input) -> Option<EventEnvelope> { None }
+            fn finish_status(&self, _: &Input, _: &Output) -> Option<EventEnvelope> { None }
+            fn working_status(&self, _: &Input) -> Option<EventEnvelope> { None }
+            fn error_status(&self, _: &Input, _: &Error) -> Option<EventEnvelope> { None }
+            fn retry_status(&self, _: &Input, _: &RetryPolicy) -> Option<EventEnvelope> { None }
         }
 
         let wrapped = SilentWrapper(processor);
@@ -465,11 +443,11 @@ where
 struct Dummy;
 
 pub trait EventProcessorTrait<Input, Output>: ProcessorTrait<Input, Output> {
-    fn pre_status(&self, input: &Input) -> Option<SystemEvent>;
-    fn finish_status(&self, input: &Input, output: &Output) -> Option<SystemEvent>;
-    fn working_status(&self, input: &Input) -> Option<SystemEvent>;
-    fn error_status(&self, input: &Input, err: &Error) -> Option<SystemEvent>;
-    fn retry_status(&self, input: &Input, retry_policy: &RetryPolicy) -> Option<SystemEvent>;
+    fn pre_status(&self, input: &Input) -> Option<EventEnvelope>;
+    fn finish_status(&self, input: &Input, output: &Output) -> Option<EventEnvelope>;
+    fn working_status(&self, input: &Input) -> Option<EventEnvelope>;
+    fn error_status(&self, input: &Input, err: &Error) -> Option<EventEnvelope>;
+    fn retry_status(&self, input: &Input, retry_policy: &RetryPolicy) -> Option<EventEnvelope>;
 }
 
 #[async_trait]
@@ -479,22 +457,22 @@ where
     Input: Send + Sync + 'static,
     Output: Send + Sync + 'static,
 {
-    fn pre_status(&self, input: &Input) -> Option<SystemEvent> {
+    fn pre_status(&self, input: &Input) -> Option<EventEnvelope> {
         self.inner_processor.pre_status(input)
     }
 
-    fn finish_status(&self, input: &Input, out: &Output) -> Option<SystemEvent> {
+    fn finish_status(&self, input: &Input, out: &Output) -> Option<EventEnvelope> {
         self.inner_processor.finish_status(input, out)
     }
 
-    fn working_status(&self, input: &Input) -> Option<SystemEvent> {
+    fn working_status(&self, input: &Input) -> Option<EventEnvelope> {
         self.inner_processor.working_status(input)
     }
 
-    fn error_status(&self, input: &Input, err: &Error) -> Option<SystemEvent> {
+    fn error_status(&self, input: &Input, err: &Error) -> Option<EventEnvelope> {
         self.inner_processor.error_status(input, err)
     }
-    fn retry_status(&self, input: &Input, retry_policy: &RetryPolicy) -> Option<SystemEvent> {
+    fn retry_status(&self, input: &Input, retry_policy: &RetryPolicy) -> Option<EventEnvelope> {
         self.inner_processor.retry_status(input, retry_policy)
     }
 }

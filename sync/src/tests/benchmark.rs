@@ -30,7 +30,8 @@ async fn main() {
     // 1. Reset State
     {
         let kafka_backend = sync::KafkaBackend::new("localhost:9095", backend.clone());
-        let sync_service = sync::SyncService::new(Some(std::sync::Arc::new(kafka_backend)), "bench".to_string());
+        let config = common::model::config::SyncConfig::default();
+        let sync_service = sync::SyncService::from_config(Some(std::sync::Arc::new(kafka_backend)), "bench".to_string(), &config);
         let initial_state = BenchState { counter: 0 };
         sync_service.send(&initial_state).await.unwrap();
         println!("State reset to 0");
@@ -43,7 +44,8 @@ async fn main() {
         let backend = backend.clone();
         let handle = tokio::spawn(async move {
             let kafka_backend = sync::KafkaBackend::new("localhost:9095", backend);
-            let sync_service = sync::SyncService::new(Some(Arc::new(kafka_backend)), "bench".to_string());
+            let config = common::model::config::SyncConfig::default();
+            let sync_service = sync::SyncService::from_config(Some(Arc::new(kafka_backend)), "bench".to_string(), &config);
             
             for _ in 0..UPDATES_PER_TASK {
                 let _ = sync_service.optimistic_update::<BenchState, _>(|state| {
@@ -67,7 +69,8 @@ async fn main() {
     // 4. Verify Result
     {
         let kafka_backend = sync::KafkaBackend::new("localhost:9095", backend.clone());
-        let sync_service = sync::SyncService::new(Some(std::sync::Arc::new(kafka_backend)), "bench".to_string());
+        let config = common::model::config::SyncConfig::default();
+        let sync_service = sync::SyncService::from_config(Some(std::sync::Arc::new(kafka_backend)), "bench".to_string(), &config);
         let final_state = sync_service.fetch_latest::<BenchState>().await.unwrap().unwrap();
         println!("Final State: {:?}", final_state);
         assert_eq!(final_state.counter, TOTAL_UPDATES as u32, "Counter mismatch!");

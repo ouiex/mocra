@@ -58,10 +58,18 @@ impl RedisEventMonitor {
         // 获取事件类型计数
         let mut event_counts = json!({});
         let event_types = [
-            "task_started", "task_completed", "task_failed",
-            "request_generated", "request_sent", "request_completed", "request_failed",
-            "download_started", "download_completed", "download_failed",
-            "parser_task_received", "parser_task_completed", "parser_task_failed"
+            "engine.task_model.started",
+            "engine.task_model.completed",
+            "engine.task_model.failed",
+            "engine.request_publish.started",
+            "engine.request_publish.completed",
+            "engine.request_publish.failed",
+            "engine.download.started",
+            "engine.download.completed",
+            "engine.download.failed",
+            "engine.parser_task_model.started",
+            "engine.parser_task_model.completed",
+            "engine.parser_task_model.failed",
         ];
 
         for event_type in &event_types {
@@ -168,7 +176,7 @@ impl RedisEventMonitor {
             .map_err(|e| format!("Redis connection failed: {e}"))?;
         
         // 获取最近的错误事件
-        let error_pattern = format!("{}:events:*_failed:*", self.key_prefix);
+        let error_pattern = format!("{}:events:*failed", self.key_prefix);
         let keys = Self::scan_keys(&mut conn, &error_pattern).await?;
         
         let mut errors = Vec::new();
@@ -231,14 +239,14 @@ impl RedisEventMonitor {
             .map_err(|e| format!("Redis connection failed: {e}"))?;
         
         // 获取最近的健康检查事件
-        let health_pattern = format!("{}:events:component_health_check:*", self.key_prefix);
+        let health_pattern = format!("{}:events:system.system_health.*", self.key_prefix);
         let keys = Self::scan_keys(&mut conn, &health_pattern).await?;
         
         let mut health_data = json!({});
         for key in keys {
             if let Ok(Some(data)) = conn.get::<&str, Option<String>>(&key).await
                 && let Ok(health_info) = serde_json::from_str::<Value>(&data)
-                    && let Some(component) = health_info["data"]["component"].as_str() {
+                    && let Some(component) = health_info["data"]["payload"]["component"].as_str() {
                         health_data[component] = health_info["data"].clone();
                     }
         }

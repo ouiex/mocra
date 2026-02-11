@@ -17,6 +17,7 @@ use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::time::{Duration, sleep};
+use std::time::{SystemTime, UNIX_EPOCH};
 use futures::StreamExt;
 
 use sync::LeaderElector;
@@ -39,6 +40,7 @@ pub struct CronScheduler {
     shutdown_rx: broadcast::Receiver<()>,
     last_version: AtomicU64,
     last_module_hash: AtomicU64,
+    last_refresh_at_ms: AtomicU64,
     leader_elector: Arc<LeaderElector>,
 }
 
@@ -60,6 +62,7 @@ impl CronScheduler {
             shutdown_rx,
             last_version: AtomicU64::new(0),
             last_module_hash: AtomicU64::new(0),
+            last_refresh_at_ms: AtomicU64::new(0),
             leader_elector,
         }
     }
@@ -93,13 +96,22 @@ impl CronScheduler {
         let mut shutdown = self.shutdown_rx.resubscribe();
         loop {
             self.refresh_cache().await;
-            // Refresh every 1 minute to pick up changes faster
+            // Refresh at configured interval to pick up changes
+            let refresh_interval_secs = self
+                .state
+                .config
+                .read()
+                .await
+                .scheduler
+                .as_ref()
+                .and_then(|s| s.refresh_interval_secs)
+                .unwrap_or(60);
             tokio::select! {
                 _ = shutdown.recv() => {
                     info!("CronScheduler refresh loop received shutdown signal");
                     break;
                 }
-                _ = sleep(Duration::from_secs(60)) => {}
+                _ = sleep(Duration::from_secs(refresh_interval_secs)) => {}
             }
         }
     }
@@ -138,9 +150,25 @@ impl CronScheduler {
         let module_hash = Self::hash_module_signatures(&module_signatures);
         let local_module_hash = self.last_module_hash.load(Ordering::Relaxed);
 
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        let last_refresh_at_ms = self.last_refresh_at_ms.load(Ordering::Relaxed);
+        let max_staleness_secs = self
+            .state
+            .config
+            .read()
+            .await
+            .scheduler
+            .as_ref()
+            .and_then(|s| s.max_staleness_secs)
+            .unwrap_or(120);
+        let staleness_exceeded = Self::staleness_exceeded(now_ms, last_refresh_at_ms, max_staleness_secs);
+
         // If version hasn't changed (and is not 0) and module set unchanged, skip refresh.
         // Note: 0 usually means "not set" or "force refresh"
-        if remote_version > 0 && remote_version == local_version && module_hash == local_module_hash {
+        if !staleness_exceeded && remote_version > 0 && remote_version == local_version && module_hash == local_module_hash {
              return; 
         }
         if module_hash != local_module_hash {
@@ -223,6 +251,7 @@ impl CronScheduler {
                     self.last_version.store(remote_version, Ordering::Relaxed);
                 }
                 self.last_module_hash.store(module_hash, Ordering::Relaxed);
+                self.last_refresh_at_ms.store(now_ms, Ordering::Relaxed);
 
                 let process_duration = start.elapsed() - fetch_duration;
                 info!(
@@ -489,6 +518,26 @@ impl CronScheduler {
             .await?;
 
         Ok(results)
+    }
+
+    fn staleness_exceeded(now_ms: u64, last_refresh_at_ms: u64, max_staleness_secs: u64) -> bool {
+        if last_refresh_at_ms == 0 {
+            return false;
+        }
+        now_ms.saturating_sub(last_refresh_at_ms) > max_staleness_secs.saturating_mul(1000)
+    }
+}
+
+#[cfg(test)]
+mod staleness_tests {
+    use super::CronScheduler;
+
+    #[test]
+    fn test_staleness_exceeded() {
+        let now_ms = 10_000;
+        assert!(!CronScheduler::staleness_exceeded(now_ms, 0, 120));
+        assert!(!CronScheduler::staleness_exceeded(now_ms, 9_500, 1));
+        assert!(CronScheduler::staleness_exceeded(now_ms, 8_000, 1));
     }
 }
 

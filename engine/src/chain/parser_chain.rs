@@ -1,10 +1,7 @@
 use common::status_tracker::ErrorDecision;
-use crate::events::EventParser::ParserFailed;
-use crate::events::EventResponseModuleLoad::{ModuleGenerateFailed, ModuleGenerateRetry};
 use crate::events::{
-    DataMiddlewareEvent, DataStoreEvent, DynFailureEvent, DynRetryEvent, EventBus,
-    EventDataMiddleware, EventDataStore, EventParser, EventResponseModuleLoad, ParserEvent,
-    ResponseModuleLoad, SystemEvent,
+    DataMiddlewareEvent, DataStoreEvent, EventBus, EventEnvelope, EventPhase, EventType,
+    ModuleGenerateEvent, ParserEvent,
 };
 use crate::processors::event_processor::{EventAwareTypedChain, EventProcessorTrait};
 use async_trait::async_trait;
@@ -29,6 +26,7 @@ use cacheable::{CacheAble, CacheService};
 use crate::task::module::Module;
 use futures::StreamExt;
 use common::model::login_info::LoginInfo;
+use serde_json::json;
 
 pub struct ResponseModuleProcessor {
     task_manager: Arc<TaskManager>,
@@ -187,39 +185,49 @@ impl ProcessorTrait<Response, (Response, Arc<Module>, Arc<ModuleConfig>, Option<
 }
 #[async_trait]
 impl EventProcessorTrait<Response, (Response, Arc<Module>, Arc<ModuleConfig>, Option<LoginInfo>)> for ResponseModuleProcessor {
-    fn pre_status(&self, input: &Response) -> Option<SystemEvent> {
-        Some(SystemEvent::ResponseModuleLoad(EventResponseModuleLoad::ModuleGenerate(input.into())))
+    fn pre_status(&self, input: &Response) -> Option<EventEnvelope> {
+        Some(EventEnvelope::engine(
+            EventType::ModuleGenerate,
+            EventPhase::Started,
+            ModuleGenerateEvent::from(input),
+        ))
     }
 
-    fn finish_status(&self, input: &Response, _output: &(Response, Arc<Module>, Arc<ModuleConfig>, Option<LoginInfo>)) -> Option<SystemEvent> {
-        Some(SystemEvent::ResponseModuleLoad(EventResponseModuleLoad::ModuleGenerateCompleted(
-            input.into(),
-        )))
+    fn finish_status(&self, input: &Response, _output: &(Response, Arc<Module>, Arc<ModuleConfig>, Option<LoginInfo>)) -> Option<EventEnvelope> {
+        Some(EventEnvelope::engine(
+            EventType::ModuleGenerate,
+            EventPhase::Completed,
+            ModuleGenerateEvent::from(input),
+        ))
     }
 
-    fn working_status(&self, input: &Response) -> Option<SystemEvent> {
-        Some(SystemEvent::ResponseModuleLoad(EventResponseModuleLoad::ModuleGenerateStarted(
-            input.into(),
-        )))
+    fn working_status(&self, input: &Response) -> Option<EventEnvelope> {
+        Some(EventEnvelope::engine(
+            EventType::ModuleGenerate,
+            EventPhase::Started,
+            ModuleGenerateEvent::from(input),
+        ))
     }
 
-    fn error_status(&self, input: &Response, err: &Error) -> Option<SystemEvent> {
-        let event: ResponseModuleLoad = input.into();
-        let failure = DynFailureEvent {
-            data: event,
-            error: err.to_string(),
-        };
-        Some(SystemEvent::ResponseModuleLoad(ModuleGenerateFailed(failure)))
+    fn error_status(&self, input: &Response, err: &Error) -> Option<EventEnvelope> {
+        Some(EventEnvelope::engine_error(
+            EventType::ModuleGenerate,
+            EventPhase::Failed,
+            ModuleGenerateEvent::from(input),
+            err,
+        ))
     }
 
-    fn retry_status(&self, input: &Response, retry_policy: &RetryPolicy) -> Option<SystemEvent> {
-        let event: ResponseModuleLoad = input.into();
-        let retry = DynRetryEvent {
-            data: event,
-            retry_count: retry_policy.current_retry,
-            reason: retry_policy.reason.clone().unwrap_or_default(),
-        };
-        Some(SystemEvent::ResponseModuleLoad(ModuleGenerateRetry(retry)))
+    fn retry_status(&self, input: &Response, retry_policy: &RetryPolicy) -> Option<EventEnvelope> {
+        Some(EventEnvelope::engine(
+            EventType::ModuleGenerate,
+            EventPhase::Retry,
+            json!({
+                "data": ModuleGenerateEvent::from(input),
+                "retry_count": retry_policy.current_retry,
+                "reason": retry_policy.reason.clone().unwrap_or_default(),
+            }),
+        ))
     }
 }
 
@@ -483,39 +491,53 @@ impl ProcessorTrait<(Response, Arc<Module>, Arc<ModuleConfig>, Option<LoginInfo>
     }
 }
 impl EventProcessorTrait<(Response, Arc<Module>, Arc<ModuleConfig>, Option<LoginInfo>), Vec<Data>> for ResponseParserProcessor {
-    fn pre_status(&self, input: &(Response, Arc<Module>, Arc<ModuleConfig>, Option<LoginInfo>)) -> Option<SystemEvent> {
-        Some(SystemEvent::Parser(EventParser::ParserReceived((&input.0).into())))
+    fn pre_status(&self, input: &(Response, Arc<Module>, Arc<ModuleConfig>, Option<LoginInfo>)) -> Option<EventEnvelope> {
+        Some(EventEnvelope::engine(
+            EventType::Parser,
+            EventPhase::Started,
+            ParserEvent::from(&input.0),
+        ))
     }
 
-    fn finish_status(&self, input: &(Response, Arc<Module>, Arc<ModuleConfig>, Option<LoginInfo>), _output: &Vec<Data>) -> Option<SystemEvent> {
-        Some(SystemEvent::Parser(EventParser::ParserCompleted((&input.0).into())))
+    fn finish_status(&self, input: &(Response, Arc<Module>, Arc<ModuleConfig>, Option<LoginInfo>), _output: &Vec<Data>) -> Option<EventEnvelope> {
+        Some(EventEnvelope::engine(
+            EventType::Parser,
+            EventPhase::Completed,
+            ParserEvent::from(&input.0),
+        ))
     }
 
-    fn working_status(&self, input: &(Response, Arc<Module>, Arc<ModuleConfig>, Option<LoginInfo>)) -> Option<SystemEvent> {
-        Some(SystemEvent::Parser(EventParser::ParserStarted((&input.0).into())))
+    fn working_status(&self, input: &(Response, Arc<Module>, Arc<ModuleConfig>, Option<LoginInfo>)) -> Option<EventEnvelope> {
+        Some(EventEnvelope::engine(
+            EventType::Parser,
+            EventPhase::Started,
+            ParserEvent::from(&input.0),
+        ))
     }
 
-    fn error_status(&self, input: &(Response, Arc<Module>, Arc<ModuleConfig>, Option<LoginInfo>), err: &Error) -> Option<SystemEvent> {
-        let event: ParserEvent = (&input.0).into();
-        let failure = DynFailureEvent {
-            data: event,
-            error: err.to_string(),
-        };
-        Some(SystemEvent::Parser(ParserFailed(failure)))
+    fn error_status(&self, input: &(Response, Arc<Module>, Arc<ModuleConfig>, Option<LoginInfo>), err: &Error) -> Option<EventEnvelope> {
+        Some(EventEnvelope::engine_error(
+            EventType::Parser,
+            EventPhase::Failed,
+            ParserEvent::from(&input.0),
+            err,
+        ))
     }
 
     fn retry_status(
         &self,
         input: &(Response, Arc<Module>, Arc<ModuleConfig>, Option<LoginInfo>),
         retry_policy: &RetryPolicy,
-    ) -> Option<SystemEvent> {
-        let event: ParserEvent = (&input.0).into();
-        let retry = DynRetryEvent {
-            data: event,
-            retry_count: retry_policy.current_retry,
-            reason: retry_policy.reason.clone().unwrap_or_default(),
-        };
-        Some(SystemEvent::Parser(EventParser::ParserRetry(retry)))
+    ) -> Option<EventEnvelope> {
+        Some(EventEnvelope::engine(
+            EventType::Parser,
+            EventPhase::Retry,
+            json!({
+                "data": ParserEvent::from(&input.0),
+                "retry_count": retry_policy.current_retry,
+                "reason": retry_policy.reason.clone().unwrap_or_default(),
+            }),
+        ))
     }
 }
 
@@ -551,37 +573,51 @@ impl ProcessorTrait<Data, Data> for DataMiddlewareProcessor {
     }
 }
 impl EventProcessorTrait<Data, Data> for DataMiddlewareProcessor {
-    fn pre_status(&self, input: &Data) -> Option<SystemEvent> {
-        Some(SystemEvent::DataMiddleware(EventDataMiddleware::MiddlewareBefore(input.into())))
+    fn pre_status(&self, input: &Data) -> Option<EventEnvelope> {
+        Some(EventEnvelope::engine(
+            EventType::MiddlewareBefore,
+            EventPhase::Started,
+            DataMiddlewareEvent::from(input),
+        ))
     }
 
-    fn finish_status(&self, input: &Data, output: &Data) -> Option<SystemEvent> {
+    fn finish_status(&self, input: &Data, output: &Data) -> Option<EventEnvelope> {
         let mut event: DataMiddlewareEvent = input.into();
         event.after_size = output.size().into();
-        Some(SystemEvent::DataMiddleware(EventDataMiddleware::MiddlewareCompleted(event)))
+        Some(EventEnvelope::engine(
+            EventType::MiddlewareBefore,
+            EventPhase::Completed,
+            event,
+        ))
     }
 
-    fn working_status(&self, input: &Data) -> Option<SystemEvent> {
-        Some(SystemEvent::DataMiddleware(EventDataMiddleware::MiddlewareStarted(input.into())))
+    fn working_status(&self, input: &Data) -> Option<EventEnvelope> {
+        Some(EventEnvelope::engine(
+            EventType::MiddlewareBefore,
+            EventPhase::Started,
+            DataMiddlewareEvent::from(input),
+        ))
     }
 
-    fn error_status(&self, input: &Data, err: &Error) -> Option<SystemEvent> {
-        let event: DataMiddlewareEvent = input.into();
-        let failure = DynFailureEvent {
-            data: event,
-            error: err.to_string(),
-        };
-        Some(SystemEvent::DataMiddleware(EventDataMiddleware::MiddlewareFailed(failure)))
+    fn error_status(&self, input: &Data, err: &Error) -> Option<EventEnvelope> {
+        Some(EventEnvelope::engine_error(
+            EventType::MiddlewareBefore,
+            EventPhase::Failed,
+            DataMiddlewareEvent::from(input),
+            err,
+        ))
     }
 
-    fn retry_status(&self, input: &Data, retry_policy: &RetryPolicy) -> Option<SystemEvent> {
-        let event: DataMiddlewareEvent = input.into();
-        let retry = DynRetryEvent {
-            data: event,
-            retry_count: retry_policy.current_retry,
-            reason: retry_policy.reason.clone().unwrap_or_default(),
-        };
-        Some(SystemEvent::DataMiddleware(EventDataMiddleware::MiddlewareRetry(retry)))
+    fn retry_status(&self, input: &Data, retry_policy: &RetryPolicy) -> Option<EventEnvelope> {
+        Some(EventEnvelope::engine(
+            EventType::MiddlewareBefore,
+            EventPhase::Retry,
+            json!({
+                "data": DataMiddlewareEvent::from(input),
+                "retry_count": retry_policy.current_retry,
+                "reason": retry_policy.reason.clone().unwrap_or_default(),
+            }),
+        ))
     }
 }
 
@@ -656,35 +692,49 @@ impl ProcessorTrait<Data, ()> for DataStoreProcessor {
     }
 }
 impl EventProcessorTrait<Data, ()> for DataStoreProcessor {
-    fn pre_status(&self, input: &Data) -> Option<SystemEvent> {
-        Some(SystemEvent::DataStore(EventDataStore::StoreBefore(input.into())))
+    fn pre_status(&self, input: &Data) -> Option<EventEnvelope> {
+        Some(EventEnvelope::engine(
+            EventType::DataStore,
+            EventPhase::Started,
+            DataStoreEvent::from(input),
+        ))
     }
 
-    fn finish_status(&self, input: &Data, _output: &()) -> Option<SystemEvent> {
-        Some(SystemEvent::DataStore(EventDataStore::StoreCompleted(input.into())))
+    fn finish_status(&self, input: &Data, _output: &()) -> Option<EventEnvelope> {
+        Some(EventEnvelope::engine(
+            EventType::DataStore,
+            EventPhase::Completed,
+            DataStoreEvent::from(input),
+        ))
     }
 
-    fn working_status(&self, input: &Data) -> Option<SystemEvent> {
-        Some(SystemEvent::DataStore(EventDataStore::StoreStarted(input.into())))
+    fn working_status(&self, input: &Data) -> Option<EventEnvelope> {
+        Some(EventEnvelope::engine(
+            EventType::DataStore,
+            EventPhase::Started,
+            DataStoreEvent::from(input),
+        ))
     }
 
-    fn error_status(&self, input: &Data, err: &Error) -> Option<SystemEvent> {
-        let event: DataStoreEvent = input.into();
-        let failure = DynFailureEvent {
-            data: event,
-            error: err.to_string(),
-        };
-        Some(SystemEvent::DataStore(EventDataStore::StoreFailed(failure)))
+    fn error_status(&self, input: &Data, err: &Error) -> Option<EventEnvelope> {
+        Some(EventEnvelope::engine_error(
+            EventType::DataStore,
+            EventPhase::Failed,
+            DataStoreEvent::from(input),
+            err,
+        ))
     }
 
-    fn retry_status(&self, input: &Data, retry_policy: &RetryPolicy) -> Option<SystemEvent> {
-        let event: DataStoreEvent = input.into();
-        let retry = DynRetryEvent {
-            data: event,
-            retry_count: retry_policy.current_retry,
-            reason: retry_policy.reason.clone().unwrap_or_default(),
-        };
-        Some(SystemEvent::DataStore(EventDataStore::StoreRetry(retry)))
+    fn retry_status(&self, input: &Data, retry_policy: &RetryPolicy) -> Option<EventEnvelope> {
+        Some(EventEnvelope::engine(
+            EventType::DataStore,
+            EventPhase::Retry,
+            json!({
+                "data": DataStoreEvent::from(input),
+                "retry_count": retry_policy.current_retry,
+                "reason": retry_policy.reason.clone().unwrap_or_default(),
+            }),
+        ))
     }
 }
 

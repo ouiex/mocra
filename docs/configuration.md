@@ -31,6 +31,11 @@ redis_port = 6379
 redis_db = 0
 pool_size = 50
 
+[sync]
+# Default: allow_rollback = true, envelope_enabled = false
+allow_rollback = true
+envelope_enabled = false
+
 [channel_config]
 minid_time = 12
 capacity = 5000
@@ -49,6 +54,7 @@ compression_threshold = 1024
 | cache | 是 | object | 缓存配置。 | Cache settings. |
 | crawler | 是 | object | 爬虫运行时行为与并发配置。 | Runtime behavior and concurrency for crawler. |
 | scheduler | 否 | object | 定时任务配置（Cron）。 | Scheduler configuration (Cron). |
+| sync | 否 | object | 分布式同步配置。 | Distributed sync settings. |
 | cookie | 否 | object | Cookie 存储 Redis 配置。 | Redis config for cookie storage. |
 | channel_config | 是 | object | 队列/消息通道配置。 | Queue/channel settings. |
 | api | 否 | object | 内置 API 服务配置。 | Built-in API server settings. |
@@ -77,7 +83,7 @@ compression_threshold = 1024
 
 ### Redis 通用配置 (RedisConfig)
 
-适用于：`cache.redis`、`channel_config.redis`、`channel_config.compensator`、`cookie`、`logger.outputs[].config`（当输出到 Redis 时）。
+适用于：`cache.redis`、`channel_config.redis`、`channel_config.compensator`、`cookie`、`logger.outputs[].redis`（当输出到 Redis 时）。
 
 | Key | 必填 | 类型 | 说明（中文） | Description (EN) |
 | --- | --- | --- | --- | --- |
@@ -96,7 +102,7 @@ compression_threshold = 1024
 
 ### Kafka 通用配置 (KafkaConfig)
 
-适用于：`channel_config.kafka`、`logger.outputs[].config`（当输出到 Kafka 时）。
+适用于：`channel_config.kafka`、`logger.outputs[].kafka`（当输出到 Kafka 时）。
 
 | Key | 必填 | 类型 | 说明（中文） | Description (EN) |
 | --- | --- | --- | --- | --- |
@@ -118,6 +124,17 @@ compression_threshold = 1024
 | queue_codec | 否 | string | 远程队列序列化格式：`json` 或 `msgpack`（需与生产/消费一致）。 | Remote queue codec: `json` or `msgpack` (must match producers/consumers). |
 | batch_concurrency | 否 | number | 远程队列批量写入并发上限。 | Max concurrency for batch publishing to remote queues. |
 | compression_threshold | 否 | number | 消息体超过阈值时压缩（字节）。 | Compress payloads above this size (bytes). |
+| nack_max_retries | 否 | number | NACK 重试次数上限（默认 0）。 | Max NACK retries (default: 0). |
+| nack_backoff_ms | 否 | number | NACK 重试退避毫秒（默认 0）。 | Backoff ms before retrying NACK (default: 0). |
+
+### [sync]
+
+| Key | 必填 | 类型 | 说明（中文） | Description (EN) |
+| --- | --- | --- | --- | --- |
+| redis | 否 | object | 同步 Redis 配置（见 Redis 通用配置）。 | Redis config for sync (see Redis section). |
+| kafka | 否 | object | 同步 Kafka 配置（见 Kafka 通用配置）。 | Kafka config for sync (see Kafka section). |
+| allow_rollback | 否 | bool | 是否允许回滚到旧值（默认 true）。 | Allow rollback to older values (default: true). |
+| envelope_enabled | 否 | bool | 是否启用版本化 envelope（默认 false）。 | Enable versioned envelope (default: false). |
 
 ### [channel_config.blob_storage]
 
@@ -161,6 +178,8 @@ compression_threshold = 1024
 | --- | --- | --- | --- | --- |
 | misfire_tolerance_secs | 否 | number | Cron 误触发容忍秒数。 | Misfire tolerance in seconds. |
 | concurrency | 否 | number | 计划任务并发上限。 | Concurrency for scheduled contexts. |
+| refresh_interval_secs | 否 | number | 调度配置刷新间隔（默认 60s）。 | Refresh interval for scheduler cache (default: 60s). |
+| max_staleness_secs | 否 | number | 最大允许陈旧窗口（默认 120s），超出则强制刷新。 | Max allowed staleness before forcing refresh (default: 120s). |
 
 ### [api]
 
@@ -181,48 +200,56 @@ compression_threshold = 1024
 
 | Key | 必填 | 类型 | 说明（中文） | Description (EN) |
 | --- | --- | --- | --- | --- |
+| enabled | 否 | bool | 是否启用日志（默认 true）。 | Enable logging (default true). |
+| level | 否 | string | 全局日志级别（默认 info）。 | Global log level (default info). |
+| format | 否 | string | console/file 仅支持 `text`。 | console/file only supports `text`. |
+| include | 否 | array | 结构化字段白名单（可选）。 | Structured field allowlist (optional). |
+| buffer | 否 | number | MQ 输出缓冲区大小（默认 10000）。 | MQ buffer size (default 10000). |
+| flush_interval_ms | 否 | number | 刷新间隔（占位，默认 500ms）。 | Flush interval placeholder (default 500ms). |
 | outputs | 是 | array | 日志输出列表（见下文）。 | Output list (see below). |
-| channel_capacity | 是 | number | 日志主通道容量。 | Main log channel capacity. |
+| prometheus | 否 | object | Prometheus 日志统计配置。 | Prometheus log stats settings. |
 
 #### logger.outputs[] (LogOutputConfig)
 
-按 `type` 区分：`file` / `redis_stream` / `kafka` / `console`。
+按 `type` 区分：`console` / `file` / `mq`。
+
+**Console**
+
+| Key | 必填 | 类型 | 说明（中文） | Description (EN) |
+| --- | --- | --- | --- | --- |
+| level | 否 | string | 日志级别（debug/info/warn/error）。 | Log level (debug/info/warn/error). |
 
 **File**
 
 | Key | 必填 | 类型 | 说明（中文） | Description (EN) |
 | --- | --- | --- | --- | --- |
 | path | 是 | string | 文件路径。 | File path. |
-| level | 是 | string | 日志级别（debug/info/warn/error）。 | Log level (debug/info/warn/error). |
-| format | 是 | string | 格式（json/text）。 | Format (json/text). |
-| rotation | 否 | string | 轮转策略（daily/none）。 | Rotation policy (daily/none). |
+| level | 否 | string | 日志级别（debug/info/warn/error）。 | Log level (debug/info/warn/error). |
+| rotation | 否 | string | 轮转策略（daily/hourly/minutely/never）。 | Rotation policy (daily/hourly/minutely/never). |
+| max_size_mb | 否 | number | 最大文件大小（占位）。 | Max file size (placeholder). |
+| max_files | 否 | number | 最大文件数（占位）。 | Max file count (placeholder). |
 
-**RedisStream**
-
-| Key | 必填 | 类型 | 说明（中文） | Description (EN) |
-| --- | --- | --- | --- | --- |
-| config | 是 | object | Redis 配置。 | Redis config. |
-| key | 是 | string | Stream key 名称。 | Stream key name. |
-| level | 是 | string | 日志级别。 | Log level. |
-| format | 是 | string | 格式（json/text）。 | Format (json/text). |
-| batch_size | 否 | number | 批量发送大小。 | Batch size. |
-
-**Kafka**
+**MQ**
 
 | Key | 必填 | 类型 | 说明（中文） | Description (EN) |
 | --- | --- | --- | --- | --- |
-| config | 是 | object | Kafka 配置。 | Kafka config. |
+| backend | 是 | string | MQ 类型：`kafka` 或 `redis`。 | MQ backend: `kafka` or `redis`. |
 | topic | 是 | string | Topic 名称。 | Topic name. |
-| level | 是 | string | 日志级别。 | Log level. |
-| format | 是 | string | 格式（json/text）。 | Format (json/text). |
-| batch_size | 否 | number | 批量发送大小。 | Batch size. |
+| level | 否 | string | 日志级别。 | Log level. |
+| format | 否 | string | 仅支持 `json`。 | Only supports `json`. |
+| buffer | 否 | number | 缓冲区大小（默认 10000）。 | Buffer size (default 10000). |
+| batch_size | 否 | number | 批量大小（占位）。 | Batch size (placeholder). |
+| compression | 否 | string | 压缩算法（占位）。 | Compression (placeholder). |
+| kafka | 否 | object | Kafka 配置（当 backend=kafka）。 | Kafka config (when backend=kafka). |
+| redis | 否 | object | Redis 配置（当 backend=redis）。 | Redis config (when backend=redis). |
 
-**Console**
+#### logger.prometheus
 
 | Key | 必填 | 类型 | 说明（中文） | Description (EN) |
 | --- | --- | --- | --- | --- |
-| level | 是 | string | 日志级别。 | Log level. |
-| format | 是 | string | 格式（json/text）。 | Format (json/text). |
+| enabled | 是 | bool | 是否启用日志指标统计。 | Enable log stats metrics. |
+| port | 否 | number | 指标端口（复用 API/metrics）。 | Metrics port (reuses API/metrics). |
+| path | 否 | string | 指标路径（默认 `/metrics`）。 | Metrics path (default `/metrics`). |
 
 ## 3. 数据库配置 (Database)
 
@@ -238,14 +265,39 @@ compression_threshold = 1024
 
 ## 5. 日志配置（简化版） (Logger, simplified)
 
-默认写入 `logs/mocra.{name}`。可用环境变量覆盖：
-- `MOCRA_LOG_LEVEL`
-- `MOCRA_LOG_FILE`（`none/off/false` 可关闭文件输出）
-- `MOCRA_LOG_CONSOLE`
-- `MOCRA_LOG_JSON`
-- `DISABLE_LOGS` / `MOCRA_DISABLE_LOGS`
+默认写入 `logs/mocra.{name}`。可用环境变量：
+- `DISABLE_LOGS` / `MOCRA_DISABLE_LOGS`（禁用日志）
+
+简化示例（仅日志相关）：
+```toml
+[logger]
+enabled = true
+level = "INFO"
+format = "text" # console/file only
+
+[[logger.outputs]]
+type = "console"
+
+[[logger.outputs]]
+type = "file"
+path = "logs/app.log"
+rotation = "daily"
+
+[[logger.outputs]]
+type = "mq"
+backend = "kafka"
+topic = "mocra-logs"
+format = "json" # mq only
+kafka = { brokers = "localhost:9095" }
+
+[logger.prometheus]
+enabled = true
+```
 
 ## 6. 测试配置参考 (Test Config Samples)
 
 - [tests/config.test.toml](tests/config.test.toml)
 - [tests/config.mock.toml](tests/config.mock.toml)
+- [tests/config.mock.pure.toml](tests/config.mock.pure.toml)
+- [tests/config.mock.pure.engine.toml](tests/config.mock.pure.engine.toml)
+- [tests/config.prod_like.toml](tests/config.prod_like.toml)

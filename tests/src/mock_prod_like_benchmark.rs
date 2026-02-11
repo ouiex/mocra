@@ -19,6 +19,7 @@ use common::model::message::TaskModel;
 use std::sync::atomic::{AtomicU64, Ordering};
 use wiremock::{MockServer, Mock, ResponseTemplate};
 use wiremock::matchers::{method, path};
+use engine::events::{DownloadEvent, EventEnvelope, EventPhase, EventType};
 
 async fn seed_database(state: &Arc<State>) {
     let db_backend = state.db.get_database_backend();
@@ -154,11 +155,25 @@ async fn main() {
         tokio::spawn(async move {
             while let Some(event) = rx.recv().await {
                 match &event {
-                    engine::events::SystemEvent::Download(engine::events::EventDownload::DownloadCompleted(_info)) => {
-                        let _ = completed_clone.fetch_add(1, Ordering::Relaxed) + 1;
+                    EventEnvelope {
+                        event_type: EventType::Download,
+                        phase: EventPhase::Completed,
+                        payload,
+                        ..
+                    } => {
+                        if serde_json::from_value::<DownloadEvent>(payload.clone()).is_ok() {
+                            let _ = completed_clone.fetch_add(1, Ordering::Relaxed) + 1;
+                        }
                     }
-                    engine::events::SystemEvent::Download(engine::events::EventDownload::DownloadFailed(_info)) => {
-                        let _ = failed_clone.fetch_add(1, Ordering::Relaxed) + 1;
+                    EventEnvelope {
+                        event_type: EventType::Download,
+                        phase: EventPhase::Failed,
+                        payload,
+                        ..
+                    } => {
+                        if serde_json::from_value::<DownloadEvent>(payload.clone()).is_ok() {
+                            let _ = failed_clone.fetch_add(1, Ordering::Relaxed) + 1;
+                        }
                     }
                     _ => {}
                 }

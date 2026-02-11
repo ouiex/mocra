@@ -162,11 +162,14 @@ Mocra 是一个**分布式、事件驱动的爬虫、采集与数据处理系统
 
 ### 5.5 事件驱动系统 (Event System)
 系统通过 `EventBus` 实现了细粒度的可观测性。所有的关键状态变更都会生成事件，这些事件可以被 Log、Metric 甚至外部系统消费。
+*   **事件模型**: 统一使用 `EventEnvelope`，包含 `domain`/`event_type`/`phase`/`payload`/`error`，并通过 `event_key` 路由。
 *   **事件分类**:
-    *   `EventTaskModel`: 任务接收、开始、完成、失败、重试。
-    *   `EventRequest`: 请求生成、发送、完成等。
-    *   `EventDownload`: 下载器创建、下载开始/结束。
-    *   `EventProxy`: 代理获取、使用结果。
+    *   `EventType::TaskModel`/`ParserTaskModel`：任务接收、开始、完成、失败、重试。
+    *   `EventType::RequestPublish`/`RequestMiddleware`：请求生成、发送、前置中间件。
+    *   `EventType::Download`：下载开始/结束/失败/重试。
+    *   `EventType::ResponseMiddleware`/`ResponsePublish`：响应中间件与发布。
+    *   `EventType::ModuleGenerate`/`Parser`/`MiddlewareBefore`/`DataStore`：解析与数据链路。
+    *   `EventType::SystemError`/`SystemHealth`：系统错误与健康状态。
 *   **用途**:
     *   **结构化日志**: 所有操作流水线化，便于追踪 ID (Trace ID) 关联。
     *   **实时监控**: Prometheus Exporter 订阅事件总线生成 Metrics。

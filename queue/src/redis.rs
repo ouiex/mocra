@@ -1,4 +1,4 @@
-use crate::{AckAction, Message, MqBackend};
+use crate::{AckAction, Message, MqBackend, NackPolicy, NackDisposition, decide_nack, parse_attempt, HEADER_ATTEMPT, HEADER_NACK_REASON};
 use async_trait::async_trait;
 use common::model::config::RedisConfig;
 use errors::Result;
@@ -34,7 +34,13 @@ pub struct RedisQueue {
 }
 
 impl RedisQueue {
-    pub fn new(redis_config: &RedisConfig, minid_time: u64, namespace: &str, batch_size: usize) -> Result<Self> {
+    pub fn new(
+        redis_config: &RedisConfig,
+        minid_time: u64,
+        namespace: &str,
+        batch_size: usize,
+        nack_policy: NackPolicy,
+    ) -> Result<Self> {
         let pool = utils::connector::create_redis_pool(
             &redis_config.redis_host,
             redis_config.redis_port,
@@ -78,7 +84,7 @@ impl RedisQueue {
         };
         
         // Spawn shared components
-        queue.spawn_ack_processor(pool.clone(), group_id.clone(), ack_rx);
+        queue.spawn_ack_processor(pool.clone(), group_id.clone(), ack_rx, nack_policy);
         queue.spawn_shared_claimer();
         queue.spawn_shared_lag_monitor();
         queue.spawn_sharded_listeners();
@@ -227,6 +233,7 @@ impl RedisQueue {
         pool: deadpool_redis::Pool,
         group_id: String,
         mut ack_rx: mpsc::Receiver<(String, AckAction)>,
+        nack_policy: NackPolicy,
     ) {
         tokio::spawn(async move {
             let mut batches: HashMap<String, Vec<String>> = HashMap::new();
@@ -249,28 +256,75 @@ impl RedisQueue {
                                 batches.entry(stream_key).or_default().push(real_id);
                                 pending_count += 1;
                             }
-                            AckAction::Nack(reason, payload) => {
+                            AckAction::Nack(reason, payload, headers) => {
+                                let attempt = parse_attempt(&headers);
+                                let disposition = decide_nack(nack_policy, attempt);
+                                let action_label = match disposition {
+                                    NackDisposition::Retry { .. } => "retry",
+                                    NackDisposition::Dlq => "dlq",
+                                };
+                                counter!(
+                                    "policy_decisions_total",
+                                    "domain" => "queue",
+                                    "event_type" => "nack",
+                                    "phase" => "failed",
+                                    "kind" => "queue",
+                                    "action" => action_label
+                                )
+                                .increment(1);
+
                                 if let Ok(mut ack_conn) = pool.get().await {
-                                     let dlq_key = format!("{}:dlq", stream_key);
-                                     let script = redis::Script::new(r"
-                                         redis.call('XADD', KEYS[3], '*', 'payload', ARGV[1], 'reason', ARGV[2], 'original_id', ARGV[3])
-                                         return redis.call('XACK', KEYS[1], KEYS[2], ARGV[3])
-                                     ");
-                                     
-                                     let _: () = script
-                                         .key(&stream_key)
-                                         .key(&group_id)
-                                         .key(&dlq_key)
-                                         .arg(payload.as_slice())
-                                         .arg(&reason)
-                                         .arg(&real_id)
-                                         .invoke_async(&mut ack_conn)
-                                         .await
-                                         .map_err(|e| error!("Failed to atomic NACK: {}", e))
-                                         .unwrap_or(());
-                                         
-                                      counter!("queue_dlq_total", "topic" => stream_key.clone()).increment(1);
-                                 }
+                                    if let NackDisposition::Retry { next_attempt } = disposition {
+                                        if nack_policy.backoff_ms > 0 {
+                                            tokio::time::sleep(Duration::from_millis(nack_policy.backoff_ms)).await;
+                                        }
+
+                                        let mut header_map = (*headers).clone();
+                                        header_map.insert(HEADER_ATTEMPT.to_string(), next_attempt.to_string());
+                                        header_map.insert(HEADER_NACK_REASON.to_string(), reason.clone());
+
+                                        let mut cmd = redis::cmd("XADD");
+                                        cmd.arg(&stream_key).arg("*").arg("payload").arg(payload.as_slice());
+                                        for (k, v) in &header_map {
+                                            cmd.arg(format!("h:{}", k)).arg(v);
+                                        }
+
+                                        let add_res: redis::RedisResult<String> = cmd.query_async(&mut ack_conn).await;
+                                        if let Err(e) = add_res {
+                                            error!("Failed to requeue message to {}: {}", stream_key, e);
+                                        }
+
+                                        let _: redis::RedisResult<()> = redis::cmd("XACK")
+                                            .arg(&stream_key)
+                                            .arg(&group_id)
+                                            .arg(&real_id)
+                                            .query_async(&mut ack_conn)
+                                            .await;
+
+                                        counter!("queue_retry_total", "topic" => stream_key.clone()).increment(1);
+                                    } else {
+                                        let dlq_key = format!("{}:dlq", stream_key);
+                                        let script = redis::Script::new(r"
+                                            redis.call('XADD', KEYS[3], '*', 'payload', ARGV[1], 'reason', ARGV[2], 'original_id', ARGV[3], 'attempt', ARGV[4])
+                                            return redis.call('XACK', KEYS[1], KEYS[2], ARGV[3])
+                                        ");
+
+                                        let _: () = script
+                                            .key(&stream_key)
+                                            .key(&group_id)
+                                            .key(&dlq_key)
+                                            .arg(payload.as_slice())
+                                            .arg(&reason)
+                                            .arg(&real_id)
+                                            .arg(attempt.to_string())
+                                            .invoke_async(&mut ack_conn)
+                                            .await
+                                            .map_err(|e| error!("Failed to atomic NACK: {}", e))
+                                            .unwrap_or(());
+
+                                        counter!("queue_dlq_total", "topic" => stream_key.clone()).increment(1);
+                                    }
+                                }
                             }
                         }
 
@@ -863,42 +917,49 @@ impl MqBackend for RedisQueue {
             .await
             .map_err(|_| QueueError::ConnectionFailed)?;
 
-        let topic_key = format!("{}:{}", self.namespace, topic);
-        let dlq_key = format!("{}:dlq", topic_key);
+        let mut dlq_keys = Vec::new();
+        dlq_keys.push(format!("{}:{}:dlq", self.namespace, topic));
 
-        // XREVRANGE key + - COUNT count
-        let result: redis::RedisResult<Vec<(String, HashMap<String, Vec<u8>>)>> = redis::cmd("XREVRANGE")
-            .arg(&dlq_key)
-            .arg("+")
-            .arg("-")
-            .arg("COUNT")
-            .arg(count)
-            .query_async(&mut conn)
-            .await;
-
-        match result {
-            Ok(messages) => {
-                let mut output = Vec::new();
-                for (id, map) in messages {
-                    let payload = map.get("payload").cloned().unwrap_or_default();
-                    let reason = String::from_utf8(map.get("reason").cloned().unwrap_or_default())
-                        .unwrap_or_else(|_| "Invalid UTF-8".to_string());
-                    let original_id = String::from_utf8(map.get("original_id").cloned().unwrap_or_default())
-                        .unwrap_or_default();
-                    
-                    output.push((id, payload, reason, original_id));
-                }
-                Ok(output)
+        if self.shards > 1 {
+            for shard in 0..self.shards {
+                dlq_keys.push(format!("{{{}:{}:{}}}:dlq", self.namespace, topic, shard));
             }
-            Err(e) => {
-                // If key doesn't exist, it might be fine, return empty
-                if let Some(_code) = e.code() {
-                    // Redis returns empty list if key missing for XREVRANGE usually, but check just in case
-                     warn!("Error reading DLQ {}: {}", dlq_key, e);
+        } else {
+            dlq_keys.push(format!("{{{}:{}}}:dlq", self.namespace, topic));
+        }
+
+        let mut output = Vec::new();
+        for dlq_key in dlq_keys {
+            let result: redis::RedisResult<Vec<(String, HashMap<String, Vec<u8>>)>> = redis::cmd("XREVRANGE")
+                .arg(&dlq_key)
+                .arg("+")
+                .arg("-")
+                .arg("COUNT")
+                .arg(count)
+                .query_async(&mut conn)
+                .await;
+
+            match result {
+                Ok(messages) => {
+                    for (id, map) in messages {
+                        let payload = map.get("payload").cloned().unwrap_or_default();
+                        let reason = String::from_utf8(map.get("reason").cloned().unwrap_or_default())
+                            .unwrap_or_else(|_| "Invalid UTF-8".to_string());
+                        let original_id = String::from_utf8(map.get("original_id").cloned().unwrap_or_default())
+                            .unwrap_or_default();
+
+                        output.push((id, payload, reason, original_id));
+                    }
                 }
-                Ok(Vec::new())
+                Err(e) => {
+                    if let Some(_code) = e.code() {
+                        warn!("Error reading DLQ {}: {}", dlq_key, e);
+                    }
+                }
             }
         }
+
+        Ok(output)
     }
 }
 

@@ -23,7 +23,7 @@ pub enum AckAction {
     /// Message processed successfully
     Ack,
     /// Message processing failed
-    Nack(String, std::sync::Arc<Vec<u8>>), // reason, original_payload
+    Nack(String, std::sync::Arc<Vec<u8>>, std::sync::Arc<HashMap<String, String>>), // reason, payload, headers
 }
 
 use std::collections::HashMap;
@@ -31,6 +31,48 @@ use futures::future::BoxFuture;
 
 pub type AckFn = Box<dyn FnOnce() -> BoxFuture<'static, Result<()>> + Send + Sync>;
 pub type NackFn = Box<dyn FnOnce(String) -> BoxFuture<'static, Result<()>> + Send + Sync>;
+
+pub const HEADER_ATTEMPT: &str = "x-attempt";
+pub const HEADER_CREATED_AT: &str = "x-created-at";
+pub const HEADER_NACK_REASON: &str = "x-nack-reason";
+
+#[derive(Debug, Clone, Copy)]
+pub struct NackPolicy {
+    pub max_retries: u32,
+    pub backoff_ms: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NackDisposition {
+    Retry { next_attempt: u32 },
+    Dlq,
+}
+
+impl Default for NackPolicy {
+    fn default() -> Self {
+        Self {
+            max_retries: 0,
+            backoff_ms: 0,
+        }
+    }
+}
+
+pub(crate) fn parse_attempt(headers: &HashMap<String, String>) -> u32 {
+    headers
+        .get(HEADER_ATTEMPT)
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(0)
+}
+
+pub fn decide_nack(policy: NackPolicy, attempt: u32) -> NackDisposition {
+    if policy.max_retries > 0 && attempt < policy.max_retries {
+        NackDisposition::Retry {
+            next_attempt: attempt.saturating_add(1),
+        }
+    } else {
+        NackDisposition::Dlq
+    }
+}
 
 /// A wrapper for items that might require acknowledgement
 pub struct QueuedItem<T> {
@@ -126,7 +168,11 @@ impl Message {
     }
 
     pub async fn nack(&self, reason: impl Into<String>) -> Result<()> {
-        self.ack_tx.send((self.id.clone(), AckAction::Nack(reason.into(), self.payload.clone()))).await.map_err(|_| {
+        let headers = self.headers.clone();
+        self.ack_tx
+            .send((self.id.clone(), AckAction::Nack(reason.into(), self.payload.clone(), headers)))
+            .await
+            .map_err(|_| {
             errors::error::QueueError::OperationFailed(Box::new(std::io::Error::other(
                 "Failed to send NACK signal",
             )))

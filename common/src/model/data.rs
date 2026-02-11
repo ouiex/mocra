@@ -310,7 +310,6 @@ impl StoreTrait for Data {
 mod tests {
     use super::*;
     use chrono::NaiveDate;
-    use polars::prelude::*;
     use serde::{Deserialize, Serialize};
 
     #[test]

@@ -1,31 +1,10 @@
 #![allow(unused)]
 use common::status_tracker::ErrorDecision;
 use log::info;
-use crate::events::EventConfigLoad::{
-    ConfigLoadCompleted, ConfigLoadFailed, ConfigLoadPrepared, ConfigLoadRetry, ConfigLoadStarted,
-};
-use crate::events::EventParserError::{
-    ParserErrorCompleted, ParserErrorFailed, ParserErrorReceived, ParserErrorRetry,
-    ParserErrorStarted,
-};
-use crate::events::EventParserTaskModel::{
-    ParserTaskModelCompleted, ParserTaskModelFailed, ParserTaskModelReceived, ParserTaskModelRetry,
-    ParserTaskModelStarted,
-};
-
-use crate::events::EventRequestPublish::{
-    RequestPublishCompleted, RequestPublishFailed, RequestPublishPrepared, RequestPublishRetry,
-    RequestPublishSend,
-};
-
-use crate::events::EventTaskModel::{
-    TaskModelCompleted, TaskModelFailed, TaskModelReceived, TaskModelRetry, TaskModelStarted,
-};
 use crate::events::{
-    ConfigLoadEvent, EventModule, EventTask, ModuleEvent, ParserErrorEvent, ParserTaskModelEvent,
-    RequestEvent, TaskEvent,
+    EventBus, EventEnvelope, EventPhase, EventType, ModuleGenerateEvent, ParserTaskModelEvent,
+    RequestEvent, TaskModelEvent,
 };
-use crate::events::{DynFailureEvent, DynRetryEvent, EventBus, SystemEvent, TaskModelEvent};
 use crate::processors::event_processor::{EventAwareTypedChain, EventProcessorTrait};
 
 
@@ -46,6 +25,7 @@ use std::sync::Arc;
 use uuid::Uuid;
 use futures::stream::{StreamExt};
 use std::marker::PhantomData;
+use serde_json::json;
 
 use crate::deduplication::Deduplicator;
 
@@ -61,41 +41,31 @@ pub struct TaskModelProcessor {
 #[async_trait]
 impl ProcessorTrait<TaskModel, Task> for TaskModelProcessor {
     fn name(&self) -> &'static str {
-        "TaskProcessor"
+        "TaskModelProcessor"
     }
+
     async fn process(&self, input: TaskModel, context: ProcessorContext) -> ProcessorResult<Task> {
-        // Fix for benchmark: Inject missing task_meta to satisfy TaskProcessor requirements
-        context.metadata.write().await.insert(
-            "task_meta".to_string(),
-            serde_json::Value::Object(serde_json::Map::new()),
-        );
-
-
-        info!(
+        debug!(
             "[TaskModelProcessor] Processing Task: account={} platform={} modules={:?} retry={}",
             input.account,
             input.platform,
             input.module,
-            context.retry_policy.as_ref().map(|r| r.current_retry).unwrap_or(0)
+            context
+                .retry_policy
+                .as_ref()
+                .map(|r| r.current_retry)
+                .unwrap_or(0)
         );
 
-        // 首先检查 Task 是否已被标记为终止（在加载 Task 之前）
-        // Task ID 格式：{platform}:{account}:{run_id}
         let task_id = format!("{}-{}", input.account, input.platform);
         match self.state.status_tracker.should_task_continue(&task_id).await {
-            Ok(ErrorDecision::Continue) => {
-                debug!(
-                    "[TaskModelProcessor<TaskModel>] task can continue: task_id={}",
-                    task_id
-                );
-            }
+            Ok(ErrorDecision::Continue) => {}
             Ok(ErrorDecision::Terminate(reason)) => {
                 error!(
                     "[TaskModelProcessor<TaskModel>] task terminated (pre-check): task_id={} reason={}",
                     task_id,
                     reason
                 );
-                // 不要将已终止的 Task 重新入队，直接返回致命错误
                 if let Err(e) = self.queue_manager.send_to_dlq("task", &input, &reason).await {
                     error!("[TaskModelProcessor<TaskModel>] failed to send to DLQ: {}", e);
                 }
@@ -126,12 +96,11 @@ impl ProcessorTrait<TaskModel, Task> for TaskModelProcessor {
                             format!(
                                 "No modules found for the given TaskModel, task_model: {input:?}"
                             )
-                                .into(),
-                        )
                             .into(),
+                        )
+                        .into(),
                     );
                 }
-                // 在TaskModelProcessor阶段进行加锁校验：如果目标模块均处于锁定状态，则根据消息类型将其重新入队
                 let default_locker_ttl = self.state.config.read().await.crawler.module_locker_ttl;
                 let mut all_locked = true;
                 for m in task.modules.iter() {
@@ -211,35 +180,51 @@ impl ProcessorTrait<TaskModel, Task> for TaskModelProcessor {
 }
 #[async_trait]
 impl EventProcessorTrait<TaskModel, Task> for TaskModelProcessor {
-    fn pre_status(&self, input: &TaskModel) -> Option<SystemEvent> {
-        Some(SystemEvent::TaskModel(TaskModelReceived(input.into())))
+    fn pre_status(&self, input: &TaskModel) -> Option<EventEnvelope> {
+        Some(EventEnvelope::engine(
+            EventType::TaskModel,
+            EventPhase::Started,
+            TaskModelEvent::from(input),
+        ))
     }
 
-    fn finish_status(&self, input: &TaskModel, output: &Task) -> Option<SystemEvent> {
+    fn finish_status(&self, input: &TaskModel, output: &Task) -> Option<EventEnvelope> {
         let mut task_model_event: TaskModelEvent = input.into();
         task_model_event.modules = Some(output.get_module_names());
-        Some(SystemEvent::TaskModel(TaskModelCompleted(task_model_event)))
+        Some(EventEnvelope::engine(
+            EventType::TaskModel,
+            EventPhase::Completed,
+            task_model_event,
+        ))
     }
 
-    fn working_status(&self, input: &TaskModel) -> Option<SystemEvent> {
-        Some(SystemEvent::TaskModel(TaskModelStarted(input.into())))
+    fn working_status(&self, input: &TaskModel) -> Option<EventEnvelope> {
+        Some(EventEnvelope::engine(
+            EventType::TaskModel,
+            EventPhase::Started,
+            TaskModelEvent::from(input),
+        ))
     }
 
-    fn error_status(&self, input: &TaskModel, error: &Error) -> Option<SystemEvent> {
-        let task_model_error: DynFailureEvent<TaskModelEvent> = DynFailureEvent {
-            data: input.into(),
-            error: error.to_string(),
-        };
-        Some(SystemEvent::TaskModel(TaskModelFailed(task_model_error)))
+    fn error_status(&self, input: &TaskModel, error: &Error) -> Option<EventEnvelope> {
+        Some(EventEnvelope::engine_error(
+            EventType::TaskModel,
+            EventPhase::Failed,
+            TaskModelEvent::from(input),
+            error,
+        ))
     }
 
-    fn retry_status(&self, input: &TaskModel, retry_policy: &RetryPolicy) -> Option<SystemEvent> {
-        let task_model_retry: DynRetryEvent<TaskModelEvent> = DynRetryEvent {
-            data: input.into(),
-            retry_count: retry_policy.current_retry,
-            reason: retry_policy.reason.clone().unwrap_or("".to_string()),
-        };
-        Some(SystemEvent::TaskModel(TaskModelRetry(task_model_retry)))
+    fn retry_status(&self, input: &TaskModel, retry_policy: &RetryPolicy) -> Option<EventEnvelope> {
+        Some(EventEnvelope::engine(
+            EventType::TaskModel,
+            EventPhase::Retry,
+            json!({
+                "data": TaskModelEvent::from(input),
+                "retry_count": retry_policy.current_retry,
+                "reason": retry_policy.reason.clone().unwrap_or_default(),
+            }),
+        ))
     }
 }
 #[async_trait]
@@ -342,35 +327,51 @@ impl ProcessorTrait<ParserTaskModel, Task> for TaskModelProcessor {
 }
 #[async_trait]
 impl EventProcessorTrait<ParserTaskModel, Task> for TaskModelProcessor {
-    fn pre_status(&self, input: &ParserTaskModel) -> Option<SystemEvent> {
-        Some(SystemEvent::ParserTaskModel(ParserTaskModelReceived(input.into())))
+    fn pre_status(&self, input: &ParserTaskModel) -> Option<EventEnvelope> {
+        Some(EventEnvelope::engine(
+            EventType::ParserTaskModel,
+            EventPhase::Started,
+            ParserTaskModelEvent::from(input),
+        ))
     }
 
-    fn finish_status(&self, input: &ParserTaskModel, output: &Task) -> Option<SystemEvent> {
+    fn finish_status(&self, input: &ParserTaskModel, output: &Task) -> Option<EventEnvelope> {
         let mut evt: ParserTaskModelEvent = input.into();
         evt.modules = Some(output.get_module_names());
-        Some(SystemEvent::ParserTaskModel(ParserTaskModelCompleted(evt)))
+        Some(EventEnvelope::engine(
+            EventType::ParserTaskModel,
+            EventPhase::Completed,
+            evt,
+        ))
     }
 
-    fn working_status(&self, input: &ParserTaskModel) -> Option<SystemEvent> {
-        Some(SystemEvent::ParserTaskModel(ParserTaskModelStarted(input.into())))
+    fn working_status(&self, input: &ParserTaskModel) -> Option<EventEnvelope> {
+        Some(EventEnvelope::engine(
+            EventType::ParserTaskModel,
+            EventPhase::Started,
+            ParserTaskModelEvent::from(input),
+        ))
     }
 
-    fn error_status(&self, input: &ParserTaskModel, err: &Error) -> Option<SystemEvent> {
-        let failure: DynFailureEvent<ParserTaskModelEvent> = DynFailureEvent {
-            data: input.into(),
-            error: err.to_string(),
-        };
-        Some(SystemEvent::ParserTaskModel(ParserTaskModelFailed(failure)))
+    fn error_status(&self, input: &ParserTaskModel, err: &Error) -> Option<EventEnvelope> {
+        Some(EventEnvelope::engine_error(
+            EventType::ParserTaskModel,
+            EventPhase::Failed,
+            ParserTaskModelEvent::from(input),
+            err,
+        ))
     }
 
-    fn retry_status(&self, input: &ParserTaskModel, retry_policy: &RetryPolicy) -> Option<SystemEvent> {
-        let retry: DynRetryEvent<ParserTaskModelEvent> = DynRetryEvent {
-            data: input.into(),
-            retry_count: retry_policy.current_retry,
-            reason: retry_policy.reason.clone().unwrap_or_default(),
-        };
-        Some(SystemEvent::ParserTaskModel(ParserTaskModelRetry(retry)))
+    fn retry_status(&self, input: &ParserTaskModel, retry_policy: &RetryPolicy) -> Option<EventEnvelope> {
+        Some(EventEnvelope::engine(
+            EventType::ParserTaskModel,
+            EventPhase::Retry,
+            json!({
+                "data": ParserTaskModelEvent::from(input),
+                "retry_count": retry_policy.current_retry,
+                "reason": retry_policy.reason.clone().unwrap_or_default(),
+            }),
+        ))
     }
 }
 #[async_trait]
@@ -511,35 +512,51 @@ impl ProcessorTrait<ErrorTaskModel, Task> for TaskModelProcessor {
 }
 #[async_trait]
 impl EventProcessorTrait<ErrorTaskModel, Task> for TaskModelProcessor {
-    fn pre_status(&self, input: &ErrorTaskModel) -> Option<SystemEvent> {
-        Some(SystemEvent::ParserError(ParserErrorReceived(input.into())))
+    fn pre_status(&self, input: &ErrorTaskModel) -> Option<EventEnvelope> {
+        Some(EventEnvelope::engine(
+            EventType::ParserTaskModel,
+            EventPhase::Started,
+            ParserTaskModelEvent::from(input),
+        ))
     }
 
-    fn finish_status(&self, input: &ErrorTaskModel, output: &Task) -> Option<SystemEvent> {
-        let mut evt: ParserErrorEvent = input.into();
+    fn finish_status(&self, input: &ErrorTaskModel, output: &Task) -> Option<EventEnvelope> {
+        let mut evt: ParserTaskModelEvent = input.into();
         evt.modules = Some(output.get_module_names());
-        Some(SystemEvent::ParserError(ParserErrorCompleted(evt)))
+        Some(EventEnvelope::engine(
+            EventType::ParserTaskModel,
+            EventPhase::Completed,
+            evt,
+        ))
     }
 
-    fn working_status(&self, input: &ErrorTaskModel) -> Option<SystemEvent> {
-        Some(SystemEvent::ParserError(ParserErrorStarted(input.into())))
+    fn working_status(&self, input: &ErrorTaskModel) -> Option<EventEnvelope> {
+        Some(EventEnvelope::engine(
+            EventType::ParserTaskModel,
+            EventPhase::Started,
+            ParserTaskModelEvent::from(input),
+        ))
     }
 
-    fn error_status(&self, input: &ErrorTaskModel, err: &Error) -> Option<SystemEvent> {
-        let failure: DynFailureEvent<ParserErrorEvent> = DynFailureEvent {
-            data: input.into(),
-            error: err.to_string(),
-        };
-        Some(SystemEvent::ParserError(ParserErrorFailed(failure)))
+    fn error_status(&self, input: &ErrorTaskModel, err: &Error) -> Option<EventEnvelope> {
+        Some(EventEnvelope::engine_error(
+            EventType::ParserTaskModel,
+            EventPhase::Failed,
+            ParserTaskModelEvent::from(input),
+            err,
+        ))
     }
 
-    fn retry_status(&self, input: &ErrorTaskModel, retry_policy: &RetryPolicy) -> Option<SystemEvent> {
-        let retry: DynRetryEvent<ParserErrorEvent> = DynRetryEvent {
-            data: input.into(),
-            retry_count: retry_policy.current_retry,
-            reason: retry_policy.reason.clone().unwrap_or_default(),
-        };
-        Some(SystemEvent::ParserError(ParserErrorRetry(retry)))
+    fn retry_status(&self, input: &ErrorTaskModel, retry_policy: &RetryPolicy) -> Option<EventEnvelope> {
+        Some(EventEnvelope::engine(
+            EventType::ParserTaskModel,
+            EventPhase::Retry,
+            json!({
+                "data": ParserTaskModelEvent::from(input),
+                "retry_count": retry_policy.current_retry,
+                "reason": retry_policy.reason.clone().unwrap_or_default(),
+            }),
+        ))
     }
 }
 
@@ -641,33 +658,24 @@ impl ProcessorTrait<Task, Vec<Module>> for TaskModuleProcessor {
 
 #[async_trait]
 impl EventProcessorTrait<Task, Vec<Module>> for TaskModuleProcessor {
-    fn pre_status(&self, input: &Task) -> Option<SystemEvent> {
-        Some(SystemEvent::Task(EventTask::TaskReceived(input.into())))
+    fn pre_status(&self, _input: &Task) -> Option<EventEnvelope> {
+        None
     }
 
-    fn finish_status(&self, input: &Task, _output: &Vec<Module>) -> Option<SystemEvent> {
-        Some(SystemEvent::Task(EventTask::TaskCompleted(input.into())))
+    fn finish_status(&self, _input: &Task, _output: &Vec<Module>) -> Option<EventEnvelope> {
+        None
     }
 
-    fn working_status(&self, input: &Task) -> Option<SystemEvent> {
-        Some(SystemEvent::Task(EventTask::TaskStarted(input.into())))
+    fn working_status(&self, _input: &Task) -> Option<EventEnvelope> {
+        None
     }
 
-    fn error_status(&self, input: &Task, err: &Error) -> Option<SystemEvent> {
-        let failure: DynFailureEvent<TaskEvent> = DynFailureEvent {
-            data: input.into(),
-            error: err.to_string(),
-        };
-        Some(SystemEvent::Task(EventTask::TaskFailed(failure)))
+    fn error_status(&self, _input: &Task, _err: &Error) -> Option<EventEnvelope> {
+        None
     }
 
-    fn retry_status(&self, input: &Task, retry_policy: &RetryPolicy) -> Option<SystemEvent> {
-        let retry: DynRetryEvent<TaskEvent> = DynRetryEvent {
-            data: input.into(),
-            retry_count: retry_policy.current_retry,
-            reason: retry_policy.reason.clone().unwrap_or_default(),
-        };
-        Some(SystemEvent::Task(EventTask::TaskRetry(retry)))
+    fn retry_status(&self, _input: &Task, _retry_policy: &RetryPolicy) -> Option<EventEnvelope> {
+        None
     }
 }
 
@@ -921,33 +929,49 @@ impl ProcessorTrait<Module, SyncBoxStream<'static, Request>> for TaskProcessor {
 }
 #[async_trait]
 impl EventProcessorTrait<Module, SyncBoxStream<'static, Request>> for TaskProcessor {
-    fn pre_status(&self, input: &Module) -> Option<SystemEvent> {
-        Some(SystemEvent::Module(EventModule::ModuleGenerate(input.into())))
+    fn pre_status(&self, input: &Module) -> Option<EventEnvelope> {
+        Some(EventEnvelope::engine(
+            EventType::ModuleGenerate,
+            EventPhase::Started,
+            ModuleGenerateEvent::from(input),
+        ))
     }
 
-    fn finish_status(&self, input: &Module, _output: &SyncBoxStream<'static, Request>) -> Option<SystemEvent> {
-        Some(SystemEvent::Module(EventModule::ModuleCompleted(input.into())))
+    fn finish_status(&self, input: &Module, _output: &SyncBoxStream<'static, Request>) -> Option<EventEnvelope> {
+        Some(EventEnvelope::engine(
+            EventType::ModuleGenerate,
+            EventPhase::Completed,
+            ModuleGenerateEvent::from(input),
+        ))
     }
 
-    fn working_status(&self, input: &Module) -> Option<SystemEvent> {
-        Some(SystemEvent::Module(EventModule::ModuleStarted(input.into())))
+    fn working_status(&self, input: &Module) -> Option<EventEnvelope> {
+        Some(EventEnvelope::engine(
+            EventType::ModuleGenerate,
+            EventPhase::Started,
+            ModuleGenerateEvent::from(input),
+        ))
     }
 
-    fn error_status(&self, input: &Module, err: &Error) -> Option<SystemEvent> {
-        let failure: DynFailureEvent<ModuleEvent> = DynFailureEvent {
-            data: input.into(),
-            error: err.to_string(),
-        };
-        Some(SystemEvent::Module(EventModule::ModuleFailed(failure)))
+    fn error_status(&self, input: &Module, err: &Error) -> Option<EventEnvelope> {
+        Some(EventEnvelope::engine_error(
+            EventType::ModuleGenerate,
+            EventPhase::Failed,
+            ModuleGenerateEvent::from(input),
+            err,
+        ))
     }
 
-    fn retry_status(&self, input: &Module, retry_policy: &RetryPolicy) -> Option<SystemEvent> {
-        let retry: DynRetryEvent<ModuleEvent> = DynRetryEvent {
-            data: input.into(),
-            retry_count: retry_policy.current_retry,
-            reason: retry_policy.reason.clone().unwrap_or_default(),
-        };
-        Some(SystemEvent::Module(EventModule::ModuleRetry(retry)))
+    fn retry_status(&self, input: &Module, retry_policy: &RetryPolicy) -> Option<EventEnvelope> {
+        Some(EventEnvelope::engine(
+            EventType::ModuleGenerate,
+            EventPhase::Retry,
+            json!({
+                "data": ModuleGenerateEvent::from(input),
+                "retry_count": retry_policy.current_retry,
+                "reason": retry_policy.reason.clone().unwrap_or_default(),
+            }),
+        ))
     }
 }
 pub struct RequestPublish {
@@ -1018,33 +1042,49 @@ impl ProcessorTrait<Request, ()> for RequestPublish {
 }
 #[async_trait]
 impl EventProcessorTrait<Request, ()> for RequestPublish {
-    fn pre_status(&self, input: &Request) -> Option<SystemEvent> {
-        Some(SystemEvent::RequestPublish(RequestPublishPrepared(input.into())))
+    fn pre_status(&self, input: &Request) -> Option<EventEnvelope> {
+        Some(EventEnvelope::engine(
+            EventType::RequestPublish,
+            EventPhase::Started,
+            RequestEvent::from(input),
+        ))
     }
 
-    fn finish_status(&self, input: &Request, _output: &()) -> Option<SystemEvent> {
-        Some(SystemEvent::RequestPublish(RequestPublishCompleted(input.into())))
+    fn finish_status(&self, input: &Request, _output: &()) -> Option<EventEnvelope> {
+        Some(EventEnvelope::engine(
+            EventType::RequestPublish,
+            EventPhase::Completed,
+            RequestEvent::from(input),
+        ))
     }
 
-    fn working_status(&self, input: &Request) -> Option<SystemEvent> {
-        Some(SystemEvent::RequestPublish(RequestPublishSend(input.into())))
+    fn working_status(&self, input: &Request) -> Option<EventEnvelope> {
+        Some(EventEnvelope::engine(
+            EventType::RequestPublish,
+            EventPhase::Started,
+            RequestEvent::from(input),
+        ))
     }
 
-    fn error_status(&self, input: &Request, err: &Error) -> Option<SystemEvent> {
-        let failure: DynFailureEvent<RequestEvent> = DynFailureEvent {
-            data: input.into(),
-            error: err.to_string(),
-        };
-        Some(SystemEvent::RequestPublish(RequestPublishFailed(failure)))
+    fn error_status(&self, input: &Request, err: &Error) -> Option<EventEnvelope> {
+        Some(EventEnvelope::engine_error(
+            EventType::RequestPublish,
+            EventPhase::Failed,
+            RequestEvent::from(input),
+            err,
+        ))
     }
 
-    fn retry_status(&self, input: &Request, retry_policy: &RetryPolicy) -> Option<SystemEvent> {
-        let retry: DynRetryEvent<RequestEvent> = DynRetryEvent {
-            data: input.into(),
-            retry_count: retry_policy.current_retry,
-            reason: retry_policy.reason.clone().unwrap_or_default(),
-        };
-        Some(SystemEvent::RequestPublish(RequestPublishRetry(retry)))
+    fn retry_status(&self, input: &Request, retry_policy: &RetryPolicy) -> Option<EventEnvelope> {
+        Some(EventEnvelope::engine(
+            EventType::RequestPublish,
+            EventPhase::Retry,
+            json!({
+                "data": RequestEvent::from(input),
+                "retry_count": retry_policy.current_retry,
+                "reason": retry_policy.reason.clone().unwrap_or_default(),
+            }),
+        ))
     }
 }
 pub struct ConfigProcessor {
@@ -1095,42 +1135,28 @@ impl ProcessorTrait<Request, (Request, Option<ModuleConfig>)> for ConfigProcesso
 }
 #[async_trait]
 impl EventProcessorTrait<Request, (Request, Option<ModuleConfig>)> for ConfigProcessor {
-    fn pre_status(&self, input: &Request) -> Option<SystemEvent> {
-        let ev: ConfigLoadEvent = (&(input.clone(), None)).into();
-        Some(SystemEvent::ConfigLoad(Box::new(ConfigLoadPrepared(ev))))
+    fn pre_status(&self, _input: &Request) -> Option<EventEnvelope> {
+        None
     }
 
     fn finish_status(
         &self,
         _input: &Request,
-        out: &(Request, Option<ModuleConfig>),
-    ) -> Option<SystemEvent> {
-        let ev: ConfigLoadEvent = out.into();
-        Some(SystemEvent::ConfigLoad(Box::new(ConfigLoadCompleted(ev))))
+        _out: &(Request, Option<ModuleConfig>),
+    ) -> Option<EventEnvelope> {
+        None
     }
 
-    fn working_status(&self, input: &Request) -> Option<SystemEvent> {
-        let ev: ConfigLoadEvent = (&(input.clone(), None)).into();
-        Some(SystemEvent::ConfigLoad(Box::new(ConfigLoadStarted(ev))))
+    fn working_status(&self, _input: &Request) -> Option<EventEnvelope> {
+        None
     }
 
-    fn error_status(&self, input: &Request, err: &Error) -> Option<SystemEvent> {
-        let ev: ConfigLoadEvent = (&(input.clone(), None)).into();
-        let failure = DynFailureEvent {
-            data: ev,
-            error: err.to_string(),
-        };
-        Some(SystemEvent::ConfigLoad(Box::new(ConfigLoadFailed(failure))))
+    fn error_status(&self, _input: &Request, _err: &Error) -> Option<EventEnvelope> {
+        None
     }
 
-    fn retry_status(&self, input: &Request, retry_policy: &RetryPolicy) -> Option<SystemEvent> {
-        let ev: ConfigLoadEvent = (&(input.clone(), None)).into();
-        let retry = DynRetryEvent {
-            data: ev,
-            retry_count: retry_policy.current_retry,
-            reason: retry_policy.reason.clone().unwrap_or_default(),
-        };
-        Some(SystemEvent::ConfigLoad(Box::new(ConfigLoadRetry(retry))))
+    fn retry_status(&self, _input: &Request, _retry_policy: &RetryPolicy) -> Option<EventEnvelope> {
+        None
     }
 }
 
@@ -1180,11 +1206,11 @@ impl<T: Send + Sync + 'static> ProcessorTrait<Vec<T>, SyncBoxStream<'static, T>>
 
 #[async_trait]
 impl<T: Send + Sync + 'static> EventProcessorTrait<Vec<T>, SyncBoxStream<'static, T>> for VecToStreamProcessor<T> {
-    fn pre_status(&self, _input: &Vec<T>) -> Option<SystemEvent> { None }
-    fn finish_status(&self, _input: &Vec<T>, _output: &SyncBoxStream<'static, T>) -> Option<SystemEvent> { None }
-    fn working_status(&self, _input: &Vec<T>) -> Option<SystemEvent> { None }
-    fn error_status(&self, _input: &Vec<T>, _err: &Error) -> Option<SystemEvent> { None }
-    fn retry_status(&self, _input: &Vec<T>, _retry_policy: &RetryPolicy) -> Option<SystemEvent> { None }
+    fn pre_status(&self, _input: &Vec<T>) -> Option<EventEnvelope> { None }
+    fn finish_status(&self, _input: &Vec<T>, _output: &SyncBoxStream<'static, T>) -> Option<EventEnvelope> { None }
+    fn working_status(&self, _input: &Vec<T>) -> Option<EventEnvelope> { None }
+    fn error_status(&self, _input: &Vec<T>, _err: &Error) -> Option<EventEnvelope> { None }
+    fn retry_status(&self, _input: &Vec<T>, _retry_policy: &RetryPolicy) -> Option<EventEnvelope> { None }
 }
 
 pub struct FlattenStreamVecProcessor<T> {
@@ -1245,11 +1271,11 @@ for FlattenStreamVecProcessor<T>
 
 #[async_trait]
 impl<T: Send + Sync + 'static> EventProcessorTrait<SyncBoxStream<'static, Vec<T>>, SyncBoxStream<'static, T>> for FlattenStreamVecProcessor<T> {
-    fn pre_status(&self, _input: &SyncBoxStream<'static, Vec<T>>) -> Option<SystemEvent> { None }
-    fn finish_status(&self, _input: &SyncBoxStream<'static, Vec<T>>, _output: &SyncBoxStream<'static, T>) -> Option<SystemEvent> { None }
-    fn working_status(&self, _input: &SyncBoxStream<'static, Vec<T>>) -> Option<SystemEvent> { None }
-    fn error_status(&self, _input: &SyncBoxStream<'static, Vec<T>>, _err: &Error) -> Option<SystemEvent> { None }
-    fn retry_status(&self, _input: &SyncBoxStream<'static, Vec<T>>, _retry_policy: &RetryPolicy) -> Option<SystemEvent> { None }
+    fn pre_status(&self, _input: &SyncBoxStream<'static, Vec<T>>) -> Option<EventEnvelope> { None }
+    fn finish_status(&self, _input: &SyncBoxStream<'static, Vec<T>>, _output: &SyncBoxStream<'static, T>) -> Option<EventEnvelope> { None }
+    fn working_status(&self, _input: &SyncBoxStream<'static, Vec<T>>) -> Option<EventEnvelope> { None }
+    fn error_status(&self, _input: &SyncBoxStream<'static, Vec<T>>, _err: &Error) -> Option<EventEnvelope> { None }
+    fn retry_status(&self, _input: &SyncBoxStream<'static, Vec<T>>, _retry_policy: &RetryPolicy) -> Option<EventEnvelope> { None }
 }
 
 pub struct StreamLoggerProcessor<T> {
@@ -1303,11 +1329,11 @@ for StreamLoggerProcessor<T>
 
 #[async_trait]
 impl<T: Send + Sync + 'static> EventProcessorTrait<SyncBoxStream<'static, T>, SyncBoxStream<'static, T>> for StreamLoggerProcessor<T> {
-    fn pre_status(&self, _input: &SyncBoxStream<'static, T>) -> Option<SystemEvent> { None }
-    fn finish_status(&self, _input: &SyncBoxStream<'static, T>, _output: &SyncBoxStream<'static, T>) -> Option<SystemEvent> { None }
-    fn working_status(&self, _input: &SyncBoxStream<'static, T>) -> Option<SystemEvent> { None }
-    fn error_status(&self, _input: &SyncBoxStream<'static, T>, _err: &Error) -> Option<SystemEvent> { None }
-    fn retry_status(&self, _input: &SyncBoxStream<'static, T>, _retry_policy: &RetryPolicy) -> Option<SystemEvent> { None }
+    fn pre_status(&self, _input: &SyncBoxStream<'static, T>) -> Option<EventEnvelope> { None }
+    fn finish_status(&self, _input: &SyncBoxStream<'static, T>, _output: &SyncBoxStream<'static, T>) -> Option<EventEnvelope> { None }
+    fn working_status(&self, _input: &SyncBoxStream<'static, T>) -> Option<EventEnvelope> { None }
+    fn error_status(&self, _input: &SyncBoxStream<'static, T>, _err: &Error) -> Option<EventEnvelope> { None }
+    fn retry_status(&self, _input: &SyncBoxStream<'static, T>, _retry_policy: &RetryPolicy) -> Option<EventEnvelope> { None }
 }
 
 pub struct FlattenStreamProcessor<T> {
@@ -1349,11 +1375,11 @@ for FlattenStreamProcessor<T>
 
 #[async_trait]
 impl<T: Send + Sync + 'static> EventProcessorTrait<SyncBoxStream<'static, SyncBoxStream<'static, T>>, SyncBoxStream<'static, T>> for FlattenStreamProcessor<T> {
-    fn pre_status(&self, _input: &SyncBoxStream<'static, SyncBoxStream<'static, T>>) -> Option<SystemEvent> { None }
-    fn finish_status(&self, _input: &SyncBoxStream<'static, SyncBoxStream<'static, T>>, _output: &SyncBoxStream<'static, T>) -> Option<SystemEvent> { None }
-    fn working_status(&self, _input: &SyncBoxStream<'static, SyncBoxStream<'static, T>>) -> Option<SystemEvent> { None }
-    fn error_status(&self, _input: &SyncBoxStream<'static, SyncBoxStream<'static, T>>, _err: &Error) -> Option<SystemEvent> { None }
-    fn retry_status(&self, _input: &SyncBoxStream<'static, SyncBoxStream<'static, T>>, _retry_policy: &RetryPolicy) -> Option<SystemEvent> { None }
+    fn pre_status(&self, _input: &SyncBoxStream<'static, SyncBoxStream<'static, T>>) -> Option<EventEnvelope> { None }
+    fn finish_status(&self, _input: &SyncBoxStream<'static, SyncBoxStream<'static, T>>, _output: &SyncBoxStream<'static, T>) -> Option<EventEnvelope> { None }
+    fn working_status(&self, _input: &SyncBoxStream<'static, SyncBoxStream<'static, T>>) -> Option<EventEnvelope> { None }
+    fn error_status(&self, _input: &SyncBoxStream<'static, SyncBoxStream<'static, T>>, _err: &Error) -> Option<EventEnvelope> { None }
+    fn retry_status(&self, _input: &SyncBoxStream<'static, SyncBoxStream<'static, T>>, _retry_policy: &RetryPolicy) -> Option<EventEnvelope> { None }
 }
 
 pub async fn create_task_model_chain(

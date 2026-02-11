@@ -1493,8 +1493,10 @@ mod tests {
     static INIT: Once = Once::new();
     fn init_logger() {
         INIT.call_once(|| {
-            if let Ok(handle) = tokio::runtime::Handle::try_current() {
-                let _ = handle.block_on(logger::init_app_logger("common-tests"));
+            if tokio::runtime::Handle::try_current().is_ok() {
+                tokio::spawn(async {
+                    let _ = logger::init_app_logger("common-tests").await;
+                });
             } else if let Ok(rt) = tokio::runtime::Runtime::new() {
                 let _ = rt.block_on(logger::init_app_logger("common-tests"));
             }
