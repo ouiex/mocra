@@ -71,3 +71,15 @@ pool_size = 100
 
 [channel_config.blob_storage]
 path = "tmp/blob_storage"
+
+
+[logger]
+enable = true
+level = "debug"
+
+[[logger.outputs]]
+type = "console"
+
+[[logger.outputs]]
+type = "file"
+path = "logs/lunaler_rpa.log"

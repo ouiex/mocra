@@ -47,7 +47,7 @@ impl ModuleTrait for MocDevModule {
         })]
     }
     fn cron(&self) -> Option<CronConfig> {
-        Some(CronConfig::every(CronInterval::Minute(1)).build())
+        Some(CronConfig::right_now())
     }
 }
 

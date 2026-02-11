@@ -33,6 +33,7 @@ pub struct PrometheusLogConfig {
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct LoggerConfig {
+    #[serde(alias = "enable")]
     pub enabled: Option<bool>,
     pub level: Option<String>,
     pub format: Option<String>,

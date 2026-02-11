@@ -581,10 +581,14 @@ pub async fn init_logger(config: LoggerConfig) -> Result<(), Box<dyn std::error:
         .with_max_level(log::LevelFilter::Trace)
         .init();
 
-    let default_level = config.level.to_lowercase();
-    let filter = EnvFilter::try_from_default_env()
-        .or_else(|_| EnvFilter::try_new(&default_level))
-        .unwrap_or_else(|_| EnvFilter::new("info"));
+    let configured_level = config.level.to_lowercase();
+    let filter = if configured_level != DEFAULT_APP_LOG_LEVEL {
+        EnvFilter::try_new(&configured_level).unwrap_or_else(|_| EnvFilter::new("info"))
+    } else {
+        EnvFilter::try_from_default_env()
+            .or_else(|_| EnvFilter::try_new(&configured_level))
+            .unwrap_or_else(|_| EnvFilter::new("info"))
+    };
 
     let sinks = build_sinks(&config)?;
     let dispatcher = Arc::new(LogDispatcher::new(sinks));

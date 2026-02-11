@@ -221,6 +221,7 @@ compression_threshold = 1024
 - `format` 仅 `console/file` 支持 `text`；`mq` 只支持 `json`
 - `buffer` 与 `flush_interval_ms` 只影响 MQ 输出（批量写入）
 - `outputs[]` 至少配置一个，否则不会有输出
+- `enabled` 为正式字段，兼容别名 `enable`
 
 最小可用示例：
 ```toml
