@@ -174,7 +174,7 @@ impl LogDispatcher {
         }
 
         for sink in &self.sinks {
-            if !sink.enabled() || record.level < sink.min_level() {
+            if !sink.enabled() || record.level > sink.min_level() {
                 continue;
             }
             if sink.emit(&record).is_err() {
@@ -342,7 +342,7 @@ impl LogSink for DynamicMqSink {
             return Ok(());
         };
 
-        if record.level < dynamic.1 {
+        if record.level > dynamic.1 {
             return Ok(());
         }
 
@@ -543,7 +543,7 @@ impl Default for LoggerConfig {
 }
 
 const DEFAULT_APP_LOG_LEVEL: &str =
-    "info,engine=debug;sqlx=warn,sea_orm=warn,h2=warn,hyper=warn";
+    "info,engine=debug;sqlx=warn,sea_orm=warn";
 
 static LOGGER_INITIALIZED: AtomicBool = AtomicBool::new(false);
 
@@ -650,12 +650,20 @@ fn normalize_filter_string(filter: &str) -> String {
     if trimmed.contains('=') || trimmed.contains(',') || trimmed.contains(';') {
         return trimmed.to_string();
     }
-    match trimmed.to_lowercase().as_str() {
-        "all" => "trace".to_string(),
-        "fatal" => "error".to_string(),
-        "warning" => "warn".to_string(),
-        other => other.to_string(),
-    }
+    let lower = trimmed.to_lowercase();
+    let normalized = match lower.as_str() {
+        "all" => "trace",
+        "fatal" => "error",
+        "warning" => "warn",
+        other => other,
+    };
+    build_allowlist_filter(normalized)
+}
+
+fn build_allowlist_filter(level: &str) -> String {
+    format!(
+        "off,cacheable={level},common={level},downloader={level},engine={level},errors={level},js_v8={level},mocra={level},proxy={level},queue={level},sync={level},utils={level},tests={level},python_mocra={level},sqlx=warn,sea_orm=warn"
+    )
 }
 
 fn base_level_from_filter(level: &str) -> Option<Level> {
