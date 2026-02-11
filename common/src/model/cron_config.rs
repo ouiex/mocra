@@ -1,12 +1,16 @@
 use cron::Schedule;
 use std::str::FromStr;
 
+use crate::config;
+
 #[derive(Debug, Clone)]
 pub struct CronConfig {
     pub schedule: Schedule,
     /// 保留原始表达式用于日志记录和调试
     pub expression: String,
     pub enable: bool,
+    pub right_now: bool,
+    pub run_now_and_schedule: bool,
 }
 
 pub enum CronInterval {
@@ -29,7 +33,28 @@ impl CronConfig {
             schedule,
             expression: expr,
             enable: true,
+            right_now: false,
+            run_now_and_schedule: false,
         }
+    }
+
+    /// 立即执行一次，不经过 cron 调度
+    pub fn right_now() -> Self {
+        let config = Self {
+            schedule: Schedule::from_str("0 0 0 1 1 ? *").unwrap(), // 永远不会触发的表达式
+            expression: "right_now".to_string(),
+            enable: true,
+            right_now: true,
+            run_now_and_schedule: false,
+        };
+        config
+    }
+
+    /// 立即执行一次，后续继续按 cron 调度
+    pub fn run_now_and_schedule(mut self) -> Self {
+        self.run_now_and_schedule = true;
+        self.right_now = false;
+        self
     }
 
     /// Fluent Builder 入口
@@ -44,6 +69,7 @@ pub struct CronBuilder {
     hour: u32,
     minute: u32,
     day_of_month: Option<u32>,
+    run_now_and_schedule: bool,
 }
 
 impl CronBuilder {
@@ -53,6 +79,7 @@ impl CronBuilder {
             hour: 0,
             minute: 0,
             day_of_month: None,
+            run_now_and_schedule: false,
         }
     }
 
@@ -78,6 +105,12 @@ impl CronBuilder {
     /// 针对 Monthly 任务，设置几号 (1-31)
     pub fn on_day(mut self, day: u32) -> Self {
         self.day_of_month = Some(day);
+        self
+    }
+
+    /// 立即执行一次，后续继续按 cron 调度
+    pub fn run_now_and_schedule(mut self) -> Self {
+        self.run_now_and_schedule = true;
         self
     }
 
@@ -108,6 +141,8 @@ impl CronBuilder {
             }
             CronInterval::Custom(expr) => expr,
         };
-        CronConfig::new(expr)
+        let mut config = CronConfig::new(expr);
+        config.run_now_and_schedule = self.run_now_and_schedule;
+        config
     }
 }

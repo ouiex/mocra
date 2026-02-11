@@ -37,6 +37,8 @@ pub struct CronScheduler {
     schedule_cache: DashMap<String, (Arc<Schedule>, Arc<Vec<(String, String)>>)>,
     // Cache for cron configs to avoid repeated parsing
     cron_config_cache: DashMap<String, Option<CronConfig>>,
+    // Cache to avoid repeating right_now executions for same contexts
+    right_now_context_hash: DashMap<String, u64>,
     shutdown_rx: broadcast::Receiver<()>,
     last_version: AtomicU64,
     last_module_hash: AtomicU64,
@@ -59,6 +61,7 @@ impl CronScheduler {
             queue_manager,
             schedule_cache: DashMap::new(),
             cron_config_cache: DashMap::new(),
+            right_now_context_hash: DashMap::new(),
             shutdown_rx,
             last_version: AtomicU64::new(0),
             last_module_hash: AtomicU64::new(0),
@@ -201,9 +204,29 @@ impl CronScheduler {
                     if let Some(cron_config) = cron_config {
                          if !cron_config.enable {
                               self.schedule_cache.remove(name);
+                              self.right_now_context_hash.remove(name);
                               continue;
                           }
                           let contexts = context_map.remove(name).unwrap_or_default();
+                          if cron_config.right_now || cron_config.run_now_and_schedule {
+                               if contexts.is_empty() {
+                                    self.schedule_cache.remove(name);
+                                    self.right_now_context_hash.remove(name);
+                                    continue;
+                                }
+
+                                let context_hash = Self::hash_contexts(&contexts);
+                                let last_hash = self.right_now_context_hash.get(name).map(|entry| *entry.value());
+                                if last_hash != Some(context_hash) {
+                                    self.right_now_context_hash.insert(name.clone(), context_hash);
+                                    let now = Utc::now();
+                                    self.process_module_contexts(name, &contexts, now).await;
+                                }
+                                if cron_config.right_now {
+                                    self.schedule_cache.remove(name);
+                                    continue;
+                                }
+                            }
                           if !contexts.is_empty() {
                                let schedule = Arc::new(cron_config.schedule.clone());
                                self.schedule_cache.insert(name.clone(), (schedule, Arc::new(contexts)));
@@ -245,6 +268,20 @@ impl CronScheduler {
                 for key in stale_cron_keys {
                     self.cron_config_cache.remove(&key);
                 }
+                let stale_right_now_keys: Vec<String> = self
+                    .right_now_context_hash
+                    .iter()
+                    .filter_map(|entry| {
+                        if module_set.contains(entry.key()) {
+                            None
+                        } else {
+                            Some(entry.key().clone())
+                        }
+                    })
+                    .collect();
+                for key in stale_right_now_keys {
+                    self.right_now_context_hash.remove(&key);
+                }
                 
                 // Update local version after successful refresh
                 if remote_version > 0 {
@@ -272,6 +309,17 @@ impl CronScheduler {
         for (name, version) in sorted {
             name.hash(&mut hasher);
             version.hash(&mut hasher);
+        }
+        hasher.finish()
+    }
+
+    fn hash_contexts(contexts: &[(String, String)]) -> u64 {
+        let mut sorted: Vec<(String, String)> = contexts.to_vec();
+        sorted.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+        let mut hasher = DefaultHasher::new();
+        for (account, platform) in sorted {
+            account.hash(&mut hasher);
+            platform.hash(&mut hasher);
         }
         hasher.finish()
     }
