@@ -757,32 +757,21 @@ impl ProcessorTrait<Module, SyncBoxStream<'static, Request>> for TaskProcessor {
             match context.metadata.read().await.get("login_info") {
                 Some(m) => {
                     let m_clone = m.clone();
-                    let info_res = tokio::task::spawn_blocking(move || {
-                        serde_json::from_value::<LoginInfo>(m_clone)
-                    })
-                        .await
+                    let info_res = serde_json::from_value::<LoginInfo>(m_clone)
                         .map_err(|e| {
                             warn!("[TaskProcessor] spawn_blocking failed: {e}");
                             e
                         });
 
                     match info_res {
-                        Ok(Ok(info)) => Some(info),
-                        Ok(Err(e)) => {
-                            warn!("[TaskProcessor] invalid login_info, will retry: {e}");
-                            return ProcessorResult::RetryableFailure(
+                        Ok(info) => Some(info),
+                        Err(e) => {
+                            warn!("[TaskProcessor] spawn_blocking failed: {e}");
+                             return ProcessorResult::RetryableFailure(
                                 context
                                     .retry_policy
                                     .unwrap_or_default()
                                     .with_reason("not found login info".to_string()),
-                            );
-                        }
-                        Err(_) => {
-                            return ProcessorResult::RetryableFailure(
-                                context
-                                    .retry_policy
-                                    .unwrap_or_default()
-                                    .with_reason("spawn_blocking failed".to_string()),
                             );
                         }
                     }
