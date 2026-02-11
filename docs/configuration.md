@@ -136,6 +136,26 @@ compression_threshold = 1024
 | allow_rollback | 否 | bool | 是否允许回滚到旧值（默认 true）。 | Allow rollback to older values (default: true). |
 | envelope_enabled | 否 | bool | 是否启用版本化 envelope（默认 false）。 | Enable versioned envelope (default: false). |
 
+### [cookie]
+
+用于读取账号登录态 Cookie。未配置时将无法从 Redis 获取 Cookie。
+
+| Key | 必填 | 类型 | 说明（中文） | Description (EN) |
+| --- | --- | --- | --- | --- |
+| redis_host | 是 | string | Redis 主机地址。 | Redis host. |
+| redis_port | 是 | number | Redis 端口。 | Redis port. |
+| redis_db | 是 | number | Redis DB 索引。 | Redis DB index. |
+| redis_username | 否 | string | Redis 用户名。 | Redis username. |
+| redis_password | 否 | string | Redis 密码。 | Redis password. |
+| pool_size | 否 | number | 连接池大小。 | Connection pool size. |
+| tls | 否 | bool | 是否启用 TLS。 | Enable TLS. |
+
+Cookie 在 Redis 中的 key 格式：
+
+```
+{namespace}-{login-info}-{account}-{platform}
+```
+
 ### [channel_config.blob_storage]
 
 | Key | 必填 | 类型 | 说明（中文） | Description (EN) |

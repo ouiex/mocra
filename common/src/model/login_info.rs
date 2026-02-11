@@ -2,7 +2,8 @@ use crate::model::cookies::CookieItem;
 use crate::model::headers::HeaderItem;
 use crate::model::{Cookies, Headers};
 use serde::{Deserialize, Serialize};
-use cacheable::CacheAble;
+use cacheable::{CacheAble, CacheService};
+use errors::CacheError;
 
 #[derive(Debug, Clone, Serialize, Deserialize,)]
 pub struct LoginInfo {
@@ -40,6 +41,19 @@ impl From<&LoginInfo> for Headers {
     }
 }
 impl LoginInfo {
+    pub async fn sync_with_fallback(id: &str, sync: &CacheService) -> Result<Option<Self>, CacheError> {
+        if let Some(info) = LoginInfo::sync(id, sync).await? {
+            return Ok(Some(info));
+        }
+
+        let legacy_key = format!("{}-login-info-{id}", sync.namespace());
+        if let Some(bytes) = sync.get(&legacy_key).await? {
+            let val = serde_json::from_slice(&bytes).map_err(CacheError::Serde)?;
+            return Ok(Some(val));
+        }
+
+        Ok(None)
+    }
     pub fn get_extra<T>(&self, key: &str) -> Option<T>
     where
         T: Serialize + for<'de> Deserialize<'de>,

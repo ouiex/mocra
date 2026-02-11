@@ -9,8 +9,7 @@ use common::model::login_info::LoginInfo;
 use common::model::message::{ErrorTaskModel, ParserTaskModel, TaskModel};
 use common::model::{ModuleConfig, Response};
 use common::state::State;
-use cacheable::CacheAble;
-use cacheable::CacheService;
+use cacheable::{CacheAble, CacheService};
 use crate::task::module::Module;
 use crate::task::module_processor_with_chain::ModuleProcessorWithChain;
 use dashmap::DashMap;
@@ -55,7 +54,7 @@ impl TaskFactory {
     }
     pub async fn login_info(&self, id: &str) -> Option<LoginInfo> {
         if let Some(sync) = self.cookie_service.as_ref(){
-            return LoginInfo::sync(id, sync)
+            return LoginInfo::sync_with_fallback(id, sync)
                 .await
                 .ok()
                 .flatten()
