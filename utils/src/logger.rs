@@ -581,12 +581,12 @@ pub async fn init_logger(config: LoggerConfig) -> Result<(), Box<dyn std::error:
         .with_max_level(log::LevelFilter::Trace)
         .init();
 
-    let configured_level = config.level.to_lowercase();
-    let filter = if configured_level != DEFAULT_APP_LOG_LEVEL {
-        EnvFilter::try_new(&configured_level).unwrap_or_else(|_| EnvFilter::new("info"))
+    let configured_filter = normalize_filter_string(&config.level);
+    let filter = if configured_filter != DEFAULT_APP_LOG_LEVEL {
+        EnvFilter::try_new(&configured_filter).unwrap_or_else(|_| EnvFilter::new("info"))
     } else {
         EnvFilter::try_from_default_env()
-            .or_else(|_| EnvFilter::try_new(&configured_level))
+            .or_else(|_| EnvFilter::try_new(&configured_filter))
             .unwrap_or_else(|_| EnvFilter::new("info"))
     };
 
@@ -645,8 +645,17 @@ fn build_sinks(config: &LoggerConfig) -> Result<Vec<Arc<dyn LogSink>>, LogError>
     Ok(sinks)
 }
 
-fn parse_level(level: Option<&str>) -> Option<Level> {
-    level.and_then(|lvl| lvl.parse::<Level>().ok())
+fn normalize_filter_string(filter: &str) -> String {
+    let trimmed = filter.trim();
+    if trimmed.contains('=') || trimmed.contains(',') || trimmed.contains(';') {
+        return trimmed.to_string();
+    }
+    match trimmed.to_lowercase().as_str() {
+        "all" => "trace".to_string(),
+        "fatal" => "error".to_string(),
+        "warning" => "warn".to_string(),
+        other => other.to_string(),
+    }
 }
 
 fn base_level_from_filter(level: &str) -> Option<Level> {
