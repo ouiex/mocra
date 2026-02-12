@@ -51,20 +51,20 @@ impl<'de> Deserialize<'de> for CookieItem {
             value: Option<String>,
             domain: Option<String>,
             path: Option<String>,
-            secure: Option<bool>,
-            #[serde(rename = "httpOnly")]
-            http_only: Option<bool>,
             // 我们自己支持两种来源：expires(秒) 或 expirationDate(字符串/数字)
             // 允许 number/string/null；统一解析为秒
             expires: Option<serde_json::Value>,
             #[serde(rename = "expirationDate")]
             expiration_date: Option<serde_json::Value>,
+            max_age: Option<serde_json::Value>,
+            secure: Option<bool>,
+            #[serde(rename = "httpOnly")]
+            http_only: Option<bool>,
             // 兼容 max-age / maxAge 两种写法
             #[serde(rename = "max-age")]
             max_age_dash: Option<serde_json::Value>,
             #[serde(rename = "maxAge")]
             max_age_camel: Option<serde_json::Value>,
-            max_age: Option<serde_json::Value>,
         }
 
         fn parse_expiration_value(v: &serde_json::Value) -> Option<f64> {

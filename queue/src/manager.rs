@@ -40,9 +40,6 @@ fn format_payload_preview(bytes: &[u8]) -> String {
     hex
 }
 
-fn format_payload_utf8_full(bytes: &[u8]) -> String {
-    String::from_utf8_lossy(bytes).to_string()
-}
 
 fn default_headers() -> HashMap<String, String> {
     let mut headers = HashMap::new();
@@ -441,19 +438,16 @@ impl QueueManager {
                             }
                             Err(e) => {
                                 let payload_len = msg.payload.len();
-                                let preview = format_payload_preview(msg.payload.as_slice());
                                 let codec = match queue_codec() {
                                     QueueCodec::Json => "json",
                                     QueueCodec::Msgpack => "msgpack",
                                 };
-                                let utf8_full = format_payload_utf8_full(msg.payload.as_slice());
+                            
                                 error!(
-                                    "Failed to deserialize message from topic {} (codec={}, bytes={}, preview={}, utf8_full={}): {}",
+                                    "Failed to deserialize message from topic {} (codec={}, bytes={}): {}",
                                     topic,
                                     codec,
                                     payload_len,
-                                    preview,
-                                    utf8_full,
                                     e
                                 );
                                 if let Err(e) = msg.nack("Deserialization failed").await {
