@@ -21,9 +21,15 @@ pub mod js_v8{
 
 #[cfg(feature = "polars")]
 pub mod polars {
-    pub use ::polars::*;
-    pub use ::polars_lazy::*;
-    pub use ::polars_ops::*;
+    pub mod polars {
+        pub use ::polars::*;
+    }
+    pub mod polars_lazy {
+        pub use ::polars_lazy::*;
+    }
+    pub mod polars_ops {
+        pub use ::polars_ops::*;
+    }
 }
 
 #[cfg(feature = "mimalloc")]
