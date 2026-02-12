@@ -282,6 +282,49 @@ impl Cookies {
             .collect::<Vec<String>>()
             .join(";")
     }
+
+    pub fn cookie_header_for_url(&self, url: &Url) -> Option<String> {
+        if self.cookies.is_empty() {
+            return None;
+        }
+
+        if let Ok(store) = CookieStore::try_from(self) {
+            let pairs = store
+                .get_request_values(url)
+                .map(|(name, value)| format!("{}={}", name, value))
+                .collect::<Vec<_>>();
+            if !pairs.is_empty() {
+                return Some(pairs.join("; "));
+            }
+        }
+
+        let host = url.host_str()?.to_ascii_lowercase();
+        let pairs = self
+            .cookies
+            .iter()
+            .filter_map(|cookie| {
+                let domain = cookie
+                    .domain
+                    .trim()
+                    .trim_start_matches('.')
+                    .to_ascii_lowercase();
+                if domain.is_empty() {
+                    return None;
+                }
+                if host == domain || host.ends_with(&format!(".{domain}")) {
+                    Some(format!("{}={}", cookie.name, cookie.value))
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+
+        if pairs.is_empty() {
+            None
+        } else {
+            Some(pairs.join("; "))
+        }
+    }
 }
 impl From<Cookies> for Jar {
     fn from(value: Cookies) -> Self {

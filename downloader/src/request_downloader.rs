@@ -402,18 +402,20 @@ impl RequestDownloader {
             }
         };
 
+        let cookie_header = if request.cookies.cookies.is_empty() {
+            None
+        } else {
+            request.cookies.cookie_header_for_url(&url)
+        };
+
         let mut request_builder = client.request(method, url);
         
         // Set Headers
         let headers: HeaderMap = HeaderMap::from(&request.headers);
         request_builder = request_builder.headers(headers);
         
-        // Set Cookies manually
-        if !request.cookies.cookies.is_empty() {
-            let cookie_str = request.cookies.cookies.iter()
-                .map(|c| format!("{}={}", c.name, c.value))
-                .collect::<Vec<_>>()
-                .join("; ");
+        // Set Cookies manually (filtered by target URL domain/path rules)
+        if let Some(cookie_str) = cookie_header {
             request_builder = request_builder.header(reqwest::header::COOKIE, cookie_str);
         }
 
