@@ -22,6 +22,7 @@ use tokio::sync::mpsc::{Receiver, Sender};
 use utils::logger::LogModel;
 use rmp_serde as rmps;
 use once_cell::sync::OnceCell;
+use serde_path_to_error;
 
 const DEFAULT_COMPRESSION_THRESHOLD: usize = 1024;
 const BLOCKING_PAYLOAD_BYTES: usize = 64 * 1024;
@@ -59,8 +60,11 @@ fn msgpack_encode<T: serde::Serialize>(value: &T) -> Result<Vec<u8>, rmps::encod
     rmps::to_vec(value)
 }
 
-fn msgpack_decode<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T, rmps::decode::Error> {
-    rmps::from_slice(bytes)
+fn msgpack_decode<T: serde::de::DeserializeOwned>(
+    bytes: &[u8],
+) -> Result<T, serde_path_to_error::Error<rmps::decode::Error>> {
+    let mut deserializer = rmps::Deserializer::new(bytes);
+    serde_path_to_error::deserialize(&mut deserializer)
 }
 
 fn msgpack_encoded_size<T: serde::Serialize>(value: &T) -> Result<usize, rmps::encode::Error> {
