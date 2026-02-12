@@ -10,6 +10,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use tokio::sync::{Mutex, RwLock};
+use url::Url;
 #[derive(Clone)]
 pub struct RateLimitTracker {
     requests_in_window: u32,
@@ -233,8 +234,73 @@ impl PartialEq for ProxyEnum {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ProxyConfig {
     pub tunnel: Option<Vec<Tunnel>>,
+    pub direct: Option<Vec<DirectProxy>>,
     pub ip_provider: Option<Vec<IpProvider>>,
     pub pool_config: Option<PoolConfig>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct DirectProxy {
+    pub name: Option<String>,
+    pub url: String,
+    pub rate_limit: Option<f32>,
+    pub expire_time: Option<String>,
+}
+
+impl DirectProxy {
+    fn to_tunnel(&self, index: usize) -> Result<Tunnel> {
+        let parsed = Url::parse(&self.url)
+            .map_err(|e| ProxyError::InvalidConfig(format!("invalid direct proxy url '{}': {e}", self.url).into()))?;
+
+        let scheme = parsed.scheme().to_ascii_lowercase();
+        let tunnel_type = match scheme.as_str() {
+            "http" => "http",
+            "https" => "https",
+            // websocket 代理统一归一到 http/https 代理协议
+            "ws" => "http",
+            "wss" => "https",
+            _ => {
+                return Err(ProxyError::InvalidConfig(
+                    format!(
+                        "unsupported direct proxy scheme '{}', expected http/https/ws/wss",
+                        scheme
+                    )
+                    .into(),
+                )
+                .into())
+            }
+        }
+        .to_string();
+
+        let host = parsed
+            .host_str()
+            .ok_or_else(|| ProxyError::InvalidConfig(format!("direct proxy missing host: {}", self.url).into()))?;
+        let port = parsed
+            .port_or_known_default()
+            .ok_or_else(|| ProxyError::InvalidConfig(format!("direct proxy missing port: {}", self.url).into()))?;
+
+        let username = if parsed.username().is_empty() {
+            None
+        } else {
+            Some(parsed.username().to_string())
+        };
+
+        Ok(Tunnel {
+            name: self
+                .name
+                .clone()
+                .unwrap_or_else(|| format!("direct_{}", index)),
+            endpoint: format!("{}:{}", host, port),
+            username,
+            password: parsed.password().map(|x| x.to_string()),
+            tunnel_type,
+            expire_time: self
+                .expire_time
+                .clone()
+                .unwrap_or_else(|| "2099-12-31T23:59:59Z".to_string()),
+            rate_limit: self.rate_limit.unwrap_or(10.0),
+        })
+    }
 }
 
 impl ProxyConfig {
@@ -248,6 +314,21 @@ impl ProxyConfig {
 
         if let Some(tunnels) = &self.tunnel {
             builder = builder.with_tunnels(tunnels.clone());
+        }
+
+        if let Some(direct) = &self.direct {
+            let mut converted = Vec::new();
+            for (idx, item) in direct.iter().enumerate() {
+                match item.to_tunnel(idx) {
+                    Ok(tunnel) => converted.push(tunnel),
+                    Err(e) => {
+                        log::warn!("[ProxyConfig] skip invalid direct proxy '{}': {}", item.url, e);
+                    }
+                }
+            }
+            if !converted.is_empty() {
+                builder = builder.with_tunnels(converted);
+            }
         }
 
         if let Some(providers) = &self.ip_provider {

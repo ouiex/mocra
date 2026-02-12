@@ -43,6 +43,11 @@ max_errors = 3
 health_check_interval_secs = 300
 refill_threshold = 0.3
 
+[[proxy.direct]]
+name = "local_https_proxy"
+url = "https://127.0.0.1:8888"
+rate_limit = 50
+
 [[proxy.tunnel]]
 name = "default_tunnel"
 endpoint = "127.0.0.1:7890"
@@ -186,8 +191,24 @@ crawler_local:cookie:login_info:benchmark-test
 | Key | 必填 | 类型 | 说明（中文） | Description (EN) |
 | --- | --- | --- | --- | --- |
 | tunnel | 否 | array | 静态隧道代理列表（见 `[[proxy.tunnel]]`）。 | Static tunnel proxies (see `[[proxy.tunnel]]`). |
+| direct | 否 | array | 直接 URL 代理列表（见 `[[proxy.direct]]`）。支持 `http/https/ws/wss`。 | Direct URL proxy list (see `[[proxy.direct]]`). Supports `http/https/ws/wss`. |
 | ip_provider | 否 | array | 动态 IP 代理提供商列表（见 `[[proxy.ip_provider]]`）。 | Dynamic IP provider list (see `[[proxy.ip_provider]]`). |
 | pool_config | 否 | object | 代理池策略（见 `[proxy.pool_config]`）。 | Proxy pool strategy (see `[proxy.pool_config]`). |
+
+#### [[proxy.direct]]
+
+用于直接声明单个代理 URL（例如 `https://127.0.0.1:8888`），无需配置 provider。
+
+| Key | 必填 | 类型 | 说明（中文） | Description (EN) |
+| --- | --- | --- | --- | --- |
+| name | 否 | string | 代理名称，不填自动生成。 | Proxy name, auto-generated if omitted. |
+| url | 是 | string | 代理 URL，支持 `http://`、`https://`、`ws://`、`wss://`。 | Proxy URL supporting `http://`, `https://`, `ws://`, `wss://`. |
+| rate_limit | 否 | number | 该代理 QPS 上限（默认 10）。 | Per-proxy QPS limit (default 10). |
+| expire_time | 否 | string | 过期时间（RFC3339，默认远期时间）。 | Expire time (RFC3339, far-future by default). |
+
+说明：
+- HTTP/HTTPS 请求可直接通过该 URL 代理。
+- WebSocket (`ws`/`wss`) 也支持；内部会按协议自动映射为可用的 HTTP/HTTPS 代理通道。
 
 #### [[proxy.tunnel]]
 
