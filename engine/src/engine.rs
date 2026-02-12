@@ -1041,7 +1041,7 @@ impl Engine {
                         Ok(true) => {}
                     }
                     
-                    // Ensure lock is released even if panic?
+                    // Ensure lock is released even if panicked?
                     // Rust async drop doesn't guarantee this easily without a Guard struct.
                     // For now, relies on TTL (5m).
 
