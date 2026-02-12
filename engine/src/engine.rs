@@ -120,7 +120,7 @@ impl Engine {
         ack_fn: &mut Option<queue::AckFn>,
         nack_fn: &mut Option<queue::NackFn>,
     ) where
-        T: serde::Serialize + queue::Identifiable + Send + Sync,
+        T: serde::Serialize + Identifiable + Send + Sync,
     {
         let decision = policy_resolver.resolve_with_error(
             "engine",
@@ -181,7 +181,7 @@ impl Engine {
         ack_fn: &mut Option<queue::AckFn>,
         nack_fn: &mut Option<queue::NackFn>,
     ) where
-        T: serde::Serialize + queue::Identifiable + Send + Sync,
+        T: serde::Serialize + Identifiable + Send + Sync,
     {
         let reason = retry_policy
             .reason
@@ -293,7 +293,7 @@ impl Engine {
             .iter()
             .filter_map(|output| match output {
                 common::model::logger_config::LogOutputConfig::Console {} => {
-                    Some(AppLogOutputConfig::Console {})
+                    Some(AppLogOutputConfig::Console)
                 }
                 common::model::logger_config::LogOutputConfig::File {
                     path,
@@ -309,7 +309,7 @@ impl Engine {
                     {
                         eprintln!("logger.outputs.mq.format only supports json, got {format}");
                     }
-                    Some(AppLogOutputConfig::Mq {})
+                    Some(AppLogOutputConfig::Mq)
                 }
             })
             .collect();
@@ -409,7 +409,7 @@ impl Engine {
         };
         
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(5));
+            let mut interval = tokio::time::interval(Duration::from_secs(5));
             loop {
                 tokio::select! {
                     _ = interval.tick() => {
@@ -782,7 +782,7 @@ impl Engine {
         info!("Starting node registry heartbeat");
         let registry = self.node_registry.clone();
         let mut shutdown = self.shutdown_tx.subscribe();
-        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(Self::NODE_HEARTBEAT_INTERVAL_SECS));
+        let mut interval = tokio::time::interval(Duration::from_secs(Self::NODE_HEARTBEAT_INTERVAL_SECS));
         
         let hostname = std::env::var("COMPUTERNAME").or(std::env::var("HOSTNAME")).unwrap_or("unknown".to_string());
         let ip = get_primary_local_ip().map(|ip| ip.to_string()).unwrap_or_else(|_| "127.0.0.1".to_string());
@@ -809,9 +809,9 @@ impl Engine {
         execute_fn: F,
     )
     where
-        T: queue::Identifiable + Send + 'static,
+        T: Identifiable + Send + 'static,
         F: Fn(T) -> Fut + Send + Sync + 'static + Clone,
-        Fut: std::future::Future<Output = ()> + Send,
+        Fut: Future<Output = ()> + Send,
     {
         let concurrency = self.state.config.read().await.crawler.task_concurrency.unwrap_or(2048);
         
@@ -1029,7 +1029,7 @@ impl Engine {
                     }
                     
                     // 2. Try to acquire lock to prevent concurrent processing
-                    match state.cache_service.set_nx(&lock_key, "1".as_bytes(), Some(std::time::Duration::from_secs(300))).await {
+                    match state.cache_service.set_nx(&lock_key, "1".as_bytes(), Some(Duration::from_secs(300))).await {
                         Ok(false) => {
                             // Locked by another worker
                             return;
@@ -1054,7 +1054,7 @@ impl Engine {
                         }
                         
                         // Mark as processed (24h TTL)
-                        let _ = state.cache_service.set(&processed_key, "1".as_bytes(), Some(std::time::Duration::from_secs(86400))).await;
+                        let _ = state.cache_service.set(&processed_key, "1".as_bytes(), Some(Duration::from_secs(86400))).await;
                         // Release lock
                         let _ = state.cache_service.del(&lock_key).await;
 
@@ -1247,7 +1247,7 @@ impl Engine {
         let mut shutdown = self.shutdown_tx.subscribe();
 
         // 每30秒进行一次健康检查
-        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
+        let mut interval = tokio::time::interval(Duration::from_secs(30));
 
         loop {
             tokio::select! {

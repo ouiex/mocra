@@ -275,10 +275,7 @@ impl FileSink {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let file_prefix = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("app");
+        let file_prefix = path.file_name().and_then(|n| n.to_str()).unwrap_or("app");
         let file_appender = tracing_appender::rolling::Builder::new()
             .rotation(rotation)
             .filename_prefix(file_prefix)
@@ -333,11 +330,10 @@ impl LogSink for DynamicMqSink {
     }
 
     fn emit(&self, record: &LogRecord) -> Result<(), LogError> {
-        let Some(dynamic) = DYNAMIC_SENDER
-            .read()
-            .ok()
-            .and_then(|g| g.as_ref().map(|d| (d.sender.clone(), d.queue_level, d.capacity)))
-        else {
+        let Some(dynamic) = DYNAMIC_SENDER.read().ok().and_then(|g| {
+            g.as_ref()
+                .map(|d| (d.sender.clone(), d.queue_level, d.capacity))
+        }) else {
             metrics::counter!("log_dropped_total", "sink" => self.name(), "reason" => "sender_unset").increment(1);
             return Ok(());
         };
@@ -352,7 +348,10 @@ impl LogSink for DynamicMqSink {
             .or_else(|| record.phase.clone())
             .unwrap_or_else(|| "info".to_string());
         let log_model = LogModel {
-            task_id: record.task_id.clone().unwrap_or_else(|| "unknown".to_string()),
+            task_id: record
+                .task_id
+                .clone()
+                .unwrap_or_else(|| "unknown".to_string()),
             request_id: record.request_id.as_ref().and_then(|s| s.parse().ok()),
             status,
             level: record.level_name.clone(),
@@ -468,14 +467,12 @@ pub fn clear_log_sender() {
 
 #[derive(Debug, Clone)]
 pub enum LogOutputConfig {
-    Console {
-    },
+    Console,
     File {
         path: PathBuf,
         rotation: Option<String>,
     },
-    Mq {
-    },
+    Mq,
 }
 
 #[derive(Debug, Clone)]
@@ -542,8 +539,7 @@ impl Default for LoggerConfig {
     }
 }
 
-const DEFAULT_APP_LOG_LEVEL: &str =
-    "info,engine=debug;sqlx=warn,sea_orm=warn";
+const DEFAULT_APP_LOG_LEVEL: &str = "info,engine=debug;sqlx=warn,sea_orm=warn";
 
 static LOGGER_INITIALIZED: AtomicBool = AtomicBool::new(false);
 
@@ -628,7 +624,11 @@ fn build_sinks(config: &LoggerConfig) -> Result<Vec<Arc<dyn LogSink>>, LogError>
                     Some("minutely") => Rotation::MINUTELY,
                     _ => Rotation::DAILY,
                 };
-                sinks.push(Arc::new(FileSink::new(path.as_path(), base_level, rotation)?));
+                sinks.push(Arc::new(FileSink::new(
+                    path.as_path(),
+                    base_level,
+                    rotation,
+                )?));
             }
             LogOutputConfig::Mq {} => {
                 sinks.push(Arc::new(DynamicMqSink::new(base_level)));
@@ -835,8 +835,16 @@ mod tests {
 
         let _ = init_logger(config).await;
 
-        info!(task_id = "test-task", status = "success", "Info message should not go to queue");
-        warn!(task_id = "test-task", status = "warning", "Warning message for queue");
+        info!(
+            task_id = "test-task",
+            status = "success",
+            "Info message should not go to queue"
+        );
+        warn!(
+            task_id = "test-task",
+            status = "warning",
+            "Warning message for queue"
+        );
 
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 

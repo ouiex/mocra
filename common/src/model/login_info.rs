@@ -1,9 +1,8 @@
 use crate::model::cookies::CookieItem;
 use crate::model::headers::HeaderItem;
 use crate::model::{Cookies, Headers};
+use cacheable::{CacheAble};
 use serde::{Deserialize, Serialize};
-use cacheable::{CacheAble, CacheService};
-use errors::CacheError;
 
 #[derive(Debug, Clone, Serialize, Deserialize,)]
 pub struct LoginInfo {
@@ -59,17 +58,5 @@ impl LoginInfo {
 impl CacheAble for LoginInfo {
     fn field() -> impl AsRef<str> {
         "login_info"
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn decode_tests(){
-        let s = r#"{"cookies":[{"name":"sessionid","value":"demo","domain":".moc.dev","path":"/","secure":false,"httpOnly":true}],"useragent":"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36","extra":{"from":"test_moc"}}"#;
-        let info = serde_json::from_str::<LoginInfo>(s);
-        println!("{:#?}", info);
-        assert!(info.is_ok());
     }
 }

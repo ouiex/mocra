@@ -4,8 +4,7 @@ use super::config::{KafkaConfig, RedisConfig};
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum LogOutputConfig {
-    Console {
-    },
+    Console,
     File {
         path: String,
         rotation: Option<String>,
