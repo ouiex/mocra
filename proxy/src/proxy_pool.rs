@@ -248,12 +248,12 @@ pub struct DirectProxy {
 }
 
 impl DirectProxy {
-    fn to_tunnel(&self, index: usize) -> Result<Tunnel> {
+    fn to_static_ip_proxy(&self, index: usize) -> Result<StaticIpProxyEntry> {
         let parsed = Url::parse(&self.url)
             .map_err(|e| ProxyError::InvalidConfig(format!("invalid direct proxy url '{}': {e}", self.url).into()))?;
 
         let scheme = parsed.scheme().to_ascii_lowercase();
-        let tunnel_type = match scheme.as_str() {
+        let proxy_type = match scheme.as_str() {
             "http" => "http",
             "https" => "https",
             // websocket 代理统一归一到 http/https 代理协议
@@ -285,21 +285,34 @@ impl DirectProxy {
             Some(parsed.username().to_string())
         };
 
-        Ok(Tunnel {
-            name: self
+        Ok(StaticIpProxyEntry {
+            provider_name: self
                 .name
                 .clone()
                 .unwrap_or_else(|| format!("direct_{}", index)),
-            endpoint: format!("{}:{}", host, port),
-            username,
-            password: parsed.password().map(|x| x.to_string()),
-            tunnel_type,
-            expire_time: self
-                .expire_time
-                .clone()
-                .unwrap_or_else(|| "2099-12-31T23:59:59Z".to_string()),
+            proxy: IpProxy {
+                ip: host.to_string(),
+                port,
+                username,
+                password: parsed.password().map(|x| x.to_string()),
+                proxy_type: Some(proxy_type),
+                rate_limit: self.rate_limit.unwrap_or(10.0),
+            },
             rate_limit: self.rate_limit.unwrap_or(10.0),
         })
+    }
+}
+
+#[derive(Debug, Clone)]
+struct StaticIpProxyEntry {
+    provider_name: String,
+    proxy: IpProxy,
+    rate_limit: f32,
+}
+
+impl StaticIpProxyEntry {
+    fn into_proxy_item(self) -> ProxyItem {
+        ProxyItem::new_for_static_ip_proxy(self.proxy, self.provider_name, self.rate_limit)
     }
 }
 
@@ -317,18 +330,7 @@ impl ProxyConfig {
         }
 
         if let Some(direct) = &self.direct {
-            let mut converted = Vec::new();
-            for (idx, item) in direct.iter().enumerate() {
-                match item.to_tunnel(idx) {
-                    Ok(tunnel) => converted.push(tunnel),
-                    Err(e) => {
-                        log::warn!("[ProxyConfig] skip invalid direct proxy '{}': {}", item.url, e);
-                    }
-                }
-            }
-            if !converted.is_empty() {
-                builder = builder.with_tunnels(converted);
-            }
+            builder = builder.with_direct_proxies(direct.clone());
         }
 
         if let Some(providers) = &self.ip_provider {
@@ -374,6 +376,7 @@ pub trait IpProxyLoader: Send + Sync {
 pub struct ProxyPoolBuilder {
     config: PoolConfig,
     tunnels: Vec<Tunnel>,
+    direct_proxies: Vec<DirectProxy>,
     ip_providers: Vec<IpProvider>,
 }
 
@@ -382,6 +385,7 @@ impl ProxyPoolBuilder {
         Self {
             config,
             tunnels: Vec::new(),
+            direct_proxies: Vec::new(),
             ip_providers: Vec::new(),
         }
     }
@@ -401,10 +405,25 @@ impl ProxyPoolBuilder {
         self
     }
 
+    pub fn with_direct_proxies(mut self, proxies: Vec<DirectProxy>) -> Self {
+        self.direct_proxies = proxies;
+        self
+    }
+
     pub async fn build(self) -> ProxyPool {
         let pool = ProxyPool::new(self.config);
         for tunnel in &self.tunnels {
             pool.add_tunnel(tunnel.clone()).await;
+        }
+        for (idx, direct) in self.direct_proxies.into_iter().enumerate() {
+            match direct.to_static_ip_proxy(idx) {
+                Ok(entry) => {
+                    pool.add_static_ip_proxy(entry.into_proxy_item()).await;
+                }
+                Err(e) => {
+                    log::warn!("[ProxyConfig] skip invalid direct proxy '{}': {}", direct.url, e);
+                }
+            }
         }
         for provider in &self.ip_providers {
             let loader = crate::proxy_impl::build_ip_proxy_loader(provider.clone());
@@ -469,6 +488,23 @@ impl ProxyItem {
             success_rate: 1.0,
             rate_limit_tracker: RateLimitTracker::new(),
             provider_rate_limit: ip_provider.rate_limit, // 使用提供商的限速值
+        }
+    }
+
+    pub fn new_for_static_ip_proxy(ip_proxy: IpProxy, provider_name: String, rate_limit: f32) -> Self {
+        let expire_time = Duration::from_secs(360 * 24 * 60 * 60)
+            + SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
+        Self {
+            proxy: ProxyEnum::IpProxy(ip_proxy),
+            error_count: 0,
+            success_count: 0,
+            last_used: None,
+            expire_time,
+            provider_name,
+            response_time: None,
+            success_rate: 1.0,
+            rate_limit_tracker: RateLimitTracker::new(),
+            provider_rate_limit: rate_limit,
         }
     }
 
@@ -649,6 +685,14 @@ impl ProxyPool {
         ip_providers.insert(name.clone(), Arc::new(provider));
         let mut pools = self.pools.write().await;
         pools.insert(name.clone(), Vec::new());
+    }
+
+    pub async fn add_static_ip_proxy(&self, item: ProxyItem) {
+        let mut pools = self.pools.write().await;
+        pools
+            .entry(item.provider_name.clone())
+            .or_insert_with(Vec::new)
+            .push(item);
     }
 
     /// 获取代理，支持负载均衡和故障转移
