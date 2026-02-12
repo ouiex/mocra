@@ -7,5 +7,6 @@ pub(crate) fn register_modules() -> Vec<Arc<dyn ModuleTrait>> {
     vec![
         test::moc_dev::MocDevModule::default_arc(),
         test::mock_dev::MockDevModule::default_arc(),
+        test::portal_live_trend::PortalLiveTrend::default_arc(),
     ]
 }

@@ -47,9 +47,9 @@ impl ModuleTrait for MocDevModule {
             request_count: 10,
         })]
     }
-    fn cron(&self) -> Option<CronConfig> {
-        Some(CronConfig::right_now())
-    }
+    // fn cron(&self) -> Option<CronConfig> {
+    //     Some(CronConfig::right_now())
+    // }
 }
 
 struct MocDevNode {

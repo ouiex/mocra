@@ -1,4 +1,4 @@
-name = "crawler_local"
+name = "lunaler_rpa"
 
 [api]
 port = 8905
@@ -9,6 +9,7 @@ database_schema = "base"
 pool_size = 50
 
 [download_config]
+# Increased pool size for 2000 concurrent requests
 pool_size = 800
 downloader_expire = 3600
 timeout = 30
@@ -18,6 +19,7 @@ enable_locker = false
 enable_rate_limit = false
 cache_ttl = 60
 wss_timeout = 60
+
 
 [cache]
 ttl = 60
@@ -29,16 +31,6 @@ redis_db = 0
 pool_size = 200
 
 [cookie]
-redis_host = "127.0.0.1"
-redis_port = 6379
-redis_db = 0
-pool_size = 50
-
-[sync]
-allow_rollback = true
-envelope_enabled = false
-
-[sync.redis]
 redis_host = "127.0.0.1"
 redis_port = 6379
 redis_db = 0

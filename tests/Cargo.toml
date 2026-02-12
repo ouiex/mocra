@@ -21,6 +21,8 @@ tracing.workspace = true
 sea-orm.workspace = true
 uuid.workspace = true
 log.workspace = true
+serde.workspace = true
+polars.workspace = true
 mimalloc = { version = "0.1", default-features = false }
 wiremock = "0.6"
 
