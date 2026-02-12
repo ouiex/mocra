@@ -7,10 +7,6 @@ use common::state::State;
 use engine::engine::Engine;
 use utils::logger;
 
-use mimalloc::MiMalloc;
-
-#[global_allocator]
-static GLOBAL: MiMalloc = MiMalloc;
 
 async fn build_engine_with_logger(enable_logger: bool) -> Engine {
     let config_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("config.toml");

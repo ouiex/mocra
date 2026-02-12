@@ -82,3 +82,10 @@ pub mod cacheable {
     pub use ::cacheable::CacheService;
 }
 
+#[cfg(feature = "polars")]
+pub mod polars {
+    pub use ::polars::*;
+    pub use ::polars_lazy::*;
+    pub use ::polars_ops::*;
+}
+

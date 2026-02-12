@@ -18,3 +18,17 @@ pub mod cacheable { pub use ::cacheable::*; }
 pub mod js_v8{
     pub use ::js_v8::*;
 }
+
+#[cfg(feature = "polars")]
+pub mod polars {
+    pub use ::polars::*;
+    pub use ::polars_lazy::*;
+    pub use ::polars_ops::*;
+}
+
+#[cfg(feature = "mimalloc")]
+use mimalloc::MiMalloc;
+
+#[cfg(feature = "mimalloc")]
+#[global_allocator]
+static GLOBAL: MiMalloc = MiMalloc;
