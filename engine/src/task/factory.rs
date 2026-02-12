@@ -54,11 +54,21 @@ impl TaskFactory {
     }
     pub async fn login_info(&self, id: &str) -> Option<LoginInfo> {
         if let Some(sync) = self.cookie_service.as_ref(){
-            return LoginInfo::sync(id, sync)
-                .await
-                .ok()
-                .flatten()
+            let result = LoginInfo::sync(id, sync).await;
+            match result {
+                Ok(None) => {
+                    let key = <LoginInfo as CacheAble>::cache_id(id, sync);
+                    log::warn!("cookie not found in redis: key={}", key);
+                }
+                Ok(Some(info))=>{
+                    return Some(info);
+                }
+                Err(err) => {
+                    log::warn!("cookies load error {}", err);
+                }
+            }
         }
+        log::warn!("cookie service not configured; skip login_info lookup for id={}", id);
         None
 
     }

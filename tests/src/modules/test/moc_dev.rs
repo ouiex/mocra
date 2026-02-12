@@ -7,6 +7,7 @@ use common::model::request::RequestMethod;
 use common::model::message::ParserData;
 use common::model::data::Data;
 use errors::Result;
+use log::{info, warn};
 
 use serde_json::{Map, Value};
 use std::sync::Arc;
@@ -16,7 +17,7 @@ pub struct MocDevModule {}
 #[async_trait]
 impl ModuleTrait for MocDevModule {
     fn should_login(&self) -> bool {
-        false
+        true
     }
 
     fn name(&self) -> String {
@@ -61,8 +62,13 @@ impl ModuleNodeTrait for MocDevNode {
         &self,
         _config: Arc<ModuleConfig>,
         _params: Map<String, Value>,
-        _login_info: Option<LoginInfo>,
+        login_info: Option<LoginInfo>,
     ) ->  Result<SyncBoxStream<'static, Request>> {
+        if let Some(info) = login_info.as_ref() {
+            info!("moc_dev login_info loaded: cookies={}, ua={}", info.cookies.len(), info.useragent);
+        } else {
+            warn!("moc_dev login_info missing");
+        }
         let mut requests = Vec::with_capacity(self.request_count);
         for i in 0..self.request_count {
             // Add cache-busting query parameter to avoid cached responses

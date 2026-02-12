@@ -153,8 +153,16 @@ compression_threshold = 1024
 Cookie 在 Redis 中的 key 格式：
 
 ```
-{namespace}-{login-info}-{account}-{platform}
+{namespace}:cookie:login_info:{account}-{platform}
 ```
+
+示例：
+
+```
+crawler_local:cookie:login_info:benchmark-test
+```
+
+说明：`{account}-{platform}` 与 `Task::id()` 一致。
 
 ### [channel_config.blob_storage]
 

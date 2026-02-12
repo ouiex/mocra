@@ -20,6 +20,7 @@ tokio.workspace = true
 tracing.workspace = true
 sea-orm.workspace = true
 uuid.workspace = true
+log.workspace = true
 mimalloc = { version = "0.1", default-features = false }
 wiremock = "0.6"
 

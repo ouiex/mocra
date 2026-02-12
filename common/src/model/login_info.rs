@@ -61,3 +61,15 @@ impl CacheAble for LoginInfo {
         "login_info"
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn decode_tests(){
+        let s = r#"'{"cookies":[{"name":"sessionid","value":"demo","domain":".moc.dev","path":"/","secure":false,"httpOnly":true}],"useragent":"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36"}'"#;
+        let info = serde_json::from_str::<LoginInfo>(s);
+        println!("{:#?}", info);
+        assert!(info.is_ok());
+    }
+}
