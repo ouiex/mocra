@@ -7,6 +7,11 @@ pub struct ProxyManager {
 }
 
 impl ProxyManager {
+    pub async fn from_proxy_config(proxy_config: &ProxyConfig) -> Result<Self> {
+        let pool = proxy_config.build_proxy_pool().await;
+        Ok(Self { pool })
+    }
+
     pub async fn from_config(config_str: &str) -> Result<Self> {
         let proxy_setting = ProxyConfig::load_from_toml(config_str)?;
         let pool = proxy_setting.build_proxy_pool().await;

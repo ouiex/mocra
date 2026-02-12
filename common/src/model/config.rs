@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use crate::policy::PolicyConfig;
+use proxy::ProxyConfig;
 use std::fmt;
 
 /// API Configuration
@@ -180,8 +181,6 @@ pub struct CrawlerConfig {
     pub module_locker_ttl: u64,
     /// Optional node ID (useful for stable node identity across restarts)
     pub node_id: Option<String>,
-    /// Path to proxy configuration file
-    pub proxy_path: Option<String>,
     /// Concurrency for task processor (JS execution)
     pub task_concurrency: Option<usize>,
     /// Concurrency for request publishing
@@ -301,6 +300,8 @@ pub struct Config {
     pub cookie: Option<RedisConfig>,
     /// Message channel configuration
     pub channel_config: ChannelConfig,
+    /// Proxy configuration
+    pub proxy: Option<ProxyConfig>,
     /// API server configuration
     pub api: Option<Api>,
     /// Event Bus configuration
@@ -365,5 +366,6 @@ mod tests {
         assert_eq!(config.name, "test_app");
         assert_eq!(config.db.url.as_deref(), Some("postgres://user:password@localhost:5432/db"));
         assert_eq!(config.crawler.request_max_retries, 3);
+        assert!(config.proxy.is_none());
     }
 }

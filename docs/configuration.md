@@ -36,6 +36,20 @@ pool_size = 50
 allow_rollback = true
 envelope_enabled = false
 
+[proxy.pool_config]
+min_size = 5
+max_size = 50
+max_errors = 3
+health_check_interval_secs = 300
+refill_threshold = 0.3
+
+[[proxy.tunnel]]
+name = "default_tunnel"
+endpoint = "127.0.0.1:7890"
+tunnel_type = "http"
+expire_time = "2099-12-31T23:59:59Z"
+rate_limit = 50
+
 [channel_config]
 minid_time = 12
 capacity = 5000
@@ -55,6 +69,7 @@ compression_threshold = 1024
 | crawler | 是 | object | 爬虫运行时行为与并发配置。 | Runtime behavior and concurrency for crawler. |
 | scheduler | 否 | object | 定时任务配置（Cron）。 | Scheduler configuration (Cron). |
 | sync | 否 | object | 分布式同步配置。 | Distributed sync settings. |
+| proxy | 否 | object | 代理池配置（内联在 config.toml）。 | Proxy pool config (inline in config.toml). |
 | cookie | 否 | object | Cookie 存储 Redis 配置。 | Redis config for cookie storage. |
 | channel_config | 是 | object | 队列/消息通道配置。 | Queue/channel settings. |
 | api | 否 | object | 内置 API 服务配置。 | Built-in API server settings. |
@@ -164,6 +179,51 @@ crawler_local:cookie:login_info:benchmark-test
 
 说明：`{account}-{platform}` 与 `Task::id()` 一致。
 
+### [proxy]
+
+用于内联配置代理，不再通过 `proxy_path` 读取外部文件。
+
+| Key | 必填 | 类型 | 说明（中文） | Description (EN) |
+| --- | --- | --- | --- | --- |
+| tunnel | 否 | array | 静态隧道代理列表（见 `[[proxy.tunnel]]`）。 | Static tunnel proxies (see `[[proxy.tunnel]]`). |
+| ip_provider | 否 | array | 动态 IP 代理提供商列表（见 `[[proxy.ip_provider]]`）。 | Dynamic IP provider list (see `[[proxy.ip_provider]]`). |
+| pool_config | 否 | object | 代理池策略（见 `[proxy.pool_config]`）。 | Proxy pool strategy (see `[proxy.pool_config]`). |
+
+#### [[proxy.tunnel]]
+
+| Key | 必填 | 类型 | 说明（中文） | Description (EN) |
+| --- | --- | --- | --- | --- |
+| name | 是 | string | 隧道名称。 | Tunnel name. |
+| endpoint | 是 | string | 代理地址（host:port）。 | Tunnel endpoint (host:port). |
+| username | 否 | string | 用户名。 | Username. |
+| password | 否 | string | 密码。 | Password. |
+| tunnel_type | 是 | string | 协议类型，如 `http`/`socks5`。 | Protocol type, e.g. `http`/`socks5`. |
+| expire_time | 是 | string | 过期时间（RFC3339）。 | Expire time (RFC3339). |
+| rate_limit | 是 | number | 每秒限速（QPS）。 | Per-tunnel rate limit (QPS). |
+
+#### [[proxy.ip_provider]]
+
+| Key | 必填 | 类型 | 说明（中文） | Description (EN) |
+| --- | --- | --- | --- | --- |
+| name | 是 | string | 提供商名称。 | Provider name. |
+| url | 是 | string | 拉取代理 IP 的接口地址。 | API URL for fetching proxy IPs. |
+| retry_codes | 是 | array[number] | 触发重试拉取的 HTTP 状态码。 | HTTP status codes triggering refresh. |
+| timeout | 是 | number | 提供商请求超时（秒）。 | Provider request timeout (seconds). |
+| rate_limit | 是 | number | 提供商请求限速（QPS）。 | Provider request rate limit (QPS). |
+| provider_expire_time | 否 | string | 提供商凭据过期时间（RFC3339）。 | Provider credential expire time (RFC3339). |
+| proxy_expire_time | 是 | number | 拉取到的代理 IP 过期时间（秒）。 | Expiration of fetched proxies (seconds). |
+| weight | 否 | number | 提供商权重（越大越优先）。 | Provider weight (higher = preferred). |
+
+#### [proxy.pool_config]
+
+| Key | 必填 | 类型 | 说明（中文） | Description (EN) |
+| --- | --- | --- | --- | --- |
+| min_size | 否 | number | 池最小容量（默认 5）。 | Minimum pool size (default 5). |
+| max_size | 否 | number | 池最大容量（默认 50）。 | Maximum pool size (default 50). |
+| max_errors | 否 | number | 单代理最大错误次数（默认 3）。 | Max errors per proxy (default 3). |
+| health_check_interval_secs | 否 | number | 健康检查间隔秒数（默认 300）。 | Health check interval in seconds (default 300). |
+| refill_threshold | 否 | number | 触发补充阈值比例（默认 0.3）。 | Refill threshold ratio (default 0.3). |
+
 ### [channel_config.blob_storage]
 
 | Key | 必填 | 类型 | 说明（中文） | Description (EN) |
@@ -194,7 +254,6 @@ crawler_local:cookie:login_info:benchmark-test
 | module_max_errors | 是 | number | 单模块最大错误数。 | Max errors per module. |
 | module_locker_ttl | 是 | number | 模块锁 TTL（秒）。 | Module lock TTL (seconds). |
 | node_id | 否 | string | 节点 ID（稳定身份）。 | Node ID for stable identity. |
-| proxy_path | 否 | string | 代理配置文件路径。 | Proxy config file path. |
 | task_concurrency | 否 | number | 本地处理器并发上限，影响任务消费速度。 | Max local processor concurrency; affects task consumption speed. |
 | publish_concurrency | 否 | number | 发布到队列的并发上限。 | Max concurrency for publishing into queues. |
 | dedup_ttl_secs | 否 | number | 请求去重 TTL（秒），用于去重窗口。 | Deduplication TTL (seconds) for request windowing. |

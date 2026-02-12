@@ -26,7 +26,6 @@ use common::processors::processor::{ProcessorContext, RetryPolicy};
 use proxy::ProxyManager;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::fs;
 use tokio::sync::{broadcast, watch};
 use common::interface::{DataMiddleware, DataStoreMiddleware, DownloadMiddleware, MiddlewareManager, ModuleTrait};
 use common::registry::NodeRegistry;
@@ -494,12 +493,9 @@ impl Engine {
 
         // Initialize DownloaderManager
         let downloader_manager = DownloaderManager::new(Arc::clone(&state)).await;
-        let proxy_manager = if let Some(path) = state.config.read().await.crawler.proxy_path.clone() {
-            let proxy_config = fs::read_to_string(path)
-                .await
-                .expect("Failed to read proxy config");
+        let proxy_manager = if let Some(proxy_config) = state.config.read().await.proxy.clone() {
             Some(Arc::new(
-                ProxyManager::from_config(&proxy_config)
+                ProxyManager::from_proxy_config(&proxy_config)
                     .await
                     .expect("Failed to create ProxyManager"),
             ))
