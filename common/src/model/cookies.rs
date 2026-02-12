@@ -45,28 +45,6 @@ impl<'de> Deserialize<'de> for CookieItem {
     where
         D: Deserializer<'de>,
     {
-        #[derive(Deserialize)]
-        struct RawItem {
-            name: Option<String>,
-            value: Option<String>,
-            domain: Option<String>,
-            path: Option<String>,
-            // 我们自己支持两种来源：expires(秒) 或 expirationDate(字符串/数字)
-            // 允许 number/string/null；统一解析为秒
-            expires: Option<serde_json::Value>,
-            #[serde(rename = "expirationDate")]
-            expiration_date: Option<serde_json::Value>,
-            max_age: Option<serde_json::Value>,
-            secure: Option<bool>,
-            #[serde(rename = "httpOnly")]
-            http_only: Option<bool>,
-            // 兼容 max-age / maxAge 两种写法
-            #[serde(rename = "max-age")]
-            max_age_dash: Option<serde_json::Value>,
-            #[serde(rename = "maxAge")]
-            max_age_camel: Option<serde_json::Value>,
-        }
-
         fn parse_expiration_value(v: &serde_json::Value) -> Option<f64> {
             match v {
                 serde_json::Value::Null => None,
@@ -115,27 +93,6 @@ impl<'de> Deserialize<'de> for CookieItem {
                 .map(|dt| dt.timestamp().max(0) as f64)
         }
 
-        let raw = RawItem::deserialize(deserializer)?;
-        let name = raw
-            .name
-            .ok_or_else(|| serde::de::Error::missing_field("name"))?;
-        let value = raw
-            .value
-            .ok_or_else(|| serde::de::Error::missing_field("value"))?;
-        let domain = raw.domain.unwrap_or_default();
-        let path = raw.path.unwrap_or_else(|| "/".to_string());
-        let secure = raw.secure.unwrap_or(false);
-        let http_only = raw.http_only; // 保持 Option<bool>
-
-        // 计算 expires（秒，u64）
-        let expires = match (raw.expires.as_ref(), raw.expiration_date.as_ref()) {
-            (Some(v), _) => parse_expiration_value(v),
-            (None, Some(v)) => parse_expiration_value(v),
-            _ => None,
-        }
-        .map(|secs| secs.floor().max(0.0) as u64);
-
-        // 计算 max_age：优先取输入中的 max-age / maxAge / max_age；若无且有 expires，则基于 expires 与当前时间差计算
         fn parse_seconds_value(v: &serde_json::Value) -> Option<f64> {
             match v {
                 serde_json::Value::Null => None,
@@ -145,31 +102,121 @@ impl<'de> Deserialize<'de> for CookieItem {
             }
         }
 
-        let max_age = raw
-            .max_age
-            .as_ref()
-            .and_then(parse_seconds_value)
-            .or_else(|| raw.max_age_dash.as_ref().and_then(parse_seconds_value))
-            .or_else(|| raw.max_age_camel.as_ref().and_then(parse_seconds_value))
-            .or_else(|| {
-                expires.map(|e| {
-                    let now = Utc::now().timestamp();
-                    let diff = (e as i64) - now;
-                    diff.max(0) as f64
-                })
-            })
-            .map(|secs| secs.floor().max(0.0) as u64);
+        struct CookieItemVisitor;
 
-        Ok(CookieItem {
-            name,
-            value,
-            domain,
-            path,
-            expires,
-            max_age,
-            secure,
-            http_only,
-        })
+        impl<'de> serde::de::Visitor<'de> for CookieItemVisitor {
+            type Value = CookieItem;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("CookieItem as map or seq")
+            }
+
+            fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+            where
+                A: serde::de::SeqAccess<'de>,
+            {
+                let name: String = seq
+                    .next_element()?
+                    .ok_or_else(|| serde::de::Error::invalid_length(0, &self))?;
+                let value: String = seq
+                    .next_element()?
+                    .ok_or_else(|| serde::de::Error::invalid_length(1, &self))?;
+                let domain: String = seq.next_element()?.unwrap_or_default();
+                let path: String = seq.next_element()?.unwrap_or_else(|| "/".to_string());
+                let expires: Option<u64> = seq.next_element()?.unwrap_or(None);
+                let max_age: Option<u64> = seq.next_element()?.unwrap_or(None);
+                let secure: bool = seq.next_element()?.unwrap_or(false);
+                let http_only: Option<bool> = seq.next_element()?.unwrap_or(None);
+
+                Ok(CookieItem {
+                    name,
+                    value,
+                    domain,
+                    path,
+                    expires,
+                    max_age,
+                    secure,
+                    http_only,
+                })
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: serde::de::MapAccess<'de>,
+            {
+                let mut name: Option<String> = None;
+                let mut value: Option<String> = None;
+                let mut domain: Option<String> = None;
+                let mut path: Option<String> = None;
+                let mut secure: Option<bool> = None;
+                let mut http_only: Option<bool> = None;
+                let mut expires: Option<serde_json::Value> = None;
+                let mut expiration_date: Option<serde_json::Value> = None;
+                let mut max_age: Option<serde_json::Value> = None;
+                let mut max_age_dash: Option<serde_json::Value> = None;
+                let mut max_age_camel: Option<serde_json::Value> = None;
+
+                while let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
+                        "name" => name = Some(map.next_value()?),
+                        "value" => value = Some(map.next_value()?),
+                        "domain" => domain = Some(map.next_value()?),
+                        "path" => path = Some(map.next_value()?),
+                        "secure" => secure = Some(map.next_value()?),
+                        "httpOnly" => http_only = Some(map.next_value()?),
+                        "expires" => expires = Some(map.next_value()?),
+                        "expirationDate" => expiration_date = Some(map.next_value()?),
+                        "max_age" => max_age = Some(map.next_value()?),
+                        "max-age" => max_age_dash = Some(map.next_value()?),
+                        "maxAge" => max_age_camel = Some(map.next_value()?),
+                        _ => {
+                            let _: serde::de::IgnoredAny = map.next_value()?;
+                        }
+                    }
+                }
+
+                let name = name.ok_or_else(|| serde::de::Error::missing_field("name"))?;
+                let value = value.ok_or_else(|| serde::de::Error::missing_field("value"))?;
+                let domain = domain.unwrap_or_default();
+                let path = path.unwrap_or_else(|| "/".to_string());
+                let secure = secure.unwrap_or(false);
+                let http_only = http_only;
+
+                let expires = match (expires.as_ref(), expiration_date.as_ref()) {
+                    (Some(v), _) => parse_expiration_value(v),
+                    (None, Some(v)) => parse_expiration_value(v),
+                    _ => None,
+                }
+                .map(|secs| secs.floor().max(0.0) as u64);
+
+                let max_age = max_age
+                    .as_ref()
+                    .and_then(parse_seconds_value)
+                    .or_else(|| max_age_dash.as_ref().and_then(parse_seconds_value))
+                    .or_else(|| max_age_camel.as_ref().and_then(parse_seconds_value))
+                    .or_else(|| {
+                        expires.map(|e| {
+                            let now = Utc::now().timestamp();
+                            let diff = (e as i64) - now;
+                            diff.max(0) as f64
+                        })
+                    })
+                    .map(|secs| secs.floor().max(0.0) as u64);
+
+                Ok(CookieItem {
+                    name,
+                    value,
+                    domain,
+                    path,
+                    expires,
+                    max_age,
+                    secure,
+                    http_only,
+                })
+            }
+        }
+
+        deserializer.deserialize_any(CookieItemVisitor)
     }
 }
 
