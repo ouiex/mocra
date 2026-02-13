@@ -49,8 +49,28 @@ pub struct Module {
     /// 挂起的执行上下文（可选）
     // Optional execution context to drive precise step selection (e.g., retry current step)
     pub pending_ctx: Option<common::model::ExecutionMark>,
+    /// 绑定的任务元数据（由 TaskModuleProcessor 统一注入）
+    pub bound_task_meta: Option<Map<String, serde_json::Value>>,
+    /// 绑定的登录信息（由 TaskModuleProcessor 统一注入）
+    pub bound_login_info: Option<LoginInfo>,
 }
 impl Module {
+    pub fn bind_task_context(
+        &mut self,
+        task_meta: Map<String, serde_json::Value>,
+        login_info: Option<LoginInfo>,
+    ) {
+        self.bound_task_meta = Some(task_meta);
+        self.bound_login_info = login_info;
+    }
+
+    pub fn runtime_task_context(&self) -> (Map<String, serde_json::Value>, Option<LoginInfo>) {
+        (
+            self.bound_task_meta.clone().unwrap_or_default(),
+            self.bound_login_info.clone(),
+        )
+    }
+
     /// 生成请求流
     ///
     /// 根据任务元数据和登录信息，调用内部处理器的 `execute_request` 生成请求流。
@@ -288,5 +308,109 @@ impl ModuleEntity {
     pub fn add_store_middleware(mut self, middleware: Arc<dyn DataStoreMiddleware>)->Self {
         self.store_middleware.push(middleware);
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_trait::async_trait;
+    use cacheable::CacheService;
+    use common::interface::ModuleTrait;
+    use common::model::entity::{AccountModel, PlatformModel};
+    use crate::task::module_processor_with_chain::ModuleProcessorWithChain;
+
+    struct LoginRequiredTestModule;
+
+    #[async_trait]
+    impl ModuleTrait for LoginRequiredTestModule {
+        fn should_login(&self) -> bool {
+            true
+        }
+
+        fn name(&self) -> String {
+            "login_required_test".to_string()
+        }
+
+        fn version(&self) -> i32 {
+            1
+        }
+
+        fn default_arc() -> Arc<dyn ModuleTrait>
+        where
+            Self: Sized,
+        {
+            Arc::new(Self)
+        }
+    }
+
+    fn build_test_module(module_impl: Arc<dyn ModuleTrait>) -> Module {
+        let now = chrono::Utc::now().naive_utc();
+        Module {
+            config: Arc::new(ModuleConfig::default()),
+            account: AccountModel {
+                id: 1,
+                name: "acc".to_string(),
+                modules: vec![],
+                enabled: true,
+                config: serde_json::json!({}),
+                priority: 1,
+                created_at: now,
+                updated_at: now,
+            },
+            platform: PlatformModel {
+                id: 1,
+                name: "pf".to_string(),
+                description: None,
+                base_url: None,
+                enabled: true,
+                config: serde_json::json!({}),
+                created_at: now,
+                updated_at: now,
+            },
+            error_times: 0,
+            finished: false,
+            data_middleware: vec![],
+            download_middleware: vec![],
+            module: module_impl,
+            locker: false,
+            locker_ttl: 0,
+            processor: ModuleProcessorWithChain::new(
+                "acc-pf-login_required_test",
+                Arc::new(CacheService::new(None, "test".to_string(), None, None)),
+                Uuid::now_v7(),
+                60,
+            ),
+            run_id: Uuid::now_v7(),
+            prefix_request: Uuid::nil(),
+            pending_ctx: None,
+            bound_task_meta: None,
+            bound_login_info: None,
+        }
+    }
+
+    #[test]
+    fn bind_task_context_roundtrip() {
+        let mut module = build_test_module(Arc::new(LoginRequiredTestModule));
+        let mut meta = Map::new();
+        meta.insert("k".to_string(), serde_json::json!("v"));
+        let login = LoginInfo::default();
+        module.bind_task_context(meta.clone(), Some(login.clone()));
+
+        let (bound_meta, bound_login) = module.runtime_task_context();
+        assert_eq!(bound_meta.get("k"), Some(&serde_json::json!("v")));
+        assert_eq!(bound_login.as_ref().map(|x| x.useragent.clone()), Some(login.useragent));
+    }
+
+    #[tokio::test]
+    async fn generate_returns_not_login_error_when_login_required_and_missing() {
+        let module = build_test_module(Arc::new(LoginRequiredTestModule));
+        match module.generate(Map::new(), None).await {
+            Ok(_) => panic!("should fail without login info"),
+            Err(err) => {
+                let msg = err.to_string();
+                assert!(msg.contains("module need login"), "unexpected error message: {msg}");
+            }
+        }
     }
 }

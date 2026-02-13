@@ -9,3 +9,4 @@ pub mod zombie;
 pub mod monitor;
 pub mod deduplication;
 pub mod runner;
+pub mod lua;

@@ -27,3 +27,39 @@ groups:
         annotations:
           summary: "Policy drop spike"
           description: "Ack/drop rate high for kind={{ $labels.kind }} event_type={{ $labels.event_type }}"
+
+      - alert: PtmFencingRejectHigh
+        expr: sum(rate(ptm_commit_total{result="fencing_reject"}[5m])) > 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "PTM fencing reject high"
+          description: "ptm_commit_total{result=fencing_reject} rate > 1/s for 5m"
+
+      - alert: PtmCasConflictHigh
+        expr: sum(rate(ptm_commit_total{result="cas_conflict"}[5m])) > 2
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "PTM CAS conflict high"
+          description: "ptm_commit_total{result=cas_conflict} rate > 2/s for 5m"
+
+      - alert: PtmClaimOutOfOrderHigh
+        expr: sum(rate(ptm_claim_total{result="out_of_order"}[5m])) > 2
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "PTM out-of-order claim high"
+          description: "ptm_claim_total{result=out_of_order} rate > 2/s for 5m"
+
+      - alert: PtmClaimStaleHigh
+        expr: sum(rate(ptm_claim_total{result="stale"}[5m])) > 2
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "PTM stale claim high"
+          description: "ptm_claim_total{result=stale} rate > 2/s for 5m"

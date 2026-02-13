@@ -14,6 +14,7 @@ use common::model::download_config::DownloadConfig;
 use common::model::{Request, Response};
 use common::state::State;
 use log::{debug, warn, error};
+use metrics::counter;
 use queue::QueueManager;
 use common::processors::processor::{
     ProcessorContext, ProcessorResult, ProcessorTrait, RetryPolicy,
@@ -24,6 +25,7 @@ use dashmap::DashMap;
 use std::time::{Instant, Duration};
 use common::status_tracker::ErrorDecision;
 use serde_json::json;
+use crate::chain::backpressure::{BackpressureSendState, send_with_backpressure};
 pub struct DownloadProcessor {
     pub(crate) downloader_manager: Arc<DownloaderManager>,
     pub(crate) state: Arc<State>,
@@ -414,6 +416,10 @@ impl ProcessorTrait<Option<Response>, ()> for ResponsePublishProcessor {
             input.id,
             input.module_id()
         );
+        let backpressure_retry_delay_ms = {
+            let cfg = self.state.config.read().await;
+            cfg.crawler.backpressure_retry_delay_ms
+        };
         // [LOG_OPTIMIZATION] debug!("[ResponsePublish] start queue send: request_id={}", id);
         let item = QueuedItem::new(input);
         
@@ -426,21 +432,57 @@ impl ProcessorTrait<Option<Response>, ()> for ResponsePublishProcessor {
                 debug!("[ResponsePublish] Sent response locally: request_id={}", id);
                 Ok(())
             }
-            Err(tokio::sync::mpsc::error::TrySendError::Full(returned_item)) 
-            | Err(tokio::sync::mpsc::error::TrySendError::Closed(returned_item)) => {
-                 self.queue_manager
-                    .get_response_push_channel()
-                    .send(returned_item)
-                    .await
-                    .map_err(|e| e.to_string())
+            Err(tokio::sync::mpsc::error::TrySendError::Full(returned_item)) => {
+                counter!("download_response_backpressure_total", "queue" => "local_response", "reason" => "queue_full").increment(1);
+                warn!(
+                    "[ResponsePublish] local response queue full, fallback to backend channel: request_id={}",
+                    id
+                );
+                let tx = self.queue_manager.get_response_push_channel();
+                match send_with_backpressure(&tx, returned_item).await {
+                    Ok(BackpressureSendState::Direct) => Ok(()),
+                    Ok(BackpressureSendState::RecoveredFromFull) => {
+                        counter!("download_response_backpressure_total", "queue" => "response", "reason" => "queue_full").increment(1);
+                        warn!(
+                            "[ResponsePublish] backend response queue full, waiting send: request_id={} remaining_capacity={}",
+                            id,
+                            tx.capacity()
+                        );
+                        Ok(())
+                    }
+                    Err(err) => {
+                        if err.after_full {
+                            counter!("download_response_backpressure_total", "queue" => "response", "reason" => "queue_full").increment(1);
+                            warn!(
+                                "[ResponsePublish] backend response queue full before close: request_id={} remaining_capacity={}",
+                                id,
+                                tx.capacity()
+                            );
+                        }
+                        counter!("download_response_backpressure_total", "queue" => "response", "reason" => "queue_closed").increment(1);
+                        Err("response queue closed".to_string())
+                    }
+                }
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(returned_item)) => {
+                counter!("download_response_backpressure_total", "queue" => "local_response", "reason" => "queue_closed").increment(1);
+                warn!(
+                    "[ResponsePublish] local response queue closed, fallback to backend channel: request_id={}",
+                    id
+                );
+                let tx = self.queue_manager.get_response_push_channel();
+                tx.send(returned_item).await.map_err(|e| e.to_string())
             }
         } {
             error!("Failed to send response to queue: {e}");
             warn!("[ResponsePublish] will retry due to queue send error");
+            let mut retry_policy = context.retry_policy.unwrap_or_default();
+            if let Some(delay_ms) = backpressure_retry_delay_ms {
+                retry_policy.retry_delay = delay_ms.max(1);
+            }
+            retry_policy.reason = Some(e);
             return ProcessorResult::RetryableFailure(
-                context
-                    .retry_policy
-                    .unwrap_or(RetryPolicy::default().with_reason(e)),
+                retry_policy,
             );
         }
         debug!("[ResponsePublish] end queue send: request_id={}", id);

@@ -297,6 +297,8 @@ impl TaskFactory {
                 run_id,
                 prefix_request: Default::default(),
                 pending_ctx: None,
+                bound_task_meta: None,
+                bound_login_info: None,
             };
             module_instance.add_step().await;
 

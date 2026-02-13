@@ -10,12 +10,13 @@ use crate::processors::event_processor::{EventAwareTypedChain, EventProcessorTra
 
 use async_trait::async_trait;
 use errors::{Error, ModuleError, Result};
-use common::model::login_info::LoginInfo;
-use common::model::message::{ErrorTaskModel, ParserTaskModel, TaskModel};
+use common::model::chain_key;
+use common::model::message::{ErrorTaskModel, ParserTaskModel, TaskModel, UnifiedTaskInput};
 use common::model::{ModuleConfig, Request};
 use common::state::State;
 
 use log::{debug, error, warn};
+use metrics::counter;
 use queue::{QueueManager, QueuedItem};
 use common::processors::processor::{
     ProcessorContext, ProcessorResult, ProcessorTrait, RetryPolicy,
@@ -26,8 +27,387 @@ use uuid::Uuid;
 use futures::stream::{StreamExt};
 use std::marker::PhantomData;
 use serde_json::json;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::deduplication::Deduplicator;
+use crate::lua::LuaScriptRegistry;
+use crate::chain::backpressure::{BackpressureSendState, send_with_backpressure};
+
+#[derive(Debug, Clone)]
+pub enum ChainDecision {
+    Continue,
+    RetryAfter {
+        delay: std::time::Duration,
+        action_applied: bool,
+    },
+    TerminateModule {
+        reason: String,
+        action_applied: bool,
+    },
+    TerminateTask {
+        reason: String,
+        action_applied: bool,
+    },
+}
+
+impl ChainDecision {
+    fn action_applied(&self) -> bool {
+        match self {
+            ChainDecision::Continue => false,
+            ChainDecision::RetryAfter { action_applied, .. } => *action_applied,
+            ChainDecision::TerminateModule { action_applied, .. } => *action_applied,
+            ChainDecision::TerminateTask { action_applied, .. } => *action_applied,
+        }
+    }
+}
+
+#[cfg(test)]
+mod decision_tests {
+    use super::ChainDecision;
+
+    #[test]
+    fn chain_decision_action_applied_flags_are_stable() {
+        let continue_decision = ChainDecision::Continue;
+        assert!(!continue_decision.action_applied());
+
+        let retry_lua = ChainDecision::RetryAfter {
+            delay: std::time::Duration::from_millis(1000),
+            action_applied: true,
+        };
+        let retry_fallback = ChainDecision::RetryAfter {
+            delay: std::time::Duration::from_millis(1000),
+            action_applied: false,
+        };
+        assert!(retry_lua.action_applied());
+        assert!(!retry_fallback.action_applied());
+
+        let terminate_module_lua = ChainDecision::TerminateModule {
+            reason: "module limit".to_string(),
+            action_applied: true,
+        };
+        let terminate_module_fallback = ChainDecision::TerminateModule {
+            reason: "module limit".to_string(),
+            action_applied: false,
+        };
+        assert!(terminate_module_lua.action_applied());
+        assert!(!terminate_module_fallback.action_applied());
+
+        let terminate_task_lua = ChainDecision::TerminateTask {
+            reason: "task limit".to_string(),
+            action_applied: true,
+        };
+        let terminate_task_fallback = ChainDecision::TerminateTask {
+            reason: "task limit".to_string(),
+            action_applied: false,
+        };
+        assert!(terminate_task_lua.action_applied());
+        assert!(!terminate_task_fallback.action_applied());
+    }
+}
+
+#[async_trait]
+pub trait ThresholdDecisionService: Send + Sync {
+    async fn task_precheck(&self, task_id: &str) -> ChainDecision;
+    async fn error_task_decide(&self, input: &ErrorTaskModel) -> ChainDecision;
+}
+
+#[derive(Clone)]
+pub struct StatusTrackerThresholdDecisionService {
+    state: Arc<State>,
+    lua_registry: Option<Arc<LuaScriptRegistry>>,
+}
+
+impl StatusTrackerThresholdDecisionService {
+    pub fn new(state: Arc<State>, lua_registry: Option<Arc<LuaScriptRegistry>>) -> Self {
+        Self { state, lua_registry }
+    }
+}
+
+#[async_trait]
+impl ThresholdDecisionService for StatusTrackerThresholdDecisionService {
+    async fn task_precheck(&self, task_id: &str) -> ChainDecision {
+        match self.state.status_tracker.should_task_continue(task_id).await {
+            Ok(ErrorDecision::Continue) => ChainDecision::Continue,
+            Ok(ErrorDecision::Terminate(reason)) => ChainDecision::TerminateTask {
+                reason,
+                action_applied: false,
+            },
+            Err(err) => {
+                warn!(
+                    "[ThresholdDecisionService] task precheck failed: task_id={} error={}, fallback=continue",
+                    task_id, err
+                );
+                ChainDecision::Continue
+            }
+            _ => ChainDecision::Continue,
+        }
+    }
+
+    async fn error_task_decide(&self, input: &ErrorTaskModel) -> ChainDecision {
+        let task_id = chain_key::task_runtime_id(
+            &input.account_task.platform,
+            &input.account_task.account,
+            input.run_id,
+        );
+
+        if let (Some(lua_registry), Some(modules)) = (&self.lua_registry, input.account_task.module.as_ref())
+            && let Some(module_name) = modules.first()
+        {
+            let module_id = chain_key::module_runtime_id(
+                &input.account_task.account,
+                &input.account_task.platform,
+                module_name,
+            );
+            let module_counter_key = chain_key::module_threshold_key(&task_id, &module_id);
+            let task_counter_key = chain_key::task_threshold_key(&task_id);
+
+            let cfg = self.state.config.read().await;
+            let module_threshold = cfg.crawler.module_max_errors.to_string();
+            let task_threshold = cfg.crawler.task_max_errors.to_string();
+            let retry_after_ms = "1000".to_string();
+            let ttl_secs = cfg.cache.ttl.to_string();
+            drop(cfg);
+
+            let now_ms = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis()
+                .to_string();
+
+            let keys = [module_counter_key.as_str(), task_counter_key.as_str()];
+            let args = [
+                module_threshold.as_str(),
+                task_threshold.as_str(),
+                retry_after_ms.as_str(),
+                ttl_secs.as_str(),
+            ];
+
+            match lua_registry
+                .eval_triplet_with_fallback(
+                    self.state.cache_service.as_ref(),
+                    "etm_threshold_decide.lua",
+                    include_str!("../../lua/etm_threshold_decide.lua"),
+                    &keys,
+                    &args,
+                )
+                .await
+            {
+                Ok((0, _, _)) => return ChainDecision::Continue,
+                Ok((1, _, _)) => {
+                    let retry_schedule_key = chain_key::error_retry_schedule_key(&task_id);
+                    let retry_member = format!("{}:{}:{}", task_id, module_id, input.prefix_request);
+                    let schedule_keys = [retry_schedule_key.as_str()];
+                    let schedule_args = [
+                        retry_member.as_str(),
+                        retry_after_ms.as_str(),
+                        now_ms.as_str(),
+                        ttl_secs.as_str(),
+                    ];
+                    match lua_registry
+                        .eval_triplet_with_fallback(
+                            self.state.cache_service.as_ref(),
+                            "etm_retry_schedule.lua",
+                            include_str!("../../lua/etm_retry_schedule.lua"),
+                            &schedule_keys,
+                            &schedule_args,
+                        )
+                        .await
+                    {
+                        Ok((0, _, _)) => {
+                            counter!("error_task_lua_action_total", "action" => "retry_scheduled").increment(1);
+                        }
+                        Ok((1, msg, _)) | Ok((2, msg, _)) => {
+                            counter!("error_task_lua_action_total", "action" => "retry_schedule_rejected").increment(1);
+                            warn!(
+                                "[ThresholdDecisionService] etm_retry_schedule rejected: task_id={} module_id={} msg={}",
+                                task_id, module_id, msg
+                            );
+                        }
+                        Ok((code, msg, _)) => {
+                            counter!("error_task_lua_action_total", "action" => "retry_schedule_unknown").increment(1);
+                            warn!(
+                                "[ThresholdDecisionService] etm_retry_schedule unexpected code={} task_id={} module_id={} msg={}",
+                                code, task_id, module_id, msg
+                            );
+                        }
+                        Err(err) => {
+                            counter!("error_task_lua_action_total", "action" => "retry_schedule_error").increment(1);
+                            warn!(
+                                "[ThresholdDecisionService] etm_retry_schedule failed: task_id={} module_id={} error={}",
+                                task_id, module_id, err
+                            );
+                        }
+                    }
+                    return ChainDecision::RetryAfter {
+                        delay: std::time::Duration::from_millis(1000),
+                        action_applied: true,
+                    };
+                }
+                Ok((2, msg, _)) => {
+                    let terminate_key = chain_key::terminate_module_key(&task_id, &module_id);
+                    let terminate_keys = [terminate_key.as_str()];
+                    let terminate_args = [msg.as_str(), now_ms.as_str(), ttl_secs.as_str()];
+                    match lua_registry
+                        .eval_triplet_with_fallback(
+                            self.state.cache_service.as_ref(),
+                            "etm_terminate_mark.lua",
+                            include_str!("../../lua/etm_terminate_mark.lua"),
+                            &terminate_keys,
+                            &terminate_args,
+                        )
+                        .await
+                    {
+                        Ok((0, _, _)) => {
+                            counter!("error_task_lua_action_total", "action" => "terminate_module_marked").increment(1);
+                        }
+                        Ok((1, _, _)) => {
+                            counter!("error_task_lua_action_total", "action" => "terminate_module_already_marked").increment(1);
+                        }
+                        Ok((code, _, _)) => {
+                            counter!("error_task_lua_action_total", "action" => "terminate_module_unknown").increment(1);
+                            warn!(
+                                "[ThresholdDecisionService] etm_terminate_mark(module) unexpected code={} task_id={} module_id={}",
+                                code, task_id, module_id
+                            );
+                        }
+                        Err(err) => {
+                            counter!("error_task_lua_action_total", "action" => "terminate_module_error").increment(1);
+                            warn!(
+                                "[ThresholdDecisionService] etm_terminate_mark(module) failed: task_id={} module_id={} error={}",
+                                task_id, module_id, err
+                            );
+                        }
+                    }
+                    self.state.status_tracker.release_module_locker(&module_id).await;
+                    return ChainDecision::TerminateModule {
+                        reason: msg,
+                        action_applied: true,
+                    };
+                }
+                Ok((3, msg, _)) => {
+                    let terminate_key = chain_key::terminate_task_key(&task_id);
+                    let terminate_keys = [terminate_key.as_str()];
+                    let terminate_args = [msg.as_str(), now_ms.as_str(), ttl_secs.as_str()];
+                    match lua_registry
+                        .eval_triplet_with_fallback(
+                            self.state.cache_service.as_ref(),
+                            "etm_terminate_mark.lua",
+                            include_str!("../../lua/etm_terminate_mark.lua"),
+                            &terminate_keys,
+                            &terminate_args,
+                        )
+                        .await
+                    {
+                        Ok((0, _, _)) => {
+                            counter!("error_task_lua_action_total", "action" => "terminate_task_marked").increment(1);
+                        }
+                        Ok((1, _, _)) => {
+                            counter!("error_task_lua_action_total", "action" => "terminate_task_already_marked").increment(1);
+                        }
+                        Ok((code, _, _)) => {
+                            counter!("error_task_lua_action_total", "action" => "terminate_task_unknown").increment(1);
+                            warn!(
+                                "[ThresholdDecisionService] etm_terminate_mark(task) unexpected code={} task_id={}",
+                                code, task_id
+                            );
+                        }
+                        Err(err) => {
+                            counter!("error_task_lua_action_total", "action" => "terminate_task_error").increment(1);
+                            warn!(
+                                "[ThresholdDecisionService] etm_terminate_mark(task) failed: task_id={} error={}",
+                                task_id, err
+                            );
+                        }
+                    }
+                    let _ = self.state.status_tracker.mark_task_terminated(&task_id).await;
+                    return ChainDecision::TerminateTask {
+                        reason: msg,
+                        action_applied: true,
+                    };
+                }
+                Ok((code, msg, _)) => {
+                    warn!(
+                        "[ThresholdDecisionService] unexpected lua decision code={} msg={}, fallback rust",
+                        code, msg
+                    );
+                }
+                Err(err) => {
+                    warn!(
+                        "[ThresholdDecisionService] lua decide failed, fallback rust: task_id={} module_id={} error={}",
+                        task_id, module_id, err
+                    );
+                }
+            }
+        }
+
+        let parse_error: Error = ModuleError::ModuleNotFound(input.error_msg.clone().into()).into();
+        let mut retry_after: Option<std::time::Duration> = None;
+
+        if let Some(modules) = &input.account_task.module {
+            for module_name in modules {
+                let module_id = chain_key::module_runtime_id(
+                    &input.account_task.account,
+                    &input.account_task.platform,
+                    module_name,
+                );
+
+                if input.prefix_request != Uuid::nil() {
+                    match self
+                        .state
+                        .status_tracker
+                        .record_parse_error(
+                            &task_id,
+                            &module_id,
+                            &input.prefix_request.to_string(),
+                            &parse_error,
+                        )
+                        .await
+                    {
+                        Ok(ErrorDecision::RetryAfter(delay)) => {
+                            retry_after = Some(delay);
+                        }
+                        Ok(_) => {}
+                        Err(err) => {
+                            warn!(
+                                "[ThresholdDecisionService] record_parse_error failed: task_id={} module_id={} error={}",
+                                task_id, module_id, err
+                            );
+                        }
+                    }
+                }
+
+                match self.state.status_tracker.should_module_continue(&module_id).await {
+                    Ok(ErrorDecision::Terminate(reason)) => {
+                        return ChainDecision::TerminateModule {
+                            reason,
+                            action_applied: false,
+                        };
+                    }
+                    Ok(_) => {}
+                    Err(err) => {
+                        warn!(
+                            "[ThresholdDecisionService] module precheck failed: module_id={} error={}",
+                            module_id, err
+                        );
+                    }
+                }
+            }
+        }
+
+        match self.task_precheck(&task_id).await {
+            ChainDecision::TerminateTask { reason, .. } => ChainDecision::TerminateTask {
+                reason,
+                action_applied: false,
+            },
+            _ => retry_after
+                .map(|delay| ChainDecision::RetryAfter {
+                    delay,
+                    action_applied: false,
+                })
+                .unwrap_or(ChainDecision::Continue),
+        }
+    }
+}
 
 /// 任务模型处理器
 ///
@@ -37,6 +417,150 @@ pub struct TaskModelProcessor {
     task_manager: Arc<TaskManager>,
     state: Arc<State>,
     queue_manager: Arc<QueueManager>,
+    event_bus: Option<Arc<EventBus>>,
+    threshold_decision_service: Arc<dyn ThresholdDecisionService>,
+}
+
+impl TaskModelProcessor {
+    async fn task_precheck(&self, task_id: &str) -> ChainDecision {
+        self.threshold_decision_service.task_precheck(task_id).await
+    }
+
+    async fn error_task_decide(&self, input: &ErrorTaskModel) -> ChainDecision {
+        self.threshold_decision_service.error_task_decide(input).await
+    }
+
+    async fn persist_error_retry_schedule(&self, input: &ErrorTaskModel, delay: std::time::Duration) {
+        let task_id = chain_key::task_runtime_id(
+            &input.account_task.platform,
+            &input.account_task.account,
+            input.run_id,
+        );
+        let module_id = input
+            .context
+            .module_id
+            .clone()
+            .or_else(|| {
+                input
+                    .account_task
+                    .module
+                    .as_ref()
+                    .and_then(|m| m.first().map(|name| {
+                        chain_key::module_runtime_id(
+                            &input.account_task.account,
+                            &input.account_task.platform,
+                            name,
+                        )
+                    }))
+            })
+            .unwrap_or_else(|| {
+                chain_key::module_runtime_id(
+                    &input.account_task.account,
+                    &input.account_task.platform,
+                    "unknown",
+                )
+            });
+        let retry_key = chain_key::error_retry_schedule_key(&task_id);
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as f64;
+        let score = now_ms + delay.as_millis() as f64;
+        let member = format!("{}:{}:{}", task_id, module_id, input.prefix_request);
+
+        if let Err(err) = self
+            .state
+            .cache_service
+            .zadd(&retry_key, score, member.as_bytes())
+            .await
+        {
+            warn!(
+                "[TaskModelProcessor<ErrorTaskModel>] failed to persist retry schedule: key={} error={}",
+                retry_key, err
+            );
+        }
+    }
+
+    async fn persist_terminate_mark(
+        &self,
+        input: &ErrorTaskModel,
+        terminate_module: Option<&str>,
+        reason: &str,
+    ) {
+        let task_id = chain_key::task_runtime_id(
+            &input.account_task.platform,
+            &input.account_task.account,
+            input.run_id,
+        );
+        let terminate_key = if let Some(module_id) = terminate_module {
+            chain_key::terminate_module_key(&task_id, module_id)
+        } else {
+            chain_key::terminate_task_key(&task_id)
+        };
+
+        let ttl_secs = {
+            let cfg = self.state.config.read().await;
+            cfg.cache.ttl
+        };
+        let payload = json!({
+            "reason": reason,
+            "task_id": task_id,
+            "module_id": terminate_module,
+            "prefix_request": input.prefix_request.to_string(),
+        })
+        .to_string();
+        if let Err(err) = self
+            .state
+            .cache_service
+            .set_nx(
+                &terminate_key,
+                payload.as_bytes(),
+                Some(std::time::Duration::from_secs(ttl_secs)),
+            )
+            .await
+        {
+            warn!(
+                "[TaskModelProcessor<ErrorTaskModel>] failed to persist terminate mark: key={} error={}",
+                terminate_key, err
+            );
+        }
+    }
+
+    async fn emit_threshold_terminated_event(
+        &self,
+        input: &ErrorTaskModel,
+        decision: &str,
+        reason: &str,
+    ) {
+        let Some(event_bus) = &self.event_bus else {
+            return;
+        };
+
+        let payload = json!({
+            "run_id": input.run_id.to_string(),
+            "account": input.account_task.account,
+            "platform": input.account_task.platform,
+            "module_id": input.context.module_id,
+            "step_idx": input.context.step_idx,
+            "prefix_request": input.prefix_request.to_string(),
+            "decision": decision,
+            "reason": reason,
+        });
+
+        if let Err(err) = event_bus
+            .publish(EventEnvelope::engine(
+                EventType::TaskTerminatedByThreshold,
+                EventPhase::Completed,
+                payload,
+            ))
+            .await
+        {
+            warn!(
+                "[TaskModelProcessor<ErrorTaskModel>] failed to publish threshold termination event: {}",
+                err
+            );
+        }
+    }
 }
 #[async_trait]
 impl ProcessorTrait<TaskModel, Task> for TaskModelProcessor {
@@ -58,9 +582,9 @@ impl ProcessorTrait<TaskModel, Task> for TaskModelProcessor {
         );
 
         let task_id = format!("{}-{}", input.account, input.platform);
-        match self.state.status_tracker.should_task_continue(&task_id).await {
-            Ok(ErrorDecision::Continue) => {}
-            Ok(ErrorDecision::Terminate(reason)) => {
+        match self.task_precheck(&task_id).await {
+            ChainDecision::Continue => {}
+            ChainDecision::TerminateTask { reason, .. } => {
                 error!(
                     "[TaskModelProcessor<TaskModel>] task terminated (pre-check): task_id={} reason={}",
                     task_id,
@@ -71,12 +595,6 @@ impl ProcessorTrait<TaskModel, Task> for TaskModelProcessor {
                 }
                 return ProcessorResult::FatalFailure(
                     ModuleError::TaskMaxError(reason.into()).into(),
-                );
-            }
-            Err(e) => {
-                warn!(
-                    "[TaskModelProcessor<TaskModel>] error tracker check failed: task_id={} error={}, continue anyway",
-                    task_id, e
                 );
             }
             _ => {}
@@ -251,15 +769,19 @@ impl ProcessorTrait<ParserTaskModel, Task> for TaskModelProcessor {
         );
 
         // 首先检查 Task 是否已被标记为终止
-        let task_id = format!("{}:{}:{}", input.account_task.platform, input.account_task.account, input.run_id);
-        match self.state.status_tracker.should_task_continue(&task_id).await {
-            Ok(ErrorDecision::Continue) => {
+        let task_id = chain_key::task_runtime_id(
+            &input.account_task.platform,
+            &input.account_task.account,
+            input.run_id,
+        );
+        match self.task_precheck(&task_id).await {
+            ChainDecision::Continue => {
                 debug!(
                     "[TaskModelProcessor<ParserTaskModel>] task can continue: task_id={}",
                     task_id
                 );
             }
-            Ok(ErrorDecision::Terminate(reason)) => {
+            ChainDecision::TerminateTask { reason, .. } => {
                 error!(
                     "[TaskModelProcessor<ParserTaskModel>] task terminated (pre-check): task_id={} reason={}",
                     task_id,
@@ -267,12 +789,6 @@ impl ProcessorTrait<ParserTaskModel, Task> for TaskModelProcessor {
                 );
                 return ProcessorResult::FatalFailure(
                     ModuleError::TaskMaxError(reason.into()).into(),
-                );
-            }
-            Err(e) => {
-                warn!(
-                    "[TaskModelProcessor<ParserTaskModel>] error tracker check failed: task_id={} error={}, continue anyway",
-                    task_id, e
                 );
             }
             _ => {}
@@ -397,16 +913,99 @@ impl ProcessorTrait<ErrorTaskModel, Task> for TaskModelProcessor {
                 .unwrap_or(0)
         );
 
-        // 首先检查 Task 是否已被标记为终止
-        let task_id = format!("{}:{}:{}", input.account_task.platform, input.account_task.account, input.run_id);
-        match self.state.status_tracker.should_task_continue(&task_id).await {
-            Ok(ErrorDecision::Continue) => {
+        let task_id = chain_key::task_runtime_id(
+            &input.account_task.platform,
+            &input.account_task.account,
+            input.run_id,
+        );
+        match self.error_task_decide(&input).await {
+            ChainDecision::Continue => {
+                counter!("error_task_threshold_decision_total", "decision" => "continue").increment(1);
                 debug!(
                     "[TaskModelProcessor<ErrorTaskModel>] task can continue: task_id={}",
                     task_id
                 );
             }
-            Ok(ErrorDecision::Terminate(reason)) => {
+            ChainDecision::RetryAfter {
+                delay,
+                action_applied,
+            } => {
+                counter!("error_task_threshold_decision_total", "decision" => "retry_after").increment(1);
+                if !(ChainDecision::RetryAfter {
+                    delay,
+                    action_applied,
+                })
+                .action_applied()
+                {
+                    self.persist_error_retry_schedule(&input, delay).await;
+                }
+                let mut retry_policy = context.retry_policy.unwrap_or_default();
+                retry_policy.retry_delay = std::cmp::max(delay.as_millis() as u64, 1);
+                retry_policy.reason = Some(format!("error task retry after {}ms", retry_policy.retry_delay));
+                return ProcessorResult::RetryableFailure(retry_policy);
+            }
+            ChainDecision::TerminateModule {
+                reason,
+                action_applied,
+            } => {
+                counter!("error_task_threshold_decision_total", "decision" => "terminate_module").increment(1);
+                let module_id = input
+                    .context
+                    .module_id
+                    .clone()
+                    .or_else(|| {
+                        input
+                            .account_task
+                            .module
+                            .as_ref()
+                            .and_then(|m| m.first().map(|name| {
+                                chain_key::module_runtime_id(
+                                    &input.account_task.account,
+                                    &input.account_task.platform,
+                                    name,
+                                )
+                            }))
+                    })
+                    .unwrap_or_else(|| {
+                        chain_key::module_runtime_id(
+                            &input.account_task.account,
+                            &input.account_task.platform,
+                            "unknown",
+                        )
+                    });
+                if !(ChainDecision::TerminateModule {
+                    reason: reason.clone(),
+                    action_applied,
+                })
+                .action_applied()
+                {
+                    self.persist_terminate_mark(&input, Some(&module_id), &reason).await;
+                }
+                self.emit_threshold_terminated_event(&input, "terminate_module", &reason)
+                    .await;
+                warn!(
+                    "[TaskModelProcessor<ErrorTaskModel>] module terminated by threshold: task_id={} reason={}",
+                    task_id, reason
+                );
+                return ProcessorResult::FatalFailure(
+                    ModuleError::ModuleMaxError(reason.into()).into(),
+                );
+            }
+            ChainDecision::TerminateTask {
+                reason,
+                action_applied,
+            } => {
+                counter!("error_task_threshold_decision_total", "decision" => "terminate_task").increment(1);
+                if !(ChainDecision::TerminateTask {
+                    reason: reason.clone(),
+                    action_applied,
+                })
+                .action_applied()
+                {
+                    self.persist_terminate_mark(&input, None, &reason).await;
+                }
+                self.emit_threshold_terminated_event(&input, "terminate_task", &reason)
+                    .await;
                 error!(
                     "[TaskModelProcessor<ErrorTaskModel>] task terminated (pre-check): task_id={} reason={}",
                     task_id,
@@ -419,13 +1018,6 @@ impl ProcessorTrait<ErrorTaskModel, Task> for TaskModelProcessor {
                     ModuleError::TaskMaxError(reason.into()).into(),
                 );
             }
-            Err(e) => {
-                warn!(
-                    "[TaskModelProcessor<ErrorTaskModel>] error tracker check failed: task_id={} error={}, continue anyway",
-                    task_id, e
-                );
-            }
-            _ => {}
         }
 
         let task = self.task_manager.load_error(&input).await;
@@ -443,57 +1035,7 @@ impl ProcessorTrait<ErrorTaskModel, Task> for TaskModelProcessor {
             }
         }
     }
-    async fn pre_process(&self, input: &ErrorTaskModel, _context: &ProcessorContext) -> Result<()> {
-        // 从 ErrorTaskModel 生成 task_id 和 module_id
-        // task_id 格式：{platform}:{account}:{run_id}
-        let task_id = format!(
-            "{}:{}:{}",
-            input.account_task.platform, input.account_task.account, input.run_id
-        );
-
-        // 记录到 error tracker
-        // 对于 ErrorTaskModel，我们将其视为一个通用错误并记录到 Task 级别
-        // 这样可以追踪重试次数和错误模式
-        debug!(
-            "[TaskModelProcessor<ErrorTaskModel>] recording error to tracker: task_id={} error={}",
-            task_id, input.error_msg
-        );
-
-        // 如果有具体的 module 信息，记录到 module 级别
-        if let Some(modules) = &input.account_task.module {
-            for module_name in modules {
-                // Module ID 格式必须与 Module.id() 保持一致：{account}-{platform}-{module}
-                let module_id = format!(
-                    "{}-{}-{}",
-                    input.account_task.account,
-                    input.account_task.platform,
-                    module_name
-                );
-
-                // 创建一个简单的 Error 用于分类
-                let error = ModuleError::ModuleNotFound(input.error_msg.clone().into()).into();
-
-                // 记录解析错误（因为 ErrorTaskModel 通常是解析或处理阶段的错误）
-                if input.prefix_request != Uuid::nil() {
-                    let request_id = input.prefix_request.to_string();
-                    debug!(
-                        "[TaskModelProcessor<ErrorTaskModel>] recording parse error: task_id={} module_id={} request_id={}",
-                        task_id, module_id, request_id
-                    );
-                    let _ = self
-                        .state
-                        .status_tracker
-                        .record_parse_error(&task_id, &module_id, &request_id, &error)
-                        .await;
-                } else {
-                    warn!(
-                        "[TaskModelProcessor<ErrorTaskModel>] skipping error record: no prefix_request, task_id={} module_id={}",
-                        task_id, module_id
-                    );
-                }
-            }
-        }
-
+    async fn pre_process(&self, _input: &ErrorTaskModel, _context: &ProcessorContext) -> Result<()> {
         Ok(())
     }
     // async fn handle_error(
@@ -572,14 +1114,13 @@ impl ProcessorTrait<Task, Vec<Module>> for TaskModuleProcessor {
     async fn process(
         &self,
         input: Task,
-        context: ProcessorContext,
+        _context: ProcessorContext,
     ) -> ProcessorResult<Vec<Module>> {
         debug!(
             "[TaskModuleProcessor] start: task_id={} module_count={}",
             input.id(),
             input.modules.len()
         );
-        let task_id = input.id();
         let metadata = input.metadata.clone();
         let login_info = input.login_info.clone();
         let mut modules: Vec<Module> = Vec::new();
@@ -623,6 +1164,7 @@ impl ProcessorTrait<Task, Vec<Module>> for TaskModuleProcessor {
                 .get_config_value("module_locker_ttl")
                 .and_then(|v| v.as_u64())
                 .unwrap_or(default_locker_ttl);
+            module.bind_task_context(metadata.clone(), login_info.clone());
             modules.push(module);
         }
 
@@ -631,43 +1173,6 @@ impl ProcessorTrait<Task, Vec<Module>> for TaskModuleProcessor {
             filtered_modules.push(x);
         }
         let modules = filtered_modules;
-        if !modules.is_empty() {
-            let (task_meta_val, login_info_val) = match tokio::task::spawn_blocking(move || {
-                let task_meta_val = serde_json::to_value(metadata)
-                    .map_err(|e| format!("task_meta serialize failed: {e}"))?;
-                let login_info_val = serde_json::to_value(login_info)
-                    .map_err(|e| format!("login_info serialize failed: {e}"))?;
-                Ok::<_, String>((task_meta_val, login_info_val))
-            })
-                .await
-            {
-                Ok(Ok(v)) => v,
-                Ok(Err(e)) => {
-                    error!(
-                        "[TaskModuleProcessor] metadata serialization failed: task_id={} error={}",
-                        task_id, e
-                    );
-                    return ProcessorResult::FatalFailure(
-                        ModuleError::ModuleNotFound(format!("metadata serialize failed: {e}").into())
-                            .into(),
-                    );
-                }
-                Err(e) => {
-                    error!(
-                        "[TaskModuleProcessor] spawn_blocking failed: task_id={} error={}",
-                        task_id, e
-                    );
-                    return ProcessorResult::FatalFailure(
-                        ModuleError::ModuleNotFound(format!("spawn_blocking failed: {e}").into())
-                            .into(),
-                    )
-                }
-            };
-
-            let mut meta_guard = context.metadata.write().await;
-            meta_guard.insert("task_meta".to_string(), task_meta_val);
-            meta_guard.insert("login_info".to_string(), login_info_val);
-        }
         ProcessorResult::Success(modules)
     }
 }
@@ -696,8 +1201,6 @@ impl EventProcessorTrait<Task, Vec<Module>> for TaskModuleProcessor {
 }
 
 pub struct TaskProcessor {
-    state: Arc<State>,
-    queue_manager: Arc<QueueManager>,
 }
 #[async_trait]
 impl ProcessorTrait<Module, SyncBoxStream<'static, Request>> for TaskProcessor {
@@ -716,196 +1219,13 @@ impl ProcessorTrait<Module, SyncBoxStream<'static, Request>> for TaskProcessor {
             input.module.name()
         );
 
-        // 在生成 Request 之前检查 Module 是否已被终止
-        match self.state.status_tracker.should_module_continue(&input.id()).await {
-            Ok(ErrorDecision::Continue) => {
-                debug!(
-                    "[TaskProcessor] module can continue generating requests: module_id={}",
-                    input.id()
-                );
-            }
-            Ok(ErrorDecision::Terminate(reason)) => {
-                error!(
-                    "[TaskProcessor] module terminated, skip request generation: module_id={} reason={}",
-                    input.id(),
-                    reason
-                );
-                // 返回空的 Request 列表，后处理会释放锁
-                return ProcessorResult::Success(Box::pin(futures::stream::empty()));
-            }
-            Err(e) => {
-                warn!(
-                    "[TaskProcessor] error tracker check failed: module_id={} error={}, continue anyway",
-                    input.id(), e
-                );
-            }
-            _ => {}
-        }
-
-        // Task.metadata
-        let meta = match context.metadata.read().await.get("task_meta") {
-            Some(m) => {
-                debug!("[TaskProcessor] Found task_meta");
-                m.as_object().cloned().unwrap_or_default()
-            }
-            None => {
-                warn!("[TaskProcessor] task_meta missing in context, will retry");
-                return ProcessorResult::RetryableFailure(context.retry_policy.unwrap_or_default());
-            }
-        };
-        let login_info = if input.module.should_login() {
-            match context.metadata.read().await.get("login_info") {
-                Some(m) => {
-                    let m_clone = m.clone();
-                    let info_res = serde_json::from_value::<LoginInfo>(m_clone)
-                        .map_err(|e| {
-                            warn!("[TaskProcessor] spawn_blocking failed: {e}");
-                            e
-                        });
-
-                    match info_res {
-                        Ok(info) => Some(info),
-                        Err(e) => {
-                            warn!("[TaskProcessor] spawn_blocking failed: {e}");
-                             return ProcessorResult::RetryableFailure(
-                                context
-                                    .retry_policy
-                                    .unwrap_or_default()
-                                    .with_reason("not found login info".to_string()),
-                            );
-                        }
-                    }
-                }
-                None => {
-                    warn!("[TaskProcessor] missing login_info, will retry");
-                    return ProcessorResult::RetryableFailure(
-                        context
-                            .retry_policy
-                            .unwrap_or_default()
-                            .with_reason("not found login info".to_string()),
-                    );
-                }
-            }
-        } else {
-            None
-        };
+        let (meta, login_info) = input.runtime_task_context();
         // TaskModel
-        // ParserTaskModel.meta=>Task.metadata=>Context.meta=>Module.generate=>ModuleTrait.generate
+        // ParserTaskModel.meta=>Task.metadata=>Module.bind_task_context=>Module.generate=>ModuleTrait.generate
         // [LOG_OPTIMIZATION] debug!("[TaskProcessor] start generate: module_id={}", input.id());
         // panic!("DEBUG PANIC: Reached input.generate"); 
         let requests: SyncBoxStream<'static, Request> = match input.generate(meta, login_info).await {
-            Ok(stream) => {
-                // Direct publish optimization
-                let queue_manager = self.queue_manager.clone();
-                let cache_service = self.state.cache_service.clone();
-                let concurrency = self.state.config.read().await.crawler.publish_concurrency.unwrap_or(100);
-
-                let dedup_ttl = self
-                    .state
-                    .config
-                    .read()
-                    .await
-                    .crawler
-                    .dedup_ttl_secs
-                    .unwrap_or(3600) as usize;
-                let namespace = self.state.cache_service.namespace().to_string();
-                let deduplicator = self
-                    .state
-                    .locker
-                    .get_pool()
-                    .map(|p| Arc::new(Deduplicator::new(p.clone(), dedup_ttl, namespace)));
-
-                let stream = stream.chunks(100)
-                    .map(move |batch: Vec<Request>| {
-                        let queue_manager = queue_manager.clone();
-                        let cache_service = cache_service.clone();
-                        let deduplicator = deduplicator.clone();
-
-                        async move {
-                            if batch.is_empty() {
-                                return Vec::new();
-                            }
-
-                            let batch_len = batch.len();
-                            let hashes = if deduplicator.is_some() {
-                                Some(std::sync::Arc::new(
-                                    batch.iter().map(|req| req.hash()).collect::<Vec<_>>(),
-                                ))
-                            } else {
-                                None
-                            };
-
-                            let results = if let Some(dedup) = &deduplicator {
-                                let hashes = hashes.clone().unwrap_or_else(|| std::sync::Arc::new(Vec::new()));
-                                let dedup_clone = dedup.clone();
-                                tokio::spawn(async move {
-                                    match dedup_clone.check_and_set_batch(hashes.as_ref()).await {
-                                        Ok(res) => res,
-                                        Err(e) => {
-                                            error!("[TaskProcessor] batch deduplication check failed: {}, allowing requests", e);
-                                            vec![true; batch_len]
-                                        }
-                                    }
-                                })
-                                    .await
-                                    .unwrap_or_else(|e| {
-                                        error!("[TaskProcessor] batch deduplication spawn failed: {}, allowing requests", e);
-                                        vec![true; batch_len]
-                                    })
-                            } else {
-                                vec![true; batch_len]
-                            };
-
-                            for (index, (req, is_new)) in batch.into_iter().zip(results).enumerate() {
-                                if !is_new {
-                                    let hash = hashes
-                                        .as_ref()
-                                        .and_then(|values| values.get(index).map(String::as_str))
-                                        .unwrap_or("unknown");
-                                    info!("[TaskProcessor] duplicate request skipped: request_id={} module_id={} hash={}", req.id, req.module_id(), hash);
-                                    continue;
-                                }
-
-                                let id = req.id.to_string();
-                                let module_id = req.module_id();
-                                let req_clone = req.clone();
-                                let cache_service = cache_service.clone();
-
-                                tokio::spawn(async move {
-                                    if let Err(e) = req_clone.send(&id, &cache_service).await {
-                                        debug!("[RequestPublish] persist failed (background): {e}");
-                                    }
-                                });
-
-                                let request_id = req.id;
-                                let item = QueuedItem::new(req);
-                                let tx = queue_manager.get_request_push_channel();
-                                match tx.try_send(item) {
-                                    Ok(_) => {
-                                        info!("[RequestPublish] publish request: request_id={} module_id={}", request_id, module_id);
-                                    }
-                                    Err(tokio::sync::mpsc::error::TrySendError::Full(item)) => {
-                                        if let Err(e) = tx.send(item).await {
-                                            error!("Failed to send request to queue: {e}");
-                                        } else {
-                                            info!("[RequestPublish] publish request: request_id={} module_id={}", request_id, module_id);
-                                        }
-                                    }
-                                    Err(e) => {
-                                        error!("Failed to send request to queue: {e}");
-                                    }
-                                }
-                            }
-
-                            Vec::<Request>::new()
-                        }
-                    })
-                    .buffer_unordered(concurrency / 10 + 1)
-                    .map(futures::stream::iter)
-                    .flatten();
-
-                Box::pin(stream)
-            }
+            Ok(stream) => stream,
             Err(e) => {
                 warn!("[TaskProcessor] generate error, will retry: {e}");
                 return ProcessorResult::RetryableFailure(
@@ -982,6 +1302,7 @@ impl EventProcessorTrait<Module, SyncBoxStream<'static, Request>> for TaskProces
 pub struct RequestPublish {
     queue_manager: Arc<QueueManager>,
     state: Arc<State>,
+    deduplicator: Option<Arc<Deduplicator>>,
 }
 
 #[async_trait]
@@ -991,10 +1312,40 @@ impl ProcessorTrait<Request, ()> for RequestPublish {
     }
 
     async fn process(&self, input: Request, context: ProcessorContext) -> ProcessorResult<()> {
+        let request_id = input.id;
+        let module_id = input.module_id();
+        let request_hash = input.hash();
+        let backpressure_retry_delay_ms = {
+            let cfg = self.state.config.read().await;
+            cfg.crawler.backpressure_retry_delay_ms
+        };
+
+        if let Some(deduplicator) = &self.deduplicator {
+            match deduplicator.check_and_set(&request_hash).await {
+                Ok(false) => {
+                    info!(
+                        "[RequestPublish] duplicate request skipped: request_id={} module_id={} hash={}",
+                        request_id,
+                        module_id,
+                        request_hash
+                    );
+                    return ProcessorResult::Success(());
+                }
+                Ok(true) => {}
+                Err(e) => {
+                    warn!(
+                        "[RequestPublish] deduplication check failed, allowing request: request_id={} module_id={} error={}",
+                        request_id,
+                        module_id,
+                        e
+                    );
+                }
+            }
+        }
         info!(
             "[RequestPublish] publish request: request_id={} module_id={}",
-            input.id,
-            input.module_id()
+            request_id,
+            module_id
         );
 
         // 1. Persist request to Redis (for chain fallback)
@@ -1013,20 +1364,43 @@ impl ProcessorTrait<Request, ()> for RequestPublish {
             }
         });
 
-        // [LOG_OPTIMIZATION] debug!("[RequestPublish] start queue send: request_id={}", input.id);
-        if let Err(e) = self
-            .queue_manager
-            .get_request_push_channel()
-            .send(QueuedItem::new(input))
-            .await
-        {
-            error!("Failed to send request to queue: {e}");
-            warn!("[RequestPublish] will retry due to queue send error");
-            return ProcessorResult::RetryableFailure(
-                context
-                    .retry_policy
-                    .unwrap_or(RetryPolicy::default().with_reason(e.to_string())),
-            );
+        // [LOG_OPTIMIZATION] debug!("[RequestPublish] start queue send: request_id={}", request_id);
+        let tx = self.queue_manager.get_request_push_channel();
+        match send_with_backpressure(&tx, QueuedItem::new(input)).await {
+            Ok(BackpressureSendState::Direct) => {}
+            Ok(BackpressureSendState::RecoveredFromFull) => {
+                counter!("request_publish_backpressure_total", "reason" => "queue_full").increment(1);
+                warn!(
+                    "[RequestPublish] queue full, falling back to awaited send: request_id={} module_id={} remaining_capacity={}",
+                    request_id,
+                    module_id,
+                    tx.capacity()
+                );
+            }
+            Err(err) => {
+                if err.after_full {
+                    counter!("request_publish_backpressure_total", "reason" => "queue_full").increment(1);
+                    warn!(
+                        "[RequestPublish] queue full before close: request_id={} module_id={} remaining_capacity={}",
+                        request_id,
+                        module_id,
+                        tx.capacity()
+                    );
+                }
+                counter!("request_publish_backpressure_total", "reason" => "queue_closed").increment(1);
+                let retry_reason = format!(
+                    "request queue closed: request_id={} module_id={}",
+                    err.item.inner.id,
+                    err.item.inner.module_id()
+                );
+                error!("[RequestPublish] {retry_reason}");
+                let mut retry_policy = context.retry_policy.unwrap_or_default();
+                if let Some(delay_ms) = backpressure_retry_delay_ms {
+                    retry_policy.retry_delay = delay_ms.max(1);
+                }
+                retry_policy.reason = Some(retry_reason);
+                return ProcessorResult::RetryableFailure(retry_policy);
+            }
         }
         // [LOG_OPTIMIZATION] debug!("[RequestPublish] end queue send: request_id={}", id); // id is string here
         ProcessorResult::Success(())
@@ -1387,120 +1761,187 @@ impl<T: Send + Sync + 'static> EventProcessorTrait<SyncBoxStream<'static, SyncBo
     fn retry_status(&self, _input: &SyncBoxStream<'static, SyncBoxStream<'static, T>>, _retry_policy: &RetryPolicy) -> Option<EventEnvelope> { None }
 }
 
-pub async fn create_task_model_chain(
-    task_manager: Arc<TaskManager>,
-    queue_manager: Arc<QueueManager>,
-    event_bus: Option<Arc<EventBus>>,
-    state: Arc<State>,
-) -> EventAwareTypedChain<TaskModel, SyncBoxStream<'static, ()>> {
-    let task_model_processor = TaskModelProcessor {
-        task_manager: task_manager.clone(),
-        state: state.clone(),
-        queue_manager: queue_manager.clone(),
-    };
-    let request_publish = RequestPublish {
-        queue_manager: queue_manager.clone(),
-        state: state.clone(),
-    };
-    let task_module_processor = TaskModuleProcessor {
-        state: state.clone(),
-    };
-    let task_processor = TaskProcessor {
-        state: state.clone(),
-        queue_manager: queue_manager.clone(),
-    };
-    EventAwareTypedChain::<TaskModel, TaskModel>::new(event_bus)
-        .then::<Task, _>(task_model_processor)
-        .then::<Vec<Module>, _>(task_module_processor)
-        .then(VecToStreamProcessor::new())
-        .then_map_stream_in_with_strategy::<SyncBoxStream<'static, Request>, _>(
-            task_processor,
-            state.config.read().await.crawler.task_concurrency.unwrap_or(1024),
-            ErrorStrategy::Skip,
-        )
-        .then_one_shot(FlattenStreamProcessor::new())
-        .then_one_shot(StreamLoggerProcessor::new("AfterFlatten").with_logger(|req: &Request| {
-            info!(
-                "[FlattenStreamProcessor] yielding request: request_id={}",
-                req.id
-            );
-        }))
-        .then_map_stream_in_with_strategy::<(), _>(
-            request_publish,
-            state.config.read().await.crawler.publish_concurrency.unwrap_or(1024),
-            ErrorStrategy::Skip,
-        )
+async fn build_request_deduplicator(state: &Arc<State>) -> Option<Arc<Deduplicator>> {
+    let dedup_ttl = state
+        .config
+        .read()
+        .await
+        .crawler
+        .dedup_ttl_secs
+        .unwrap_or(3600) as usize;
+    let namespace = state.cache_service.namespace().to_string();
+    state
+        .locker
+        .get_pool()
+        .map(|pool| Arc::new(Deduplicator::new(pool.clone(), dedup_ttl, namespace)))
 }
-pub async fn create_parser_task_chain(
-    task_manager: Arc<TaskManager>,
-    queue_manager: Arc<QueueManager>,
-    event_bus: Option<Arc<EventBus>>,
-    state: Arc<State>,
-) -> EventAwareTypedChain<ParserTaskModel, SyncBoxStream<'static, ()>> {
-    let task_model_processor = TaskModelProcessor {
-        task_manager: task_manager.clone(),
-        state: state.clone(),
-        queue_manager: queue_manager.clone(),
-    };
-    let request_publish = RequestPublish {
-        queue_manager: queue_manager.clone(),
-        state: state.clone(),
-    };
-    let task_module_processor = TaskModuleProcessor {
-        state: state.clone(),
-    };
-    let task_processor = TaskProcessor {
-        state: state.clone(),
-        queue_manager: queue_manager.clone(),
-    };
-    EventAwareTypedChain::<ParserTaskModel, ParserTaskModel>::new(event_bus)
-        .then::<Task, _>(task_model_processor)
-        .then::<Vec<Module>, _>(task_module_processor)
-        .then(VecToStreamProcessor::new())
-        .then_map_stream_in_with_strategy::<SyncBoxStream<'static, Request>, _>(
-            task_processor,
-            state.config.read().await.crawler.task_concurrency.unwrap_or(256), // Lower default for parser chain if needed, using user logic for now
-            ErrorStrategy::Skip,
-        )
-        .then_one_shot(FlattenStreamProcessor::new())
-        .then_map_stream_in_with_strategy::<(), _>(
-            request_publish,
-            state.config.read().await.crawler.publish_concurrency.unwrap_or(256),
-            ErrorStrategy::Skip,
-        )
-}
-pub async fn create_error_task_chain(
-    task_manager: Arc<TaskManager>,
-    queue_manager: Arc<QueueManager>,
-    event_bus: Option<Arc<EventBus>>,
-    state: Arc<State>,
-) -> EventAwareTypedChain<ErrorTaskModel, SyncBoxStream<'static, ()>> {
-    let task_model_processor = TaskModelProcessor {
-        task_manager: task_manager.clone(),
-        state: state.clone(),
-        queue_manager: queue_manager.clone(),
-    };
 
-    let request_publish = RequestPublish {
-        queue_manager: queue_manager.clone(),
-        state: state.clone(),
+pub struct UnifiedTaskIngressChain {
+    task_chain: Arc<EventAwareTypedChain<TaskModel, SyncBoxStream<'static, ()>>>,
+    parser_chain: Arc<EventAwareTypedChain<ParserTaskModel, SyncBoxStream<'static, ()>>>,
+    error_chain: Arc<EventAwareTypedChain<ErrorTaskModel, SyncBoxStream<'static, ()>>>,
+}
+
+impl UnifiedTaskIngressChain {
+    pub fn new(
+        task_chain: Arc<EventAwareTypedChain<TaskModel, SyncBoxStream<'static, ()>>>,
+        parser_chain: Arc<EventAwareTypedChain<ParserTaskModel, SyncBoxStream<'static, ()>>>,
+        error_chain: Arc<EventAwareTypedChain<ErrorTaskModel, SyncBoxStream<'static, ()>>>,
+    ) -> Self {
+        Self {
+            task_chain,
+            parser_chain,
+            error_chain,
+        }
+    }
+
+    pub async fn execute(
+        &self,
+        input: UnifiedTaskInput,
+        context: ProcessorContext,
+    ) -> ProcessorResult<SyncBoxStream<'static, ()>> {
+        match input {
+            UnifiedTaskInput::Task(task) => self.task_chain.execute(task, context).await,
+            UnifiedTaskInput::ParserTask(task) => self.parser_chain.execute(task, context).await,
+            UnifiedTaskInput::ErrorTask(task) => self.error_chain.execute(task, context).await,
+        }
+    }
+}
+
+pub async fn create_unified_task_ingress_chain(
+    task_manager: Arc<TaskManager>,
+    queue_manager: Arc<QueueManager>,
+    event_bus: Option<Arc<EventBus>>,
+    state: Arc<State>,
+    lua_registry: Option<Arc<LuaScriptRegistry>>,
+) -> UnifiedTaskIngressChain {
+    let task_concurrency = state.config.read().await.crawler.task_concurrency.unwrap_or(1024);
+    let parser_concurrency = {
+        let cfg = state.config.read().await;
+        cfg.crawler
+            .parser_concurrency
+            .or(cfg.crawler.task_concurrency)
+            .unwrap_or(256)
     };
-    let task_module_processor = TaskModuleProcessor {
-        state: state.clone(),
+    let error_task_concurrency = {
+        let cfg = state.config.read().await;
+        cfg.crawler
+            .error_task_concurrency
+            .or(cfg.crawler.parser_concurrency)
+            .or(cfg.crawler.task_concurrency)
+            .unwrap_or(4)
     };
-    let task_processor = TaskProcessor {
-        state: state.clone(),
-        queue_manager: queue_manager.clone(),
-    };
-    EventAwareTypedChain::<ErrorTaskModel, ErrorTaskModel>::new(event_bus)
-        .then::<Task, _>(task_model_processor)
-        .then::<Vec<Module>, _>(task_module_processor)
-        .then(VecToStreamProcessor::new())
-        .then_map_stream_in_with_strategy::<SyncBoxStream<'static, Request>, _>(
-            task_processor,
-            4,
-            ErrorStrategy::Skip,
-        )
-        .then_one_shot(FlattenStreamProcessor::new())
-        .then_map_stream_in_with_strategy::<(), _>(request_publish, 32, ErrorStrategy::Skip)
+    let task_publish_concurrency = state.config.read().await.crawler.publish_concurrency.unwrap_or(1024);
+    let parser_publish_concurrency = state.config.read().await.crawler.publish_concurrency.unwrap_or(256);
+    let error_publish_concurrency = state.config.read().await.crawler.publish_concurrency.unwrap_or(32);
+
+    let task_deduplicator = build_request_deduplicator(&state).await;
+    let task_chain = Arc::new(
+        EventAwareTypedChain::<TaskModel, TaskModel>::new(event_bus.clone())
+            .then::<Task, _>(TaskModelProcessor {
+                task_manager: task_manager.clone(),
+                state: state.clone(),
+                queue_manager: queue_manager.clone(),
+                event_bus: event_bus.clone(),
+                threshold_decision_service: Arc::new(StatusTrackerThresholdDecisionService::new(
+                    state.clone(),
+                    lua_registry.clone(),
+                )),
+            })
+            .then::<Vec<Module>, _>(TaskModuleProcessor {
+                state: state.clone(),
+            })
+            .then(VecToStreamProcessor::new())
+            .then_map_stream_in_with_strategy::<SyncBoxStream<'static, Request>, _>(
+                TaskProcessor {},
+                task_concurrency,
+                ErrorStrategy::Skip,
+            )
+            .then_one_shot(FlattenStreamProcessor::new())
+            .then_one_shot(StreamLoggerProcessor::new("AfterFlatten").with_logger(|req: &Request| {
+                info!(
+                    "[FlattenStreamProcessor] yielding request: request_id={}",
+                    req.id
+                );
+            }))
+            .then_map_stream_in_with_strategy::<(), _>(
+                RequestPublish {
+                    queue_manager: queue_manager.clone(),
+                    state: state.clone(),
+                    deduplicator: task_deduplicator,
+                },
+                task_publish_concurrency,
+                ErrorStrategy::Skip,
+            ),
+    );
+
+    let parser_deduplicator = build_request_deduplicator(&state).await;
+    let parser_chain = Arc::new(
+        EventAwareTypedChain::<ParserTaskModel, ParserTaskModel>::new(event_bus.clone())
+            .then::<Task, _>(TaskModelProcessor {
+                task_manager: task_manager.clone(),
+                state: state.clone(),
+                queue_manager: queue_manager.clone(),
+                event_bus: event_bus.clone(),
+                threshold_decision_service: Arc::new(StatusTrackerThresholdDecisionService::new(
+                    state.clone(),
+                    lua_registry.clone(),
+                )),
+            })
+            .then::<Vec<Module>, _>(TaskModuleProcessor {
+                state: state.clone(),
+            })
+            .then(VecToStreamProcessor::new())
+            .then_map_stream_in_with_strategy::<SyncBoxStream<'static, Request>, _>(
+                TaskProcessor {},
+                parser_concurrency,
+                ErrorStrategy::Skip,
+            )
+            .then_one_shot(FlattenStreamProcessor::new())
+            .then_map_stream_in_with_strategy::<(), _>(
+                RequestPublish {
+                    queue_manager: queue_manager.clone(),
+                    state: state.clone(),
+                    deduplicator: parser_deduplicator,
+                },
+                parser_publish_concurrency,
+                ErrorStrategy::Skip,
+            ),
+    );
+
+    let error_deduplicator = build_request_deduplicator(&state).await;
+    let error_chain = Arc::new(
+        EventAwareTypedChain::<ErrorTaskModel, ErrorTaskModel>::new(event_bus)
+            .then::<Task, _>(TaskModelProcessor {
+                task_manager,
+                state: state.clone(),
+                queue_manager: queue_manager.clone(),
+                event_bus: None,
+                threshold_decision_service: Arc::new(StatusTrackerThresholdDecisionService::new(
+                    state.clone(),
+                    lua_registry,
+                )),
+            })
+            .then::<Vec<Module>, _>(TaskModuleProcessor {
+                state: state.clone(),
+            })
+            .then(VecToStreamProcessor::new())
+            .then_map_stream_in_with_strategy::<SyncBoxStream<'static, Request>, _>(
+                TaskProcessor {},
+                error_task_concurrency,
+                ErrorStrategy::Skip,
+            )
+            .then_one_shot(FlattenStreamProcessor::new())
+            .then_map_stream_in_with_strategy::<(), _>(
+                RequestPublish {
+                    queue_manager,
+                    state,
+                    deduplicator: error_deduplicator,
+                },
+                error_publish_concurrency,
+                ErrorStrategy::Skip,
+            ),
+    );
+
+    UnifiedTaskIngressChain::new(task_chain, parser_chain, error_chain)
 }

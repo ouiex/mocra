@@ -1,6 +1,6 @@
 # Contract Test Coverage
 
-Date: 2026-02-10
+Date: 2026-02-13
 
 ## Scope
 
@@ -30,6 +30,30 @@ Environment hints:
 
 ## Pending Gaps
 
-- Redis multi-consumer contention edge cases beyond single subscriber.
+- Redis multi-consumer contention edge cases beyond current script-level coverage.
 - Full end-to-end poison decode path through actual chains and DLQ.
 - CI coverage report publishing (artifact generation).
+
+## CI Gate (Optional Redis)
+
+Contract test scripts now include an optional Engine Redis integration gate:
+
+- PowerShell: [scripts/ci_contract_tests.ps1](scripts/ci_contract_tests.ps1)
+- Bash: [scripts/ci_contract_tests.sh](scripts/ci_contract_tests.sh)
+
+Behavior:
+
+- Always run Queue + Sync contract tests.
+- Run `cargo test -p engine redis_ -- --nocapture` only when one of these env vars is set:
+	- `REDIS_URL`
+	- `MOCRA_REDIS_TEST_URL`
+- If both are missing, Redis integration tests are explicitly skipped.
+
+Recommended CI snippet:
+
+- Linux/macOS runners:
+	- `export REDIS_URL=redis://:password@redis-host:6379/0`
+	- `bash scripts/ci_contract_tests.sh`
+- Windows runners:
+	- `$env:REDIS_URL = "redis://:password@redis-host:6379/0"`
+	- `pwsh -File scripts/ci_contract_tests.ps1`

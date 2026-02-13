@@ -9,6 +9,22 @@
 - 毫秒：`claim_*`（Redis Stream 相关）
 - 字节：`compression_threshold`、`max_response_size`
 
+## 运行模式判定（单节点 / 分布式）
+
+当前版本**不需要也不支持**通过 `RuntimeMode` 手动指定模式。
+
+Engine 在启动时会根据配置自动判断：
+
+- 当 `cache.redis` 已配置：判定为**分布式模式**。
+- 当 `cache.redis` 未配置：判定为**单节点模式**。
+
+对应代码入口：`Config::is_single_node_mode()`（`common/src/model/config.rs`）。
+
+影响（简述）：
+
+- 单节点模式：跳过依赖分布式 Redis 原子脚本的链路（例如 Lua-first 协调流程）。
+- 分布式模式：启用分布式相关链路（如 Lua 预加载与分布式协调）。
+
 ## 1. 推荐配置结构 (Recommended Structure)
 
 ```toml
@@ -277,6 +293,7 @@ crawler_local:cookie:login_info:benchmark-test
 | node_id | 否 | string | 节点 ID（稳定身份）。 | Node ID for stable identity. |
 | task_concurrency | 否 | number | 本地处理器并发上限，影响任务消费速度。 | Max local processor concurrency; affects task consumption speed. |
 | publish_concurrency | 否 | number | 发布到队列的并发上限。 | Max concurrency for publishing into queues. |
+| backpressure_retry_delay_ms | 否 | number | 发生队列背压（full/closed）时的重试基准延迟（毫秒）。未设置则沿用默认重试策略。 | Base retry delay (ms) when queue backpressure (full/closed) occurs. Uses default retry policy when omitted. |
 | dedup_ttl_secs | 否 | number | 请求去重 TTL（秒），用于去重窗口。 | Deduplication TTL (seconds) for request windowing. |
 | idle_stop_secs | 否 | number | 本地队列空闲超时秒数，超过则自动停止；0/不填为关闭（仅基于本地队列是否有待处理）。 | Idle timeout based on local queue emptiness; stop when exceeded. 0/omitted disables. |
 

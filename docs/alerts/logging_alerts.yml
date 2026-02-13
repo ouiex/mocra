@@ -25,3 +25,39 @@ groups:
         annotations:
           summary: "Log sink errors"
           description: "log_sink_errors_total rate > 1/s for 5m"
+
+      - alert: RequestPublishBackpressureHigh
+        expr: sum(rate(request_publish_backpressure_total{reason="queue_full"}[5m])) > 5
+        for: 5m
+        labels:
+          severity: warn
+        annotations:
+          summary: "Request publish backpressure high"
+          description: "request_publish_backpressure_total(queue_full) rate > 5/s for 5m"
+
+      - alert: ParserChainBackpressureHigh
+        expr: sum by (queue) (rate(parser_chain_backpressure_total{reason="queue_full"}[5m])) > 5
+        for: 5m
+        labels:
+          severity: warn
+        annotations:
+          summary: "Parser chain backpressure high"
+          description: "parser_chain_backpressure_total(queue_full) rate high on queue={{ $labels.queue }}"
+
+      - alert: DownloadResponseBackpressureHigh
+        expr: sum by (queue) (rate(download_response_backpressure_total{reason="queue_full"}[5m])) > 5
+        for: 5m
+        labels:
+          severity: warn
+        annotations:
+          summary: "Download response backpressure high"
+          description: "download_response_backpressure_total(queue_full) rate high on queue={{ $labels.queue }}"
+
+      - alert: BackpressureQueueClosedDetected
+        expr: sum(rate(request_publish_backpressure_total{reason="queue_closed"}[5m])) + sum(rate(parser_chain_backpressure_total{reason="queue_closed"}[5m])) + sum(rate(download_response_backpressure_total{reason="queue_closed"}[5m])) > 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Queue closed detected in pipeline"
+          description: "queue_closed backpressure counters observed continuously for 2m"

@@ -575,15 +575,44 @@ impl QueueManager {
 
     /// Local pending message count across processor queues
     pub async fn local_pending_count(&self) -> usize {
-        let mut total = 0usize;
+        let (task, download, response, parser, error, remote_task) =
+            self.local_pending_breakdown().await;
+        task + download + response + parser + error + remote_task
+    }
 
-        total += self.channel.task_receiver.lock().await.len();
-        total += self.channel.download_request_receiver.lock().await.len();
-        total += self.channel.remote_response_receiver.lock().await.len();
-        total += self.channel.remote_parser_task_receiver.lock().await.len();
-        total += self.channel.remote_error_receiver.lock().await.len();
+    pub async fn local_pending_breakdown(&self) -> (usize, usize, usize, usize, usize, usize) {
+        let task = self
+            .channel
+            .task_sender
+            .max_capacity()
+            .saturating_sub(self.channel.task_sender.capacity());
+        let download = self
+            .channel
+            .download_request_sender
+            .max_capacity()
+            .saturating_sub(self.channel.download_request_sender.capacity());
+        let response = self
+            .channel
+            .remote_response_sender
+            .max_capacity()
+            .saturating_sub(self.channel.remote_response_sender.capacity());
+        let parser = self
+            .channel
+            .remote_parser_task_sender
+            .max_capacity()
+            .saturating_sub(self.channel.remote_parser_task_sender.capacity());
+        let error = self
+            .channel
+            .remote_error_sender
+            .max_capacity()
+            .saturating_sub(self.channel.remote_error_sender.capacity());
+        let remote_task = self
+            .channel
+            .remote_task_sender
+            .max_capacity()
+            .saturating_sub(self.channel.remote_task_sender.capacity());
 
-        total
+        (task, download, response, parser, error, remote_task)
     }
 
     async fn flush_batch_grouped<T>(

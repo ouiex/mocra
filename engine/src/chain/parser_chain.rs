@@ -14,6 +14,7 @@ use common::model::{ModuleConfig, Response};
 use common::state::State;
 
 use log::{debug, error, info, warn};
+use metrics::counter;
 use queue::{QueueManager, QueuedItem};
 use common::processors::processor::{
     ProcessorContext, ProcessorResult, ProcessorTrait, RetryPolicy,
@@ -27,6 +28,7 @@ use crate::task::module::Module;
 use futures::StreamExt;
 use common::model::login_info::LoginInfo;
 use serde_json::json;
+use crate::chain::backpressure::{BackpressureSendState, send_with_backpressure};
 
 pub struct ResponseModuleProcessor {
     task_manager: Arc<TaskManager>,
@@ -235,7 +237,67 @@ pub struct ResponseParserProcessor {
     queue_manager: Arc<QueueManager>,
     state: Arc<State>,
     cache_service: Arc<CacheService>,
+    event_bus: Option<Arc<EventBus>>,
 }
+
+impl ResponseParserProcessor {
+    async fn emit_semantic_event(
+        &self,
+        event_type: EventType,
+        payload: serde_json::Value,
+    ) {
+        if let Some(event_bus) = &self.event_bus {
+            let _ = event_bus
+                .publish(EventEnvelope::engine(
+                    event_type,
+                    EventPhase::Completed,
+                    payload,
+                ))
+                .await;
+        }
+    }
+
+    async fn send_with_backpressure<T>(
+        &self,
+        tx: tokio::sync::mpsc::Sender<QueuedItem<T>>,
+        item: QueuedItem<T>,
+        queue_kind: &'static str,
+        log_context: &str,
+    ) -> bool {
+        match send_with_backpressure(&tx, item).await {
+            Ok(BackpressureSendState::Direct) => true,
+            Ok(BackpressureSendState::RecoveredFromFull) => {
+                counter!("parser_chain_backpressure_total", "queue" => queue_kind, "reason" => "queue_full").increment(1);
+                warn!(
+                    "[ResponseParserProcessor] queue full, fallback to awaited send: queue={} context={} remaining_capacity={}",
+                    queue_kind,
+                    log_context,
+                    tx.capacity()
+                );
+                true
+            }
+            Err(err) => {
+                if err.after_full {
+                    counter!("parser_chain_backpressure_total", "queue" => queue_kind, "reason" => "queue_full").increment(1);
+                    warn!(
+                        "[ResponseParserProcessor] queue full before close: queue={} context={} remaining_capacity={}",
+                        queue_kind,
+                        log_context,
+                        tx.capacity()
+                    );
+                }
+                counter!("parser_chain_backpressure_total", "queue" => queue_kind, "reason" => "queue_closed").increment(1);
+                error!(
+                    "[ResponseParserProcessor] queue closed before send: queue={} context={}",
+                    queue_kind,
+                    log_context
+                );
+                false
+            }
+        }
+    }
+}
+
 #[async_trait]
 impl ProcessorTrait<(Response, Arc<Module>, Arc<ModuleConfig>, Option<LoginInfo>), Vec<Data>> for ResponseParserProcessor {
     fn name(&self) -> &'static str {
@@ -325,7 +387,13 @@ impl ProcessorTrait<(Response, Arc<Module>, Arc<ModuleConfig>, Option<LoginInfo>
             }
         };
 
-        if let Some(task) = data.parser_task.take() {
+           if let Some(task) = data.parser_task.take() {
+               let task_account = task.account_task.account.clone();
+               let task_platform = task.account_task.platform.clone();
+               let task_run_id = task.run_id;
+               let task_module_id = task.context.module_id.clone();
+               let task_step_idx = task.context.step_idx;
+               let task_prefix_request = task.prefix_request;
              // OPTIMIZATION: Check if we can bypass the queue and generate requests locally
              let target_module_name = task.account_task.module.as_ref().and_then(|v| v.first());
              let is_same_module = target_module_name.map_or(true, |name| name == module.module.name().as_str());
@@ -349,29 +417,137 @@ impl ProcessorTrait<(Response, Arc<Module>, Arc<ModuleConfig>, Option<LoginInfo>
                          let request_queue = self.queue_manager.get_request_push_channel();
                          let mut generated_count = 0;
                          while let Some(req) = stream.next().await {
-                               if let Err(e) = request_queue.send(QueuedItem::new(req)).await {
-                                   error!("[ResponseParserProcessor] Failed to send generated request: {}", e);
-                               } else {
+                               let req_id = req.id.to_string();
+                               let req_module_id = req.module_id();
+                               let context = format!(
+                                   "generated_request request_id={} module_id={}",
+                                   req_id,
+                                   req_module_id
+                               );
+                               if self
+                                   .send_with_backpressure(
+                                       request_queue.clone(),
+                                       QueuedItem::new(req),
+                                       "request",
+                                       &context,
+                                   )
+                                   .await
+                               {
                                    generated_count += 1;
                                }
                          }
                          info!("[ResponseParserProcessor] Locally generated {} requests", generated_count);
+                         self.emit_semantic_event(
+                             EventType::ParserTaskProduced,
+                             json!({
+                                 "account": task_account,
+                                 "platform": task_platform,
+                                 "run_id": task_run_id,
+                                 "module_id": task_module_id,
+                                 "step_idx": task_step_idx,
+                                 "prefix_request": task_prefix_request,
+                                 "path": "local_generate"
+                             }),
+                         ).await;
+                         self.emit_semantic_event(
+                             EventType::ModuleStepAdvanced,
+                             json!({
+                                 "account": task_account,
+                                 "platform": task_platform,
+                                 "run_id": task_run_id,
+                                 "module_id": task_module_id,
+                                 "step_idx": task_step_idx,
+                                 "prefix_request": task_prefix_request,
+                                 "generated_count": generated_count,
+                                 "mode": "local_generate"
+                             }),
+                         ).await;
                          // Successfully handled, do NOT enqueue ParserTaskModel
                      },
                      Err(e) => {
                          error!("[ResponseParserProcessor] Failed to generate requests locally: {}, falling back to queue", e);
                          // Fallback: put the task back into parser_task queue
                          let queue = self.queue_manager.get_parser_task_push_channel();
-                         if let Err(e) = queue.send(QueuedItem::new(task)).await {
-                             error!("[ResponseParserProcessor] failed to send parser task fallback: {e}");
+                         let context = format!(
+                             "parser_task_fallback account={} platform={} run_id={} module_id={}",
+                             task.account_task.account,
+                             task.account_task.platform,
+                             task.run_id,
+                             task.context.module_id.as_deref().unwrap_or("unknown")
+                         );
+                         if !self
+                             .send_with_backpressure(
+                                 queue,
+                                 QueuedItem::new(task),
+                                 "parser_task",
+                                 &context,
+                             )
+                             .await
+                         {
+                             error!("[ResponseParserProcessor] failed to send parser task fallback: {}", context);
+                         } else {
+                             self.emit_semantic_event(
+                                 EventType::ParserTaskProduced,
+                                 json!({
+                                     "account": task_account,
+                                     "platform": task_platform,
+                                     "run_id": task_run_id,
+                                     "module_id": task_module_id,
+                                     "step_idx": task_step_idx,
+                                     "prefix_request": task_prefix_request,
+                                     "path": "fallback_queue"
+                                 }),
+                             ).await;
+                             self.emit_semantic_event(
+                                 EventType::ModuleStepFallback,
+                                 json!({
+                                     "account": task_account,
+                                     "platform": task_platform,
+                                     "run_id": task_run_id,
+                                     "module_id": task_module_id,
+                                     "step_idx": task_step_idx,
+                                     "prefix_request": task_prefix_request,
+                                     "reason": "local_generate_failed",
+                                     "error": e.to_string(),
+                                     "path": "parser_task_queue"
+                                 }),
+                             ).await;
                          }
                      }
                  }
              } else {
                 // Different module/context, enqueue as usual
                 let queue = self.queue_manager.get_parser_task_push_channel();
-                if let Err(e) = queue.send(QueuedItem::new(task)).await {
-                     error!("[ResponseParserProcessor] failed to send parser task: {e}");
+                let context = format!(
+                    "parser_task account={} platform={} run_id={} module_id={}",
+                    task.account_task.account,
+                    task.account_task.platform,
+                    task.run_id,
+                    task.context.module_id.as_deref().unwrap_or("unknown")
+                );
+                if !self
+                    .send_with_backpressure(
+                        queue,
+                        QueuedItem::new(task),
+                        "parser_task",
+                        &context,
+                    )
+                    .await
+                {
+                     error!("[ResponseParserProcessor] failed to send parser task: {}", context);
+                } else {
+                    self.emit_semantic_event(
+                        EventType::ParserTaskProduced,
+                        json!({
+                            "account": task_account,
+                            "platform": task_platform,
+                            "run_id": task_run_id,
+                            "module_id": task_module_id,
+                            "step_idx": task_step_idx,
+                            "prefix_request": task_prefix_request,
+                            "path": "parser_task_queue"
+                        }),
+                    ).await;
                 }
              }
         }
@@ -384,8 +560,28 @@ impl ProcessorTrait<(Response, Arc<Module>, Arc<ModuleConfig>, Option<LoginInfo>
             msg.prefix_request = input.0.prefix_request;
             msg.run_id = input.0.run_id;
             let queue = self.queue_manager.get_error_push_channel();
-            if let Err(e) = queue.send(QueuedItem::new(msg)).await {
-                error!("[ResponseParserProcessor] failed to send parser error: {e}");
+            let context = format!(
+                "error_task request_id={} module_id={}",
+                input.0.id,
+                input.0.module_id()
+            );
+            if !self
+                .send_with_backpressure(queue, QueuedItem::new(msg), "error", &context)
+                .await
+            {
+                error!("[ResponseParserProcessor] failed to send parser error: {}", context);
+            } else {
+                self.emit_semantic_event(
+                    EventType::ErrorTaskProduced,
+                    json!({
+                        "request_id": input.0.id,
+                        "account": input.0.account,
+                        "platform": input.0.platform,
+                        "module_id": input.0.module_id(),
+                        "step_idx": input.0.context.step_idx,
+                        "prefix_request": input.0.prefix_request
+                    }),
+                ).await;
             }
 
             // 不再使用旧的 record_response_error
@@ -482,8 +678,16 @@ impl ProcessorTrait<(Response, Arc<Module>, Arc<ModuleConfig>, Option<LoginInfo>
             prefix_request: input.0.prefix_request,
         };
         let queue = self.queue_manager.get_error_push_channel();
-        if let Err(e) = queue.send(QueuedItem::new(error_task)).await {
-            error!("[ResponseParserProcessor] failed to enqueue ErrorTaskModel: {e}");
+        let context = format!(
+            "handle_error request_id={} module_id={}",
+            input.0.id,
+            input.0.module_id()
+        );
+        if !self
+            .send_with_backpressure(queue, QueuedItem::new(error_task), "error", &context)
+            .await
+        {
+            error!("[ResponseParserProcessor] failed to enqueue ErrorTaskModel: {}", context);
         }
 
         // 释放模块锁
@@ -792,6 +996,7 @@ pub async fn create_parser_chain(
         queue_manager,
         state,
         cache_service: cache_service.clone(),
+        event_bus: event_bus.clone(),
     };
     let data_middleware_processor = DataMiddlewareProcessor {
         middleware_manager: middleware_manager.clone(),

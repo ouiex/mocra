@@ -52,6 +52,11 @@ impl State {
     /// Starts a background task to watch for configuration changes.
     pub async fn new_with_provider(provider: Box<dyn ConfigProvider>) -> Self {
         let config = provider.load_config().await.expect("failed to load config");
+        let single_node_mode = config.is_single_node_mode();
+        info!(
+            "Runtime mode initialized: {}",
+            if single_node_mode { "single_node" } else { "distributed" }
+        );
         
         let watcher_res = provider.watch().await;
 
@@ -66,7 +71,10 @@ impl State {
             .expect("Failed to connect to database"),
         );
         info!("Database connected successfully");
-        let cache_pool = config.cache.redis.as_ref().map(|redis| {
+        let cache_pool = if single_node_mode {
+            None
+        } else {
+            config.cache.redis.as_ref().map(|redis| {
             create_redis_pool(
                 &redis.redis_host,
                 redis.redis_port,
@@ -77,7 +85,8 @@ impl State {
                 redis.tls.unwrap_or(false),
             )
             .expect("Failed to connect cache")
-        });
+            })
+        };
         {
             if let Some(pool) = cache_pool.as_ref() {
                 let mut cnn = pool.get().await.expect("Failed to get cache connection");
@@ -88,7 +97,10 @@ impl State {
             }
         }
         info!("cache pool connect successfully");
-        let cookie_pool = config.cookie.as_ref().map(|redis| {
+        let cookie_pool = if single_node_mode {
+            None
+        } else {
+            config.cookie.as_ref().map(|redis| {
             create_redis_pool(
                 &redis.redis_host,
                 redis.redis_port,
@@ -99,7 +111,8 @@ impl State {
                 redis.tls.unwrap_or(false),
             )
                 .expect("Failed to connect cache")
-        });
+            })
+        };
         info!("cookie pool connect successfully");
 
         // Reuse cache_pool for locker and limiter since they use the same config

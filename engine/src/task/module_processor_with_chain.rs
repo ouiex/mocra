@@ -9,6 +9,7 @@
 // - 若解析成功但未返回 ParserTaskModel 且存在下一步，使用一次性门闸（AdvanceGate）合成“占位任务”推进下一步，避免多实例重复推进。
 
 use common::model::ExecutionMark;
+use common::model::chain_key;
 use common::interface::module::{ModuleNodeTrait, SyncBoxStream};
 use common::model::{ ModuleConfig, Request, Response};
 use errors::{RequestError, Result};
@@ -139,7 +140,11 @@ impl ModuleProcessorWithChain {
     }
 
     fn advance_key(&self) -> String {
-        format!("run:{}:module:{}", self.run_id, self.module_id)
+        chain_key::execution_state_key(self.run_id, &self.module_id)
+    }
+
+    fn advance_key_legacy(&self) -> String {
+        chain_key::legacy_execution_state_key(self.run_id, &self.module_id)
     }
 
     /// 将 Request 以 request.id 作为 key 持久化（供回退/恢复使用）
@@ -161,7 +166,15 @@ impl ModuleProcessorWithChain {
     // 使用一次性门闸标记“已推进到下一步”：
     // 仅用于在解析成功但未返回 ParserTaskModel 时，合成占位任务推进下一步（避免多实例重复推进）。
     async fn try_mark_step_advanced_once(&self, step_idx: usize) -> Result<bool> {
-        let id_str = format!("{}:step:{}", self.advance_key(), step_idx);
+        let id_str = chain_key::module_step_advance_once_key(self.run_id, &self.module_id, step_idx);
+        let legacy_id_str =
+            chain_key::legacy_module_step_advance_once_key(self.run_id, &self.module_id, step_idx);
+
+        if AdvanceGate::sync(&id_str, &self.cache).await?.is_some()
+            || AdvanceGate::sync(&legacy_id_str, &self.cache).await?.is_some()
+        {
+            return Ok(false);
+        }
         
         let gate = AdvanceGate(true);
         // Use send_nx for atomic check-and-set with explicit TTL
@@ -176,7 +189,20 @@ impl ModuleProcessorWithChain {
 
     // 回退门闸：对同一 (step_idx, prefix_request) 仅允许回退一次，防止生成失败时的无限回退循环。
     async fn try_allow_fallback_once(&self, step_idx: usize, prefix: &Uuid) -> Result<bool> {
-        let id_str = format!("{}:step:{}:prefix:{}", self.advance_key(), step_idx, prefix);
+        let id_str =
+            chain_key::module_step_fallback_once_key(self.run_id, &self.module_id, step_idx, *prefix);
+        let legacy_id_str = chain_key::legacy_module_step_fallback_once_key(
+            self.run_id,
+            &self.module_id,
+            step_idx,
+            *prefix,
+        );
+
+        if FallbackGate::sync(&id_str, &self.cache).await?.is_some()
+            || FallbackGate::sync(&legacy_id_str, &self.cache).await?.is_some()
+        {
+            return Ok(false);
+        }
         
         let gate = FallbackGate(true);
         // Use send_nx for atomic check-and-set
@@ -818,12 +844,18 @@ impl ModuleProcessorWithChain {
 
         // Check distributed state
         let id_str = self.advance_key();
+        let legacy_id_str = self.advance_key_legacy();
         if let Ok(Some(signal)) = StopSignal::sync(&id_str, &self.cache).await
             && signal.0 {
                 // Update local cache
                 *self.stop.write().await = true;
                 return Ok(true);
             }
+        if let Ok(Some(signal)) = StopSignal::sync(&legacy_id_str, &self.cache).await
+            && signal.0 {
+                *self.stop.write().await = true;
+                return Ok(true);
+        }
         
         // Update last check time
         self.last_stop_check.store(now, Ordering::Relaxed);
@@ -836,11 +868,241 @@ impl ModuleProcessorWithChain {
 
         // Update distributed state
         let id_str = self.advance_key();
+        let legacy_id_str = self.advance_key_legacy();
         StopSignal(true).send(&id_str, &self.cache).await?;
+        let _ = StopSignal(true).send(&legacy_id_str, &self.cache).await;
         debug!(
             "[chain] module={} run={} set_stopped: marked as stopped",
             self.module_id, self.run_id
         );
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_trait::async_trait;
+    use cacheable::CacheAble;
+    use cacheable::CacheService;
+    use common::interface::ModuleNodeTrait;
+    use common::model::meta::MetaData;
+    use common::model::request::RequestMethod;
+    use futures::StreamExt;
+
+    enum ParserBehavior {
+        ReturnTask,
+        ReturnError,
+    }
+
+    struct TestNode {
+        behavior: ParserBehavior,
+        module_id: String,
+    }
+
+    struct GenerateErrorNode;
+
+    #[async_trait]
+    impl ModuleNodeTrait for GenerateErrorNode {
+        async fn generate(
+            &self,
+            _config: Arc<ModuleConfig>,
+            _params: serde_json::Map<String, serde_json::Value>,
+            _login_info: Option<LoginInfo>,
+        ) -> Result<SyncBoxStream<'static, Request>> {
+            Err(RequestError::BuildFailed("generate failed".into()).into())
+        }
+
+        async fn parser(
+            &self,
+            _response: Response,
+            _config: Option<Arc<ModuleConfig>>,
+        ) -> Result<ParserData> {
+            Ok(ParserData::default())
+        }
+    }
+
+    #[async_trait]
+    impl ModuleNodeTrait for TestNode {
+        async fn generate(
+            &self,
+            _config: Arc<ModuleConfig>,
+            _params: serde_json::Map<String, serde_json::Value>,
+            _login_info: Option<LoginInfo>,
+        ) -> Result<SyncBoxStream<'static, Request>> {
+            Ok(Box::pin(futures::stream::empty()))
+        }
+
+        async fn parser(
+            &self,
+            response: Response,
+            _config: Option<Arc<ModuleConfig>>,
+        ) -> Result<ParserData> {
+            match self.behavior {
+                ParserBehavior::ReturnTask => {
+                    let task = ParserTaskModel::from(&response)
+                        .with_context(response.context.clone().with_module_id(self.module_id.clone()));
+                    Ok(ParserData::default().with_task(task))
+                }
+                ParserBehavior::ReturnError => {
+                    Err(RequestError::BuildFailed("parser failed".into()).into())
+                }
+            }
+        }
+    }
+
+    fn build_response(module: &str, step_idx: u32, prefix_request: Uuid, run_id: Uuid) -> Response {
+        Response {
+            id: Uuid::now_v7(),
+            platform: "pf".to_string(),
+            account: "acc".to_string(),
+            module: module.to_string(),
+            status_code: 200,
+            cookies: Default::default(),
+            content: vec![],
+            storage_path: None,
+            headers: vec![],
+            task_retry_times: 0,
+            metadata: MetaData::default(),
+            download_middleware: vec![],
+            data_middleware: vec![],
+            task_finished: false,
+            context: ExecutionMark::default().with_step_idx(step_idx),
+            run_id,
+            prefix_request,
+            request_hash: None,
+            priority: Default::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn execute_parser_success_advances_to_next_step_and_keeps_prefix() {
+        let run_id = Uuid::now_v7();
+        let module_id = "acc-pf-m1".to_string();
+        let processor = ModuleProcessorWithChain::new(
+            module_id.clone(),
+            Arc::new(CacheService::new(None, "test".to_string(), None, None)),
+            run_id,
+            60,
+        );
+        processor
+            .add_step_node(Arc::new(TestNode {
+                behavior: ParserBehavior::ReturnTask,
+                module_id: module_id.clone(),
+            }))
+            .await;
+        processor
+            .add_step_node(Arc::new(TestNode {
+                behavior: ParserBehavior::ReturnTask,
+                module_id: module_id.clone(),
+            }))
+            .await;
+
+        let prefix = Uuid::now_v7();
+        let response = build_response("m1", 0, prefix, run_id);
+        let data = processor.execute_parser(response, None).await.expect("execute_parser should succeed");
+
+        let task = data.parser_task.expect("parser task should be produced");
+        assert_eq!(task.context.step_idx, Some(1));
+        assert_eq!(task.context.module_id.as_deref(), Some(module_id.as_str()));
+        assert_eq!(task.prefix_request, prefix);
+    }
+
+    #[tokio::test]
+    async fn execute_parser_failure_emits_error_task_with_stay_current_step() {
+        let run_id = Uuid::now_v7();
+        let module_id = "acc-pf-m1".to_string();
+        let processor = ModuleProcessorWithChain::new(
+            module_id.clone(),
+            Arc::new(CacheService::new(None, "test".to_string(), None, None)),
+            run_id,
+            60,
+        );
+        processor
+            .add_step_node(Arc::new(TestNode {
+                behavior: ParserBehavior::ReturnError,
+                module_id: module_id.clone(),
+            }))
+            .await;
+
+        let prefix = Uuid::now_v7();
+        let response = build_response("m1", 0, prefix, run_id);
+        let data = processor.execute_parser(response, None).await.expect("execute_parser should return parser data with error task");
+
+        let err_task = data.error_task.expect("error task should be produced");
+        assert_eq!(err_task.context.step_idx, Some(0));
+        assert_eq!(err_task.context.module_id.as_deref(), Some(module_id.as_str()));
+        assert!(err_task.context.stay_current_step);
+        assert_eq!(err_task.prefix_request, prefix);
+        assert!(!err_task.error_msg.is_empty());
+    }
+
+    #[tokio::test]
+    async fn execute_request_fallback_is_allowed_once_then_blocked_for_same_step_and_prefix() {
+        let run_id = Uuid::now_v7();
+        let module_id = "acc-pf-m1".to_string();
+        let cache = Arc::new(CacheService::new(None, "test".to_string(), None, None));
+        let processor = ModuleProcessorWithChain::new(module_id.clone(), cache.clone(), run_id, 60);
+
+        processor
+            .add_step_node(Arc::new(TestNode {
+                behavior: ParserBehavior::ReturnTask,
+                module_id: module_id.clone(),
+            }))
+            .await;
+        processor.add_step_node(Arc::new(GenerateErrorNode)).await;
+
+        let prefix = Uuid::now_v7();
+        let mut prev_req = Request::new("http://example.local", RequestMethod::Get.as_ref());
+        prev_req.id = prefix;
+        prev_req.account = "acc".to_string();
+        prev_req.platform = "pf".to_string();
+        prev_req.module = "m1".to_string();
+        prev_req.context = ExecutionMark::default()
+            .with_module_id(module_id.clone())
+            .with_step_idx(0);
+        prev_req.run_id = run_id;
+        prev_req.prefix_request = Uuid::nil();
+        prev_req
+            .send(&prefix.to_string(), &cache)
+            .await
+            .expect("persist previous request for fallback");
+
+        let ctx = Some(
+            ExecutionMark::default()
+                .with_module_id(module_id.clone())
+                .with_step_idx(1),
+        );
+
+        let first = processor
+            .execute_request(
+                Arc::new(ModuleConfig::default()),
+                serde_json::Map::new(),
+                None,
+                ctx.clone(),
+                Some(prefix),
+            )
+            .await
+            .expect("first fallback should succeed");
+        let mut first_stream = first;
+        let recovered = first_stream
+            .next()
+            .await
+            .expect("fallback should return previous request");
+        assert_eq!(recovered.id, prefix);
+
+        match processor
+            .execute_request(
+                Arc::new(ModuleConfig::default()),
+                serde_json::Map::new(),
+                None,
+                ctx,
+                Some(prefix),
+            )
+            .await
+        {
+            Ok(_) => panic!("second fallback must be blocked by fallback gate"),
+            Err(_) => {}
+        }
     }
 }

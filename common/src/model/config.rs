@@ -185,6 +185,12 @@ pub struct CrawlerConfig {
     pub task_concurrency: Option<usize>,
     /// Concurrency for request publishing
     pub publish_concurrency: Option<usize>,
+    /// Concurrency for parser task processor
+    pub parser_concurrency: Option<usize>,
+    /// Concurrency for error task processor
+    pub error_task_concurrency: Option<usize>,
+    /// Delay in milliseconds before retrying when backpressure is detected
+    pub backpressure_retry_delay_ms: Option<u64>,
     /// Request deduplication TTL in seconds (default: 3600)
     pub dedup_ttl_secs: Option<u64>,
     /// Idle stop timeout in seconds (stop engine if local queues have no data for this duration)
@@ -312,6 +318,14 @@ pub struct Config {
     pub policy: Option<PolicyConfig>,
 }
 impl Config {
+    /// Whether current config should run in single-node mode.
+    ///
+    /// Rule: if cache.redis is configured, runtime is distributed;
+    /// otherwise it is single-node mode.
+    pub fn is_single_node_mode(&self) -> bool {
+        self.cache.redis.is_none()
+    }
+
     /// Loads configuration from a TOML file
     pub fn load(path: &str) -> Result<Self, String> {
         // 读取config.toml文件

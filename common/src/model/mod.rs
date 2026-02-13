@@ -1,4 +1,5 @@
 pub mod config;
+pub mod chain_key;
 pub mod context;
 pub mod cookies;
 pub mod cron_config;

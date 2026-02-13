@@ -1,3 +1,4 @@
+pub mod backpressure;
 pub mod task_model_chain;
 pub mod download_chain;
 pub mod parser_chain;

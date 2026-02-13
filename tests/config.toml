@@ -36,27 +36,6 @@ redis_port = 6379
 redis_db = 0
 pool_size = 50
 
-[proxy.pool_config]
-min_size = 1
-max_size = 20
-max_errors = 3
-health_check_interval_secs = 60
-refill_threshold = 0.3
-
-[[proxy.direct]]
-name = "local_https_proxy"
-url = "https://127.0.0.1:8888"
-rate_limit = 50
-
-[[proxy.direct]]
-name = "local_http_proxy"
-url = "http://127.0.0.1:8080"
-rate_limit = 50
-
-[[proxy.direct]]
-name = "local_wss_proxy"
-url = "wss://127.0.0.1:8888"
-rate_limit = 50
 
 
 [crawler]
@@ -65,7 +44,7 @@ task_max_errors = 100
 module_max_errors = 10
 module_locker_ttl = 5
 task_concurrency = 1000
-idle_stop_secs = 0
+idle_stop_secs = 10
 
 [scheduler]
 refresh_interval_secs = 60

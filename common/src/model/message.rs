@@ -251,6 +251,42 @@ pub struct TaskModel {
     pub run_id: Uuid,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", content = "payload", rename_all = "snake_case")]
+pub enum UnifiedTaskInput {
+    Task(TaskModel),
+    ParserTask(ParserTaskModel),
+    ErrorTask(ErrorTaskModel),
+}
+
+impl UnifiedTaskInput {
+    pub fn run_id(&self) -> Uuid {
+        match self {
+            UnifiedTaskInput::Task(value) => value.run_id,
+            UnifiedTaskInput::ParserTask(value) => value.run_id,
+            UnifiedTaskInput::ErrorTask(value) => value.run_id,
+        }
+    }
+}
+
+impl From<TaskModel> for UnifiedTaskInput {
+    fn from(value: TaskModel) -> Self {
+        UnifiedTaskInput::Task(value)
+    }
+}
+
+impl From<ParserTaskModel> for UnifiedTaskInput {
+    fn from(value: ParserTaskModel) -> Self {
+        UnifiedTaskInput::ParserTask(value)
+    }
+}
+
+impl From<ErrorTaskModel> for UnifiedTaskInput {
+    fn from(value: ErrorTaskModel) -> Self {
+        UnifiedTaskInput::ErrorTask(value)
+    }
+}
+
 #[async_trait]
 impl Offloadable for TaskModel {
     fn should_offload(&self, _threshold: usize) -> bool {

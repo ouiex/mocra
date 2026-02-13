@@ -16,6 +16,11 @@ pub enum EventDomain {
 pub enum EventType {
     TaskModel,
     ParserTaskModel,
+    ParserTaskProduced,
+    ErrorTaskProduced,
+    ModuleStepAdvanced,
+    ModuleStepFallback,
+    TaskTerminatedByThreshold,
     RequestPublish,
     RequestMiddleware,
     Download,
@@ -68,6 +73,11 @@ impl EventType {
         match self {
             EventType::TaskModel => "task_model",
             EventType::ParserTaskModel => "parser_task_model",
+            EventType::ParserTaskProduced => "parser_task_produced",
+            EventType::ErrorTaskProduced => "error_task_produced",
+            EventType::ModuleStepAdvanced => "module_step_advanced",
+            EventType::ModuleStepFallback => "module_step_fallback",
+            EventType::TaskTerminatedByThreshold => "task_terminated_by_threshold",
             EventType::RequestPublish => "request_publish",
             EventType::RequestMiddleware => "request_middleware",
             EventType::Download => "download",
@@ -160,6 +170,79 @@ impl EventEnvelope {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_millis()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{EventEnvelope, EventPhase, EventType, ParserTaskModelEvent};
+    use common::model::message::{ErrorTaskModel, ParserTaskModel, TaskModel};
+    use common::model::ExecutionMark;
+    use serde_json::json;
+    use uuid::Uuid;
+
+    #[test]
+    fn threshold_termination_event_type_has_stable_name() {
+        assert_eq!(
+            EventType::TaskTerminatedByThreshold.as_str(),
+            "task_terminated_by_threshold"
+        );
+    }
+
+    #[test]
+    fn task_model_chain_semantic_event_types_have_stable_names() {
+        assert_eq!(EventType::ParserTaskProduced.as_str(), "parser_task_produced");
+        assert_eq!(EventType::ErrorTaskProduced.as_str(), "error_task_produced");
+        assert_eq!(EventType::ModuleStepAdvanced.as_str(), "module_step_advanced");
+        assert_eq!(EventType::ModuleStepFallback.as_str(), "module_step_fallback");
+    }
+
+    #[test]
+    fn parser_task_model_event_mapping_is_consistent_for_parser_and_error_inputs() {
+        let run_id = Uuid::now_v7();
+        let task_model = TaskModel {
+            account: "acc".to_string(),
+            platform: "pf".to_string(),
+            module: Some(vec!["m1".to_string()]),
+            priority: Default::default(),
+            run_id,
+        };
+
+        let parser_task = ParserTaskModel {
+            id: Uuid::now_v7(),
+            account_task: task_model.clone(),
+            timestamp: 0,
+            metadata: json!({"k":"v"}),
+            context: ExecutionMark::default(),
+            run_id,
+            prefix_request: Uuid::now_v7(),
+        };
+        let parser_evt = ParserTaskModelEvent::from(&parser_task);
+        assert_eq!(parser_evt.account, "acc");
+        assert_eq!(parser_evt.platform, "pf");
+        assert_eq!(parser_evt.modules, Some(vec!["m1".to_string()]));
+
+        let error_task = ErrorTaskModel {
+            id: Uuid::now_v7(),
+            account_task: task_model,
+            error_msg: "err".to_string(),
+            timestamp: 0,
+            metadata: json!({"e":"x"}),
+            context: ExecutionMark::default(),
+            run_id,
+            prefix_request: Uuid::now_v7(),
+        };
+        let error_evt = ParserTaskModelEvent::from(&error_task);
+        assert_eq!(error_evt.account, "acc");
+        assert_eq!(error_evt.platform, "pf");
+        assert_eq!(error_evt.modules, Some(vec!["m1".to_string()]));
+    }
+
+    #[test]
+    fn parser_task_model_event_envelope_key_is_stable() {
+        let payload = json!({"account":"acc","platform":"pf"});
+        let evt = EventEnvelope::engine(EventType::ParserTaskModel, EventPhase::Completed, payload);
+        assert_eq!(evt.event_key(), "engine.parser_task_model.completed");
     }
 }
 

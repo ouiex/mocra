@@ -111,6 +111,10 @@ ParserTask -> ParserTaskProcessor -> Request / Data
 - `[download_config]`：下载并发、超时、限流
 - `[crawler]`：全局任务容错/并发参数
 
+**运行模式自动判定**：
+- 不再使用 `runtime.mode`。
+- 当 `[cache.redis]` 存在时，Engine 判定为分布式；否则为单节点。
+
 示例（节选）：
 ```toml
 [db]
@@ -196,6 +200,13 @@ listener_count = 8
 
 新增详细改造方案：
 - `docs/design/task_model_chain_unification_plan.md`
+- `docs/contract_test_coverage.md`
+- `docs/alerts/backpressure_runbook.md`
+- `docs/alerts/cas_fencing_runbook.md`
+- `docs/dashboards/threshold_calibration_template.md`
+- `docs/dashboards/baseline_report_template.md`
+- `docs/design/gray_release_sop.md`
+- `docs/design/rollback_drill_checklist.md`
 
 以下文档已被合并或保留为历史参考：
 - `docs/System_Architecture_zh.md`

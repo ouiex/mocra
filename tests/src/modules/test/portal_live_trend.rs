@@ -50,9 +50,9 @@ impl ModuleTrait for PortalLiveTrend {
     async fn add_step(&self) -> Vec<Arc<dyn ModuleNodeTrait>> {
         vec![Arc::new(PortalLiveTrendNode::default())]
     }
-    fn cron(&self) -> Option<CronConfig> {
-        Some(CronConfig::right_now())
-    }
+    // fn cron(&self) -> Option<CronConfig> {
+    //     Some(CronConfig::right_now())
+    // }
 }
 
 #[derive(Serialize, Deserialize, Debug)]

@@ -111,3 +111,35 @@ impl Default for EventBus {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::events::{EventPhase, EventType};
+    use serde_json::json;
+
+    #[tokio::test]
+    async fn semantic_event_subscription_receives_parser_task_produced() {
+        let bus = EventBus::new(128, 4);
+        let mut rx = bus
+            .subscribe("engine.parser_task_produced.completed".to_string())
+            .await;
+        bus.start().await;
+
+        let event = EventEnvelope::engine(
+            EventType::ParserTaskProduced,
+            EventPhase::Completed,
+            json!({"account":"acc","platform":"pf"}),
+        );
+        bus.publish(event).await.expect("publish should succeed");
+
+        let received = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+            .await
+            .expect("should receive event within timeout")
+            .expect("receiver should yield one event");
+
+        assert_eq!(received.event_key(), "engine.parser_task_produced.completed");
+        assert_eq!(received.event_type, EventType::ParserTaskProduced);
+        assert_eq!(received.phase, EventPhase::Completed);
+    }
+}
+
