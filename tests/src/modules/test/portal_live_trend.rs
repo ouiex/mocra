@@ -1,16 +1,16 @@
 use async_trait::async_trait;
 use chrono::Local;
-use common::model::{CronConfig, Headers, ModuleConfig, Request, Response};
-use errors::{ParserError, RequestError, Result};
-use polars::prelude::*;
-use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
-use std::sync::Arc;
 use common::interface::{ModuleNodeTrait, ModuleTrait, SyncBoxStream};
 use common::model::data::Data;
 use common::model::login_info::LoginInfo;
 use common::model::message::ParserData;
 use common::model::request::RequestMethod;
+use common::model::{Headers, ModuleConfig, Request, Response};
+use errors::{ParserError, RequestError, Result};
+use polars::prelude::*;
+use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
+use std::sync::Arc;
 
 #[derive(Debug)]
 pub struct PortalLiveTrend {}

@@ -118,6 +118,7 @@ impl Engine {
             .unwrap_or(0);
         if idle_stop_secs > 0 {
             let queue_manager = self.queue_manager.clone();
+            let cron_scheduler = self.cron_scheduler.clone();
             let shutdown_tx = self.shutdown_tx.clone();
             let mut shutdown_rx = self.shutdown_tx.subscribe();
             tokio::spawn(async move {
@@ -134,8 +135,9 @@ impl Engine {
                             let (task, download, response, parser, error, remote_task) =
                                 queue_manager.local_pending_breakdown().await;
                             let pending = task + download + response + parser + error + remote_task;
+                            let has_running_cron_tasks = cron_scheduler.has_running_tasks();
 
-                            if pending > 0 {
+                            if pending > 0 || has_running_cron_tasks {
                                 last_active = Instant::now();
                                 continue;
                             }

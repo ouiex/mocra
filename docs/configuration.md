@@ -295,7 +295,7 @@ crawler_local:cookie:login_info:benchmark-test
 | publish_concurrency | 否 | number | 发布到队列的并发上限。 | Max concurrency for publishing into queues. |
 | backpressure_retry_delay_ms | 否 | number | 发生队列背压（full/closed）时的重试基准延迟（毫秒）。未设置则沿用默认重试策略。 | Base retry delay (ms) when queue backpressure (full/closed) occurs. Uses default retry policy when omitted. |
 | dedup_ttl_secs | 否 | number | 请求去重 TTL（秒），用于去重窗口。 | Deduplication TTL (seconds) for request windowing. |
-| idle_stop_secs | 否 | number | 本地队列空闲超时秒数，超过则自动停止；0/不填为关闭（仅基于本地队列是否有待处理）。 | Idle timeout based on local queue emptiness; stop when exceeded. 0/omitted disables. |
+| idle_stop_secs | 否 | number | 空闲超时秒数，超过则自动停止；0/不填为关闭。判定条件：本地队列无待处理且 CronScheduler 无运行中任务。 | Idle timeout before auto-stop; 0/omitted disables. Stops only when local queues are empty and CronScheduler has no running tasks. |
 
 ### [scheduler]
 

@@ -24,6 +24,23 @@ use sync::LeaderElector;
 use tokio::sync::broadcast;
 use metrics::{counter, histogram};
 
+struct ActiveCronJobGuard<'a> {
+    counter: &'a AtomicU64,
+}
+
+impl<'a> ActiveCronJobGuard<'a> {
+    fn new(counter: &'a AtomicU64) -> Self {
+        counter.fetch_add(1, Ordering::Relaxed);
+        Self { counter }
+    }
+}
+
+impl Drop for ActiveCronJobGuard<'_> {
+    fn drop(&mut self) {
+        self.counter.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
 /// Scheduler for triggering time-based tasks.
 /// 
 /// Uses a Leader Election mechanism to ensure unique execution and reduce contention.
@@ -43,6 +60,7 @@ pub struct CronScheduler {
     last_version: AtomicU64,
     last_module_hash: AtomicU64,
     last_refresh_at_ms: AtomicU64,
+    active_context_jobs: AtomicU64,
     leader_elector: Arc<LeaderElector>,
 }
 
@@ -66,8 +84,13 @@ impl CronScheduler {
             last_version: AtomicU64::new(0),
             last_module_hash: AtomicU64::new(0),
             last_refresh_at_ms: AtomicU64::new(0),
+            active_context_jobs: AtomicU64::new(0),
             leader_elector,
         }
+    }
+
+    pub fn has_running_tasks(&self) -> bool {
+        self.active_context_jobs.load(Ordering::Relaxed) > 0
     }
 
     async fn get_misfire_tolerance(&self) -> i64 {
@@ -326,7 +349,7 @@ impl CronScheduler {
 
     /// Main scheduler loop.
     ///
-    /// Triggers tasks at the top of every minute.
+    /// Triggers tasks with second-level precision.
     async fn run(self: Arc<Self>) {
         // Start the leader elector in background
         {
@@ -341,56 +364,53 @@ impl CronScheduler {
 
         loop {
             let now = Utc::now();
-            let current_minute_ts = now.timestamp() / 60 * 60;
+            let current_second_ts = now.timestamp();
 
-            if let Some(current_minute) = Utc.timestamp_opt(current_minute_ts, 0).single() {
+            if let Some(current_second) = Utc.timestamp_opt(current_second_ts, 0).single() {
                 // Only Leader processes ticks
                 if self.leader_elector.is_leader() {
                     // Misfire Handling Logic
                     if let Some(last_run) = last_tick {
-                        let diff = current_minute.signed_duration_since(last_run).num_seconds();
+                        let diff = current_second.signed_duration_since(last_run).num_seconds();
                         
-                        if diff > 60 {
+                        if diff > 1 {
                             // We missed some ticks!
                             let misfire_tolerance = self.get_misfire_tolerance().await;
                             if diff <= misfire_tolerance {
-                                 info!("Detected missed ticks. Catching up from {} to {}", last_run, current_minute);
-                                 // Catch up logic: Run for each missed minute
-                                 let mut cursor = last_run + chrono::Duration::seconds(60);
-                                 while cursor <= current_minute {
+                                 info!("Detected missed ticks. Catching up from {} to {}", last_run, current_second);
+                                 let mut cursor = last_run + chrono::Duration::seconds(1);
+                                 while cursor <= current_second {
                                      self.clone().process_tick(cursor).await;
-                                     cursor += chrono::Duration::seconds(60);
+                                     cursor += chrono::Duration::seconds(1);
                                  }
-                                 last_tick = Some(current_minute);
+                                 last_tick = Some(current_second);
                             } else {
                                  warn!("Missed ticks gap ({}) exceeds tolerance ({}). Skipping catch-up, setting last_tick to now.", diff, misfire_tolerance);
-                                 last_tick = Some(current_minute);
-                                 self.clone().process_tick(current_minute).await;
+                                 last_tick = Some(current_second);
+                                 self.clone().process_tick(current_second).await;
                             }
                         } else if diff > 0 {
                              // Normal tick
-                             last_tick = Some(current_minute);
-                             self.clone().process_tick(current_minute).await;
+                             last_tick = Some(current_second);
+                             self.clone().process_tick(current_second).await;
                         }
                     } else {
                          // First run
-                         last_tick = Some(current_minute);
-                         self.clone().process_tick(current_minute).await;
+                         last_tick = Some(current_second);
+                         self.clone().process_tick(current_second).await;
                     }
                 } else {
                      // Not leader, just update last_tick to stay in sync roughly, or do nothing.
                      // Updating last_tick ensures if we BECOME leader, we don't think we missed hours of ticks.
-                     last_tick = Some(current_minute);
+                     last_tick = Some(current_second);
                 }
             }
 
-            // Sleep until the start of the next minute
+            // Sleep until the start of the next second
             let now = Utc::now();
-            let next_minute = (now.timestamp() / 60 + 1) * 60;
-            // Ensure sleep_duration is non-negative
-            let sleep_secs = (next_minute - now.timestamp()).max(0) as u64;
+            let next_second = now.timestamp() + 1;
+            let sleep_secs = (next_second - now.timestamp()).max(0) as u64;
             let sleep_duration = std::time::Duration::from_secs(sleep_secs);
-            // Add a small buffer to ensure we land inside the next minute
             
             let mut shutdown = self.shutdown_rx.resubscribe();
             tokio::select! {
@@ -398,12 +418,12 @@ impl CronScheduler {
                     info!("CronScheduler main loop received shutdown signal");
                     break;
                 }
-                _ = sleep(sleep_duration + Duration::from_millis(100)) => {}
+                _ = sleep(sleep_duration + Duration::from_millis(10)) => {}
             }
         }
     }
 
-    async fn process_tick(self: Arc<Self>, current_minute: DateTime<Utc>) {
+    async fn process_tick(self: Arc<Self>, current_tick: DateTime<Utc>) {
         // Iterate over cached schedules
         // DashMap iter() locks shards, but for reading it's fine.
         // We collect keys first to avoid holding locks while processing if we want, 
@@ -414,7 +434,7 @@ impl CronScheduler {
         for r in self.schedule_cache.iter() {
             let (module_name, (schedule, contexts)) = r.pair();
             
-            if Self::is_schedule_match(schedule, current_minute) {
+            if Self::is_schedule_match(schedule, current_tick) {
                 tasks.push((module_name.clone(), contexts.clone()));
             }
         }
@@ -427,7 +447,7 @@ impl CronScheduler {
             let this = self.clone();
             total_triggered += contexts.len();
             tokio::spawn(async move {
-                 this.process_module_contexts(&module_name, &contexts, current_minute).await;
+                 this.process_module_contexts(&module_name, &contexts, current_tick).await;
             });
         }
         
@@ -438,7 +458,8 @@ impl CronScheduler {
         }
     }
 
-    async fn process_module_contexts(&self, module_name: &str, contexts: &[(String, String)], current_minute: DateTime<Utc>) {
+    async fn process_module_contexts(&self, module_name: &str, contexts: &[(String, String)], current_tick: DateTime<Utc>) {
+        let _active_guard = ActiveCronJobGuard::new(&self.active_context_jobs);
         // Iterate over each context and try to acquire lock individually
         // Parallelize using for_each_concurrent to maximize throughput
         let concurrency = self.state.config.read().await.scheduler
@@ -446,7 +467,7 @@ impl CronScheduler {
             .and_then(|s| s.concurrency)
             .unwrap_or(100);
 
-        let timestamp = current_minute.timestamp();
+        let timestamp = current_tick.timestamp();
         let namespace_prefix = {
             let ns = self.state.cache_service.namespace();
             if ns.is_empty() {
@@ -495,7 +516,7 @@ impl CronScheduler {
                                 let (account, platform) = batch_items[i];
                                 info!(
                                     "Triggering cron task for module: {} [{}@{}] at {}",
-                                    module_name, account, platform, current_minute
+                                    module_name, account, platform, current_tick
                                 );
                                 
                                 self.trigger_single_task(module_name, account, platform).await;
