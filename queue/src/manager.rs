@@ -26,20 +26,6 @@ use serde_path_to_error;
 
 const DEFAULT_COMPRESSION_THRESHOLD: usize = 1024;
 const BLOCKING_PAYLOAD_BYTES: usize = 64 * 1024;
-const PAYLOAD_PREVIEW_BYTES: usize = 64;
-
-fn format_payload_preview(bytes: &[u8]) -> String {
-    let preview_len = bytes.len().min(PAYLOAD_PREVIEW_BYTES);
-    let mut hex = String::with_capacity(preview_len * 3);
-    for (idx, b) in bytes.iter().take(preview_len).enumerate() {
-        if idx > 0 {
-            hex.push(' ');
-        }
-        hex.push_str(&format!("{:02x}", b));
-    }
-    hex
-}
-
 
 fn default_headers() -> HashMap<String, String> {
     let mut headers = HashMap::new();

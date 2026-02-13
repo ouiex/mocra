@@ -29,17 +29,20 @@ struct WebSocketDownloadProcessor {
     cache_service: Arc<CacheService>,
 }
 #[async_trait]
-impl ProcessorTrait<(Request, Option<ModuleConfig>), ()> for WebSocketDownloadProcessor {
+impl ProcessorTrait<(Option<Request>, Option<ModuleConfig>), ()> for WebSocketDownloadProcessor {
     fn name(&self) -> &'static str {
         "WebSocketDownloadProcessor"
     }
 
     async fn process(
         &self,
-        input: (Request, Option<ModuleConfig>),
+        input: (Option<Request>, Option<ModuleConfig>),
         context: ProcessorContext,
     ) -> ProcessorResult<()> {
-        let (request, _) = input;
+        let request = match input.0 {
+            Some(request) => request,
+            None => return ProcessorResult::Success(()),
+        };
         let request_id = request.id;
         let module_id = request.module_id();
         let response = self.wss_downloader.send(request).await;
@@ -61,14 +64,18 @@ impl ProcessorTrait<(Request, Option<ModuleConfig>), ()> for WebSocketDownloadPr
     }
     async fn post_process(
         &self,
-        input: &(Request, Option<ModuleConfig>),
+        input: &(Option<Request>, Option<ModuleConfig>),
         _output: &(),
         _context: &ProcessorContext,
     ) -> errors::Result<()> {
+        let request = match &input.0 {
+            Some(request) => request,
+            None => return Ok(()),
+        };
         // 从response_recv中取出Response进行middleware处理和发布
         let (tx, mut rx) = tokio::sync::mpsc::channel(100);
         let timeout = input.1.as_ref().and_then(|x|x.get_config::<u64>("wss_timeout")).unwrap_or(60);
-        let module_id = input.0.module_id();
+        let module_id = request.module_id();
 
 
         // 注册监听器，确保只接收当前模块的消息
@@ -80,7 +87,7 @@ impl ProcessorTrait<(Request, Option<ModuleConfig>), ()> for WebSocketDownloadPr
         let config = input.1.clone();
         let wss_downloader = self.wss_downloader.clone();
         let module_id_clone = module_id.clone();
-        let run_id = input.0.run_id;
+        let run_id = request.run_id;
         let cache_service = self.cache_service.clone();
         tokio::spawn(async move {
             use tokio::time::{Duration, interval};
@@ -114,6 +121,9 @@ impl ProcessorTrait<(Request, Option<ModuleConfig>), ()> for WebSocketDownloadPr
                             Some(response) => {
                                 // 收到响应，进行处理
                                 let modified_response = middleware_manager.handle_response(response, &config).await;
+                                let Some(modified_response) = modified_response else {
+                                    continue;
+                                };
                                 let item = QueuedItem::new(modified_response);
                                 if let Err(e) = match queue_manager.try_send_local_response(item) {
                                     Ok(_) => Ok(()),
@@ -143,48 +153,87 @@ impl ProcessorTrait<(Request, Option<ModuleConfig>), ()> for WebSocketDownloadPr
         Ok(())
     }
 }
-impl EventProcessorTrait<(Request, Option<ModuleConfig>), ()> for WebSocketDownloadProcessor {
-    fn pre_status(&self, input: &(Request, Option<ModuleConfig>)) -> Option<EventEnvelope> {
-        let ev: DownloadEvent = (&input.0).into();
-        Some(EventEnvelope::engine(EventType::Download, EventPhase::Started, ev))
+impl EventProcessorTrait<(Option<Request>, Option<ModuleConfig>), ()> for WebSocketDownloadProcessor {
+    fn pre_status(&self, input: &(Option<Request>, Option<ModuleConfig>)) -> Option<EventEnvelope> {
+        match &input.0 {
+            Some(request) => {
+                let ev: DownloadEvent = request.into();
+                Some(EventEnvelope::engine(EventType::Download, EventPhase::Started, ev))
+            }
+            None => Some(EventEnvelope::system_error(
+                "wss_download_skipped_without_request",
+                EventPhase::Completed,
+            )),
+        }
     }
 
-    fn finish_status(&self, input: &(Request, Option<ModuleConfig>), _output: &()) -> Option<EventEnvelope> {
-        let ev: DownloadEvent = (&input.0).into();
-
-        Some(EventEnvelope::engine(EventType::Download, EventPhase::Completed, ev))
+    fn finish_status(&self, input: &(Option<Request>, Option<ModuleConfig>), _output: &()) -> Option<EventEnvelope> {
+        match &input.0 {
+            Some(request) => {
+                let ev: DownloadEvent = request.into();
+                Some(EventEnvelope::engine(EventType::Download, EventPhase::Completed, ev))
+            }
+            None => Some(EventEnvelope::system_error(
+                "wss_download_skipped_without_request",
+                EventPhase::Completed,
+            )),
+        }
     }
 
-    fn working_status(&self, input: &(Request, Option<ModuleConfig>)) -> Option<EventEnvelope> {
-        let ev: DownloadEvent = (&input.0).into();
-        Some(EventEnvelope::engine(EventType::Download, EventPhase::Started, ev))
+    fn working_status(&self, input: &(Option<Request>, Option<ModuleConfig>)) -> Option<EventEnvelope> {
+        match &input.0 {
+            Some(request) => {
+                let ev: DownloadEvent = request.into();
+                Some(EventEnvelope::engine(EventType::Download, EventPhase::Started, ev))
+            }
+            None => Some(EventEnvelope::system_error(
+                "wss_download_skipped_without_request",
+                EventPhase::Completed,
+            )),
+        }
     }
 
-    fn error_status(&self, input: &(Request, Option<ModuleConfig>), err: &Error) -> Option<EventEnvelope> {
-        let ev: DownloadEvent = (&input.0).into();
-        Some(EventEnvelope::engine_error(
-            EventType::Download,
-            EventPhase::Failed,
-            ev,
-            err,
-        ))
+    fn error_status(&self, input: &(Option<Request>, Option<ModuleConfig>), err: &Error) -> Option<EventEnvelope> {
+        match &input.0 {
+            Some(request) => {
+                let ev: DownloadEvent = request.into();
+                Some(EventEnvelope::engine_error(
+                    EventType::Download,
+                    EventPhase::Failed,
+                    ev,
+                    err,
+                ))
+            }
+            None => Some(EventEnvelope::system_error(
+                format!("wss_download_skipped_with_error: {err}"),
+                EventPhase::Failed,
+            )),
+        }
     }
 
     fn retry_status(
         &self,
-        input: &(Request, Option<ModuleConfig>),
+        input: &(Option<Request>, Option<ModuleConfig>),
         retry_policy: &RetryPolicy,
     ) -> Option<EventEnvelope> {
-        let ev: DownloadEvent = (&input.0).into();
-        Some(EventEnvelope::engine(
-            EventType::Download,
-            EventPhase::Retry,
-            json!({
-                "data": ev,
-                "retry_count": retry_policy.current_retry,
-                "reason": retry_policy.reason.clone().unwrap_or_default(),
-            }),
-        ))
+        match &input.0 {
+            Some(request) => {
+                let ev: DownloadEvent = request.into();
+                Some(EventEnvelope::engine(
+                    EventType::Download,
+                    EventPhase::Retry,
+                    json!({
+                        "data": ev,
+                        "retry_count": retry_policy.current_retry,
+                        "reason": retry_policy.reason.clone().unwrap_or_default(),
+                    }),
+                ))
+            }
+            None => Some(EventEnvelope::system_error(
+                "wss_download_skipped_retry_without_request",
+                EventPhase::Completed,
+            )),
+        }
     }
 }
 
@@ -213,6 +262,6 @@ pub async fn create_wss_download_chain(
     EventAwareTypedChain::<Request, Request>::new(event_bus)
         .then::<(Request, Option<ModuleConfig>), _>(config_processor)
         .then::<(Request, Option<ModuleConfig>), _>(proxy_middleware)
-        .then::<(Request, Option<ModuleConfig>), _>(request_middleware)
+        .then::<(Option<Request>, Option<ModuleConfig>), _>(request_middleware)
         .then::<(), _>(download_processor)
 }

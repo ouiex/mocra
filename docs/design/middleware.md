@@ -20,9 +20,10 @@ Refactored to use strong-typed traits with explicit hooks.
 pub trait DownloadMiddleware: Send + Sync {
     fn name(&self) -> String;
     // Executed before the request is sent to the downloader
-    async fn before_request(&self, req: Request, cfg: &Option<ModuleConfig>) -> Request { req }
-    // Executed after the response is received from the downloader
-    async fn after_response(&self, res: Response, cfg: &Option<ModuleConfig>) -> Response { res }
+    // Return None to skip this request
+    async fn before_request(&self, req: Request, cfg: &Option<ModuleConfig>) -> Option<Request> { Some(req) }
+    // Return None to skip subsequent response middleware and publishing
+    async fn after_response(&self, res: Response, cfg: &Option<ModuleConfig>) -> Option<Response> { Some(res) }
 }
 ```
 
@@ -32,7 +33,8 @@ pub trait DownloadMiddleware: Send + Sync {
 pub trait DataMiddleware: Send + Sync {
     fn name(&self) -> String;
     // Process data after parsing
-    async fn handle_data(&self, data: Data, cfg: &Option<ModuleConfig>) -> Data { data }
+    // Return None to skip subsequent data middleware and storage
+    async fn handle_data(&self, data: Data, cfg: &Option<ModuleConfig>) -> Option<Data> { Some(data) }
 }
 ```
 

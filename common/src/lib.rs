@@ -6,6 +6,5 @@ pub mod status_tracker;
 pub mod stream_stats;
 pub mod registry;
 pub mod config;
-pub mod middleware;
 pub mod storage;
 pub mod policy;

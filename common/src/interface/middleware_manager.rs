@@ -144,22 +144,25 @@ impl MiddlewareManager {
             .collect()
     }
 
-    pub async fn handle_request(&self, request: Request, config: &Option<ModuleConfig>) -> Request {
+    pub async fn handle_request(&self, request: Request, config: &Option<ModuleConfig>) -> Option<Request> {
         let mut req = request;
         let mut middleware: Vec<(Arc<dyn DownloadMiddleware>, u32)> = self
             .get_download_middleware(&req.download_middleware, config)
             .await;
         middleware.sort_by(|x, y| x.1.cmp(&y.1));
         for (middleware, _) in middleware {
-            req = middleware.before_request(req, config).await;
+            match middleware.before_request(req, config).await {
+                Some(next_req) => req = next_req,
+                None => return None,
+            }
         }
-        req
+        Some(req)
     }
     pub async fn handle_response(
         &self,
         response: Response,
         config: &Option<ModuleConfig>,
-    ) -> Response {
+    ) -> Option<Response> {
         let mut resp = response;
         let mut middleware: Vec<(Arc<dyn DownloadMiddleware>, u32)> = self
             .get_download_middleware(&resp.download_middleware, config)
@@ -167,12 +170,15 @@ impl MiddlewareManager {
         middleware.sort_by(|x, y| y.1.cmp(&x.1));
         for (middleware, _) in middleware {
             if resp.download_middleware.contains(&middleware.name()) {
-                resp = middleware.after_response(resp, config).await;
+                match middleware.after_response(resp, config).await {
+                    Some(next_resp) => resp = next_resp,
+                    None => return None,
+                }
             }
         }
-        resp
+        Some(resp)
     }
-    pub async fn handle_data(&self, data: Data, config: &Option<ModuleConfig>) -> Data {
+    pub async fn handle_data(&self, data: Data, config: &Option<ModuleConfig>) -> Option<Data> {
         let mut data = data;
         let mut middleware: Vec<(Arc<dyn DataMiddleware>, u32)> = self
             .get_data_middleware(&data.data_middleware, config)
@@ -180,10 +186,13 @@ impl MiddlewareManager {
         middleware.sort_by(|x, y| x.1.cmp(&y.1));
         for (middleware, _) in middleware {
             if data.data_middleware.contains(&middleware.name()) {
-                data = middleware.handle_data(data, config).await;
+                match middleware.handle_data(data, config).await {
+                    Some(next_data) => data = next_data,
+                    None => return None,
+                }
             }
         }
-        data
+        Some(data)
     }
     /// 返回存储结果的map，key为中间件名称，value为存储结果，只返回错误的结果
     pub async fn handle_store_data(

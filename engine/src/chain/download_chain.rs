@@ -31,7 +31,7 @@ pub struct DownloadProcessor {
 }
 
 #[async_trait]
-impl ProcessorTrait<(Request, Option<ModuleConfig>), (Option<Response>, Option<ModuleConfig>)>
+impl ProcessorTrait<(Option<Request>, Option<ModuleConfig>), (Option<Response>, Option<ModuleConfig>)>
 for DownloadProcessor
 {
     fn name(&self) -> &'static str {
@@ -40,14 +40,18 @@ for DownloadProcessor
 
     async fn process(
         &self,
-        input: (Request, Option<ModuleConfig>),
+        input: (Option<Request>, Option<ModuleConfig>),
         context: ProcessorContext,
     ) -> ProcessorResult<(Option<Response>, Option<ModuleConfig>)> {
+        let request = match input.0 {
+            Some(request) => request,
+            None => return ProcessorResult::Success((None, input.1)),
+        };
         debug!(
             "[DownloadProcessor] begin process: request_id={} module_id={} task_id={} retry_count={}",
-            input.0.id,
-            input.0.module_id(),
-            input.0.task_id(),
+            request.id,
+            request.module_id(),
+            request.task_id(),
             context.retry_policy.as_ref().map(|r| r.current_retry).unwrap_or(0)
         );
 
@@ -58,7 +62,7 @@ for DownloadProcessor
             // TaskModelChain 和 DownloadChain 运行在不同节点，需要在执行前再次检查最新错误状态
 
             // 1. 检查 Task 级别错误 (带缓存优化)
-            let task_id = input.0.task_id();
+            let task_id = request.task_id();
             // 尝试从缓存获取决策
             let cached_task_decision = {
                 if let Some(entry) = self.decision_cache.get(&task_id) {
@@ -92,7 +96,7 @@ for DownloadProcessor
                 Ok(ErrorDecision::Terminate(reason)) => {
                     error!(
                         "[DownloadProcessor] task terminated before download: task_id={} reason={}",
-                        input.0.task_id(),
+                        request.task_id(),
                         reason
                     );
                     return ProcessorResult::FatalFailure(
@@ -102,7 +106,7 @@ for DownloadProcessor
                 Err(e) => {
                     warn!(
                         "[DownloadProcessor] task error check failed, continue anyway: task_id={} error={}",
-                        input.0.task_id(),
+                        request.task_id(),
                         e
                     );
                 }
@@ -110,7 +114,7 @@ for DownloadProcessor
             }
 
             // 2. 检查 Module 级别错误 (带缓存优化)
-            let module_id = input.0.module_id();
+            let module_id = request.module_id();
             // 尝试从缓存获取决策
             let cached_decision = {
                 if let Some(entry) = self.decision_cache.get(&module_id) {
@@ -145,13 +149,13 @@ for DownloadProcessor
                 Ok(ErrorDecision::Terminate(reason)) => {
                     error!(
                         "[DownloadProcessor] module terminated before download: module_id={} reason={}",
-                        input.0.module_id(),
+                        request.module_id(),
                         reason
                     );
                     // Module 已终止，释放锁并返回 None，让链路继续处理其他请求
                     self.state
                         .status_tracker
-                        .release_module_locker(&input.0.module_id())
+                        .release_module_locker(&request.module_id())
                         .await;
 
                     // 返回 None 表示跳过该请求，而不是 FatalFailure
@@ -161,7 +165,7 @@ for DownloadProcessor
                 Err(e) => {
                     warn!(
                         "[DownloadProcessor] module error check failed, continue anyway: module_id={} error={}",
-                        input.0.module_id(),
+                        request.module_id(),
                         e
                     );
                 }
@@ -175,15 +179,15 @@ for DownloadProcessor
             DownloadConfig::load(&input.1, &self.state.config.read().await.download_config);
         let downloader = self
             .downloader_manager
-            .get_downloader(&input.0, download_config)
+            .get_downloader(&request, download_config)
             .await;
-        debug!("[DownloadProcessor] acquired downloader, start download: request_id={}", input.0.id);
+        debug!("[DownloadProcessor] acquired downloader, start download: request_id={}", request.id);
 
-        let module_id = input.0.module_id();
-        let task_id = input.0.task_id();
-        let request_id = input.0.id;
+        let module_id = request.module_id();
+        let task_id = request.task_id();
+        let request_id = request.id;
 
-        match downloader.download(input.0).await {
+        match downloader.download(request).await {
             Ok(response) => {
                 // [LOG_OPTIMIZATION]
                 // debug!(
@@ -262,14 +266,18 @@ for DownloadProcessor
     }
     async fn handle_error(
         &self,
-        _input: &(Request, Option<ModuleConfig>),
+        _input: &(Option<Request>, Option<ModuleConfig>),
         _error: Error,
         _context: &ProcessorContext,
     ) -> ProcessorResult<(Option<Response>, Option<ModuleConfig>)> {
+        let request = match &_input.0 {
+            Some(request) => request,
+            None => return ProcessorResult::Success((None, _input.1.clone())),
+        };
         error!(
             "[DownloadProcessor] handle_error: request_id={} module_id={} error={}",
-            _input.0.id,
-            _input.0.module_id(),
+            request.id,
+            request.module_id(),
             _error
         );
 
@@ -280,65 +288,103 @@ for DownloadProcessor
         // Ensure we release the module lock to avoid stale locks.
         self.state
             .status_tracker
-            .release_module_locker(&_input.0.module_id())
+            .release_module_locker(&request.module_id())
             .await;
         ProcessorResult::Success((None, _input.1.clone()))
     }
 }
 
 #[async_trait]
-impl EventProcessorTrait<(Request, Option<ModuleConfig>), (Option<Response>, Option<ModuleConfig>)>
+impl EventProcessorTrait<(Option<Request>, Option<ModuleConfig>), (Option<Response>, Option<ModuleConfig>)>
 for DownloadProcessor
 {
-    fn pre_status(&self, input: &(Request, Option<ModuleConfig>)) -> Option<EventEnvelope> {
-        let ev: DownloadEvent = (&input.0).into();
-        Some(EventEnvelope::engine(EventType::Download, EventPhase::Started, ev))
+    fn pre_status(&self, input: &(Option<Request>, Option<ModuleConfig>)) -> Option<EventEnvelope> {
+        match &input.0 {
+            Some(request) => {
+                let ev: DownloadEvent = request.into();
+                Some(EventEnvelope::engine(EventType::Download, EventPhase::Started, ev))
+            }
+            None => Some(EventEnvelope::system_error(
+                "download_skipped_without_request",
+                EventPhase::Completed,
+            )),
+        }
     }
 
     fn finish_status(
         &self,
-        input: &(Request, Option<ModuleConfig>),
+        input: &(Option<Request>, Option<ModuleConfig>),
         out: &(Option<Response>, Option<ModuleConfig>),
     ) -> Option<EventEnvelope> {
-        // Build a DownloadEvent; enrich with response info if available
-        let mut ev: DownloadEvent = (&input.0).into();
-        if let Some(resp) = &out.0 {
-            ev.status_code = Some(resp.status_code);
-            // Keeping duration_ms/response_size as None unless tracked elsewhere
+        match &input.0 {
+            Some(request) => {
+                let mut ev: DownloadEvent = request.into();
+                if let Some(resp) = &out.0 {
+                    ev.status_code = Some(resp.status_code);
+                }
+                Some(EventEnvelope::engine(EventType::Download, EventPhase::Completed, ev))
+            }
+            None => Some(EventEnvelope::system_error(
+                "download_skipped_without_request",
+                EventPhase::Completed,
+            )),
         }
-        Some(EventEnvelope::engine(EventType::Download, EventPhase::Completed, ev))
     }
 
-    fn working_status(&self, input: &(Request, Option<ModuleConfig>)) -> Option<EventEnvelope> {
-        let ev: DownloadEvent = (&input.0).into();
-        Some(EventEnvelope::engine(EventType::Download, EventPhase::Started, ev))
+    fn working_status(&self, input: &(Option<Request>, Option<ModuleConfig>)) -> Option<EventEnvelope> {
+        match &input.0 {
+            Some(request) => {
+                let ev: DownloadEvent = request.into();
+                Some(EventEnvelope::engine(EventType::Download, EventPhase::Started, ev))
+            }
+            None => Some(EventEnvelope::system_error(
+                "download_skipped_without_request",
+                EventPhase::Completed,
+            )),
+        }
     }
 
-    fn error_status(&self, input: &(Request, Option<ModuleConfig>), err: &Error) -> Option<EventEnvelope> {
-        let ev: DownloadEvent = (&input.0).into();
-        Some(EventEnvelope::engine_error(
-            EventType::Download,
-            EventPhase::Failed,
-            ev,
-            err,
-        ))
+    fn error_status(&self, input: &(Option<Request>, Option<ModuleConfig>), err: &Error) -> Option<EventEnvelope> {
+        match &input.0 {
+            Some(request) => {
+                let ev: DownloadEvent = request.into();
+                Some(EventEnvelope::engine_error(
+                    EventType::Download,
+                    EventPhase::Failed,
+                    ev,
+                    err,
+                ))
+            }
+            None => Some(EventEnvelope::system_error(
+                format!("download_skipped_with_error: {err}"),
+                EventPhase::Failed,
+            )),
+        }
     }
 
     fn retry_status(
         &self,
-        input: &(Request, Option<ModuleConfig>),
+        input: &(Option<Request>, Option<ModuleConfig>),
         retry_policy: &RetryPolicy,
     ) -> Option<EventEnvelope> {
-        let ev: DownloadEvent = (&input.0).into();
-        Some(EventEnvelope::engine(
-            EventType::Download,
-            EventPhase::Retry,
-            json!({
-                "data": ev,
-                "retry_count": retry_policy.current_retry,
-                "reason": retry_policy.reason.clone().unwrap_or_default(),
-            }),
-        ))
+        match &input.0 {
+            Some(request) => {
+                let ev: DownloadEvent = request.into();
+                Some(EventEnvelope::engine(
+                    EventType::Download,
+                    EventPhase::Retry,
+                    json!({
+                        "data": ev,
+                        "retry_count": retry_policy.current_retry,
+                        "reason": retry_policy.reason.clone().unwrap_or_default(),
+                    }),
+                ))
+            }
+            None => Some(EventEnvelope::system_error(
+                "download_skipped_retry_without_request",
+                EventPhase::Completed,
+            )),
+        }
     }
 }
 
@@ -530,7 +576,7 @@ pub struct RequestMiddlewareProcessor {
     pub(crate) middleware_manager: Arc<MiddlewareManager>,
 }
 #[async_trait]
-impl ProcessorTrait<(Request, Option<ModuleConfig>), (Request, Option<ModuleConfig>)>
+impl ProcessorTrait<(Request, Option<ModuleConfig>), (Option<Request>, Option<ModuleConfig>)>
 for RequestMiddlewareProcessor
 {
     fn name(&self) -> &'static str {
@@ -541,7 +587,7 @@ for RequestMiddlewareProcessor
         &self,
         input: (Request, Option<ModuleConfig>),
         _context: ProcessorContext,
-    ) -> ProcessorResult<(Request, Option<ModuleConfig>)> {
+    ) -> ProcessorResult<(Option<Request>, Option<ModuleConfig>)> {
         debug!(
             "[RequestMiddleware] handling request middleware: request_id={} module_id={}",
             input.0.id,
@@ -555,7 +601,7 @@ for RequestMiddlewareProcessor
     }
 }
 #[async_trait]
-impl EventProcessorTrait<(Request, Option<ModuleConfig>), (Request, Option<ModuleConfig>)>
+impl EventProcessorTrait<(Request, Option<ModuleConfig>), (Option<Request>, Option<ModuleConfig>)>
 for RequestMiddlewareProcessor
 {
     fn pre_status(&self, input: &(Request, Option<ModuleConfig>)) -> Option<EventEnvelope> {
@@ -569,13 +615,19 @@ for RequestMiddlewareProcessor
     fn finish_status(
         &self,
         _input: &(Request, Option<ModuleConfig>),
-        out: &(Request, Option<ModuleConfig>),
+        out: &(Option<Request>, Option<ModuleConfig>),
     ) -> Option<EventEnvelope> {
-        Some(EventEnvelope::engine(
-            EventType::RequestMiddleware,
-            EventPhase::Completed,
-            RequestMiddlewareEvent::from(&out.0),
-        ))
+        match &out.0 {
+            Some(request) => Some(EventEnvelope::engine(
+                EventType::RequestMiddleware,
+                EventPhase::Completed,
+                RequestMiddlewareEvent::from(request),
+            )),
+            None => Some(EventEnvelope::system_error(
+                "request_skipped_by_middleware",
+                EventPhase::Completed,
+            )),
+        }
     }
 
     fn working_status(&self, input: &(Request, Option<ModuleConfig>)) -> Option<EventEnvelope> {
@@ -641,7 +693,7 @@ for ResponseMiddlewareProcessor
             .middleware_manager
             .handle_response(response, &input.1)
             .await;
-        ProcessorResult::Success(Some(modified_response))
+        ProcessorResult::Success(modified_response)
     }
 }
 #[async_trait]
@@ -855,7 +907,7 @@ pub async fn create_download_chain(
     EventAwareTypedChain::<Request, Request>::new(event_bus)
         .then_silent::<(Request, Option<ModuleConfig>), _>(config_processor)
         .then::<(Request, Option<ModuleConfig>), _>(proxy_middleware)
-        .then_silent::<(Request, Option<ModuleConfig>), _>(request_middleware)
+        .then_silent::<(Option<Request>, Option<ModuleConfig>), _>(request_middleware)
         .then::<(Option<Response>, Option<ModuleConfig>), _>(download_processor)
         .then_silent::<Option<Response>, _>(response_middleware)
         .then::<(), _>(response_publish)

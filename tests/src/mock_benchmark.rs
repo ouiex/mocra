@@ -153,9 +153,9 @@ impl DownloadMiddleware for CounterDownloadMiddleware {
         "counter_download_middleware".to_string()
     }
 
-    async fn after_response(&self, response: Response, _config: &Option<ModuleConfig>) -> Response {
+    async fn after_response(&self, response: Response, _config: &Option<ModuleConfig>) -> Option<Response> {
         self.counter.fetch_add(1, Ordering::Relaxed);
-        response
+        Some(response)
     }
 
     fn default_arc() -> Arc<dyn DownloadMiddleware>

@@ -194,6 +194,9 @@ listener_count = 8
 
 ## 9. 文档索引（保留）
 
+新增详细改造方案：
+- `docs/design/task_model_chain_unification_plan.md`
+
 以下文档已被合并或保留为历史参考：
 - `docs/System_Architecture_zh.md`
 - `docs/Design_Distributed_Cron.md`

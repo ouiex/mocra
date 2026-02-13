@@ -18,15 +18,17 @@ pub trait DownloadMiddleware: Send + Sync {
     /// Hook executed before a request is sent.
     /// 
     /// Can be used to modify headers, URL, or validation.
-    async fn before_request(&self, request: Request, _config: &Option<ModuleConfig>) -> Request {
-        request
+    /// Returning `None` will skip this request.
+    async fn before_request(&self, request: Request, _config: &Option<ModuleConfig>) -> Option<Request> {
+        Some(request)
     }
     
     /// Hook executed after a response is received.
     /// 
     /// Can be used for validation, logging, or error handling.
-    async fn after_response(&self, response: Response, _config: &Option<ModuleConfig>) -> Response {
-        response
+    /// Returning `None` will skip subsequent response middleware and publishing.
+    async fn after_response(&self, response: Response, _config: &Option<ModuleConfig>) -> Option<Response> {
+        Some(response)
     }
     
     /// Returns a default shared instance of the middleware.
@@ -49,8 +51,9 @@ pub trait DataMiddleware: Send + Sync {
     /// Hook to process data items.
     /// 
     /// Can be used for cleaning, transformation, or enrichment.
-    async fn handle_data(&self, data: Data, _config: &Option<ModuleConfig>) -> Data {
-        data
+    /// Returning `None` will skip subsequent data middleware and storage.
+    async fn handle_data(&self, data: Data, _config: &Option<ModuleConfig>) -> Option<Data> {
+        Some(data)
     }
     
     /// Returns a default shared instance of the middleware.

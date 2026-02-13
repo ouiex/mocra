@@ -111,7 +111,6 @@ mimalloc = { version = "0.1", default-features = false, optional = true }
 [features]
 default = ["mimalloc"]
 js-v8 = ["dep:js-v8"]
-jemalloc = [] # Placeholder if user wants jemalloc
 mimalloc = ["dep:mimalloc"]
 polars = ["dep:polars", "dep:polars-lazy", "dep:polars-ops"]
 

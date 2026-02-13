@@ -5,7 +5,7 @@ use crate::events::{
 };
 use crate::processors::event_processor::{EventAwareTypedChain, EventProcessorTrait};
 use async_trait::async_trait;
-use errors::{Error, Result};
+use errors::{DataMiddlewareError, Error, Result};
 use crate::task::TaskManager;
 use common::interface::middleware_manager::MiddlewareManager;
 use common::model::data::Data;
@@ -586,7 +586,12 @@ impl ProcessorTrait<Data, Data> for DataMiddlewareProcessor {
         if start.elapsed().as_millis() > 10 {
             info!("[DataMiddlewareProcessor] SLOW middleware execution: {} ms", start.elapsed().as_millis());
         }
-        ProcessorResult::Success(modified_data)
+        match modified_data {
+            Some(data) => ProcessorResult::Success(data),
+            None => ProcessorResult::FatalFailure(
+                DataMiddlewareError::EmptyData("data dropped by data middleware".into()).into(),
+            ),
+        }
     }
 }
 impl EventProcessorTrait<Data, Data> for DataMiddlewareProcessor {
