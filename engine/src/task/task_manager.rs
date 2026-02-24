@@ -20,7 +20,7 @@ pub struct TaskManager {
 }
 
 impl TaskManager {
-    /// 创建新的任务管理器
+    /// Creates a task manager with repository, factory, and module assembler wiring.
     pub fn new(state: Arc<State>) -> Self {
         let repository = TaskRepository::new((*state.db).clone());
 
@@ -41,62 +41,75 @@ impl TaskManager {
     }
     
 
-    /// 添加工作模块
+    /// Registers one module implementation.
     pub async fn add_module(&self, work: Arc<dyn ModuleTrait>) {
         let mut assembler = self.module_assembler.write().await;
         assembler.register_module(work);
     }
+
+    /// Registers multiple module implementations.
     pub async fn add_modules(&self, works: Vec<Arc<dyn ModuleTrait>>) {
         let mut assembler = self.module_assembler.write().await;
         for work in works {
             assembler.register_module(work);
         }
     }
+    /// Returns true when module name is registered.
     pub async fn exists_module(&self, name: &str) -> bool {
         let assembler = self.module_assembler.read().await;
         assembler.get_module(name).is_some()
     }
+    /// Unregisters module by name.
     pub async fn remove_work(&self, name: &str) {
         let mut assembler = self.module_assembler.write().await;
         assembler.remove_module(name);
     }
+    /// Removes all modules loaded from a given origin path.
     pub async fn remove_by_origin(&self, origin: &std::path::Path) {
         let mut assembler = self.module_assembler.write().await;
         assembler.remove_by_origin(origin);
     }
+    /// Returns all registered module names.
     pub async fn module_names(&self) -> Vec<String> {
         let assembler = self.module_assembler.read().await;
         assembler.module_names()
     }
+    /// Tags module names with origin path for hot-reload bookkeeping.
     pub async fn set_origin(&self, names: &[String], origin: &std::path::Path) {
         let mut assembler = self.module_assembler.write().await;
         assembler.set_origin(names, origin);
     }
-    /// 根据任务模型加载任务，并同步初始状态
+    /// Loads task from TaskModel and synchronizes initial state.
     pub async fn load_with_model(&self, task_model: &TaskModel) -> Result<Task> {
         self.factory.load_with_model(task_model).await
     }
 
-    /// 根据解析任务模型加载任务，并加载历史状态或初始状态
+    /// Loads task from ParserTaskModel with historical state restoration.
     pub async fn load_parser(&self, parser_model: &ParserTaskModel) -> Result<Task> {
         self.factory.load_parser_model(parser_model).await
     }
 
-    /// 根据解析错误模型加载任务，并增加错误次数
+    /// Loads task from ErrorTaskModel and applies error accounting.
     pub async fn load_error(&self, error_model: &ErrorTaskModel) -> Result<Task> {
         self.factory.load_error_model(error_model).await
     }
+
+    /// Loads task context from response metadata.
     pub async fn load_with_response(&self, response: &Response) -> Result<Task> {
         self.factory.load_with_response(response).await
     }
+
+    /// Loads resolved module and optional login info for parser flow.
     pub async fn load_module_with_response(&self, response: &Response) -> Result<(Arc<Module>, Option<LoginInfo>)> {
         self.factory.load_module_with_response(response).await
     }
 
+    /// Clears internal factory caches.
     pub async fn clear_factory_cache(&self) {
         self.factory.clear_cache().await;
     }
     
+    /// Returns all registered module implementations.
     pub async fn get_all_modules(&self) -> Vec<Arc<dyn ModuleTrait>> {
         let assembler = self.module_assembler.read().await;
         assembler.get_all_modules()

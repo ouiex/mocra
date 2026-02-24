@@ -4,12 +4,12 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 
-/// 限流器配置项
+/// Rate limiter configuration.
 #[derive(Debug, Clone)]
 pub struct RateLimitConfig {
-    /// 每秒最大请求次数
+    /// Maximum requests per second.
     pub max_requests_per_second: f32,
-    /// 窗口大小（默认1秒）
+    /// Window size (default: 1 second).
     pub window_size: Duration,
 }
 
@@ -36,21 +36,22 @@ impl RateLimitConfig {
     }
 }
 
-/// 滑动窗口限流器
-/// 使用滑动窗口算法来限制特定标识符的访问频率
-/// 优化版本：
-/// 1. 使用读写锁减少锁竞争，读操作可并发执行
-/// 2. 直接存储时间戳减少内存开销
-/// 3. 优化清理逻辑，减少不必要的遍历
-/// 4. 支持为不同的key设置不同的速率限制
-/// 5. 支持动态添加和修改key的速率配置
+/// Sliding-window rate limiter.
+///
+/// Uses a sliding-window strategy to throttle requests per identifier.
+/// Optimizations:
+/// 1. Uses read/write locks to reduce contention and allow concurrent reads.
+/// 2. Stores timestamps directly to reduce memory overhead.
+/// 3. Optimized cleanup logic to avoid unnecessary scans.
+/// 4. Supports per-key rate limits.
+/// 5. Supports dynamic key-level config updates.
 #[derive(Debug)]
 pub struct SlidingWindowRateLimiter {
-    /// 默认限流配置（用于未配置的key）
+    /// Default rate-limit config (used for keys without explicit config).
     default_config: Arc<RwLock<RateLimitConfig>>,
-    /// 每个key的特定配置
+    /// Per-key custom configuration.
     key_configs: Arc<RwLock<HashMap<String, RateLimitConfig>>>,
-    /// 存储每个标识符对应的时间戳列表
+    /// Timestamp lists per identifier.
     records: Arc<RwLock<HashMap<String, Vec<Instant>>>>,
 }
 impl Default for SlidingWindowRateLimiter {
@@ -60,10 +61,10 @@ impl Default for SlidingWindowRateLimiter {
 }
 
 impl SlidingWindowRateLimiter {
-    /// 创建新的限流器实例
+    /// Creates a new rate limiter instance.
     ///
-    /// # 参数
-    /// * `default_config` - 默认的限流配置
+    /// # Parameters
+    /// * `default_config` - Default rate-limit configuration.
     pub fn new(default_config: RateLimitConfig) -> Self {
         Self {
             default_config: Arc::new(RwLock::new(default_config)),
@@ -72,24 +73,24 @@ impl SlidingWindowRateLimiter {
         }
     }
 
-    /// 创建一个简单的限流器（兼容旧接口）
+    /// Creates a simple limiter (backward-compatible helper).
     ///
-    /// # 参数
-    /// * `max_requests_per_second` - 每秒最大请求次数，支持小数
+    /// # Parameters
+    /// * `max_requests_per_second` - Maximum requests per second (supports decimals).
     pub fn simple(max_requests_per_second: f32) -> Self {
         Self::new(RateLimitConfig::new(max_requests_per_second))
     }
 
-    /// 为特定key设置限流配置
+    /// Sets rate-limit config for a specific key.
     ///
-    /// # 参数
-    /// * `key` - 要配置的key
-    /// * `config` - 限流配置
+    /// # Parameters
+    /// * `key` - Target key.
+    /// * `config` - Rate-limit configuration.
     pub async fn set_key_config(&self, key: String, config: RateLimitConfig) {
         let mut configs = self.key_configs.write().await;
         configs.insert(key, config);
     }
-    /// 设置全局限流配置（影响所有key）
+    /// Sets global limit (affects all keys).
     pub async fn set_limit(&self, limit: f32) {
         self.default_config.write().await.max_requests_per_second = limit;
         let mut config = self.key_configs.write().await;
@@ -98,10 +99,10 @@ impl SlidingWindowRateLimiter {
         })
     }
 
-    /// 批量设置多个key的限流配置
+    /// Sets multiple key configs in batch.
     ///
-    /// # 参数
-    /// * `configs` - key到配置的映射
+    /// # Parameters
+    /// * `configs` - Mapping from key to config.
     pub async fn set_key_configs(&self, configs: HashMap<String, RateLimitConfig>) {
         let mut key_configs = self.key_configs.write().await;
         for (key, config) in configs {
@@ -109,22 +110,22 @@ impl SlidingWindowRateLimiter {
         }
     }
 
-    /// 移除特定key的配置（将使用默认配置）
+    /// Removes config for a key (falls back to default config).
     ///
-    /// # 参数
-    /// * `key` - 要移除配置的key
+    /// # Parameters
+    /// * `key` - Key whose config should be removed.
     pub async fn remove_key_config(&self, key: &str) {
         let mut configs = self.key_configs.write().await;
         configs.remove(key);
     }
 
-    /// 获取特定key的配置
+    /// Gets config for a specific key.
     ///
-    /// # 参数
-    /// * `key` - 要查询的key
+    /// # Parameters
+    /// * `key` - Key to query.
     ///
-    /// # 返回值
-    /// 该key的配置，如果没有特定配置则返回默认配置
+    /// # Returns
+    /// Key-specific config, or default config if none is set.
     pub async fn get_key_config(&self, key: &str) -> RateLimitConfig {
         let configs = self.key_configs.read().await;
         if let Some(config) = configs.get(key) {
@@ -134,130 +135,130 @@ impl SlidingWindowRateLimiter {
         }
     }
 
-    /// 获取所有已配置的key及其配置
+    /// Returns all configured keys and their configs.
     pub async fn get_all_key_configs(&self) -> HashMap<String, RateLimitConfig> {
         let configs = self.key_configs.read().await;
         configs.clone()
     }
 
-    /// 记录一次请求
+    /// Records a request.
     ///
-    /// # 参数
-    /// * `identifier` - 用于区分不同请求来源的标识符
+    /// # Parameters
+    /// * `identifier` - Identifier used to distinguish request sources.
     pub async fn record(&self, identifier: String) {
         let config = self.get_key_config(&identifier).await;
         let mut records = self.records.write().await;
         let entry = records.entry(identifier.clone()).or_insert_with(Vec::new);
 
-        // 添加新的时间戳
+        // Add new timestamp.
         entry.push(Instant::now());
 
-        // 清理过期的记录（这里忽略返回值，因为刚添加了新记录，不会为空）
+        // Clean expired records (return value ignored because entry was just appended).
         let _ = self.clean_expired_records_internal(entry, &config);
 
-        // 顺便进行一次随机清理，避免长期未访问的identifier堆积
+        // Opportunistic cleanup to avoid long-term buildup of inactive identifiers.
         self.opportunistic_cleanup(&mut records).await;
     }
 
-    /// 验证是否达到最大限制
+    /// Verifies whether request limit has been reached.
     ///
-    /// # 参数
-    /// * `identifier` - 用于区分不同请求来源的标识符
+    /// # Parameters
+    /// * `identifier` - Identifier used to distinguish request sources.
     ///
-    /// # 返回值
-    /// * `Ok(())` - 未达到限制，可以继续
-    /// * `Err(u64)` - 达到限制，返回需要等待的毫秒数
+    /// # Returns
+    /// * `Ok(())` - Limit not reached; request can proceed.
+    /// * `Err(u64)` - Limit reached; wait time in milliseconds.
     pub async fn verify(&self, identifier: &str) -> Result<(), u64> {
         let config = self.get_key_config(identifier).await;
         let records = self.records.read().await;
 
         if let Some(entry) = records.get(identifier) {
-            // 如果没有记录，直接允许
+            // No records: allow immediately.
             if entry.is_empty() {
                 return Ok(());
             }
 
-            // 计算相邻请求的最小间隔时间
+            // Compute minimum interval between adjacent requests.
             let min_interval = Duration::from_millis(
                 (config.window_size.as_millis() as f64 / config.max_requests_per_second as f64)
                     as u64,
             );
 
-            // 获取最后一次请求的时间戳
+            // Get timestamp of the last request.
             let last_request_time = entry.last().unwrap();
             let elapsed_since_last = last_request_time.elapsed();
 
-            // 检查间隔时间是否足够
+            // Check whether interval is sufficient.
             if elapsed_since_last >= min_interval {
                 Ok(())
             } else {
-                // 间隔时间不够，计算需要等待的时间
+                // Interval too short; compute remaining wait time.
                 let wait_time = min_interval - elapsed_since_last;
                 Err(wait_time.as_millis() as u64)
             }
         } else {
-            // 没有记录，直接允许
+            // No records: allow immediately.
             Ok(())
         }
     }
 
-    /// 验证并记录请求（原子操作）
+    /// Verifies and records a request (atomic operation).
     ///
-    /// # 参数
-    /// * `identifier` - 用于区分不同请求来源的标识符
+    /// # Parameters
+    /// * `identifier` - Identifier used to distinguish request sources.
     ///
-    /// # 返回值
-    /// * `Ok(())` - 未达到限制，已记录请求
-    /// * `Err(u64)` - 达到限制，返回需要等待的毫秒数
+    /// # Returns
+    /// * `Ok(())` - Limit not reached; request was recorded.
+    /// * `Err(u64)` - Limit reached; wait time in milliseconds.
     pub async fn verify_and_record(&self, identifier: String) -> Result<(), u64> {
         let config = self.get_key_config(&identifier).await;
         let mut records = self.records.write().await;
-        // 趁有写锁的机会，进行一次机会性清理
+        // Perform opportunistic cleanup while holding write lock.
         self.opportunistic_cleanup(&mut records).await;
 
         let entry = records.entry(identifier).or_insert_with(Vec::new);
-        // 清理过期的记录
+        // Clean expired records.
         self.clean_expired_records_internal(entry, &config);
 
         let now = Instant::now();
 
-        // 如果没有记录，直接允许
+        // No records: allow immediately.
         if entry.is_empty() {
             entry.push(now);
             return Ok(());
         }
 
-        // 计算相邻请求的最小间隔时间
-        // 间隔时间 = window_size / max_requests_per_second
+        // Compute minimum interval between adjacent requests.
+        // Interval = window_size / max_requests_per_second.
         let min_interval = Duration::from_millis(
             (config.window_size.as_millis() as f64 / config.max_requests_per_second as f64) as u64,
         );
 
-        // 获取最后一次请求的时间戳
+        // Get timestamp of the last request.
         let last_request_time = entry.last().unwrap();
         let elapsed_since_last = now.duration_since(*last_request_time);
 
-        // 检查间隔时间是否足够
+        // Check whether interval is sufficient.
         if elapsed_since_last >= min_interval {
-            // 间隔时间足够，记录新请求
+            // Interval is sufficient; record request.
             entry.push(now);
             Ok(())
         } else {
-            // 间隔时间不够，计算需要等待的时间
+            // Interval too short; compute remaining wait time.
             let wait_time = min_interval - elapsed_since_last;
             Err(wait_time.as_millis() as u64)
         }
     }
 
-    /// 内部方法：清理过期的时间记录
+    /// Internal helper: cleans expired timestamps.
     ///
-    /// # 参数
-    /// * `records` - 要清理的时间记录列表
-    /// * `config` - 该key的配置
+    /// # Parameters
+    /// * `records` - Timestamp list to clean.
+    /// * `config` - Config for this key.
     ///
-    /// # 返回值
-    /// * `true` - 清理后记录为空，应该删除该identifier
-    /// * `false` - 清理后仍有有效记录
+    /// # Returns
+    /// * `true` - No records remain after cleanup; identifier can be removed.
+    /// * `false` - Valid records remain.
     fn clean_expired_records_internal(
         &self,
         records: &mut Vec<Instant>,
@@ -266,44 +267,44 @@ impl SlidingWindowRateLimiter {
         let now = Instant::now();
         let cutoff_time = now - config.window_size;
 
-        // 保留在窗口期内的记录
+        // Keep records within current window.
         records.retain(|&timestamp| timestamp > cutoff_time);
 
-        // 返回是否应该删除该identifier
+        // Return whether identifier should be removed.
         records.is_empty()
     }
 
-    /// 机会性清理：在写锁期间随机清理一些过期的identifier
-    /// 这样可以避免长期未访问的identifier永远留在内存中
+    /// Opportunistic cleanup: prune expired identifiers during write operations.
+    /// This prevents long-inactive identifiers from lingering in memory indefinitely.
     async fn opportunistic_cleanup(&self, records: &mut HashMap<String, Vec<Instant>>) {
         let total_identifiers = records.len();
 
-        // 每次最多清理5个identifier，或者总数的10%，取较小值（至少1个）
-        // 对于小规模映射也进行轻量清理，避免长时间未访问的键长期滞留。
+        // Clean up at most 5 identifiers, or 10% of total (minimum 1), whichever is smaller.
+        // For small maps, still perform lightweight cleanup to avoid stale key retention.
         let max_cleanup_count = std::cmp::min(5, (total_identifiers / 10).max(1));
 
         let mut keys_to_remove = Vec::new();
 
-        // 遍历部分identifier进行清理
+        // Iterate over a subset of identifiers for cleanup.
         for (checked_count, (key, entry)) in records.iter_mut().enumerate() {
             if checked_count >= max_cleanup_count {
                 break;
             }
 
-            // 获取该key的配置
+            // Get config for this key.
             let config = self.get_key_config(key).await;
             if self.clean_expired_records_internal(entry, &config) {
                 keys_to_remove.push(key.clone());
             }
         }
 
-        // 移除空的identifier
+        // Remove empty identifiers.
         for key in keys_to_remove {
             records.remove(&key);
         }
     }
 
-    /// 计算有效记录数量（不修改原数据）
+    /// Counts valid records without mutating source data.
     fn count_valid_records(&self, records: &[Instant], config: &RateLimitConfig) -> f32 {
         let now = Instant::now();
         let cutoff_time = now - config.window_size;
@@ -314,44 +315,44 @@ impl SlidingWindowRateLimiter {
             .count() as f32
     }
 
-    /// 计算需要等待的时间（毫秒）
+    /// Calculates wait time in milliseconds.
     ///
-    /// # 参数
-    /// * `records` - 时间记录列表
-    /// * `config` - 该key的配置
+    /// # Parameters
+    /// * `records` - Timestamp list.
+    /// * `config` - Config for this key.
     ///
-    /// # 返回值
-    /// 需要等待的毫秒数
+    /// # Returns
+    /// Milliseconds to wait.
     fn calculate_wait_time(&self, records: &[Instant], config: &RateLimitConfig) -> u64 {
         if records.is_empty() {
             return 0;
         }
 
-        // 找到最早的记录
+        // Find oldest record.
         let oldest_record = match records.iter().min() {
             Some(record) => record,
-            None => return 0, // 理论上不会到达这里，因为已经检查了 is_empty()
+            None => return 0, // Should not happen because `is_empty()` is checked above.
         };
 
-        // 计算最早记录到现在的时间
+        // Compute elapsed duration since oldest record.
         let elapsed = oldest_record.elapsed();
 
-        // 如果还在窗口期内，计算剩余等待时间
+        // If still in window, compute remaining wait time.
         if elapsed < config.window_size {
             let remaining = config.window_size - elapsed;
-            remaining.as_millis() as u64 + 1 // 加1毫秒确保下次检查时能通过
+            remaining.as_millis() as u64 + 1 // Add 1ms to ensure next check can pass.
         } else {
             0
         }
     }
 
-    /// 获取指定标识符的当前请求计数
+    /// Returns current request count for identifier.
     ///
-    /// # 参数
-    /// * `identifier` - 标识符
+    /// # Parameters
+    /// * `identifier` - Identifier.
     ///
-    /// # 返回值
-    /// 当前窗口期内的请求数量
+    /// # Returns
+    /// Number of requests in current window.
     pub async fn get_current_count(&self, identifier: &str) -> usize {
         let config = self.get_key_config(identifier).await;
         let records = self.records.read().await;
@@ -362,13 +363,13 @@ impl SlidingWindowRateLimiter {
         }
     }
 
-    /// 获取下次可以请求的时间间隔（毫秒）
+    /// Returns time until next available request (milliseconds).
     ///
-    /// # 参数
-    /// * `identifier` - 标识符
+    /// # Parameters
+    /// * `identifier` - Identifier.
     ///
-    /// # 返回值
-    /// 需要等待的毫秒数，0表示可以立即请求
+    /// # Returns
+    /// Wait time in milliseconds; `0` means request is immediately available.
     pub async fn get_next_available_time(&self, identifier: &str) -> u64 {
         let config = self.get_key_config(identifier).await;
         let records = self.records.read().await;
@@ -378,13 +379,13 @@ impl SlidingWindowRateLimiter {
                 return 0;
             }
 
-            // 计算相邻请求的最小间隔时间
+            // Compute minimum interval between adjacent requests.
             let min_interval = Duration::from_millis(
                 (config.window_size.as_millis() as f64 / config.max_requests_per_second as f64)
                     as u64,
             );
 
-            // 获取最后一次请求的时间戳
+            // Get timestamp of the last request.
             let last_request_time = entry.last().unwrap();
             let elapsed_since_last = last_request_time.elapsed();
 
@@ -399,9 +400,9 @@ impl SlidingWindowRateLimiter {
         }
     }
 
-    /// 清理所有过期的记录
-    /// 这个方法可以定期调用来释放内存
-    /// 注：现在各个方法已经自动清理，这个方法主要用于手动清理
+    /// Cleans all expired records.
+    /// This can be called periodically to reclaim memory.
+    /// Note: methods already perform automatic cleanup; this is primarily for manual cleanup.
     pub async fn cleanup(&self) {
         let mut records = self.records.write().await;
         let mut keys_to_remove = Vec::new();
@@ -413,25 +414,25 @@ impl SlidingWindowRateLimiter {
             }
         }
 
-        // 移除空的条目
+        // Remove empty entries.
         for key in keys_to_remove {
             records.remove(&key);
         }
     }
 
-    /// 获取当前存储的标识符数量
+    /// Returns number of identifiers currently stored.
     pub async fn get_identifier_count(&self) -> usize {
         let records = self.records.read().await;
         records.len()
     }
 
-    /// 重置指定标识符的记录
+    /// Resets records for a specific identifier.
     pub async fn reset(&self, identifier: &str) {
         let mut records = self.records.write().await;
         records.remove(identifier);
     }
 
-    /// 重置所有记录
+    /// Resets all records.
     pub async fn reset_all(&self) {
         let mut records = self.records.write().await;
         records.clear();

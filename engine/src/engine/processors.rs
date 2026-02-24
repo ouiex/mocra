@@ -1,6 +1,7 @@
 use super::*;
 
 impl Engine {
+    /// Sends periodic cluster heartbeat updates until shutdown.
     pub(super) async fn start_node_registry(&self) {
         info!("Starting node registry heartbeat");
         let registry = self.node_registry.clone();
@@ -25,6 +26,7 @@ impl Engine {
         }
     }
 
+    /// Shared runner for queue-backed processors with pause/shutdown awareness.
     async fn run_processor_loop<T, F, Fut>(
         &self,
         name: &str,
@@ -47,6 +49,7 @@ impl Engine {
         runner.run(receiver, execute_fn).await;
     }
 
+    /// Starts task ingestion workers (`TaskModel` / unified ingress path).
     pub(super) async fn start_task_processor(&self, unified_task_ingress: Arc<UnifiedTaskIngressChain>) {
         let concurrency = self
             .state
@@ -119,6 +122,7 @@ impl Engine {
         .await;
     }
 
+    /// Starts request download workers (HTTP and WebSocket variants).
     pub(super) async fn start_download_processor(&self) {
         let concurrency = self
             .state
@@ -219,6 +223,7 @@ impl Engine {
         .await;
     }
 
+    /// Starts parser-task workers that continue chain progression after parser outcomes.
     pub(super) async fn start_parser_model_processor(&self, unified_task_ingress: Arc<UnifiedTaskIngressChain>) {
         let concurrency = {
             let cfg = self.state.config.read().await;

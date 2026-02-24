@@ -52,7 +52,7 @@ impl From<deadpool_redis::PoolError> for LockError {
     }
 }
 
-// 简化的锁信息结构
+// Simplified lock metadata structure.
 #[derive(Debug, Clone)]
 pub struct LockInfo {
     key: String,
@@ -69,7 +69,7 @@ pub struct AdvancedDistributedLock {
 }
 
 impl AdvancedDistributedLock {
-    /// 尝试获取锁，支持重试
+    /// Tries to acquire a lock with retry support.
     pub async fn acquire_with_retry(
         pool: Option<Arc<deadpool_redis::Pool>>,
         local_map: Option<Arc<DashMap<String, (String, Instant)>>>,
@@ -100,13 +100,13 @@ impl AdvancedDistributedLock {
                     renewal_handle: None,
                 };
 
-                // 启动自动续期
+                // Start automatic renewal.
                 lock.start_renewal().await;
                 return Ok(Some(lock));
             }
 
             if start_time.elapsed() >= max_wait {
-                return Ok(None); // 超时
+                return Ok(None); // Timed out.
             }
 
             sleep(retry_interval).await;
@@ -123,7 +123,7 @@ impl AdvancedDistributedLock {
         if let Some(pool) = pool {
             let mut conn = pool.get().await?;
 
-            // 使用SET NX EX命令实现原子操作
+            // Use `SET NX EX` to perform atomic lock acquisition.
             let script = r#"
             return redis.call("SET", KEYS[1], ARGV[1], "NX", "EX", ARGV[2])
         "#;
@@ -173,7 +173,7 @@ impl AdvancedDistributedLock {
         }
     }
 
-    /// 启动自动续期任务
+    /// Starts the automatic renewal task.
     async fn start_renewal(&mut self) {
         let pool = self.pool.clone();
         let local_map = self.local_map.clone();
@@ -182,7 +182,7 @@ impl AdvancedDistributedLock {
         let ttl = self.lock_info.ttl;
 
         let handle = tokio::spawn(async move {
-            let renewal_interval = Duration::from_millis(ttl * 1000 / 3); // 每 1/3 TTL 续期一次
+            let renewal_interval = Duration::from_millis(ttl * 1000 / 3); // Renew once every 1/3 TTL.
 
             loop {
                 sleep(renewal_interval).await;
@@ -207,24 +207,24 @@ impl AdvancedDistributedLock {
 
                             match result {
                                 Ok(1) => {
-                                    trace!("锁续期成功: {key}");
+                                    trace!("Lock renewed successfully: {key}");
                                 }
                                 Ok(0) => {
-                                    trace!("锁已失效，停止续期: {key}");
+                                    trace!("Lock is no longer valid, stopping renewal: {key}");
                                     break;
                                 }
                                 Ok(_) => {
-                                    trace!("续期返回意外值: {key}");
+                                    trace!("Renewal returned unexpected value: {key}");
                                     break;
                                 }
                                 Err(e) => {
-                                    trace!("续期失败: {e}");
+                                    trace!("Renewal failed: {e}");
                                     break;
                                 }
                             }
                         }
                         Err(e) => {
-                            trace!("获取连接失败，停止续期: {e}");
+                            trace!("Failed to get Redis connection, stopping renewal: {e}");
                             break;
                         }
                     }
@@ -232,13 +232,13 @@ impl AdvancedDistributedLock {
                     if let Some(mut entry) = map.get_mut(&key) {
                         if entry.0 == value {
                             entry.1 = Instant::now() + Duration::from_secs(ttl);
-                            trace!("本地锁续期成功: {key}");
+                            trace!("Local lock renewed successfully: {key}");
                         } else {
-                            trace!("本地锁已失效(值不匹配)，停止续期: {key}");
+                            trace!("Local lock invalid (value mismatch), stopping renewal: {key}");
                             break;
                         }
                     } else {
-                        trace!("本地锁已失效(不存在)，停止续期: {key}");
+                        trace!("Local lock invalid (missing), stopping renewal: {key}");
                         break;
                     }
                 } else {
@@ -251,7 +251,7 @@ impl AdvancedDistributedLock {
     }
 
     pub async fn release(mut self) -> Result<bool, LockError> {
-        // 停止续期任务
+        // Stop renewal task.
         if let Some(handle) = self.renewal_handle.take() {
             handle.abort();
         }
@@ -292,7 +292,7 @@ impl AdvancedDistributedLock {
         }
     }
 
-    /// 检查锁是否仍然有效
+    /// Checks whether the lock is still valid.
     pub async fn is_valid(&self) -> Result<bool, LockError> {
         if let Some(pool) = &self.pool {
             let mut conn = pool.get().await?;
@@ -386,7 +386,7 @@ impl DistributedLockManager {
             let released = lock.release().await?;
             Ok(released)
         } else {
-            Ok(false) // 锁不存在
+            Ok(false) // Lock does not exist.
         }
     }
 
@@ -409,7 +409,7 @@ impl DistributedLockManager {
         }
     }
 
-    // 检查锁是否仍然有效
+    // Checks whether lock is still valid.
     pub async fn is_lock_valid(&self, lock_name: &str) -> Result<bool, LockError> {
         if let Some(lock) = self.locks.get(lock_name) {
             lock.is_valid().await
@@ -418,7 +418,7 @@ impl DistributedLockManager {
         }
     }
 
-    // 获取连接池的引用（供其他地方使用）
+    // Returns the connection pool reference (for external consumers).
     pub fn get_pool(&self) -> Option<&deadpool_redis::Pool> {
         self.redis_pool.as_ref().map(|p| p.as_ref())
     }

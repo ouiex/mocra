@@ -13,18 +13,18 @@ use tokio_tungstenite::tungstenite::protocol::Role;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use uuid::Uuid;
 
-/// WebSocketDownloader 管理多个 WebSocket 连接
-/// 每个 module_id 对应一个连接
+/// WebSocketDownloader manages multiple WebSocket connections.
+/// Each `module_id` maps to one connection.
 
 #[derive(Clone)]
 pub struct WebSocketDownloader {
-    // 存储活跃的连接发送端，用于发送消息
+    // Stores active connection senders used to send messages.
     // Key: module_id
     connections: Arc<Mutex<HashMap<String, mpsc::Sender<Message>>>>,
-    // 监听器映射：Key: module_id -> Value: Response Sender
-    // 每个模块可以注册自己的接收通道，实现消息隔离
+    // Listener map: Key: module_id -> Value: Response sender.
+    // Each module can register its own receive channel for message isolation.
     listeners: Arc<Mutex<HashMap<String, mpsc::Sender<Response>>>>,
-    // 活跃连接计数器
+    // Active connection counter.
     active_connections: Arc<Mutex<usize>>,
 }
 
@@ -43,19 +43,19 @@ impl WebSocketDownloader {
         }
     }
 
-    /// 注册监听器
+    /// Registers a listener.
     pub async fn subscribe(&self, module_id: String, sender: mpsc::Sender<Response>) {
         let mut listeners = self.listeners.lock().await;
         listeners.insert(module_id, sender);
     }
 
-    /// 取消注册监听器
+    /// Unregisters a listener.
     pub async fn unsubscribe(&self, module_id: &str) {
         let mut listeners = self.listeners.lock().await;
         listeners.remove(module_id);
     }
 
-    /// 获取活跃连接数
+    /// Returns the number of active connections.
     pub async fn active_count(&self) -> usize {
         *self.active_connections.lock().await
     }
@@ -77,7 +77,7 @@ impl WebSocketDownloader {
         tokio::spawn(async move {
             loop {
                 tokio::select! {
-                    // 1. 处理发送消息 (Write)
+                    // 1. Handle outbound messages (write).
                     msg = rx.recv() => {
                         match msg {
                             Some(msg) => {
@@ -86,10 +86,10 @@ impl WebSocketDownloader {
                                     break;
                                 }
                             }
-                            None => break, // 发送通道已关闭
+                            None => break, // Send channel closed.
                         }
                     }
-                    // 2. 处理接收消息 (Read)
+                    // 2. Handle inbound messages (read).
                     item = read.next() => {
                         match item {
                             Some(Ok(msg)) if msg.is_text() || msg.is_binary() => {
@@ -116,12 +116,13 @@ impl WebSocketDownloader {
                                     priority: request_clone.priority,
                                 };
 
-                                // 分发消息给对应的监听器
+                                // Dispatch message to the corresponding listener.
                                 let listeners_guard = listeners.lock().await;
                                 if let Some(sender) = listeners_guard.get(&module_id_clone) {
                                     if let Err(e) = sender.send(response).await {
                                         warn!("[WebSocketDownloader] Failed to forward response for module {} (receiver dropped): {}", module_id_clone, e);
-                                        // 这里不退出循环，因为可能只是当前的 Chain 停止了，连接还需要保持
+                                        // Do not break here: the current chain may have stopped,
+                                        // but the connection should remain alive.
                                     }
                                 } else {
                                     warn!("[WebSocketDownloader] No listener registered for module {}, dropping message", module_id_clone);
@@ -136,15 +137,15 @@ impl WebSocketDownloader {
                                 error!("[WebSocketDownloader] Read error for module {}: {}", module_id_clone, e);
                                 break;
                             }
-                            None => break, // 连接已关闭
+                            None => break, // Connection closed.
                         }
                     }
                 }
             }
-            // 清理工作
+            // Cleanup.
             let _ = write.close().await;
 
-            // 减少活跃连接计数
+            // Decrease active connection count.
             let mut count = active_connections.lock().await;
             if *count > 0 {
                 *count -= 1;
@@ -156,17 +157,17 @@ impl WebSocketDownloader {
         });
     }
 
-    /// 发送请求
-    /// 如果连接不存在，会自动建立连接
-    /// 如果连接已存在，直接复用
+    /// Sends a request.
+    /// If the connection does not exist, it will be created automatically.
+    /// If the connection already exists, it will be reused.
     pub async fn send(&self, request: Request) -> Result<()> {
         let module_id = request.module_id();
         let mut connections = self.connections.lock().await;
 
-        // 检查连接是否存在且活跃
+        // Check whether a connection exists and is active.
         if let Some(sender) = connections.get(&module_id) {
             if !sender.is_closed() {
-                // 连接存在，直接发送数据
+                // Connection exists, send data directly.
                 if let Some(body) = &request.body {
                     let msg = Message::Text(String::from_utf8_lossy(body).to_string().into());
                     if let Err(e) = sender.send(msg).await {
@@ -174,34 +175,34 @@ impl WebSocketDownloader {
                             "[WebSocketDownloader] Failed to send message to existing connection: {}, reconnecting...",
                             e
                         );
-                        // 发送失败，移除旧连接，准备重连
+                        // Sending failed: remove old connection and prepare to reconnect.
                         connections.remove(&module_id);
                     } else {
                         return Ok(());
                     }
                 } else {
-                    // 没有 body，仅建立连接或保持活跃
+                    // No body: only establish connection or keep it alive.
                     return Ok(());
                 }
             } else {
-                // 连接已关闭，移除
+                // Connection is closed: remove it.
                 connections.remove(&module_id);
             }
         }
 
-        // 建立新连接
+        // Establish a new connection.
         info!(
             "[WebSocketDownloader] Connecting to {} for module {}",
             request.url, module_id
         );
 
-        // 增加活跃连接计数
+        // Increase active connection count.
         {
             let mut count = self.active_connections.lock().await;
             *count += 1;
         }
 
-        // 创建发送通道，用于向 WebSocket 发送消息
+        // Create send channel for WebSocket outbound messages.
         let (tx, rx) = mpsc::channel::<Message>(32);
 
         if let Some(proxy_config) = &request.proxy {
@@ -248,10 +249,10 @@ impl WebSocketDownloader {
             self.spawn_task(ws_stream, module_id.clone(), request.clone(), rx);
         }
 
-        // 保存连接
+        // Save connection.
         connections.insert(module_id, tx.clone());
 
-        // 如果有初始数据，发送
+        // Send initial payload if present.
         if let Some(body) = &request.body {
             let msg = Message::Text(String::from_utf8_lossy(body).to_string().into());
             tx.send(msg).await.map_err(|e| {
@@ -262,11 +263,11 @@ impl WebSocketDownloader {
         Ok(())
     }
 
-    /// 关闭指定模块的连接
+    /// Closes the connection for the specified module.
     pub async fn close(&self, module_id: &str) {
         let mut connections = self.connections.lock().await;
         if let Some(sender) = connections.remove(module_id) {
-            // 发送 Close 消息或者直接 Drop sender 都会触发连接关闭
+            // Sending Close or dropping sender will both trigger connection shutdown.
             let _ = sender.send(Message::Close(None)).await;
         }
     }

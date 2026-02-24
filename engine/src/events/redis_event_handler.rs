@@ -9,7 +9,7 @@ use std::time::Duration;
 use tokio::time::timeout;
 use deadpool_redis::redis;
 
-/// Redis事件处理器，用于将事件保存到Redis供其他程序监控
+/// Persists runtime events to Redis for downstream monitoring consumers.
 pub struct RedisEventHandler {
     redis_pool: Arc<deadpool_redis::Pool>,
     key_prefix: String,
@@ -25,21 +25,21 @@ impl RedisEventHandler {
         }
     }
 
-    /// 生成Redis键名
+    /// Builds the Redis list key used to append raw events.
     fn generate_key(&self, event_type: &str) -> String {
         format!("{}:events:{}", self.key_prefix, event_type)
     }
 
-    /// 生成时间序列键名
+    /// Builds the Redis sorted-set key used for time-series indexing.
     fn generate_timeseries_key(&self, event_type: &str) -> String {
         format!("{}:timeseries:{}", self.key_prefix, event_type)
     }
 
-    /// 启动后台清理任务
+    /// Starts a background cleanup task for time-series retention.
     ///
     /// # Arguments
-    /// * `interval` - 清理任务执行间隔
-    /// * `retention` - 数据保留时间
+    /// * `interval` - Cleanup execution interval.
+    /// * `retention` - Retention window used to prune stale points.
     pub fn start_cleanup_task(&self, interval: Duration, retention: Duration) {
         let pool = self.redis_pool.clone();
         let key_pattern = format!("{}:timeseries:*", self.key_prefix);
@@ -65,7 +65,7 @@ impl RedisEventHandler {
             .await
             .map_err(|e| format!("Redis connection failed: {e}"))?;
 
-        // 1. 扫描所有相关 Key
+        // 1) Scan matching time-series keys.
         let mut keys: Vec<String> = Vec::new();
         {
             let mut iter: redis::AsyncIter<String> = redis::cmd("SCAN")
@@ -83,21 +83,19 @@ impl RedisEventHandler {
             }
         } // iter dropped here, releasing borrow on conn
 
-        // 2. 计算截止时间
+        // 2) Compute retention cutoff.
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)?
             .as_secs_f64();
         let cutoff = now - retention.as_secs_f64();
 
-        // 3. 批量清理
+        // 3) Remove old points and refresh key TTL.
         for key in keys {
             let mut pipe = redis::pipe();
-            // 移除旧数据
             pipe.cmd("ZREMRANGEBYSCORE")
                 .arg(&key)
                 .arg("-inf")
                 .arg(cutoff)
-                // 重置过期时间（确保 Key 在不再更新后最终会过期）
                 .expire(&key, retention.as_secs() as i64);
 
             let _: () = pipe.query_async(&mut conn).await?;
@@ -108,7 +106,7 @@ impl RedisEventHandler {
 
 
 
-    /// 序列化事件
+    /// Serializes an event envelope into a compact JSON payload.
     fn serialize_event(&self, event: &EventEnvelope) -> String {
         json!({
             "event_key": event.event_key(),
@@ -118,7 +116,7 @@ impl RedisEventHandler {
         .to_string()
     }
 
-    /// 重试机制
+    /// Executes an async Redis operation with bounded exponential backoff.
     async fn retry_operation<F, Fut>(
         &self,
         mut operation: F,
@@ -186,39 +184,3 @@ impl RedisEventHandler {
         });
     }
 }
-//        // 注意：原代码中 save_timeseries_data 的 member 结构与 serialize_event 是一致的
-//        let member = &event_data;
-//
-//        // 4. 使用 Pipeline 执行写入，并带有重试机制
-//        // 注意：这里移除了每次写入时的 ZREMRANGEBYSCORE 和 EXPIRE 操作，应由后台任务处理
-//        // 将连接获取移入闭包内部，既解决了生命周期问题，又能在重试时获取新连接（提高健壮性）
-//        // 在 Happy Path 下，仍然只获取一次连接。
-//        let operation = || async {
-//            let mut conn = self
-//                .redis_pool
-//                .get()
-//                .await
-//                .map_err(|e| format!("Redis connection failed: {e}"))?;
-//
-//            let mut pipe = redis::pipe();
-//            pipe.rpush(&key, &event_data)
-//                .zadd(&ts_key, member, score);
-//
-//            let _: () = timeout(Duration::from_secs(5), async {
-//                pipe.query_async(&mut conn).await
-//            })
-//            .await??;
-//            Ok(())
-//        };
-//
-//        if let Err(e) = self.retry_operation(operation).await {
-//            error!("Failed to save event to Redis (pipeline): {}", e);
-//        }
-//
-//        Ok(())
-//    }
-//
-//    fn name(&self) -> &'static str {
-//        "RedisEventHandler"
-//    }
-//}

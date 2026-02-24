@@ -6,12 +6,14 @@ use common::model::{Request, Response};
 use crate::task::module::Module;
 use errors::{Error, ErrorKind};
 
+/// Top-level domain that namespaces event families.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub enum EventDomain {
     Engine,
     System,
 }
 
+/// Canonical event type identifiers emitted by the engine.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub enum EventType {
     TaskModel,
@@ -34,6 +36,7 @@ pub enum EventType {
     SystemHealth,
 }
 
+/// Lifecycle phase attached to each event emission.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub enum EventPhase {
     Started,
@@ -42,12 +45,14 @@ pub enum EventPhase {
     Retry,
 }
 
+/// Error payload carried by failed events.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EventError {
     pub kind: ErrorKind,
     pub message: String,
 }
 
+/// Transport envelope used by the event bus and storage backends.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EventEnvelope {
     pub domain: EventDomain,
@@ -60,6 +65,13 @@ pub struct EventEnvelope {
 }
 
 impl EventDomain {
+    /// Returns the canonical lowercase domain key.
+    ///
+    /// ```
+    /// use engine::events::EventDomain;
+    /// assert_eq!(EventDomain::Engine.as_str(), "engine");
+    /// assert_eq!(EventDomain::System.as_str(), "system");
+    /// ```
     pub fn as_str(&self) -> &'static str {
         match self {
             EventDomain::Engine => "engine",
@@ -69,6 +81,12 @@ impl EventDomain {
 }
 
 impl EventType {
+    /// Returns the canonical lowercase event type key.
+    ///
+    /// ```
+    /// use engine::events::EventType;
+    /// assert_eq!(EventType::RequestPublish.as_str(), "request_publish");
+    /// ```
     pub fn as_str(&self) -> &'static str {
         match self {
             EventType::TaskModel => "task_model",
@@ -94,6 +112,12 @@ impl EventType {
 }
 
 impl EventPhase {
+    /// Returns the canonical lowercase phase key.
+    ///
+    /// ```
+    /// use engine::events::EventPhase;
+    /// assert_eq!(EventPhase::Retry.as_str(), "retry");
+    /// ```
     pub fn as_str(&self) -> &'static str {
         match self {
             EventPhase::Started => "started",
@@ -161,6 +185,13 @@ impl EventEnvelope {
         }
     }
 
+    /// Builds the stable composite event key `domain.type.phase`.
+    ///
+    /// ```
+    /// use engine::events::{EventEnvelope, EventPhase, EventType};
+    /// let evt = EventEnvelope::engine(EventType::ParserTaskModel, EventPhase::Completed, serde_json::json!({}));
+    /// assert_eq!(evt.event_key(), "engine.parser_task_model.completed");
+    /// ```
     pub fn event_key(&self) -> String {
         format!("{}.{}.{}", self.domain.as_str(), self.event_type.as_str(), self.phase.as_str())
     }
@@ -263,6 +294,7 @@ impl From<&TaskModel> for TaskModelEvent {
     }
 }
 
+/// Compact event payload representing parser/error task-model inputs.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ParserTaskModelEvent {
     pub account: String,
@@ -293,6 +325,7 @@ impl From<&ErrorTaskModel> for ParserTaskModelEvent {
 }
 
 
+/// Event payload emitted when a concrete module instance is generated.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModuleGenerateEvent {
     pub account: String,
@@ -311,7 +344,7 @@ impl From<&Module> for ModuleGenerateEvent {
 }
 
 
-/// 请求事件
+/// Event payload for outbound request publication.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RequestEvent {
     pub request_id: Uuid,
@@ -338,7 +371,7 @@ impl From<&Request> for RequestEvent {
     }
 }
 
-/// 下载事件
+/// Event payload for download execution telemetry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DownloadEvent {
     pub request_id: Uuid,
@@ -367,7 +400,7 @@ impl From<&Request> for DownloadEvent {
     }
 }
 
-/// 解析事件
+/// Event payload for parser execution telemetry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ParserEvent {
     pub account: String,
@@ -387,6 +420,7 @@ impl From<&Response> for ParserEvent {
     }
 }
 
+/// Event payload for data-middleware transformation stages.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DataMiddlewareEvent {
     pub account: String,
@@ -410,6 +444,7 @@ impl From<&common::model::data::Data> for DataMiddlewareEvent {
 }
 
 
+/// Event payload for final data-store persistence stages.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DataStoreEvent {
     pub account: String,
@@ -432,6 +467,7 @@ impl From<&common::model::data::Data> for DataStoreEvent {
     }
 }
 
+/// Event payload for request middleware application.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RequestMiddlewareEvent {
     pub request_id: Uuid,
@@ -456,6 +492,7 @@ impl From<&Request> for RequestMiddlewareEvent {
     }
 }
 
+/// Event payload for response middleware processing.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResponseEvent {
     pub response_id: Uuid,
@@ -480,7 +517,7 @@ impl From<&Response> for ResponseEvent {
 
 
 
-/// 健康检查事件
+/// Event payload for periodic component health reporting.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HealthCheckEvent {
     pub component: String,

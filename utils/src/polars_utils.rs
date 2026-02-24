@@ -11,7 +11,7 @@
 // pub fn date_parser_with_format(inputs: &[Series], kwargs: CustomerFormat) -> PolarsResult<Series> {
 //     let ca = inputs[0].str()?;
 //     let out: DatetimeChunked = ca.apply_into_string_amortized(|value, _output| {
-//         // 使用 chrono 进行自定义解析
+//         // Use `chrono` for custom parsing.
 //         if let Ok(dt) = NaiveDateTime::parse_from_str(value, kwargs.format.as_str()) {
 //             Some(dt.timestamp_micros())
 //         } else if let Ok(date) = NaiveDate::parse_from_str(value, "%Y-%m-%d") {

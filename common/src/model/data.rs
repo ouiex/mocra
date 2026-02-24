@@ -6,43 +6,43 @@ use polars::io::ipc::IpcWriter;
 use polars::prelude::*;
 use std::fmt::Debug;
 use uuid::Uuid;
-/// 存储上下文信息，包含任务和模块的标识信息
+/// Storage context carrying task/module identity.
 #[derive(Clone, Debug, Default)]
 pub struct StoreContext {
-    /// 请求唯一标识
+    /// Unique request identifier.
     pub request_id: Uuid,
-    /// 平台标识
+    /// Platform identifier.
     pub platform: String,
-    /// 账号标识
+    /// Account identifier.
     pub account: String,
-    /// 模块标识
+    /// Module identifier.
     pub module: String,
-    /// 元数据
+    /// Metadata.
     pub meta: MetaData,
-    /// 数据中间件列表
+    /// Data middleware list.
     pub data_middleware: Vec<String>,
 }
 impl StoreContext {
-    /// 生成任务标识 (account-platform)
+    /// Builds task identifier (`account-platform`).
     pub fn task_id(&self) -> String {
         format!("{}-{}", self.account, self.platform)
     }
-    /// 生成模块标识 (account-platform-module)
+    /// Builds module identifier (`account-platform-module`).
     pub fn module_id(&self) -> String {
         format!("{}-{}-{}", self.account, self.platform, self.module)
     }
 }
 
-/// 文件存储结构，用于存储二进制文件内容
+/// File storage structure for binary file content.
 #[derive(Clone, Debug, Default)]
 pub struct FileStore {
-    /// 上下文信息
+    /// Context information.
     pub ctx: StoreContext,
-    /// 文件名
+    /// File name.
     pub file_name: String,
-    /// 文件路径
+    /// File path.
     pub file_path: String,
-    /// 文件内容
+    /// File content.
     pub content: Vec<u8>,
 }
 
@@ -92,46 +92,46 @@ impl From<Data> for FileStore {
 }
 
 impl FileStore {
-    /// 设置文件内容
+    /// Sets file content.
     pub fn with_content(mut self, content: Vec<u8>) -> Self {
         self.content = content;
         self
     }
-    /// 设置上下文信息
+    /// Sets context information.
     pub fn with_ctx(mut self, ctx: StoreContext) -> Self {
         self.ctx = ctx;
         self
     }
-    /// 设置文件名
+    /// Sets file name.
     pub fn with_name(mut self, file_name: impl AsRef<str>) -> Self {
         self.file_name = file_name.as_ref().to_string();
         self
     }
-    /// 设置文件路径
+    /// Sets file path.
     pub fn with_path(mut self, file_path: impl AsRef<str>) -> Self {
         self.file_path = file_path.as_ref().to_string();
         self
     }
-    /// 设置文件名 (别名)
+    /// Sets file name (alias).
     pub fn with_file_name(self, file_name: impl AsRef<str>) -> Self {
         self.with_name(file_name)
     }
-    /// 设置文件路径 (别名)
+    /// Sets file path (alias).
     pub fn with_file_path(self, file_path: impl AsRef<str>) -> Self {
         self.with_path(file_path)
     }
 }
 
-/// DataFrame 存储结构，用于存储结构化数据
+/// DataFrame storage structure for tabular data.
 #[derive(Clone, Debug, Default)]
 pub struct DataFrameStore {
-    /// 上下文信息
+    /// Context information.
     ctx: StoreContext,
-    /// 序列化后的 DataFrame 数据 (IPC 格式)
+    /// Serialized DataFrame payload (IPC format).
     pub data: Vec<u8>,
-    /// 数据库 Schema
+    /// Database schema.
     pub schema: String,
-    /// 数据库表名
+    /// Database table name.
     pub table: String,
 }
 
@@ -165,7 +165,7 @@ impl From<DataFrameStore> for Data {
 
 
 impl DataFrameStore {
-    /// 设置 DataFrame 数据，自动序列化为 IPC 格式
+    /// Sets DataFrame data and serializes to IPC format.
     pub fn with_data(mut self, data: DataFrame) -> Self {
         let mut buffer = Vec::new();
         let mut df = data;
@@ -174,43 +174,43 @@ impl DataFrameStore {
         self.data = buffer;
         self
     }
-    /// 设置 Schema
+    /// Sets schema.
     pub fn with_schema(mut self, schema: impl AsRef<str>) -> Self {
         self.schema = schema.as_ref().to_string();
         self
     }
-    /// 设置表名
+    /// Sets table name.
     pub fn with_table(mut self, table: impl AsRef<str>) -> Self {
         self.table = table.as_ref().to_string();
         self
     }
 }
 
-/// 数据类型枚举
+/// Data type enum.
 #[derive(Debug, Clone)]
 pub enum DataType {
-    /// 结构化数据
+    /// Structured tabular data.
     DataFrame(DataFrameStore),
-    /// 文件数据
+    /// File data.
     File(FileStore),
 }
 
-/// 通用数据传输对象，封装了元数据和具体内容
+/// Generic data transfer object wrapping metadata and concrete payload.
 #[derive(Debug, Clone)]
 pub struct Data {
-    /// 请求唯一标识
+    /// Unique request identifier.
     pub request_id: Uuid,
-    /// 平台标识
+    /// Platform identifier.
     pub platform: String,
-    /// 账号标识
+    /// Account identifier.
     pub account: String,
-    /// 模块标识
+    /// Module identifier.
     pub module: String,
-    /// 元数据
+    /// Metadata.
     pub meta: MetaData,
-    /// 数据内容
+    /// Payload.
     pub data: DataType,
-    /// 需要执行的数据中间件
+    /// Data middleware to execute.
     pub data_middleware: Vec<String>,
 }
 
@@ -228,7 +228,7 @@ impl Default for Data {
     }
 }
 impl Data {
-    /// 从 Response 构建 Data
+    /// Builds `Data` from `Response`.
     pub fn from(response: &Response) -> Self {
         Data {
             request_id: response.id,
@@ -240,29 +240,29 @@ impl Data {
             data_middleware: response.data_middleware.clone(),
         }
     }
-    /// 设置数据中间件列表
+    /// Sets middleware list.
     pub fn with_middlewares(mut self, middleware: Vec<String>) -> Self {
         self.data_middleware = middleware;
         self
     }
-    /// 添加单个数据中间件
+    /// Adds one middleware item.
     pub fn with_middleware(mut self, middleware: impl AsRef<str>) -> Self {
         self.data_middleware.push(middleware.as_ref().into());
         self
     }
-    /// 获取任务ID (account-platform)
+    /// Returns task ID (`account-platform`).
     pub fn task_id(&self) -> String {
         format!("{}-{}", self.account, self.platform)
     }
-    /// 获取模块ID (account-platform-module)
+    /// Returns module ID (`account-platform-module`).
     pub fn module_id(&self) -> String {
         format!("{}-{}-{}", self.account, self.platform, self.module)
     }
-    /// 转换为 DataFrameStore
+    /// Converts into `DataFrameStore`.
     pub fn with_df(self, data: DataFrame) -> DataFrameStore {
         DataFrameStore::default().with_data(data)
     }
-    /// 转换为 FileStore
+    /// Converts into `FileStore`.
     pub fn with_file(self, data: Vec<u8>) -> FileStore {
         // Transfer CrawlData context into a FileStore builder preserving metadata.
         FileStore {
@@ -279,7 +279,7 @@ impl Data {
             content: data,
         }
     }
-    /// 获取数据大小 (字节数或行数)
+    /// Returns payload size (bytes or rows).
     pub fn size(&self) -> usize {
         match &self.data {
             DataType::DataFrame(df_store) => df_store.data.len(),
@@ -332,23 +332,23 @@ mod tests {
             value: serde_json::Value,
         }
 
-        // 方法1: 只定义需要的字段，serde会自动忽略其他字段
+        // Method 1: define only required fields; serde ignores unknown fields.
         #[derive(Serialize, Deserialize, Debug)]
         struct RespPartial {
             data: Vec<Item>,
-            // 不定义is_success字段，它会被忽略
+            // `is_success` is not defined and will be ignored.
         }
 
-        // 方法2: 使用Option来处理可选字段
+        // Method 2: use `Option` for optional fields.
         #[derive(Serialize, Deserialize, Debug)]
         struct RespWithOptional {
             data: Vec<Item>,
-            is_success: Option<bool>, // 可选字段
-            #[serde(default)] // 如果字段不存在，使用默认值
+            is_success: Option<bool>, // Optional field.
+            #[serde(default)] // Use default when field is missing.
             extra_field: String,
         }
 
-        // 测试包含更多字段的复杂JSON
+        // Test JSON with additional fields.
         let complex_json = r#"
         {
             "data": [
@@ -367,23 +367,23 @@ mod tests {
             "version": "1.0.0"
         }"#;
 
-        // 方法1: 只解析需要的字段
+        // Method 1: parse only required fields.
         let resp_partial: RespPartial = serde_json::from_str(complex_json).unwrap();
         assert_eq!(resp_partial.data.len(), 3);
 
-        // 方法2: 使用Option处理可选字段
+        // Method 2: handle optional fields via `Option`.
         let resp_optional: RespWithOptional = serde_json::from_str(complex_json).unwrap();
         assert_eq!(resp_optional.is_success, Some(true));
         assert_eq!(resp_optional.extra_field, "");
 
-        // 方法4: 使用serde_json::Value进行动态解析
+        // Method 4: dynamic parsing with `serde_json::Value`.
         let value: serde_json::Value = serde_json::from_str(complex_json).unwrap();
         if let Some(data) = value.get("data") {
             let items: Vec<Item> = serde_json::from_value(data.clone()).unwrap();
             assert_eq!(items.len(), 3);
         }
 
-        // 提取特定字段
+        // Extract specific fields.
         let is_success = value
             .get("is_success")
             .and_then(|v| v.as_bool())

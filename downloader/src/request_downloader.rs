@@ -23,17 +23,19 @@ use dashmap::DashMap;
 use metrics::{counter, histogram};
 use rand::Rng;
 
-/// RequestDownloader 实现了 Downloader trait，提供 HTTP 请求下载功能
-/// 支持 Cookie 和 Header 缓存、请求限速、任务锁等功能。
-/// 通过 enable_cache、enable_locker 和 enable_rate_limit 方法可以启用相应的功能。
-/// 该下载器使用 reqwest 库进行 HTTP 请求，并使用 Arc 和 Mutex 实现线程安全。
-/// task_locks 使用分布式锁
+/// RequestDownloader implements the Downloader trait and provides HTTP download capability.
+/// It supports cookie/header caching, rate limiting, and task locking.
+/// The corresponding features can be enabled via `enable_cache`, `enable_locker`,
+/// and `enable_rate_limit`.
+/// This downloader uses `reqwest` for HTTP requests and relies on `Arc`/`Mutex`-style
+/// shared state patterns for thread safety.
+/// Task locks are implemented with a distributed lock.
 
 #[derive(Clone)]
 pub struct RequestDownloader {
-    /// 速率限制器
+    /// Rate limiter.
     pub limit: Arc<DistributedSlidingWindowRateLimiter>,
-    /// 分布式锁管理器
+    /// Distributed lock manager.
     pub locker: Arc<DistributedLockManager>,
     cache_service: Arc<CacheService>,
     enable_cache: Arc<AtomicBool>,
@@ -108,18 +110,18 @@ impl RequestDownloader {
         let module_id = request.module_id();
         let mut modified_request = request;
 
-        // 并行处理headers和cookies的缓存加载
+        // Load cached headers and cookies in parallel.
         let headers_future = self.load_cached_headers(&module_id, &modified_request.cache_headers);
         let cookies_future = self.load_cached_cookies(&module_id);
 
         let (cached_headers, cached_cookies) = tokio::try_join!(headers_future, cookies_future)?;
 
-        // 应用缓存的headers
+        // Apply cached headers.
         if let Some(headers) = cached_headers {
             modified_request.headers.merge(&headers);
         }
 
-        // 应用缓存的cookies
+        // Apply cached cookies.
         if let Some(cookies) = cached_cookies {
             modified_request.cookies.merge(&cookies);
         }
@@ -127,7 +129,7 @@ impl RequestDownloader {
         Ok(modified_request)
     }
 
-    /// 加载缓存的headers，使用细粒度锁和L1缓存
+    /// Loads cached headers using fine-grained locking and an L1 cache.
     async fn load_cached_headers(
         &self,
         module_id: &str,
@@ -183,7 +185,7 @@ impl RequestDownloader {
         }
     }
 
-    /// 加载缓存的cookies，使用细粒度锁和L1缓存
+    /// Loads cached cookies using fine-grained locking and an L1 cache.
     async fn load_cached_cookies(&self, module_id: &str) -> Result<Option<Cookies>> {
         // L1 Cache Check
         if let Some(entry) = self.cookies_cache.get(module_id) {
@@ -220,7 +222,7 @@ impl RequestDownloader {
         } else {
             None
         };
-        // 根据request.cache_headers更新响应头
+        // Update response headers based on `request.cache_headers`.
         let cache_enabled = self.enable_cache.load(Ordering::Relaxed);
         if cache_enabled
             && let Some(cache_headers) = &request.cache_headers
@@ -485,7 +487,7 @@ impl RequestDownloader {
         histogram!("downloader_request_duration_seconds", "module" => request.module.clone()).record(duration);
         counter!("downloader_requests_total", "status_code" => response.status().as_u16().to_string(), "module" => request.module.clone()).increment(1);
 
-        // 处理cookie，将response cookie合并到request cookie并存储到缓存里
+        // Process cookies: merge response cookies into request cookies and cache them.
         let cache_enabled = self.enable_cache.load(Ordering::Relaxed);
         if cache_enabled {
             let mut current_cookies = request.cookies.clone();

@@ -195,7 +195,7 @@ pub fn to_numeric(input: &str) -> Option<f64> {
                 continue;
             }
             if let Some(su) = small_unit(ch) {
-                // 十 百 千
+                // Small units: ten, hundred, thousand.
                 if last_was_digit {
                     section_total += current * su;
                 } else {
@@ -207,7 +207,7 @@ pub fn to_numeric(input: &str) -> Option<f64> {
                 continue;
             }
             if let Some(bu) = big_unit(ch) {
-                // 万 亿 boundaries
+                // Large section boundaries: ten-thousand and hundred-million.
                 section_total += current;
                 total += section_total * bu;
                 section_total = 0.0;

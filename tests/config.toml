@@ -1,7 +1,7 @@
 name = "lunaler_rpa"
 
-[api]
-port = 8905
+# [api]
+# port = 8905
 
 [db]
 url = "postgres://eason:Qaz.123456@localhost:5433/crawler"
@@ -28,7 +28,7 @@ ttl = 60
 redis_host = "127.0.0.1"
 redis_port = 6379
 redis_db = 0
-pool_size = 200
+pool_size = 100
 
 [cookie]
 redis_host = "127.0.0.1"
@@ -43,7 +43,7 @@ request_max_retries = 1
 task_max_errors = 100
 module_max_errors = 10
 module_locker_ttl = 5
-task_concurrency = 1000
+task_concurrency = 32
 idle_stop_secs = 10
 
 [scheduler]
@@ -64,13 +64,7 @@ redis_port = 6379
 redis_db = 0
 pool_size = 100
 
-[channel_config.blob_storage]
-path = "tmp/blob_storage"
 
-
-[logger]
-enable = true
-level = "debug"
 
 [[logger.outputs]]
 type = "console"

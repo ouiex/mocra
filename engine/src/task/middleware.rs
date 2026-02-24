@@ -5,26 +5,22 @@ use std::sync::Arc;
 use common::interface::DownloadMiddleware;
 use common::model::ModuleConfig;
 
-/// 下载中间件包装器
-///
-/// 包含中间件名称、配置以及具体的 `DownloadMiddleware` 实现。
+/// Download middleware wrapper with bound config.
 pub struct DownloaderMiddleware {
-    /// 中间件名称
+    /// Middleware name.
     pub name: String,
-    /// 模块配置
+    /// Module configuration snapshot.
     pub config: ModuleConfig,
-    /// 中间件实现
+    /// Middleware implementation.
     pub work: Arc<dyn DownloadMiddleware>,
 }
 
-/// 数据中间件包装器
-///
-/// 包含中间件名称、配置以及具体的 `DataMiddleware` 实现。
+/// Data middleware wrapper.
 pub struct DataMiddleware {
-    /// 中间件名称
+    /// Middleware name.
     pub name: String,
-    /// 模块配置
+    /// Module configuration snapshot.
     pub config: ModuleConfig,
-    /// 中间件实现
+    /// Middleware implementation.
     pub work: Arc<dyn DownloadMiddleware>,
 }

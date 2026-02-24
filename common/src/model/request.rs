@@ -21,7 +21,8 @@ pub enum RequestMethod {
     Options,
     Put,
     Head,
-    // 目前wss只是一个标志，用于区分WebSocket请求，实际wss请求里不需要该参数
+    // `wss` is currently just a marker used to distinguish WebSocket requests.
+    // Actual WebSocket calls do not require this parameter.
     Wss,
 }
 impl Display for RequestMethod {
@@ -72,10 +73,12 @@ pub struct Request {
     pub task_retry_times: usize,
     pub use_new_client: bool,
     pub timeout: u64,
-    /// ParserModel,ErrorModel中的meta会在TaskFactory添加至Task.meta中
-    /// meta用于存储额外的信息，在Module.generate中将Task.meta,ShopInfo.extra,ModuleConfig合并至Request.meta中
-    /// 所有的meta来自于Task.meta,LoginInfo.extra,ModuleConfig,trait add
-    /// 使用自定义的数据字段区分task,login_info,trait由代码添加的不做区分
+    /// `meta` from `ParserModel` and `ErrorModel` is appended to `Task.meta` in `TaskFactory`.
+    ///
+    /// `meta` stores extra information. In `Module.generate`, `Task.meta`,
+    /// `ShopInfo.extra`, and `ModuleConfig` are merged into `Request.meta`.
+    /// Metadata sources include `Task.meta`, `LoginInfo.extra`, `ModuleConfig`, and trait-level
+    /// additions. Caller-defined fields are used to distinguish task/login/trait data.
     pub meta: MetaData,
     pub params: Option<Vec<(String, String)>>,
     #[serde(with = "crate::model::serde_value::option_value")]
@@ -83,13 +86,13 @@ pub struct Request {
     pub body: Option<Vec<u8>>,
     #[serde(with = "crate::model::serde_value::option_value")]
     pub form: Option<serde_json::Value>,
-    /// 哪些headers需要缓存
-    /// 例如：`Cache-Control`, `Expires`, `ETag`
+    /// Header names that should be cached.
+    /// Example: `Cache-Control`, `Expires`, `ETag`.
     pub cache_headers: Option<Vec<String>>,
     pub proxy: Option<ProxyEnum>,
-    /// 限流ID
-    /// 用于标识同一限流组的请求
-    /// 默认使用module_id
+    /// Rate-limit identifier.
+    /// Used to mark requests that belong to the same rate-limit group.
+    /// Defaults to `module_id`.
     pub limit_id: String,
     pub download_middleware: Vec<String>,
     pub data_middleware: Vec<String>,
@@ -98,7 +101,7 @@ pub struct Request {
     pub context: ExecutionMark,
     pub run_id: Uuid,
     pub prefix_request: Uuid,
-    /// 自定义的hash字符串，用于覆盖默认的请求hash计算
+    /// Custom hash string used to override default request hash calculation.
     pub hash_str: Option<String>,
     pub enable_cache: bool,
     /// Enable distributed lock for this request to ensure serial execution within the same task/run
@@ -140,7 +143,7 @@ impl Request {
             json: None,
             body: None,
             form: None,
-            timeout: 30, // 默认超时时间为30秒
+            timeout: 30, // Default timeout: 30 seconds.
             cache_headers: None,
             proxy: None,
             limit_id: "".to_string(),

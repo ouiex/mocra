@@ -185,10 +185,10 @@ pub fn json_value_to_any_value(values: &'_ [Value]) -> Vec<AnyValue<'_>> {
     out
 }
 
-/// 更高效的构建：直接用 typed 容器构建 Series，避免 AnyValue 中转。
+/// Efficient series construction using typed buffers (no `AnyValue` bridge).
 #[inline]
 pub fn serde_values_to_series(name: &str, values: &[Value]) -> Series {
-    // 与 json_value_to_any_value 相同的目标类型判定
+    // Target-type inference mirrors `json_value_to_any_value`.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum Target {
         Utf8,
@@ -341,7 +341,7 @@ pub fn serde_values_to_series(name: &str, values: &[Value]) -> Series {
     }
 }
 
-/// 显式指定目标类型，跳过类型探测，适合已知 schema 的高性能场景。
+/// Explicit target type conversion for known-schema high-performance paths.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JsonTarget {
     Utf8,
@@ -444,7 +444,7 @@ pub fn json_values_to_series_with_target(
 }
 
 pub fn calamine_value_to_series(name: &str, values: &[Data]) -> Series {
-    // 与 serde_values_to_series 相同的目标类型判定
+    // Target-type inference mirrors `serde_values_to_series`.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum Target {
         Utf8,
@@ -561,11 +561,11 @@ pub fn calamine_value_to_series(name: &str, values: &[Data]) -> Series {
                     Data::Int(i) => buf.push(Some(*i as f64)),
                     Data::Float(f) => buf.push(Some(*f)),
                     Data::DateTime(dt) => {
-                        // ExcelDateTime 可以转换为 f64 (Excel 序列号)
+                        // `ExcelDateTime` can be represented as Excel serial `f64`.
                         buf.push(Some(dt.as_f64()))
                     }
-                    Data::DateTimeIso(_) => buf.push(None), // 无法直接转换为 f64
-                    Data::DurationIso(_) => buf.push(None), // 无法直接转换为 f64
+                    Data::DateTimeIso(_) => buf.push(None),
+                    Data::DurationIso(_) => buf.push(None),
                     Data::Empty => buf.push(None),
                     Data::Error(_) => buf.push(None),
                     Data::String(_) | Data::Bool(_) => buf.push(None),

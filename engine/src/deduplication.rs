@@ -9,10 +9,11 @@ use chrono::Utc;
 use bloomfilter::Bloom;
 use metrics::{counter, histogram};
 
-/// Three-layer deduplication system:
-/// L0: Bloom Filter (ultra-fast negative check, no false positives for "definitely new")
-/// L1: DashMap (fast local cache for known duplicates)
-/// L2: Redis (distributed authoritative source)
+/// Three-layer deduplication pipeline.
+///
+/// - L0 Bloom Filter: fast probabilistic pre-check.
+/// - L1 DashMap: local duplicate cache with expiry.
+/// - L2 Redis: distributed source of truth.
 #[derive(Clone)]
 pub struct Deduplicator {
     pool: Pool,
@@ -26,18 +27,19 @@ pub struct Deduplicator {
 }
 
 impl Deduplicator {
+    /// Creates a deduplicator with default Bloom filter tuning.
     pub fn new(pool: Pool, ttl: usize, namespace: impl Into<String>) -> Self {
         Self::new_with_bloom_config(pool, ttl, namespace, 10_000_000, 0.01)
     }
 
-    /// Create deduplicator with configurable Bloom Filter
-    /// 
+    /// Creates a deduplicator with explicit Bloom filter configuration.
+    ///
     /// # Arguments
-    /// * `pool` - Redis connection pool
-    /// * `ttl` - TTL for dedup entries in seconds
-    /// * `namespace` - Key namespace
-    /// * `bloom_capacity` - Expected number of items (default: 10M)
-    /// * `bloom_fp_rate` - False positive rate (default: 0.01 = 1%)
+    /// * `pool` - Redis connection pool.
+    /// * `ttl` - TTL for dedup entries in seconds.
+    /// * `namespace` - Redis key namespace prefix.
+    /// * `bloom_capacity` - Expected item count for Bloom filter sizing.
+    /// * `bloom_fp_rate` - Target false-positive rate.
     pub fn new_with_bloom_config(
         pool: Pool,
         ttl: usize,
@@ -48,8 +50,7 @@ impl Deduplicator {
         let local_cache = Arc::new(DashMap::new());
         let cache_clone = local_cache.clone();
         
-        // Initialize Bloom Filter
-        // With 10M capacity and 0.01 FP rate: ~11.98 MB memory, 7 hash functions
+        // Initialize Bloom filter (e.g. ~12 MB at 10M entries / 1% FP).
         let bloom = Arc::new(RwLock::new(
             Bloom::new_for_fp_rate(bloom_capacity, bloom_fp_rate)
                 .expect("Failed to create Bloom filter"),
@@ -63,14 +64,14 @@ impl Deduplicator {
             (bloom_capacity as f64 * (-bloom_fp_rate.ln() / (2.0_f64.ln().powi(2)))) / 8.0 / 1024.0 / 1024.0
         );
         
-        // Background cleaner for local cache and Bloom Filter
+        // Background cleanup for L1 cache and Bloom reset.
         tokio::spawn(async move {
             let mut interval = time::interval(Duration::from_secs(60));
             loop {
                 interval.tick().await;
                 let now = Utc::now().timestamp();
                 
-                // Clean L1 cache
+                // Clean L1 cache.
                 if cache_clone.len() > 1_000_000 {
                     info!("Deduplicator L1 cache exceeded 1M entries, clearing all to prevent OOM");
                     cache_clone.clear();
@@ -78,16 +79,14 @@ impl Deduplicator {
                     cache_clone.retain(|_, &mut expire_at| expire_at > now);
                 }
                 
-                // Periodically reset Bloom Filter to prevent saturation
-                // Reset every 10 minutes to keep FP rate low
+                // Periodically reset Bloom filter to avoid saturation drift.
                 let bloom_size = {
                     let bloom_guard = bloom_clone.read().await;
                     bloom_guard.number_of_hash_functions()
                 };
                 
-                // Reset bloom every 10 minutes
                 if bloom_size > 0 {
-                    // Check if we should reset (simple time-based heuristic)
+                    // Simple time-based reset heuristic.
                     static mut LAST_RESET: i64 = 0;
                     unsafe {
                         if LAST_RESET == 0 {
@@ -114,34 +113,30 @@ impl Deduplicator {
         }
     }
 
-    /// Returns true if the request is new (not duplicate).
-    /// Adds the hash to Redis if it's new.
+    /// Returns `true` when `hash` is new and successfully recorded.
     pub async fn check_and_set(&self, hash: &str) -> Result<bool> {
         let start = std::time::Instant::now();
         let now = Utc::now().timestamp();
         let hash_owned = hash.to_string();
         
-        // L0: Check Bloom Filter (read lock, very fast)
+        // L0: Bloom filter pre-check.
         let bloom_says_exists = {
             let bloom_guard = self.bloom.read().await;
             bloom_guard.check(&hash_owned)
         };
         
         if bloom_says_exists {
-            // Bloom says "might exist", need further verification
+            // Might exist, continue to L1/L2 verification.
             counter!("dedup_bloom_hits", "result" => "maybe_exists").increment(1);
         } else {
-            // Bloom says "definitely new" - shortcut!
-            // Still need to set it in Redis and Bloom
+            // Definitely new under Bloom semantics; still persist in Redis.
             counter!("dedup_bloom_hits", "result" => "definitely_new").increment(1);
             
-            // Add to Bloom immediately (write lock)
             {
                 let mut bloom_guard = self.bloom.write().await;
                 bloom_guard.set(&hash_owned);
             }
             
-            // Set in Redis
             let mut conn = match self.pool.get().await {
                 Ok(c) => c,
                 Err(e) => {
@@ -163,27 +158,25 @@ impl Deduplicator {
             let _: Option<String> = conn.set_options(&key, "1", opts).await
                 .map_err(|e| errors::Error::from(errors::CacheError::Redis(e)))?;
             
-            // Add to L1 cache
             self.local_cache.insert(hash_owned.clone(), now + self.ttl as i64);
             
             histogram!("dedup_check_latency_us", "path" => "bloom_new").record(start.elapsed().as_micros() as f64);
             return Ok(true);
         }
         
-        // L1: Check local cache
+        // L1: Check local cache.
         if let Some(expire_at) = self.local_cache.get(&hash_owned) {
             if *expire_at > now {
                 histogram!("dedup_check_latency_us", "path" => "l1_hit").record(start.elapsed().as_micros() as f64);
                 counter!("dedup_l1_hits").increment(1);
-                return Ok(false); // Known duplicate
+                return Ok(false);
             } else {
-                // Expired, drop it
                 drop(expire_at);
                 self.local_cache.remove(&hash_owned);
             }
         }
         
-        // L2: Check Redis
+        // L2: Redis authoritative check.
         let mut conn = match self.pool.get().await {
             Ok(c) => c,
             Err(e) => {
@@ -208,11 +201,9 @@ impl Deduplicator {
         let is_new = result.is_some();
         
         if !is_new {
-            // It was already in Redis, update L1 cache
             self.local_cache.insert(hash_owned.clone(), now + self.ttl as i64);
             counter!("dedup_l2_hits").increment(1);
         } else {
-            // New entry, add to L1 cache
             self.local_cache.insert(hash_owned.clone(), now + self.ttl as i64);
             counter!("dedup_l2_new").increment(1);
         }
@@ -221,9 +212,9 @@ impl Deduplicator {
         Ok(is_new)
     }
 
-    /// Batch version of check_and_set.
-    /// Returns a boolean vector corresponding to input hashes.
-    /// Uses Bloom Filter for pre-filtering and Redis pipeline for performance.
+    /// Batch version of `check_and_set`.
+    ///
+    /// Returns a boolean vector aligned with input order.
     pub async fn check_and_set_batch(&self, hashes: &[String]) -> Result<Vec<bool>> {
         if hashes.is_empty() {
             return Ok(Vec::new());

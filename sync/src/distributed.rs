@@ -48,7 +48,7 @@ fn msgpack_decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, rmps::decode::
 }
 
 pub trait SyncAble: Send + Sync + Sized + 'static + Serialize + DeserializeOwned {
-    // 消息队列topic
+    // Message queue topic.
     fn topic() -> String;
 }
 

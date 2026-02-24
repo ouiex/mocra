@@ -196,18 +196,18 @@ impl State {
         );
         info!("Redis connection pool created successfully");
 
-        // 初始化错误跟踪器
+        // Initialize error tracking subsystem.
         let error_tracker_config = ErrorTrackerConfig {
             task_max_errors: config.crawler.task_max_errors,
             module_max_errors: config.crawler.module_max_errors,
             request_max_retries: config.crawler.request_max_retries,
-            parse_max_retries: config.crawler.request_max_retries, // 使用相同配置
+            parse_max_retries: config.crawler.request_max_retries,
             enable_success_decay: true,
             success_decay_amount: 1,
             enable_time_window: false,
             time_window_seconds: 3600,
             consecutive_error_threshold: 3,
-            error_ttl: config.cache.ttl, // 从配置读取错误记录过期时间
+            error_ttl: config.cache.ttl,
         };
         let error_tracker = Arc::new(StatusTracker::new(
             cache_service.clone(),

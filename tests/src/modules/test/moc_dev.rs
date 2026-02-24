@@ -43,13 +43,13 @@ impl ModuleTrait for MocDevModule {
     }
     async fn add_step(&self) -> Vec<Arc<dyn ModuleNodeTrait>> {
         vec![Arc::new(MocDevNode {
-            url: "https://moc.dev".to_string(),
-            request_count: 10,
+            url: "http://127.0.0.1:3000".to_string(),
+            request_count: 1000,
         })]
     }
-    // fn cron(&self) -> Option<CronConfig> {
-    //     Some(CronConfig::right_now())
-    // }
+    fn cron(&self) -> Option<CronConfig> {
+        Some(CronConfig::right_now())
+    }
 }
 
 struct MocDevNode {
@@ -71,15 +71,7 @@ impl ModuleNodeTrait for MocDevNode {
         }
         let mut requests = Vec::with_capacity(self.request_count);
         for i in 0..self.request_count {
-            // Add cache-busting query parameter to avoid cached responses
-            let url = format!("{}?_t={}&_i={}", self.url, std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos(), i);
-            let mut request = Request::new(url, RequestMethod::Get);
-            request
-                .download_middleware
-                .push("benchmark_counter_download_middleware".to_string());
+           let request = Request::new(format!("{}?/msg={i}",self.url), RequestMethod::Get);
             requests.push(request);
         }
         requests.into_stream_ok()

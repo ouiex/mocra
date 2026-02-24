@@ -1,6 +1,7 @@
 use super::*;
 
 impl Engine {
+    /// Registers optional event consumers (console + Redis) and binds subscriptions.
     async fn setup_event_handlers(&self) {
         let Some(event_bus) = &self.event_bus else {
             info!("EventBus disabled; skipping event handlers");
@@ -43,6 +44,14 @@ impl Engine {
         info!("Event handlers registered successfully");
     }
 
+    /// Starts the full engine runtime.
+    ///
+    /// Startup phases:
+    /// 1. Optional Lua preload for distributed mode.
+    /// 2. Optional API startup.
+    /// 3. Event bus initialization.
+    /// 4. Background services (cleaners/monitor/idle-stop watcher).
+    /// 5. Chain construction and processor loops.
     pub async fn start(&self) {
         info!("Starting Schedule with event-driven architecture");
         let use_distributed_lua = {
@@ -203,6 +212,7 @@ impl Engine {
         );
     }
 
+    /// Triggers graceful shutdown for processors and optional event infrastructure.
     pub async fn shutdown(&self) {
         info!("Shutting down Schedule");
 
@@ -229,6 +239,7 @@ impl Engine {
         info!("Schedule shutdown completed");
     }
 
+    /// Returns a lightweight runtime status snapshot for diagnostics.
     pub async fn get_system_stats(&self) -> serde_json::Value {
         serde_json::json!({
             "processors": {
@@ -245,6 +256,7 @@ impl Engine {
         })
     }
 
+    /// Starts the HTTP API server in a detached task.
     pub async fn start_api(&self, port: u16) {
         let queue_manager = self.queue_manager.clone();
         let prometheus_handle = self.prometheus_handle.clone();
@@ -281,6 +293,7 @@ impl Engine {
         });
     }
 
+    /// Starts cron scheduling loop.
     pub fn start_cron_scheduler(&self) {
         info!("Starting cron scheduler");
         self.cron_scheduler.clone().start();

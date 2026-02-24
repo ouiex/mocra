@@ -5,7 +5,11 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use deadpool_redis::redis;
 
-/// Redis事件监控API，用于其他程序查询事件数据
+/// Read-only monitoring API over Redis-backed event data.
+///
+/// This helper is used by external observability tools to query counters,
+/// progress snapshots, error summaries, and time-series metrics persisted by
+/// event handlers.
 pub struct RedisEventMonitor {
     redis_pool: Arc<deadpool_redis::Pool>,
     key_prefix: String,
@@ -45,17 +49,17 @@ impl RedisEventMonitor {
         }
     }
 
-    /// 获取实时系统统计信息
+    /// Returns aggregated real-time counters and derived success-rate metrics.
     pub async fn get_system_stats(&self) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
         let mut conn = self.redis_pool.get().await
             .map_err(|e| format!("Redis connection failed: {e}"))?;
 
-        // 获取各种计数统计
+        // Read high-level counters.
         let request_success: i64 = conn.get(format!("{}:stats:request_success_count", self.key_prefix)).await.unwrap_or(0);
         let request_fail: i64 = conn.get(format!("{}:stats:request_fail_count", self.key_prefix)).await.unwrap_or(0);
         let task_fail: i64 = conn.get(format!("{}:stats:task_fail_count", self.key_prefix)).await.unwrap_or(0);
 
-        // 获取事件类型计数
+        // Read per-event counters for selected core event keys.
         let mut event_counts = json!({});
         let event_types = [
             "engine.task_model.started",
@@ -91,7 +95,7 @@ impl RedisEventMonitor {
         }))
     }
 
-    /// 获取任务进度信息
+    /// Returns progress information for a specific task id.
     pub async fn get_task_progress(&self, task_id: &str) -> Result<Option<Value>, Box<dyn std::error::Error + Send + Sync>> {
         let mut conn = self.redis_pool.get().await
             .map_err(|e| format!("Redis connection failed: {e}"))?;
@@ -104,7 +108,7 @@ impl RedisEventMonitor {
         }
     }
 
-    /// 获取所有活跃任务的进度
+    /// Returns progress entries for all active tasks.
     pub async fn get_all_task_progress(&self) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
         let mut conn = self.redis_pool.get().await
             .map_err(|e| format!("Redis connection failed: {e}"))?;
@@ -129,7 +133,7 @@ impl RedisEventMonitor {
         }))
     }
 
-    /// 获取下载性能数据
+    /// Returns recent download performance records and summary statistics.
     pub async fn get_download_performance(&self, limit: usize) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
         let mut conn = self.redis_pool.get().await
             .map_err(|e| format!("Redis connection failed: {e}"))?;
@@ -170,12 +174,12 @@ impl RedisEventMonitor {
         }))
     }
 
-    /// 获取错误详情
+    /// Returns recent failure events ordered by descending timestamp.
     pub async fn get_error_details(&self, limit: usize) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
         let mut conn = self.redis_pool.get().await
             .map_err(|e| format!("Redis connection failed: {e}"))?;
         
-        // 获取最近的错误事件
+        // Read recent failure-related event keys.
         let error_pattern = format!("{}:events:*failed", self.key_prefix);
         let keys = Self::scan_keys(&mut conn, &error_pattern).await?;
         
@@ -187,11 +191,11 @@ impl RedisEventMonitor {
                 }
         }
 
-        // 按时间戳排序
+        // Sort by timestamp.
         errors.sort_by(|a, b| {
             let ts_a = a["timestamp"].as_u64().unwrap_or(0);
             let ts_b = b["timestamp"].as_u64().unwrap_or(0);
-            ts_b.cmp(&ts_a) // 降序排列
+            ts_b.cmp(&ts_a)
         });
 
         Ok(json!({
@@ -201,7 +205,7 @@ impl RedisEventMonitor {
         }))
     }
 
-    /// 获取时间序列数据
+    /// Returns time-series points for `event_type` in the latest `hours` window.
     pub async fn get_timeseries_data(&self, event_type: &str, hours: u64) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
         let mut conn = self.redis_pool.get().await
             .map_err(|e| format!("Redis connection failed: {e}"))?;
@@ -233,12 +237,12 @@ impl RedisEventMonitor {
         }))
     }
 
-    /// 获取健康状态报告
+    /// Returns a synthesized health report from recent system health events.
     pub async fn get_health_report(&self) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
         let mut conn = self.redis_pool.get().await
             .map_err(|e| format!("Redis connection failed: {e}"))?;
         
-        // 获取最近的健康检查事件
+        // Read recent health-check events.
         let health_pattern = format!("{}:events:system.system_health.*", self.key_prefix);
         let keys = Self::scan_keys(&mut conn, &health_pattern).await?;
         
@@ -251,7 +255,7 @@ impl RedisEventMonitor {
                     }
         }
 
-        // 计算整体健康状态
+        // Compute overall status from component-level statuses.
         let mut healthy_components = 0;
         let mut total_components = 0;
         
@@ -279,16 +283,16 @@ impl RedisEventMonitor {
         }))
     }
 
-    /// 清理过期数据
+    /// Cleans up expired time-series points and returns deleted entry count.
     pub async fn cleanup_expired_data(&self) -> Result<u64, Box<dyn std::error::Error + Send + Sync>> {
         let mut conn = self.redis_pool.get().await
             .map_err(|e| format!("Redis connection failed: {e}"))?;
         let current_time = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
-        let cutoff_time = current_time - (24 * 3600); // 24小时前
+        let cutoff_time = current_time - (24 * 3600);
 
         let mut cleaned_count = 0u64;
 
-        // 清理时间序列数据
+        // Remove old points from each time-series key.
         let ts_pattern = format!("{}:timeseries:*", self.key_prefix);
         let ts_keys = Self::scan_keys(&mut conn, &ts_pattern).await?;
         

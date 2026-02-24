@@ -9,17 +9,18 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use errors::OrmError;
 
-/// 数据库访问层，负责从数据库加载实体数据
+/// Read-focused repository for loading task-related entities from database.
 pub struct TaskRepository {
     db: Arc<DatabaseConnection>,
 }
 
 impl TaskRepository {
+    /// Creates repository from SeaORM database connection.
     pub fn new(db: DatabaseConnection) -> Self {
         Self { db: Arc::new(db) }
     }
 
-    /// 加载账号信息
+    /// Loads enabled account by account name.
     pub async fn load_account(&self, account_name: &str) -> Result<AccountModel> {
         let txn = begin_read(&self.db)
             .await
@@ -36,7 +37,7 @@ impl TaskRepository {
         Ok(account)
     }
 
-    /// 加载平台信息
+    /// Loads enabled platform by platform name.
     pub async fn load_platform(&self, platform_name: &str) -> Result<PlatformModel> {
         let txn = begin_read(&self.db)
             .await
@@ -53,7 +54,7 @@ impl TaskRepository {
         Ok(platform)
     }
 
-    /// 验证账号-平台关联
+    /// Loads enabled account-platform relation.
     pub async fn load_account_platform_relation(
         &self,
         account_id: i32,
@@ -75,7 +76,7 @@ impl TaskRepository {
         Ok(relation)
     }
 
-    /// 根据账号和平台加载所有启用的模块
+    /// Loads all enabled modules bound to account-platform pair.
     pub async fn load_modules_by_account_platform(
         &self,
         platform_name: &str,
@@ -117,18 +118,18 @@ impl TaskRepository {
         Ok(modules)
     }
 
-    /// 根据账号、平台和模块名加载特定模块
+    /// Loads selected modules by names under account-platform scope.
     pub async fn load_module_by_account_platform_module(
         &self,
         platform_name: &str,
         account_name: &str,
-        module_name: &[String], // 保持Vec<String>参数
+        module_name: &[String],
     ) -> Result<Vec<ModuleModel>> {
         let txn = begin_read(&self.db)
             .await
             .map_err(|e| OrmError::ConnectionError(e.to_string().into()))?;
 
-        // 动态生成IN子句的占位符
+        // Build dynamic placeholders for IN clause.
         let placeholders: Vec<String> =
             (1..=module_name.len()).map(|i| format!("${i}")).collect();
         let in_clause = placeholders.join(", ");
@@ -155,7 +156,7 @@ impl TaskRepository {
             module_name.len() + 2
         );
 
-        // 构建参数值向量
+        // Build SQL bind values in placeholder order.
         let mut values: Vec<Value> = module_name
             .iter()
             .map(|name| Value::from(name.clone()))
@@ -176,7 +177,7 @@ impl TaskRepository {
         Ok(module)
     }
 
-    /// 批量加载模块与平台的关联关系
+    /// Batch loads module-platform relations keyed by module_id.
     pub async fn load_module_platform_relations(
         &self,
         module_ids: &[i32],
@@ -202,7 +203,7 @@ impl TaskRepository {
         Ok(map)
     }
 
-    /// 批量加载模块与账号的关联关系
+    /// Batch loads module-account relations keyed by module_id.
     pub async fn load_module_account_relations(
         &self,
         module_ids: &[i32],
@@ -228,7 +229,7 @@ impl TaskRepository {
         Ok(map)
     }
 
-    /// 加载模块与平台的关联关系
+    /// Loads module-platform relation for one module.
     pub async fn load_module_platform_relation(
         &self,
         module_id: i32,
@@ -250,7 +251,7 @@ impl TaskRepository {
         Ok(relation)
     }
 
-    /// 加载模块与账号的关联关系
+    /// Loads module-account relation for one module.
     pub async fn load_module_account_relation(
         &self,
         module_id: i32,
@@ -272,7 +273,7 @@ impl TaskRepository {
         Ok(relation)
     }
 
-    /// 批量加载模块的数据中间件关联
+    /// Batch loads module-data-middleware relations grouped by module id.
     pub async fn load_module_data_middleware_relations(
         &self,
         module_ids: &[i32],
@@ -299,7 +300,7 @@ impl TaskRepository {
         Ok(grouped)
     }
 
-    /// 批量加载模块的下载中间件关联
+    /// Batch loads module-download-middleware relations grouped by module id.
     pub async fn load_module_download_middleware_relations(
         &self,
         module_ids: &[i32],
@@ -326,7 +327,7 @@ impl TaskRepository {
         Ok(grouped)
     }
 
-    /// 批量加载数据中间件
+    /// Batch loads enabled data middlewares by ids.
     pub async fn load_data_middlewares(
         &self,
         middleware_ids: &[i32],
@@ -345,7 +346,7 @@ impl TaskRepository {
         Ok(middlewares)
     }
 
-    /// 批量加载下载中间件
+    /// Batch loads enabled download middlewares by ids.
     pub async fn load_download_middlewares(
         &self,
         middleware_ids: &[i32],

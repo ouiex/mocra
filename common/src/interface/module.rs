@@ -36,22 +36,23 @@ pub trait ModuleTrait: Send + Sync {
     async fn pre_process(&self, _config: Option<Arc<ModuleConfig>>,) -> Result<()> {
         Ok(())
     }
-    // 这个在ModuleProcessorWithChain执行完所有节点后调用，用于做一些收尾工作
-    // 注意此时所以的Response可能还未进入DataMiddleware阶段，所以不能依赖最终数据处理结果
+    // Called after `ModuleProcessorWithChain` finishes all nodes, for finalization logic.
+    // Responses may not yet pass through `DataMiddleware`, so do not depend on final processed output.
     async fn post_process(&self, _config: Option<Arc<ModuleConfig>>,) -> Result<()> {
         Ok(())
     }
-    /// 返回该模块的定时调度配置
-    /// 默认为 None (不启用定时启动)
+    /// Returns cron schedule config for this module.
+    /// Defaults to `None` (scheduled startup disabled).
     fn cron(&self) -> Option<CronConfig> {
         None
     }
 }
 
-/// 目前ModuleStepNodeTrait负责每个节点的请求生成和响应解析，每个请求对应一个解析
-/// 问题1 多节点之间如何进行数据传递，目前是使用Meta字段进行传递 Request->Response->ParserData->Request
-/// 问题2 每个执行节点是一个单独的struct,理想情况下struct中的所有字段都是只读的，不允许在执行过程中进行修改
-///      但是实际情况下无法保证这种情况，例如记录页码进行翻页，这种情况只能通过Meta进行传递
+/// `ModuleNodeTrait` defines per-node request generation and response parsing.
+/// Data across nodes is currently propagated via metadata:
+/// `Request -> Response -> ParserData -> Request`.
+/// Ideally node structs are immutable during execution; when mutable progression state
+/// (e.g. pagination) is needed, it should be carried in metadata.
 #[async_trait]
 pub trait ModuleNodeTrait: Send + Sync {
     async fn generate(

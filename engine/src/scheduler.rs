@@ -41,20 +41,22 @@ impl Drop for ActiveCronJobGuard<'_> {
     }
 }
 
-/// Scheduler for triggering time-based tasks.
-/// 
-/// Uses a Leader Election mechanism to ensure unique execution and reduce contention.
-/// Only the leader node participates in scheduling.
+/// Distributed cron scheduler for module-level task triggers.
+///
+/// Responsibilities:
+/// - Periodically refresh enabled `(module, account, platform)` contexts.
+/// - Cache parsed schedules for low-latency tick matching.
+/// - Trigger queue tasks only on the elected leader node.
+/// - Recover short scheduler pauses with configurable misfire catch-up.
 pub struct CronScheduler {
     task_manager: Arc<TaskManager>,
     state: Arc<State>,
     queue_manager: Arc<QueueManager>,
-    // Cache for parsed schedules and contexts
-    // Key: Module Name, Value: (Schedule, Contexts)
+    // Key: module_name, value: (parsed schedule, enabled contexts).
     schedule_cache: DashMap<String, (Arc<Schedule>, Arc<Vec<(String, String)>>)>,
-    // Cache for cron configs to avoid repeated parsing
+    // Key: module_name, value: cached cron config.
     cron_config_cache: DashMap<String, Option<CronConfig>>,
-    // Cache to avoid repeating right_now executions for same contexts
+    // Key: module_name, value: hash of contexts already executed for right_now.
     right_now_context_hash: DashMap<String, u64>,
     shutdown_rx: broadcast::Receiver<()>,
     last_version: AtomicU64,
@@ -65,7 +67,7 @@ pub struct CronScheduler {
 }
 
 impl CronScheduler {
-    /// Creates a new CronScheduler instance.
+    /// Creates a new scheduler with empty in-memory caches.
     pub async fn new(
         task_manager: Arc<TaskManager>,
         state: Arc<State>,
@@ -89,6 +91,7 @@ impl CronScheduler {
         }
     }
 
+    /// Returns whether context-processing jobs are still running.
     pub fn has_running_tasks(&self) -> bool {
         self.active_context_jobs.load(Ordering::Relaxed) > 0
     }
@@ -101,9 +104,7 @@ impl CronScheduler {
             .unwrap_or(300)
     }
 
-    /// Starts the scheduler loop in background tasks.
-    ///
-    /// Consumes the Arc<Self> to spawn tasks.
+    /// Starts background loops for cache refresh and tick processing.
     pub fn start(self: Arc<Self>) {
         // Spawn Refresh Loop
         let this = self.clone();
@@ -122,7 +123,7 @@ impl CronScheduler {
         let mut shutdown = self.shutdown_rx.resubscribe();
         loop {
             self.refresh_cache().await;
-            // Refresh at configured interval to pick up changes
+            // Refresh at configured interval to pick up config and context changes.
             let refresh_interval_secs = self
                 .state
                 .config
@@ -143,7 +144,7 @@ impl CronScheduler {
     }
 
     async fn refresh_cache(&self) {
-        // Check Redis for version to avoid unnecessary DB queries
+        // Use distributed versioning to avoid unnecessary DB scans.
         let namespace = self.state.cache_service.namespace();
         let redis_version_key = if namespace.is_empty() {
             "scheduler:config_version".to_string()
@@ -192,8 +193,7 @@ impl CronScheduler {
             .unwrap_or(120);
         let staleness_exceeded = Self::staleness_exceeded(now_ms, last_refresh_at_ms, max_staleness_secs);
 
-        // If version hasn't changed (and is not 0) and module set unchanged, skip refresh.
-        // Note: 0 usually means "not set" or "force refresh"
+           // Skip refresh when both remote version and module signatures are unchanged.
         if !staleness_exceeded && remote_version > 0 && remote_version == local_version && module_hash == local_module_hash {
              return; 
         }
@@ -209,7 +209,7 @@ impl CronScheduler {
                 
                 let context_count = contexts.len();
                 
-                // Group by module
+                // Group enabled contexts by module.
                 let mut context_map: std::collections::HashMap<String, Vec<(String, String)>> = std::collections::HashMap::new();
                 for (m, a, p) in contexts {
                     context_map.entry(m).or_default().push((a, p));
@@ -223,7 +223,7 @@ impl CronScheduler {
                         self.cron_config_cache.insert(name.clone(), config.clone());
                         config
                     };
-                    // We only care if the module has a cron schedule
+                    // Keep only modules with enabled cron configuration.
                     if let Some(cron_config) = cron_config {
                          if !cron_config.enable {
                               self.schedule_cache.remove(name);
@@ -254,11 +254,11 @@ impl CronScheduler {
                                let schedule = Arc::new(cron_config.schedule.clone());
                                self.schedule_cache.insert(name.clone(), (schedule, Arc::new(contexts)));
                           } else {
-                                // No active contexts, remove from cache to avoid checking
+                                // No active contexts; remove stale cache entry.
                                 self.schedule_cache.remove(name);
                           }
                     } else {
-                        // Module has no cron, ensure it's not in cache
+                        // Module has no cron configuration.
                         self.schedule_cache.remove(name);
                     }
                 }
@@ -306,7 +306,7 @@ impl CronScheduler {
                     self.right_now_context_hash.remove(&key);
                 }
                 
-                // Update local version after successful refresh
+                // Persist refresh markers only after a successful pass.
                 if remote_version > 0 {
                     self.last_version.store(remote_version, Ordering::Relaxed);
                 }
@@ -347,11 +347,9 @@ impl CronScheduler {
         hasher.finish()
     }
 
-    /// Main scheduler loop.
-    ///
-    /// Triggers tasks with second-level precision.
+    /// Main loop that evaluates one scheduler tick per second.
     async fn run(self: Arc<Self>) {
-        // Start the leader elector in background
+        // Start leader election loop.
         {
             let elector = self.leader_elector.clone();
             tokio::spawn(async move {
@@ -367,14 +365,13 @@ impl CronScheduler {
             let current_second_ts = now.timestamp();
 
             if let Some(current_second) = Utc.timestamp_opt(current_second_ts, 0).single() {
-                // Only Leader processes ticks
+                // Only leader nodes execute scheduling decisions.
                 if self.leader_elector.is_leader() {
-                    // Misfire Handling Logic
+                    // Handle temporary pauses by optionally replaying missed ticks.
                     if let Some(last_run) = last_tick {
                         let diff = current_second.signed_duration_since(last_run).num_seconds();
                         
                         if diff > 1 {
-                            // We missed some ticks!
                             let misfire_tolerance = self.get_misfire_tolerance().await;
                             if diff <= misfire_tolerance {
                                  info!("Detected missed ticks. Catching up from {} to {}", last_run, current_second);
@@ -384,24 +381,21 @@ impl CronScheduler {
                                      cursor += chrono::Duration::seconds(1);
                                  }
                                  last_tick = Some(current_second);
-                            } else {
+                               } else {
                                  warn!("Missed ticks gap ({}) exceeds tolerance ({}). Skipping catch-up, setting last_tick to now.", diff, misfire_tolerance);
                                  last_tick = Some(current_second);
                                  self.clone().process_tick(current_second).await;
                             }
                         } else if diff > 0 {
-                             // Normal tick
                              last_tick = Some(current_second);
                              self.clone().process_tick(current_second).await;
                         }
                     } else {
-                         // First run
                          last_tick = Some(current_second);
                          self.clone().process_tick(current_second).await;
                     }
                 } else {
-                     // Not leader, just update last_tick to stay in sync roughly, or do nothing.
-                     // Updating last_tick ensures if we BECOME leader, we don't think we missed hours of ticks.
+                         // Keep cursor roughly in sync while follower nodes are idle.
                      last_tick = Some(current_second);
                 }
             }
@@ -424,11 +418,7 @@ impl CronScheduler {
     }
 
     async fn process_tick(self: Arc<Self>, current_tick: DateTime<Utc>) {
-        // Iterate over cached schedules
-        // DashMap iter() locks shards, but for reading it's fine.
-        // We collect keys first to avoid holding locks while processing if we want, 
-        // but DashMap is designed for concurrent access.
-        
+        // Gather matches for this tick from the schedule cache.
         let mut tasks = Vec::new();
         
         for r in self.schedule_cache.iter() {
@@ -439,7 +429,7 @@ impl CronScheduler {
             }
         }
 
-        // Process matches
+        // Process matching modules asynchronously.
         let start = std::time::Instant::now();
         let mut total_triggered = 0;
         
@@ -460,8 +450,7 @@ impl CronScheduler {
 
     async fn process_module_contexts(&self, module_name: &str, contexts: &[(String, String)], current_tick: DateTime<Utc>) {
         let _active_guard = ActiveCronJobGuard::new(&self.active_context_jobs);
-        // Iterate over each context and try to acquire lock individually
-        // Parallelize using for_each_concurrent to maximize throughput
+        // Process context batches concurrently and lock each `(module, account, platform, tick)`.
         let concurrency = self.state.config.read().await.scheduler
             .as_ref()
             .and_then(|s| s.concurrency)
@@ -477,7 +466,6 @@ impl CronScheduler {
             }
         };
         let namespace_prefix = Arc::new(namespace_prefix);
-        // Increased batch size for better throughput
         let batch_size = 500;
 
         futures::stream::iter(contexts.chunks(batch_size))
@@ -485,7 +473,7 @@ impl CronScheduler {
                 let namespace_prefix = Arc::clone(&namespace_prefix);
                 async move {
                 let mut keys = Vec::with_capacity(batch.len());
-                // Store references to batch items to map back results
+                // Keep references to map lock results to original contexts.
                 let mut batch_items = Vec::with_capacity(batch.len());
 
                 for (account, platform) in batch {
@@ -501,7 +489,7 @@ impl CronScheduler {
                 let key_refs: Vec<&str> = keys.iter().map(|s| s.as_str()).collect();
 
                 let lock_start = std::time::Instant::now();
-                // TTL = 600 seconds (10 mins)
+                // Lock TTL: 10 minutes.
                 match self
                     .state
                     .cache_service
@@ -533,9 +521,7 @@ impl CronScheduler {
     }
     
     fn is_schedule_match(schedule: &Schedule, target: DateTime<Utc>) -> bool {
-        // Check if `target` is in the schedule.
-        // We look for the next occurrence AFTER `target - 1 sec`.
-        // If it equals `target`, it's a match.
+        // Match when the next occurrence after `target - 1s` equals `target`.
         let check_time = target - chrono::Duration::seconds(1);
         if let Some(next) = schedule.after(&check_time).next() {
             return next == target;
@@ -553,7 +539,6 @@ impl CronScheduler {
             priority: common::model::Priority::Normal,
         };
         
-        // Push to queue
         let sender = self.queue_manager.get_task_push_channel();
         if let Err(e) = sender.send(QueuedItem::new(task)).await {
              error!("Failed to push cron task to queue for module {} [{}@{}]: {}", module_name, account, platform, e);
@@ -563,7 +548,7 @@ impl CronScheduler {
     async fn fetch_all_enabled_contexts(
         &self,
     ) -> Result<Vec<(String, String, String)>, sea_orm::DbErr> {
-        // Optimized Single Query for ALL enabled contexts
+        // Single query for all enabled scheduling contexts.
         let results: Vec<(String, String, String)> = module::Entity::find()
             .join(JoinType::InnerJoin, module::Relation::RelModuleAccount.def())
             .join(JoinType::InnerJoin, rel_module_account::Relation::Account.def())

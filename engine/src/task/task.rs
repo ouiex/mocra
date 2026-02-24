@@ -6,7 +6,7 @@ use errors::Result;
 use uuid::Uuid;
 use futures::StreamExt;
 
-/// 增强的任务结构，包含更完整的配置信息
+/// Runtime task aggregate for one account-platform execution scope.
 #[derive(Clone)]
 pub struct Task {
     pub account: AccountModel,
@@ -20,20 +20,20 @@ pub struct Task {
 
 
 impl Task {
-    /// 获取任务的唯一标识符
+    /// Returns stable task id in account-platform format.
     pub fn id(&self) -> String {
         format!("{}-{}", self.account.name, self.platform.name)
     }
 
-    /// 获取工作模块的名称列表
+    /// Returns runtime module ids included in this task.
     pub fn get_module_names(&self) -> Vec<String> {
         self.modules.iter().map(|module| module.id()).collect()
     }
 
-    /// 并发执行所有模块的请求生成
+    /// Concurrently generates requests from all modules and merges results.
     pub async fn build_requests(&self) -> Result<Vec<Request>> {
         use futures::future::join_all;
-        // 1) 并发创建每个模块的请求流
+        // 1) Generate request streams concurrently.
         let futures = self
             .modules
             .iter()
@@ -41,7 +41,7 @@ impl Task {
 
         let results = join_all(futures).await;
 
-        // 2) 合并所有请求流
+        // 2) Collect and merge all produced request streams.
         let mut all_requests = Vec::new();
         for result in results {
             match result {
@@ -54,6 +54,8 @@ impl Task {
         }
         Ok(all_requests)
     }
+
+    /// Returns true when task has no runnable modules.
     pub fn is_empty(&self)->bool{
         self.modules.is_empty()
     }

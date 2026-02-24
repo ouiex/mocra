@@ -11,14 +11,14 @@ use std::time::SystemTime;
 pub struct DownloaderManager {
     pub state: Arc<State>,
     pub default_downloader: Box<dyn Downloader>,
-    // 注册的下载器工厂
+    // Registered downloader factories.
     pub downloader: Arc<DashMap<String, Box<dyn Downloader>>>,
-    // task下载器配置
+    // Task downloader configuration.
     pub config: Arc<DashMap<String, DownloadConfig>>,
-    // task下载器实例
+    // Task downloader instances.
     pub task_downloader: Arc<DashMap<String, Box<dyn Downloader>>>,
     pub wss_downloader: Arc<WebSocketDownloader>,
-    // 记录上次更新过期时间的时间戳，减少Redis写入频率
+    // Records the last expiration update timestamp to reduce Redis write frequency.
     pub expire_update_cache: Arc<DashMap<String, u64>>,
 }
 
@@ -45,11 +45,11 @@ impl DownloaderManager {
                 pool_size,
                 max_response_size,
             )),
-            //下载器工厂列表
+            // Downloader factory list.
             downloader: Arc::new(DashMap::new()),
-            //task下载器配置
+            // Task downloader configuration.
             config: Arc::new(DashMap::new()),
-            //task下载器实例
+            // Task downloader instances.
             task_downloader: Arc::new(DashMap::new()),
             wss_downloader: Arc::new(WebSocketDownloader::new()),
             expire_update_cache: Arc::new(DashMap::new()),
@@ -72,7 +72,7 @@ impl DownloaderManager {
         }
     }
 
-    // 获取当前时间戳的辅助函数
+    // Helper function to get the current timestamp.
     fn current_timestamp() -> u64 {
         SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
@@ -80,7 +80,7 @@ impl DownloaderManager {
             .as_secs()
     }
 
-    // 清理过期的下载器
+    // Cleans up expired downloaders.
     async fn cleanup_expired_downloader(&self) {
         let downloader_expire_time = self
             .state
@@ -131,7 +131,7 @@ impl DownloaderManager {
             self.task_downloader.remove(key);
         }
 
-        // 检查健康状态
+        // Check health status.
         let check_list: Vec<(String, Box<dyn Downloader>)> = self
             .task_downloader
             .iter()
@@ -182,7 +182,7 @@ impl DownloaderManager {
         let current_time = Self::current_timestamp();
         let module_id = request.module_id();
 
-        // 检查是否需要更新过期时间（每60秒更新一次）
+        // Check whether expiration time needs to be updated (once every 60 seconds).
         let should_update = if let Some(last_update) = self.expire_update_cache.get(&module_id) {
             current_time > *last_update + 60
         } else {
@@ -194,7 +194,7 @@ impl DownloaderManager {
             self.expire_update_cache
                 .insert(module_id.clone(), current_time);
 
-            // 更新过期时间 (Redis ZSET)
+            // Update expiration time (Redis ZSET).
             let config_name = self.state.config.read().await.name.clone();
             let key = format!("{}:downloader_expire", config_name);
             let pool = self.state.locker.get_pool().map(|p| p.clone());
@@ -215,7 +215,7 @@ impl DownloaderManager {
             });
         }
 
-        // 获取或插入配置
+        // Get or insert configuration.
         // Use entry API to only insert if needed, but we also want to return the config.
         // If we just use get() then insert(), we reduce lock contention on write?
         // DashMap entry() locks until released.
@@ -240,7 +240,7 @@ impl DownloaderManager {
              request.limit_id.clone()
         };
 
-        // 获取或创建下载器
+        // Get or create downloader.
         if let Some(downloader) = self.task_downloader.get(&module_id) {
              // Check if we really need to update config.
              // We can optimistically skip calling set_config if we assume config in self.config hasn't changed 
@@ -268,7 +268,7 @@ impl DownloaderManager {
             }
         };
 
-        // 确保配置是最新的
+        // Ensure the configuration is up to date.
         new_downloader.set_config(&limit_id, config).await;
         self.task_downloader.insert(
             module_id.clone(),

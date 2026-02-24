@@ -2,6 +2,7 @@
 version = "0.1.0"
 edition = "2024"
 name = "js-v8"
+publish = false
 
 [dependencies]
 v8.workspace = true

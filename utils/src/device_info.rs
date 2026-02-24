@@ -3,18 +3,18 @@ use std::io;
 use std::net::IpAddr;
 use std::process::Command;
 
-/// 设备信息结构体
+/// Device information structure.
 #[derive(Debug, Clone)]
 pub struct DeviceInfo {
-    /// 设备名称/主机名
+    /// Device name / hostname.
     pub hostname: String,
-    /// 本地IP地址列表
+    /// Local IP address list.
     pub local_ips: Vec<IpAddr>,
-    /// 公网IP地址（如果可获取）
+    /// Public IP address (if available).
     pub public_ip: Option<IpAddr>,
 }
 
-/// 获取设备完整信息
+/// Gets full device information.
 pub async fn get_device_info() -> Result<DeviceInfo, Box<dyn std::error::Error>> {
     let hostname = get_hostname()?;
     let local_ips = get_local_ips()?;
@@ -27,7 +27,7 @@ pub async fn get_device_info() -> Result<DeviceInfo, Box<dyn std::error::Error>>
     })
 }
 
-/// 获取设备主机名
+/// Gets device hostname.
 pub fn get_hostname() -> Result<String, io::Error> {
     #[cfg(target_os = "windows")]
     {
@@ -50,20 +50,20 @@ pub fn get_hostname() -> Result<String, io::Error> {
     }
 }
 
-/// 获取本地IP地址列表
+/// Gets local IP address list.
 pub fn get_local_ips() -> Result<Vec<IpAddr>, Box<dyn std::error::Error>> {
     use std::net::UdpSocket;
 
     let mut ips = Vec::new();
 
-    // 方法1: 通过连接外部地址获取本地IP
+    // Method 1: infer local IP by connecting to an external address.
     if let Ok(socket) = UdpSocket::bind("0.0.0.0:0")
         && socket.connect("8.8.8.8:80").is_ok()
             && let Ok(addr) = socket.local_addr() {
                 ips.push(addr.ip());
             }
 
-    // 方法2: 通过系统命令获取网络接口信息
+    // Method 2: collect network interface addresses via system commands.
     let system_ips = get_network_interfaces()?;
     for ip in system_ips {
         if !ips.contains(&ip) {
@@ -71,19 +71,19 @@ pub fn get_local_ips() -> Result<Vec<IpAddr>, Box<dyn std::error::Error>> {
         }
     }
 
-    // 过滤掉环回地址
+    // Filter out loopback addresses.
     ips.retain(|ip| !ip.is_loopback());
 
     Ok(ips)
 }
 
-/// 获取公网IP地址
+/// Gets public IP address.
 pub async fn get_public_ip() -> Result<IpAddr, Box<dyn std::error::Error>> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
         .build()?;
 
-    // 尝试多个IP查询服务
+    // Try multiple IP lookup services.
     let services = vec![
         "https://ifconfig.me/ip",
         "https://icanhazip.com",
@@ -103,7 +103,7 @@ pub async fn get_public_ip() -> Result<IpAddr, Box<dyn std::error::Error>> {
     Err("Failed to get public IP from all services".into())
 }
 
-/// Unix系统获取主机名
+/// Gets hostname on Unix systems.
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 fn get_hostname_unix() -> Result<String, io::Error> {
     let output = Command::new("hostname").output()?;
@@ -112,11 +112,11 @@ fn get_hostname_unix() -> Result<String, io::Error> {
         let hostname = String::from_utf8_lossy(&output.stdout).trim().to_string();
         Ok(hostname)
     } else {
-        // 备用方法：读取 /etc/hostname 文件
+        // Fallback: read `/etc/hostname`.
         match std::fs::read_to_string("/etc/hostname") {
             Ok(content) => Ok(content.trim().to_string()),
             Err(_) => {
-                // 最后备用方法：使用环境变量
+                // Last fallback: use environment variables.
                 std::env::var("HOSTNAME")
                     .or_else(|_| std::env::var("HOST"))
                     .map_err(|_| {
@@ -127,7 +127,7 @@ fn get_hostname_unix() -> Result<String, io::Error> {
     }
 }
 
-/// Windows系统获取主机名
+/// Gets hostname on Windows.
 #[cfg(target_os = "windows")]
 fn get_hostname_windows() -> Result<String, io::Error> {
     let output = Command::new("hostname").output()?;
@@ -136,14 +136,14 @@ fn get_hostname_windows() -> Result<String, io::Error> {
         let hostname = String::from_utf8_lossy(&output.stdout).trim().to_string();
         Ok(hostname)
     } else {
-        // 备用方法：使用环境变量
+        // Fallback: use environment variables.
         std::env::var("COMPUTERNAME")
             .or_else(|_| std::env::var("HOSTNAME"))
             .map_err(|_| io::Error::new(io::ErrorKind::NotFound, "Could not determine hostname"))
     }
 }
 
-/// 获取网络接口信息
+/// Gets network interface addresses.
 fn get_network_interfaces() -> Result<Vec<IpAddr>, Box<dyn std::error::Error>> {
     let mut ips = Vec::new();
 
@@ -163,7 +163,7 @@ fn get_network_interfaces() -> Result<Vec<IpAddr>, Box<dyn std::error::Error>> {
     Ok(ips)
 }
 
-/// macOS获取网络接口
+/// Gets network interfaces on macOS.
 #[cfg(target_os = "macos")]
 fn get_network_interfaces_macos() -> Result<Vec<IpAddr>, Box<dyn std::error::Error>> {
     let output = Command::new("ifconfig").arg("-a").output()?;
@@ -172,23 +172,23 @@ fn get_network_interfaces_macos() -> Result<Vec<IpAddr>, Box<dyn std::error::Err
     parse_ifconfig_output(&output_str)
 }
 
-/// Linux获取网络接口
+/// Gets network interfaces on Linux.
 #[cfg(target_os = "linux")]
 fn get_network_interfaces_linux() -> Result<Vec<IpAddr>, Box<dyn std::error::Error>> {
-    // 优先使用 ip 命令
+    // Prefer `ip` command.
     if let Ok(output) = Command::new("ip").args(&["addr", "show"]).output() {
         let output_str = String::from_utf8_lossy(&output.stdout);
         return parse_ip_addr_output(&output_str);
     }
 
-    // 备用 ifconfig 命令
+    // Fallback to `ifconfig` command.
     let output = Command::new("ifconfig").arg("-a").output()?;
 
     let output_str = String::from_utf8_lossy(&output.stdout);
     parse_ifconfig_output(&output_str)
 }
 
-/// Windows获取网络接口
+/// Gets network interfaces on Windows.
 #[cfg(target_os = "windows")]
 fn get_network_interfaces_windows() -> Result<Vec<IpAddr>, Box<dyn std::error::Error>> {
     let output = Command::new("ipconfig").arg("/all").output()?;
@@ -197,14 +197,14 @@ fn get_network_interfaces_windows() -> Result<Vec<IpAddr>, Box<dyn std::error::E
     parse_ipconfig_output(&output_str)
 }
 
-/// 解析ifconfig输出
+/// Parses `ifconfig` output.
 fn parse_ifconfig_output(output: &str) -> Result<Vec<IpAddr>, Box<dyn std::error::Error>> {
     let mut ips = Vec::new();
 
     for line in output.lines() {
         let line = line.trim();
 
-        // 查找inet地址
+        // Look for `inet` addresses.
         if line.starts_with("inet ") {
             let parts: Vec<&str> = line.split_whitespace().collect();
             if parts.len() >= 2
@@ -218,7 +218,7 @@ fn parse_ifconfig_output(output: &str) -> Result<Vec<IpAddr>, Box<dyn std::error
     Ok(ips)
 }
 
-/// 解析ip addr输出
+/// Parses `ip addr` output.
 #[cfg(target_os = "linux")]
 fn parse_ip_addr_output(output: &str) -> Result<Vec<IpAddr>, Box<dyn std::error::Error>> {
     let mut ips = Vec::new();
@@ -243,7 +243,7 @@ fn parse_ip_addr_output(output: &str) -> Result<Vec<IpAddr>, Box<dyn std::error:
     Ok(ips)
 }
 
-/// 解析ipconfig输出
+/// Parses `ipconfig` output.
 #[cfg(target_os = "windows")]
 fn parse_ipconfig_output(output: &str) -> Result<Vec<IpAddr>, Box<dyn std::error::Error>> {
     let mut ips = Vec::new();
@@ -266,13 +266,13 @@ fn parse_ipconfig_output(output: &str) -> Result<Vec<IpAddr>, Box<dyn std::error
     Ok(ips)
 }
 
-/// 获取主要的本地IP地址（通常是第一个非环回地址）
+/// Gets primary local IP address (usually first non-loopback address).
 pub fn get_primary_local_ip() -> Result<IpAddr, Box<dyn std::error::Error>> {
     let ips = get_local_ips()?;
     ips.into_iter()
         .find(|ip| match ip {
             IpAddr::V4(ipv4) => {
-                // 过滤掉私有地址范围中的特殊地址
+                // Filter special-use addresses.
                 !ipv4.is_loopback() && !ipv4.is_multicast() && !ipv4.is_broadcast()
             }
             IpAddr::V6(ipv6) => !ipv6.is_loopback() && !ipv6.is_multicast(),
@@ -280,7 +280,7 @@ pub fn get_primary_local_ip() -> Result<IpAddr, Box<dyn std::error::Error>> {
         .ok_or_else(|| "No valid local IP address found".into())
 }
 
-/// 格式化设备信息为字符串
+/// Formats device information as string.
 impl std::fmt::Display for DeviceInfo {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         writeln!(f, "Device Information:")?;

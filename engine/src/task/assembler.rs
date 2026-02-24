@@ -7,11 +7,11 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-/// 配置组装器，负责将数据库实体组装成模块配置
+/// Builds module configuration objects from database entities and relations.
 pub struct ConfigAssembler;
 
 impl ConfigAssembler {
-    /// 构建关联配置映射
+    /// Builds a relation config map for middleware-like entities.
     pub fn build_relation_config<T, F, G>(
         relations: &[T],
         entities: &[G],
@@ -27,19 +27,18 @@ impl ConfigAssembler {
         for relation in relations {
             let entity_id = extract_entity_id(relation);
             if let Some(entity) = entities.iter().find(|e| {
-                // 这里需要根据具体类型来匹配ID
-                // 由于泛型限制，这个函数可能需要拆分为具体的实现
-                false // 临时占位
+                // Generic ID matching is intentionally left as a placeholder.
+                let _ = entity_id;
+                false
             }) {
                 let name = extract_name(entity);
-                // 需要获取关联配置，这里也需要具体实现
-                // config_map.insert(name.to_string(), relation.config.clone());
+                let _ = name;
             }
         }
         config_map
     }
 
-    /// 构建数据中间件关联配置
+    /// Builds relation config map for data middleware.
     pub fn build_data_middleware_relation_config(
         relations: &[RelModuleDataMiddlewareModel],
         middlewares: &[DataMiddlewareModel],
@@ -56,7 +55,7 @@ impl ConfigAssembler {
         config_map
     }
 
-    /// 构建下载中间件关联配置
+    /// Builds relation config map for download middleware.
     pub fn build_download_middleware_relation_config(
         relations: &[RelModuleDownloadMiddlewareModel],
         middlewares: &[DownloadMiddlewareModel],
@@ -73,7 +72,7 @@ impl ConfigAssembler {
         config_map
     }
 
-    /// 构建中间件基础配置
+    /// Builds base middleware config map (`name -> config`).
     pub fn build_middleware_base_config<T: HasNameAndConfig>(
         middlewares: &[T],
     ) -> HashMap<String, serde_json::Value> {
@@ -83,7 +82,7 @@ impl ConfigAssembler {
             .collect()
     }
 
-    /// 组装完整的模块配置
+    /// Assembles the complete `ModuleConfig` from account/platform/module entities.
     #[allow(clippy::too_many_arguments)]
     pub fn assemble_module_config(
         account: &AccountModel,
@@ -123,7 +122,7 @@ impl ConfigAssembler {
     }
 }
 
-/// 用于统一处理具有名称和配置的实体的trait
+/// Shared abstraction for entities exposing a name and config payload.
 pub trait HasNameAndConfig {
     fn name(&self) -> &String;
     fn config(&self) -> &serde_json::Value;
@@ -162,7 +161,7 @@ impl From<Arc<dyn ModuleTrait>> for ModuleItem {
     }
 }
 
-/// 模块组装器，负责创建完整的Module实例
+/// Registry-like assembler for loaded module implementations.
 pub struct ModuleAssembler {
     modules: HashMap<String, ModuleItem>,
 }
@@ -174,7 +173,7 @@ impl ModuleAssembler {
         }
     }
 
-    /// 注册模块
+    /// Registers a module implementation by its name.
     pub fn register_module(&mut self, module: Arc<dyn ModuleTrait>) {
         self.modules.insert(module.name().clone(), module.into());
     }
@@ -191,7 +190,7 @@ impl ModuleAssembler {
             if let Some(item) = self.modules.get_mut(n) { item.origin = Some(origin.to_path_buf()); }
         }
     }
-    /// 根据名称获取模块
+    /// Returns a module by name.
     pub fn get_module(&self, name: &str) -> Option<Arc<dyn ModuleTrait>> {
         self.modules.get(name).map(|x| x.module.clone())
     }

@@ -50,7 +50,7 @@ fn sheet_dataframe(
         let column_data: Vec<_> = (0..sheet.height())
             .map(|row_idx| {
                 sheet
-                    .get((row_idx, col_index)) // 使用 get() 而不是 get_value()
+                    .get((row_idx, col_index)) // Use `get()` instead of `get_value()`.
                     .unwrap_or(&Data::Empty)
                     .clone()
             })

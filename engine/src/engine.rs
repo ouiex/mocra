@@ -65,26 +65,41 @@ mod tests;
 /// - **Rate Limiting**: Distributed sliding window rate limiter protects target sites and manages concurrency.
 /// - **Cron**: `CronScheduler` handles distributed timing tasks with de-duplication.
 pub struct Engine {
+    /// Message transport abstraction for all engine queues (task/request/response/parser/error).
     pub queue_manager: Arc<QueueManager>,
+    /// Downloader registry and connection lifecycle manager.
     pub downloader_manager: Arc<DownloaderManager>,
+    /// Task loading and module materialization service.
     pub task_manager: Arc<TaskManager>,
+    /// Optional proxy provider used by download stages.
     pub proxy_manager: Option<Arc<ProxyManager>>,
+    /// Runtime middleware registry for request/response/data stages.
     pub middleware_manager: Arc<MiddlewareManager>,
+    /// Optional pub/sub event bus for observability and operational workflows.
     pub event_bus: Option<Arc<EventBus>>,
+    /// Global shared state (config, cache, status tracker, lock/rate services).
     pub state: Arc<State>,
-    // 广播型关闭信号，所有处理器都能订阅到
+    /// Broadcast shutdown signal consumed by all long-running processor loops.
     shutdown_tx: broadcast::Sender<()>,
+    /// Pause switch propagated to workers via watch channel.
     pause_tx: watch::Sender<bool>,
+    /// Optional Prometheus exporter handle exposed to API endpoints.
     pub prometheus_handle: Option<PrometheusHandle>,
+    /// Node registry used for heartbeats and cluster visibility.
     pub node_registry: Arc<NodeRegistry>,
+    /// Distributed cron scheduler.
     pub cron_scheduler: Arc<CronScheduler>,
+    /// Lua script registry used for atomic distributed coordination paths.
     pub lua_registry: Arc<LuaScriptRegistry>,
 }
 
 impl Engine {
+    /// Interval for node heartbeats.
     const NODE_HEARTBEAT_INTERVAL_SECS: u64 = 10;
+    /// TTL attached to heartbeat records.
     const NODE_HEARTBEAT_TTL_SECS: u64 = Self::NODE_HEARTBEAT_INTERVAL_SECS * 3;
 
+    /// Normalizes engine event labels for low-cardinality metrics dimensions.
     fn policy_event_label(event_type: &str) -> &'static str {
         match event_type {
             "task_model" => "task_model",
@@ -118,6 +133,12 @@ impl Engine {
         }
     }
 
+    /// Applies policy resolution for fatal failures and performs queue side-effects.
+    ///
+    /// The method emits `policy_decisions_total` metrics and then executes one of:
+    /// - retry via `nack` with reason,
+    /// - DLQ handoff + `ack`,
+    /// - direct `ack`.
     async fn handle_policy_failure<T>(
         policy_resolver: &PolicyResolver,
         queue_manager: &QueueManager,
@@ -179,6 +200,10 @@ impl Engine {
         }
     }
 
+    /// Applies policy resolution for retryable failures surfaced by processor chains.
+    ///
+    /// Retryable outcomes are converted into a synthetic `ProcessorChain` error shape
+    /// so policy matching stays consistent with normal error handling.
     async fn handle_policy_retry<T>(
         policy_resolver: &PolicyResolver,
         queue_manager: &QueueManager,
@@ -248,6 +273,8 @@ impl Engine {
             }
         }
     }
+
+    /// Initializes queue manager with optional log topic derived from logger outputs.
     fn init_queue_manager(cfg: &common::model::config::Config) -> Arc<QueueManager> {
         let log_topic = cfg
             .logger
@@ -392,13 +419,13 @@ impl Engine {
         // Ignore error if recorder is already installed (e.g. in tests)
         let prometheus_handle = builder.install_recorder().ok();
 
-        // 创建事件总线
+        // Create event bus when enabled by configuration.
         let event_bus = if let Some(conf) = &state.config.read().await.event_bus {
             Some(Arc::new(EventBus::new(conf.capacity, conf.concurrency)))
         } else {
             None
         };
-        // 创建关闭信号通道
+        // Create global shutdown signal channel.
         let (shutdown_tx, _shutdown_rx) = broadcast::channel(1);
         
         let (pause_tx, _) = watch::channel(false);

@@ -14,14 +14,14 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock;
 
-/// 限流器配置项
+/// Rate limiter configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RateLimitConfig {
-    /// 每秒最大请求次数
+    /// Maximum requests per second.
     pub max_requests_per_second: f32,
-    /// 窗口大小（默认1秒）
+    /// Window size in milliseconds (default: 1 second).
     pub window_size_millis: u64,
-    /// 基准每秒最大请求次数（用于恢复）
+    /// Baseline max requests per second (used for restoration).
     #[serde(default)]
     pub base_max_requests_per_second: Option<f32>,
 }
@@ -51,39 +51,40 @@ impl RateLimitConfig {
     }
 }
 
-/// 基于Redis的分布式平滑限流器
-/// 使用平滑限流算法来限制特定标识符的访问频率
-/// 功能特性：
-/// 1. 分布式限流，支持多实例共享限流状态
-/// 2. 平滑限流：计算每个请求的间隔时间，确保请求平均分布
-/// 3. 使用AdvancedDistributedLock保护Redis数据读写操作
-/// 4. 支持为不同的key设置不同的速率限制
-/// 5. 支持动态添加和修改key的速率配置
-/// 6. 本地计算，Redis仅用于存储和同步最后请求时间
-/// 7. 每个key的配置存储在Redis中，支持持久化和动态更新
+/// Redis-based distributed smooth rate limiter.
+///
+/// Uses a smooth throttling strategy to control request rate per identifier.
+/// Features:
+/// 1. Distributed limiting with shared state across multiple instances.
+/// 2. Smooth pacing via computed interval per request.
+/// 3. Uses `AdvancedDistributedLock` to protect Redis read/write operations.
+/// 4. Supports per-key rate limits.
+/// 5. Supports dynamic key-level config updates.
+/// 6. Performs local calculations; Redis stores/synchronizes last-request time.
+/// 7. Stores key configs in Redis for persistence and dynamic updates.
 #[derive(Debug, Clone)]
 pub struct DistributedSlidingWindowRateLimiter {
-    /// Redis连接池
+    /// Redis connection pool.
     pool: Option<Arc<Pool>>,
-    /// 分布式锁管理器
+    /// Distributed lock manager.
     lock_manager: Arc<DistributedLockManager>,
-    /// Redis key前缀
+    /// Redis key prefix.
     key_prefix: String,
     /// Sub prefix
     sub_prefix: String,
-    /// 默认配置Redis key
+    /// Redis key for default config.
     default_config_key: String,
-    /// 个别配置Redis key前缀
+    /// Redis key prefix for per-key configs.
     config_key_prefix: String,
-    /// 默认限流配置
+    /// Default rate-limit config.
     default_config: RateLimitConfig,
-    /// 本地最后请求时间缓存 (identifier -> last_request_timestamp)
+    /// Local cache of last request time (`identifier -> last_request_timestamp`).
     local_last_request: Arc<DashMap<String, u64>>,
-    /// 本地配置缓存 (identifier -> RateLimitConfig)
+    /// Local config cache (`identifier -> RateLimitConfig`).
     local_configs: Arc<DashMap<String, RateLimitConfig>>,
-    /// 本地默认配置缓存
+    /// Local default-config cache.
     local_default_config: Arc<RwLock<Option<RateLimitConfig>>>,
-    /// 本地暂停状态缓存 (identifier -> suspend_until_timestamp)
+    /// Local suspension cache (`identifier -> suspend_until_timestamp`).
     local_suspended: Arc<DashMap<String, u64>>,
     /// Local wait cache to reduce Redis contention (identifier -> wait_until_timestamp)
     local_wait_until: Arc<DashMap<String, u64>>,
@@ -98,12 +99,12 @@ pub struct DistributedSlidingWindowRateLimiter {
 const TIME_OFFSET_REFRESH_SECS: u64 = 60;
 
 impl DistributedSlidingWindowRateLimiter {
-    /// 创建新的分布式限流器实例
+    /// Creates a new distributed rate limiter instance.
     ///
-    /// # 参数
-    /// * `pool` - Redis连接池
-    /// * `key_prefix` - Redis key前缀，用于区分不同的限流器实例
-    /// * `default_config` - 默认的限流配置
+    /// # Parameters
+    /// * `pool` - Redis connection pool.
+    /// * `key_prefix` - Redis key prefix used to namespace limiter instances.
+    /// * `default_config` - Default rate-limit config.
     pub fn new(
         limit_pool: Option<Arc<Pool>>,
         locker: Arc<DistributedLockManager>,
@@ -133,27 +134,27 @@ impl DistributedSlidingWindowRateLimiter {
         }
     }
 
-    /// 获取Redis记录的key（存储最后请求时间戳）
+    /// Returns Redis key for stored last-request timestamp.
     fn get_last_request_key(&self, identifier: &str) -> String {
         format!("{}:last_request:{}", self.key_prefix, identifier)
     }
 
-    /// 获取分布式锁的key
+    /// Returns distributed-lock key.
     fn get_lock_key(&self, identifier: &str) -> String {
         format!("{}:lock:{}", self.sub_prefix, identifier)
     }
 
-    /// 获取配置的key
+    /// Returns per-key config key.
     fn get_config_key(&self, identifier: &str) -> String {
         format!("{}:{}", self.config_key_prefix, identifier)
     }
 
-    /// 获取暂停key
+    /// Returns suspension key.
     fn get_suspended_key(&self, identifier: &str) -> String {
         format!("{}:suspended:{}", self.key_prefix, identifier)
     }
 
-    /// 暂停指定标识符的请求（Circuit Breaker）
+    /// Suspends requests for specified identifier (circuit breaker).
     pub async fn suspend(&self, identifier: &str, duration: Duration) -> Result<()> {
         let current_time = self.get_current_timestamp().await?;
         let suspend_until = current_time + duration.as_millis() as u64;
@@ -174,7 +175,7 @@ impl DistributedSlidingWindowRateLimiter {
         Ok(())
     }
 
-    /// 检查是否被暂停
+    /// Checks whether identifier is currently suspended.
     async fn check_suspended(&self, identifier: &str) -> Result<Option<u64>> {
         // Check short-lived cache first
         if let Some(entry) = self.suspend_cache.get(identifier) {
@@ -222,7 +223,9 @@ impl DistributedSlidingWindowRateLimiter {
         }
     }
 
-    /// 获取当前时间戳（毫秒），优先使用Redis时间以避免时钟偏差
+    /// Returns current timestamp in milliseconds.
+    ///
+    /// Prefers Redis time when available to reduce clock skew across instances.
     async fn get_current_timestamp(&self) -> Result<u64> {
         if let Some(pool) = &self.pool {
             // Try to use cached offset
@@ -264,11 +267,11 @@ impl DistributedSlidingWindowRateLimiter {
         }
     }
 
-    /// 为特定key设置限流配置
+    /// Sets rate-limit config for a specific key.
     ///
-    /// # 参数
-    /// * `key` - 要配置的key
-    /// * `config` - 限流配置
+    /// # Parameters
+    /// * `key` - Target key.
+    /// * `config` - Rate-limit configuration.
     pub async fn set_key_config(&self, key: &str, config: RateLimitConfig) -> Result<()> {
         // Check cache first to avoid redundant Redis writes
         if let Some(existing) = self.local_configs.get(key) {
@@ -301,7 +304,7 @@ impl DistributedSlidingWindowRateLimiter {
         let config = RateLimitConfig::new(limit);
         self.set_key_config(id, config).await
     }
-    /// 设置全局限流配置（影响所有key）
+    /// Sets global limit configuration (affects all keys).
     pub async fn set_all_limit(&self, limit: f32) -> Result<()> {
         if let Some(pool) = &self.pool {
             let mut conn = pool
@@ -309,7 +312,7 @@ impl DistributedSlidingWindowRateLimiter {
                 .await
                 .map_err(|e| RateLimitError::RedisError(e.into()))?;
 
-            // 更新默认配置
+            // Update default config.
             let mut default_config = self.default_config.clone();
             default_config.max_requests_per_second = limit;
             let config_json = serde_json::to_string(&default_config)?;
@@ -318,7 +321,7 @@ impl DistributedSlidingWindowRateLimiter {
                 .await
                 .map_err(|e| RateLimitError::RedisError(e.into()))?;
 
-            // 更新所有已配置的key
+            // Update all configured keys.
             let pattern = format!("{}:*", self.config_key_prefix);
             let keys: Vec<String> = conn
                 .keys(&pattern)
@@ -338,12 +341,12 @@ impl DistributedSlidingWindowRateLimiter {
                     }
             }
         } else {
-            // 更新本地默认配置
+            // Update local default config.
             let mut default_config = self.default_config.clone();
             default_config.max_requests_per_second = limit;
             *self.local_default_config.write().await = Some(default_config);
 
-            // 更新所有本地配置
+            // Update all local configs.
             for mut entry in self.local_configs.iter_mut() {
                 entry.value_mut().max_requests_per_second = limit;
             }
@@ -352,10 +355,10 @@ impl DistributedSlidingWindowRateLimiter {
         Ok(())
     }
 
-    /// 批量设置多个key的限流配置
+    /// Sets rate-limit configs for multiple keys in batch.
     ///
-    /// # 参数
-    /// * `configs` - key到配置的映射
+    /// # Parameters
+    /// * `configs` - Mapping from key to config.
     pub async fn set_key_configs(&self, configs: HashMap<String, RateLimitConfig>) -> Result<()> {
         if let Some(pool) = &self.pool {
             let mut conn = pool
@@ -399,10 +402,10 @@ impl DistributedSlidingWindowRateLimiter {
         Ok(())
     }
 
-    /// 移除特定key的配置（将使用默认配置）
+    /// Removes a key-specific config (falls back to default config).
     ///
-    /// # 参数
-    /// * `key` - 要移除配置的key
+    /// # Parameters
+    /// * `key` - Key whose config should be removed.
     pub async fn remove_key_config(&self, key: &str) -> Result<()> {
         if let Some(pool) = &self.pool {
             let mut conn = pool
@@ -420,13 +423,13 @@ impl DistributedSlidingWindowRateLimiter {
         Ok(())
     }
 
-    /// 获取特定key的配置
+    /// Gets config for a specific key.
     ///
-    /// # 参数
-    /// * `key` - 要查询的key
+    /// # Parameters
+    /// * `key` - Key to query.
     ///
-    /// # 返回值
-    /// 该key的配置，如果没有特定配置则返回默认配置
+    /// # Returns
+    /// Key-specific config, or default config when not set.
     pub async fn get_key_config(&self, key: &str) -> Result<RateLimitConfig> {
         if let Some(pool) = &self.pool {
             let mut conn = pool
@@ -435,7 +438,7 @@ impl DistributedSlidingWindowRateLimiter {
                 .map_err(|e| RateLimitError::RedisError(e.into()))?;
             let config_key = self.get_config_key(key);
 
-            // 先尝试获取特定配置
+            // Try key-specific config first.
             let config_json: Option<String> = conn
                 .get(&config_key)
                 .await
@@ -445,7 +448,7 @@ impl DistributedSlidingWindowRateLimiter {
                     return Ok(config);
                 }
 
-            // 尝试获取默认配置
+            // Then try default config.
             let default_json: Option<String> = conn
                 .get(&self.default_config_key)
                 .await
@@ -455,7 +458,7 @@ impl DistributedSlidingWindowRateLimiter {
                     return Ok(config);
                 }
         } else {
-            // 本地模式
+            // Local mode.
             if let Some(config) = self.local_configs.get(key) {
                 return Ok(config.clone());
             }
@@ -464,11 +467,11 @@ impl DistributedSlidingWindowRateLimiter {
             }
         }
 
-        // 返回硬编码的默认配置
+        // Fallback to hard-coded default config.
         Ok(self.default_config.clone())
     }
 
-    /// 获取所有已配置的key及其配置
+    /// Returns all configured keys and their configs.
     pub async fn get_all_key_configs(&self) -> Result<HashMap<String, RateLimitConfig>> {
         if let Some(pool) = &self.pool {
             let mut conn = pool
@@ -489,7 +492,7 @@ impl DistributedSlidingWindowRateLimiter {
                     .map_err(|e| RateLimitError::RedisError(e.into()))?;
                 if let Some(json) = config_json
                     && let Ok(config) = serde_json::from_str::<RateLimitConfig>(&json) {
-                        // 提取实际的identifier（去掉前缀）
+                        // Extract actual identifier (strip prefix).
                         let identifier = key
                             .strip_prefix(&format!("{}:", self.config_key_prefix))
                             .unwrap_or(&key);
@@ -506,15 +509,15 @@ impl DistributedSlidingWindowRateLimiter {
         }
     }
 
-    /// 记录一次请求
+    /// Records one request.
     ///
-    /// # 参数
-    /// * `identifier` - 用于区分不同请求来源的标识符
+    /// # Parameters
+    /// * `identifier` - Identifier used to distinguish request sources.
     pub async fn record(&self, identifier: &str) -> Result<()> {
         let lock_key = self.get_lock_key(identifier);
         let last_request_key = self.get_last_request_key(identifier);
 
-        // 获取分布式锁保护Redis操作
+        // Acquire distributed lock to protect Redis operations.
         if let Ok(acquired) = self
             .lock_manager
             .acquire_lock(&lock_key, 30, Duration::from_secs(5))
@@ -532,25 +535,25 @@ impl DistributedSlidingWindowRateLimiter {
                     .await
                     .map_err(|e| RateLimitError::RedisError("redis connect error".into()))?;
 
-                // 设置TTL，基于实际请求间隔时间，确保下次验证时记录仍然存在
+                // Set TTL based on request interval so record remains available for next check.
                 let config = self.get_key_config(identifier).await?;
                 let min_interval_millis = (config.window_size_millis as f64
                     / config.max_requests_per_second as f64)
                     as u64;
                 let ttl_millis = min_interval_millis * 2;
                 let ttl_seconds = (ttl_millis / 1000).max(1);
-                // 更新最后请求时间
+                // Update last request time.
                 let _: () = conn
                     .set_ex(&last_request_key, current_time, ttl_seconds)
                     .await
                     .map_err(|e| RateLimitError::RedisError(e.into()))?;
             } else {
-                // 本地模式
+                // Local mode.
                 self.local_last_request
                     .insert(last_request_key, current_time);
             }
 
-            // 释放锁
+            // Release lock.
             let _ = self.lock_manager.release_lock(&lock_key).await;
         } else {
             return Err(RateLimitError::RedisError("Failed to acquire lock".into()).into());
@@ -559,7 +562,7 @@ impl DistributedSlidingWindowRateLimiter {
         Ok(())
     }
 
-    /// 尝试获取许可 (原子操作)
+    /// Tries to acquire permit (atomic operation).
     pub async fn acquire(&self, identifier: &str, _permits: f64) -> Result<()> {
         let wait_ms = self.check_and_update(identifier).await?;
         if wait_ms > 0 {
@@ -569,14 +572,14 @@ impl DistributedSlidingWindowRateLimiter {
         Ok(())
     }
 
-    /// 验证是否达到最大限制
+    /// Verifies whether max limit has been reached.
     ///
-    /// # 参数
-    /// * `identifier` - 用于区分不同请求来源的标识符
+    /// # Parameters
+    /// * `identifier` - Identifier used to distinguish request sources.
     ///
-    /// # 返回值
-    /// * `Ok(())` - 未达到限制，可以继续
-    /// * `Err(u64)` - 达到限制，返回需要等待的毫秒数
+    /// # Returns
+    /// * `Ok(())` - Limit not reached.
+    /// * `Err(u64)` - Limit reached; wait time in milliseconds.
     pub async fn verify(&self, identifier: &str) -> Result<Option<u64>> {
         // Check suspension first
         if let Some(wait) = self.check_suspended(identifier).await? {
@@ -628,7 +631,7 @@ impl DistributedSlidingWindowRateLimiter {
                 Ok(None)
             }
         } else {
-             // Local mode
+            // Local mode.
             if let Some(last_time) = self.local_last_request.get(&last_request_key).map(|v| *v) {
                 let elapsed = current_time.saturating_sub(last_time);
                 if elapsed < min_interval_millis {
@@ -639,14 +642,14 @@ impl DistributedSlidingWindowRateLimiter {
         }
     }
 
-    /// 原子检查并更新限流状态 (Atomic Check-and-Update)
+    /// Atomically checks and updates rate-limit state.
     ///
-    /// # 参数
-    /// * `identifier` - 标识符
+    /// # Parameters
+    /// * `identifier` - Identifier.
     ///
-    /// # 返回值
-    /// * `Ok(0)` - 成功获取许可
-    /// * `Ok(wait_ms)` - 需要等待 wait_ms 毫秒
+    /// # Returns
+    /// * `Ok(0)` - Permit acquired.
+    /// * `Ok(wait_ms)` - Must wait `wait_ms` milliseconds.
     pub async fn check_and_update(&self, identifier: &str) -> Result<u64> {
         // Check suspension first
         if let Some(wait) = self.check_suspended(identifier).await? {
@@ -719,7 +722,7 @@ impl DistributedSlidingWindowRateLimiter {
 
             Ok(result)
         } else {
-             // Simple implementation for local mode (Locking via DashMap entry)
+            // Simple local-mode implementation (locking via DashMap entry).
              let entry = self.local_last_request.entry(last_request_key);
              match entry {
                  dashmap::mapref::entry::Entry::Occupied(mut occ) => {
@@ -739,44 +742,44 @@ impl DistributedSlidingWindowRateLimiter {
         }
     }
 
-    /// 获取下次可以请求的时间间隔（毫秒）
+    /// Returns time until next request can proceed (milliseconds).
     ///
-    /// # 参数
-    /// * `identifier` - 标识符
+    /// # Parameters
+    /// * `identifier` - Identifier.
     ///
-    /// # 返回值
-    /// 需要等待的毫秒数，0表示可以立即请求
+    /// # Returns
+    /// Milliseconds to wait; `0` means request is immediately allowed.
     pub async fn get_next_available_time(&self, identifier: &str) -> Result<u64> {
         self.verify(identifier).await.map(|res| res.unwrap_or(0))
     }
 
-    /// 减少限流速率（Backpressure）
+    /// Decreases rate-limit throughput (backpressure).
     ///
-    /// # 参数
-    /// * `identifier` - 标识符
-    /// * `factor` - 减少因子 (0.0 - 1.0)，例如 0.5 表示减半
+    /// # Parameters
+    /// * `identifier` - Identifier.
+    /// * `factor` - Reduction factor (`0.0 - 1.0`), e.g. `0.5` halves throughput.
     pub async fn decrease_limit(&self, identifier: &str, factor: f32) -> Result<f32> {
         let mut config = self.get_key_config(identifier).await?;
         
-        // 确保base_max_requests_per_second已设置
+        // Ensure `base_max_requests_per_second` is initialized.
         if config.base_max_requests_per_second.is_none() {
             config.base_max_requests_per_second = Some(config.max_requests_per_second);
         }
 
-        // 计算新的限制
+        // Compute new limit.
         let new_limit = config.max_requests_per_second * factor;
-        // 设置一个最小下限，避免变为0
+        // Apply minimum floor to avoid zero.
         config.max_requests_per_second = new_limit.max(0.1);
         
         self.set_key_config(identifier, config.clone()).await?;
         Ok(config.max_requests_per_second)
     }
 
-    /// 尝试恢复限流速率
+    /// Tries to restore rate-limit throughput.
     ///
-    /// # 参数
-    /// * `identifier` - 标识符
-    /// * `step_factor` - 恢复步长因子 (> 1.0)，例如 1.1 表示增加 10%
+    /// # Parameters
+    /// * `identifier` - Identifier.
+    /// * `step_factor` - Restore step factor (`> 1.0`), e.g. `1.1` increases by 10%.
     pub async fn try_restore_limit(&self, identifier: &str, step_factor: f32) -> Result<f32> {
         let mut config = self.get_key_config(identifier).await?;
         
@@ -790,8 +793,9 @@ impl DistributedSlidingWindowRateLimiter {
         Ok(config.max_requests_per_second)
     }
 
-    /// 清理所有过期的记录
-    /// 这个方法可以定期调用来释放Redis内存
+    /// Cleans all expired records.
+    ///
+    /// Can be called periodically to reclaim Redis memory.
     pub async fn cleanup(&self) -> Result<u64> {
         if let Some(pool) = &self.pool {
             let mut conn = pool
@@ -808,26 +812,26 @@ impl DistributedSlidingWindowRateLimiter {
             let current_time = self.get_current_timestamp().await?;
 
             for key in keys {
-                // 检查key是否过期（TTL <= 0）或者检查值是否过期
+                // Check whether key is expired (`TTL <= 0`) or value is stale.
                 let ttl: i64 = conn
                     .ttl(&key)
                     .await
                     .map_err(|e| RateLimitError::RedisError(e.into()))?;
 
                 let should_delete = if ttl == -1 {
-                    // 没有设置TTL，检查值是否过期
+                    // No TTL set; determine staleness from stored value.
                     if let Ok(Some(last_time)) = conn.get::<_, Option<u64>>(&key).await {
-                        // 基于默认配置计算最大间隔时间来判断是否过期
+                        // Use default config to compute max valid age.
                         let min_interval_millis = (self.default_config.window_size_millis as f64
                             / self.default_config.max_requests_per_second as f64)
                             as u64;
-                        let max_valid_age = min_interval_millis * 2; // 与TTL设置保持一致
+                        let max_valid_age = min_interval_millis * 2; // Keep consistent with TTL policy.
                         current_time.saturating_sub(last_time) > max_valid_age
                     } else {
-                        true // 获取不到值，删除key
+                        true // Could not fetch value; delete key.
                     }
                 } else {
-                    ttl <= 0 // TTL过期
+                    ttl <= 0 // TTL expired.
                 };
 
                 if should_delete {
@@ -843,20 +847,20 @@ impl DistributedSlidingWindowRateLimiter {
 
             Ok(total_cleaned)
         } else {
-            // 本地模式清理
+            // Local-mode cleanup.
             let mut total_cleaned = 0u64;
             let current_time = self.get_current_timestamp().await?;
 
-            // 收集需要删除的key，避免在迭代时修改
+            // Collect keys to delete to avoid mutating while iterating.
             let mut keys_to_remove = Vec::new();
 
             for entry in self.local_last_request.iter() {
                 let last_time = *entry.value();
 
-                // 尝试获取对应的配置来计算过期时间
-                // 注意：这里简化处理，如果找不到特定配置就用默认配置
-                // 实际上identifier需要从key中解析出来，但这里key就是last_request_key
-                // 我们可以尝试解析identifier，或者简单地使用默认配置作为保守估计
+                // Try using corresponding config to compute expiry.
+                // Simplified: fall back to default config when key-specific config is unavailable.
+                // In practice identifier should be parsed from key; here key is already last_request_key.
+                // Using default config is a conservative estimate.
 
                 let min_interval_millis = (self.default_config.window_size_millis as f64
                     / self.default_config.max_requests_per_second as f64)
@@ -878,7 +882,7 @@ impl DistributedSlidingWindowRateLimiter {
         }
     }
 
-    /// 获取当前存储的标识符数量
+    /// Returns number of identifiers currently stored.
     pub async fn get_identifier_count(&self) -> Result<usize> {
         if let Some(pool) = &self.pool {
             let mut conn = pool
@@ -896,7 +900,7 @@ impl DistributedSlidingWindowRateLimiter {
         }
     }
 
-    /// 重置指定标识符的记录
+    /// Resets records for a specific identifier.
     pub async fn reset(&self, identifier: &str) -> Result<()> {
         let key = self.get_last_request_key(identifier);
         if let Some(pool) = &self.pool {
@@ -914,7 +918,7 @@ impl DistributedSlidingWindowRateLimiter {
         Ok(())
     }
 
-    /// 重置所有记录
+    /// Resets all records.
     pub async fn reset_all(&self) -> Result<()> {
         if let Some(pool) = &self.pool {
             let mut conn = pool
@@ -940,7 +944,7 @@ impl DistributedSlidingWindowRateLimiter {
         Ok(())
     }
 
-    /// 获取key前缀（用于调试）
+    /// Returns key prefix (for debugging).
     pub fn get_key_prefix(&self) -> &str {
         &self.key_prefix
     }

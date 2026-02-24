@@ -6,18 +6,18 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-/// 重试策略
+/// Retry policy.
 #[derive(Debug, Clone)]
 pub struct RetryPolicy {
-    /// 最大重试次数
+    /// Maximum retry attempts.
     pub max_retries: u32,
-    /// 初始重试延迟（毫秒）
+    /// Initial retry delay in milliseconds.
     pub retry_delay: u64,
-    /// 当前重试次数
+    /// Current retry count.
     pub current_retry: u32,
-    /// 重试原因
+    /// Retry reason.
     pub reason: Option<String>,
-    /// 元数据
+    /// Extra metadata.
     pub meta: serde_json::Value,
 }
 impl Default for RetryPolicy {
@@ -33,24 +33,24 @@ impl Default for RetryPolicy {
 }
 
 impl RetryPolicy {
-    /// 检查是否应该重试
+    /// Returns `true` when another retry should be attempted.
     pub fn should_retry(&self) -> bool {
         self.current_retry < self.max_retries
     }
-    /// 计算下一次重试延迟
+    /// Calculates delay before the next retry.
     pub fn next_retry_delay(&self) -> u64 {
         self.retry_delay * (self.current_retry + 1) as u64
     }
-    /// 增加重试计数
+    /// Increments retry count.
     pub fn increment_retry(&mut self) {
         self.current_retry += 1;
     }
-    /// 重置策略
+    /// Resets retry state.
     pub fn reset(&mut self) {
         self.current_retry = 0;
         self.retry_delay = 2000;
     }
-    /// 等待下一次重试
+    /// Advances retry state and returns the delay for the next retry.
     pub async fn delay_next_retry(&mut self) -> Option<u64> {
         if !self.should_retry() {
             return None;
@@ -60,28 +60,28 @@ impl RetryPolicy {
         Some(delay)
     }
 
-    /// 添加元数据
+    /// Adds a metadata entry.
     pub fn with_meta(mut self, key: &str, value: serde_json::Value) -> Self {
         if let serde_json::Value::Object(ref mut map) = self.meta {
             map.insert(key.to_string(), value);
         }
         self
     }
-    /// 设置重试原因
+    /// Sets retry reason.
     pub fn with_reason(mut self, reason: String) -> Self {
         self.reason = Some(reason);
         self
     }
 }
 
-/// 处理器结果
+/// Processor execution result.
 #[derive(Debug)]
 pub enum ProcessorResult<T> {
-    /// 处理成功
+    /// Processing succeeded.
     Success(T),
-    /// 处理失败，但可以重试
+    /// Processing failed, but can be retried.
     RetryableFailure(RetryPolicy),
-    /// 处理失败，不可重试
+    /// Processing failed and is not retryable.
     FatalFailure(Error),
 }
 
@@ -102,18 +102,18 @@ impl<T> ProcessorResult<T> {
     }
 }
 
-/// 处理器上下文
+/// Processor execution context.
 #[derive(Debug, Clone)]
 pub struct ProcessorContext {
-    /// 元数据 (线程安全)
+    /// Thread-safe metadata.
     pub metadata: Arc<RwLock<HashMap<String, serde_json::Value>>>,
-    /// 重试策略
+    /// Retry policy.
     pub retry_policy: Option<RetryPolicy>,
-    /// 创建时间戳
+    /// Creation timestamp.
     pub created_at: u64,
-    /// 步骤超时时间（毫秒）
+    /// Step timeout in milliseconds.
     pub step_timeout_ms: Option<u64>,
-    /// 是否已取消
+    /// Whether execution has been cancelled.
     pub cancelled: bool,
 }
 
@@ -157,21 +157,21 @@ impl ProcessorContext {
     }
 }
 
-/// 基础处理器trait
+/// Base processor trait.
 #[async_trait]
 pub trait ProcessorTrait<Input, Output>: Send + Sync {
-    /// 处理器名称
+    /// Processor name.
     fn name(&self) -> &'static str;
 
-    /// 处理输入数据
+    /// Processes input data.
     async fn process(&self, input: Input, context: ProcessorContext) -> ProcessorResult<Output>;
 
-    /// 前置处理（可选）
+    /// Optional pre-processing hook.
     async fn pre_process(&self, _input: &Input, _context: &ProcessorContext) -> Result<()> {
         Ok(())
     }
 
-    /// 后置处理（可选）
+    /// Optional post-processing hook.
     async fn post_process(
         &self,
         _input: &Input,
@@ -181,7 +181,7 @@ pub trait ProcessorTrait<Input, Output>: Send + Sync {
         Ok(())
     }
 
-    /// 错误处理（可选）
+    /// Optional error handling hook.
     async fn handle_error(
         &self,
         _input: &Input,
@@ -191,18 +191,18 @@ pub trait ProcessorTrait<Input, Output>: Send + Sync {
         ProcessorResult::FatalFailure(_error)
     }
 
-    /// 检查是否应该处理该输入
+    /// Optional predicate to decide whether this input should be processed.
     async fn should_process(&self, _input: &Input, _context: &ProcessorContext) -> bool {
         true
     }
 }
 
-/// 可配置的处理器trait
+/// Configurable processor trait.
 #[async_trait]
 pub trait ConfigurableProcessor<Input, Output, Config>: ProcessorTrait<Input, Output> {
-    /// 应用配置
+    /// Applies configuration.
     async fn apply_config(&mut self, config: Config) -> Result<()>;
 
-    /// 获取当前配置
+    /// Returns current configuration.
     fn get_config(&self) -> Option<&Config>;
 }

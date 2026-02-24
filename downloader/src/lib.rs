@@ -10,26 +10,27 @@ pub use websocket_downloader::WebSocketDownloader;
 pub use downloader_manager::DownloaderManager;
 #[async_trait::async_trait]
 pub trait Downloader: dyn_clone::DynClone + Send + Sync + 'static {
-    /// 设置配置
+    /// Sets downloader configuration.
     async fn set_config(&self, id: &str, config: DownloadConfig);
-    /// 设置速率限制
+    /// Sets rate limit.
     async fn set_limit(&self, id: &str, limit: f32);
-    /// 下载器的名称
+    /// Downloader name.
     fn name(&self) -> String;
 
-    /// 下载器的版本
+    /// Downloader version.
     fn version(&self) -> Version;
 
-    /// 执行下载任务
+    /// Executes download task.
     async fn download(&self, request: Request) -> Result<Response>;
 
-    /// 健康检查
+    /// Health check.
     async fn health_check(&self) -> Result<()>;
     async fn close(&self) -> Result<()> {
-        // 默认实现，子类可以覆盖
+        // Default implementation; concrete implementations may override.
         Ok(())
     }
 }
 
-// 为 trait 对象启用克隆能力（基于实现类型的 Clone），用于 Box<dyn Downloader> 的 clone
+// Enables clone support for trait objects (based on implementor `Clone`) used by
+// `Box<dyn Downloader>`.
 dyn_clone::clone_trait_object!(Downloader);

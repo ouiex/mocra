@@ -11,19 +11,20 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-/// MiddlewareManager 用于管理下载和数据中间件
-/// 在schedule启动前需要将所有的中间件注册到此管理器中
-/// 不支持动态注册中间件，所有中间件在启动时就需要注册完成
-/// 通过 `register_download_middleware` 和 `register_data_middleware` 方法注册中
-/// 通过 `register_download_middleware_from_vec` 和 `register_data_middleware_from_vec` 方法批量注册中间件
-/// 目前只用于处理下载请求和响应的中间件，暂不处理数据处理的中间件
-/// 数据中间件需要在解析器模块中处理
-/// 中间件的权重来自于 `ModuleConfig` 中的配置或 `DownloadMiddleware.weight` 和 `DataMiddleware.weight` 方法
-/// `ModuleConfig` 中的配置优先级高于中间件自身的权重
-/// `ModuleConfig` 中的权重来源于 `download_middleware_config` 和 `rel_module_download_middleware_config` 这两个配置里
-/// 其他配置中的weight字段不会影响中间件的权重
-/// 数据库表中的weight字段暂时不参与权重，后续可以删除该字段
-/// 中间件的执行顺序由权重决定，权重越小优先
+/// Manages download/data/store middlewares.
+///
+/// All middlewares should be registered before scheduler startup.
+/// Dynamic registration at runtime is not supported.
+/// Use `register_download_middleware` / `register_data_middleware` for single registration,
+/// and `register_*_from_vec` for batch registration.
+///
+/// Weight resolution:
+/// - Effective weight comes from `ModuleConfig` override when available,
+///   otherwise from middleware's own `weight()`.
+/// - `ModuleConfig` overrides have higher priority than middleware defaults.
+/// - For download middleware, overrides come from
+///   `download_middleware_config` and `rel_module_download_middleware_config`.
+/// - Lower weight executes earlier.
 ///
 pub struct MiddlewareManager {
     pub download_middleware: Arc<RwLock<Vec<Arc<dyn DownloadMiddleware>>>>,
@@ -194,7 +195,7 @@ impl MiddlewareManager {
         }
         Some(data)
     }
-    /// 返回存储结果的map，key为中间件名称，value为存储结果，只返回错误的结果
+    /// Returns a map of storage results (`middleware_name -> result`), filtered to errors only.
     pub async fn handle_store_data(
         &self,
         data: Data,

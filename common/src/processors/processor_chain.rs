@@ -12,19 +12,19 @@ use std::time::Duration;
 
 pub type SyncBoxStream<'a, T> = Pin<Box<dyn Stream<Item = T> + Send + Sync + 'a>>;
 
-/// 处理器链
+/// Type-erased processor chain executor.
 ///
-/// 特性：
-/// - 链式编排：每一步接受上一步的输出作为输入；
-/// - 强类型校验：构建/执行前用 `TypeId` 做运行期类型连通性校验；
-/// - 失败语义：支持 Success / RetryableFailure / FatalFailure；
-/// - 上下文控制：支持取消、每步超时、重试策略等；
-/// - 扩展适配器：支持 Vec 映射、流式映射（并发、错误策略）。
+/// Highlights:
+/// - Step-by-step orchestration where each output becomes the next input.
+/// - Runtime type continuity checks via `TypeId`.
+/// - Explicit failure semantics (`Success`, `RetryableFailure`, `FatalFailure`).
+/// - Context controls for cancellation, timeout, and retry state.
+/// - Adapters for vector and stream mapping scenarios.
 struct ProcessorChain {
     steps: Vec<ProcessorStep>,
 }
 
-/// 处理器步骤的包装（对外隐藏具体泛型类型，通过类型擦除来统一调度）
+/// Internal wrapper around a chain step using type erasure.
 struct ProcessorStep {
     name: String,
     executor: Box<dyn ProcessorExecutor + Send + Sync>,
@@ -35,10 +35,10 @@ struct ProcessorStep {
     output_type_name: &'static str,
 }
 
-/// 处理器执行器 trait，用于类型擦除。
+/// Type-erased executor abstraction for chain steps.
 ///
-/// 将具体的 `ProcessorTrait<Input, Output>` 封装为统一的 `ProcessorExecutor`，
-/// 以便链路在运行时按步骤顺序调用。
+/// Wraps concrete `ProcessorTrait<Input, Output>` implementations into a uniform
+/// runtime interface.
 #[async_trait]
 trait ProcessorExecutor: Send + Sync {
     async fn execute(
@@ -49,10 +49,10 @@ trait ProcessorExecutor: Send + Sync {
     fn name(&self) -> &str;
 }
 
-/// 具体的处理器执行器实现
+/// Typed executor implementation for a concrete processor.
 struct TypedProcessorExecutor<Input, Output, P> {
     processor: P,
-    // 使用函数指针 PhantomData 避免从 Input/Output 传播自动 trait（如 Sync）
+    // Function-pointer PhantomData prevents auto-trait leakage from Input/Output.
     _phantom: std::marker::PhantomData<fn(Input) -> Output>,
 }
 
@@ -74,11 +74,10 @@ where
         input: Input,
         context: ProcessorContext,
     ) -> ProcessorResult<Output> {
-        // 2) 准备上下文
+        // Prepare mutable execution context.
         let mut current_context = context;
 
-        // 2.1 should_process 判定
-        // 跳过场景：仅当 Input 与 Output 类型相同（透传）。否则只能继续处理以避免类型断裂。
+        // Evaluate optional skip. Skip is only safe when Input == Output.
         let mut skip_processing = false;
         let should_do = self
             .processor
@@ -100,7 +99,7 @@ where
                 "Processor {} decided to skip; passthrough input",
                 self.processor.name()
             );
-            // Input == Output, safe to cast via Any
+            // Input == Output, safe cast through Any.
             let any_in = Box::new(input) as Box<dyn Any + Send>;
             match any_in.downcast::<Output>() {
                 Ok(out) => return ProcessorResult::Success(*out),
@@ -115,22 +114,22 @@ where
             }
         }
 
-        // 2.2 pre_process 在第一次尝试之前执行
+        // Run pre-process hook before the first attempt.
         if let Err(e) = self.processor.pre_process(&input, &current_context).await {
             error!("Pre-processing failed for {}: {}", self.processor.name(), e);
             return ProcessorResult::FatalFailure(e);
         }
 
         loop {
-            // 3) 取消检查
+            // Cancellation check.
             if current_context.cancelled {
                 return ProcessorResult::FatalFailure(
                     ProcessorChainError::Cancelled("cancelled".into()).into(),
                 );
             }
 
-            // 4) 执行处理器（可选超时）
-            // 必须 clone input 给 process，因为 process 消耗所有权，而我们需要保留 typed_input 用于重试或错误处理
+            // Execute processor with optional timeout.
+            // Clone input because `process` takes ownership and retries may be required.
             let fut = self
                 .processor
                 .process(input.clone(), current_context.clone());
@@ -157,14 +156,14 @@ where
 
             match result {
                 ProcessorResult::Success(output) => {
-                    // 后置处理失败可进入 handle_error 以允许补偿。
+                    // Post-process failures are delegated to `handle_error` for compensation.
                     if let Err(post_err) = self
                         .processor
                         .post_process(&input, &output, &current_context)
                         .await
                     {
                         error!("Post-processing failed for {}: {}", self.name(), post_err);
-                        // 将 post_err 当作 Fatal 交给 handle_error
+                        // Treat post-process error as fatal and delegate to error handler.
                         let handled = self
                             .processor
                             .handle_error(&input, post_err, &current_context)
@@ -187,7 +186,7 @@ where
                         retry_policy.current_retry
                     );
 
-                    // 检查是否应该重试
+                    // Evaluate retry policy.
                     if let Some(delay_ms) = retry_policy.delay_next_retry().await {
                         warn!(
                             "TypedProcessorExecutor {}: Will retry after {}ms delay (attempt {}), message: {:?}",
@@ -199,7 +198,7 @@ where
 
                         tokio::time::sleep(Duration::from_millis(delay_ms)).await;
                         current_context = current_context.with_retry_policy(retry_policy);
-                        continue; // 重试，下一次循环将再次使用 typed_input.clone()
+                        continue;
                     } else {
                         warn!(
                             "TypedProcessorExecutor {}: Max retries exceeded, giving up",
@@ -230,7 +229,7 @@ where
                     }
                 }
                 ProcessorResult::FatalFailure(err) => {
-                    // process 失败 -> 交给 handle_error
+                    // `process` failed; delegate to `handle_error`.
                     let handled = self
                         .processor
                         .handle_error(&input, err, &current_context)
@@ -260,7 +259,7 @@ where
         input: Box<dyn Any + Send>,
         context: ProcessorContext,
     ) -> ProcessorResult<Box<dyn Any + Send>> {
-        // 1) 向下转型为具体输入类型；若失败，立即返回致命错误（类型不匹配）
+        // 1) Downcast to concrete input type; fail fast on mismatch.
         let typed_input = match input.downcast::<Input>() {
             Ok(typed) => *typed,
             Err(_e) => {
@@ -290,8 +289,9 @@ where
     }
 }
 
-/// 扁平化执行器：将 Vec<Vec<T>> 扁平为 Vec<T>
-/// 一次性处理器执行器（不支持重试，不要求 Input: Clone）
+/// One-shot processor executor.
+///
+/// This executor does not support retries and does not require `Input: Clone`.
 struct OneShotProcessorExecutor<Input, Output, P> {
     processor: P,
     _phantom: std::marker::PhantomData<fn(Input) -> Output>,
@@ -423,9 +423,9 @@ where
     }
 }
 
-/// Vec map 执行器：对 `Vec<ElemIn>` 中的每个元素运行处理器（保持输出顺序）
-/// - Sequential：逐个处理；
-/// - Parallel(n)：并发处理，但通过 (idx, result) 收集再排序，确保顺序稳定。
+/// Vec-map executor that applies a processor to each `Vec<ElemIn>` item.
+/// - `Sequential`: process one by one.
+/// - `Parallel(n)`: process concurrently and reassemble results by original index.
 enum VecMapMode {
     Sequential,
     Parallel(usize),
@@ -434,10 +434,10 @@ enum VecMapMode {
 struct MapVecExecutor<ElemIn, ElemOut, P> {
     inner: TypedProcessorExecutor<ElemIn, ElemOut, P>,
     mode: VecMapMode,
-    // 当设置为 Some(strategy) 时，启用与流式 map 类似的元素级错误处理策略（仅在并行模式下生效）：
-    // - Drop：丢弃出错元素，继续；
-    // - Stop：在遇到第一个错误时停止产出后续元素（返回已成功的前缀）。
-    // 注意：ReturnResult 不在此执行器中支持（如需返回 Result，请新增专门的 result 版本）。
+    // Enables per-element error strategy (parallel mode only):
+    // - Drop: ignore failed elements and continue.
+    // - Stop: stop at first failure and return successful prefix.
+    // `ReturnResult` is intentionally unsupported in this executor.
     strategy: Option<ErrorStrategy>,
 }
 
@@ -468,7 +468,7 @@ where
         input: Box<dyn Any + Send>,
         context: ProcessorContext,
     ) -> ProcessorResult<Box<dyn Any + Send>> {
-        // 下转为 Vec<ElemIn>
+        // Downcast to `Vec<ElemIn>`.
         let vec_input = match input.downcast::<Vec<ElemIn>>() {
             Ok(b) => *b,
             Err(_) => {
@@ -527,7 +527,7 @@ where
                         .await;
                 // let mut results = results;
                 // results.sort_by_key(|(idx, _)| *idx);
-                // 根据是否启用策略决定错误处理方式
+                // Select error handling behavior based on configured strategy.
                 if let Some(strategy) = self.strategy {
                     if matches!(strategy, ErrorStrategy::ReturnResult) {
                         return ProcessorResult::FatalFailure(
@@ -611,16 +611,20 @@ impl<F: std::future::Future + Send + Unpin> std::future::Future for SyncWrapper<
     }
 }
 
-/// 流式 map 执行器（输入为 SyncBoxStream<ElemIn>，输出为 SyncBoxStream<ElemOut>），内部支持并发
+/// Stream-map executor.
 ///
-/// 支持三种错误策略：
-/// - Drop：丢弃错误项，继续流；
-/// - Stop：遇到错误立即停止后续产出；
-/// - ReturnResult：不在该执行器中支持（请使用 `MapStreamInResultExecutor`）。
+/// Input: `SyncBoxStream<ElemIn>`
+/// Output: `SyncBoxStream<ElemOut>`
+/// Supports bounded internal concurrency.
+///
+/// Supported error strategies:
+/// - `Skip`: drop failed item and continue.
+/// - `Stop`: stop yielding subsequent items after first failure.
+/// - `ReturnResult`: unsupported here (use `MapStreamInResultExecutor`).
 struct MapStreamInExecutor<ElemIn, ElemOut, P> {
     inner: Arc<TypedProcessorExecutor<ElemIn, ElemOut, P>>,
     concurrency: usize,
-    // 错误处理策略：drop（默认，丢弃错误）、stop（遇错停止整个流）、result（输出 Result<ElemOut, Error>）
+    // Element-level error strategy for stream mapping.
     strategy: ErrorStrategy,
 }
 
@@ -679,7 +683,7 @@ where
         let ctx = context.clone();
         let inner_arc = self.inner.clone();
         let strategy = self.strategy;
-        // 使用原子布尔标识实现 Stop 策略（无锁、轻量）
+        // Use an atomic stop flag for lock-free `Stop` semantics.
         use std::sync::atomic::{AtomicBool, Ordering};
         let stop_flag = Arc::new(AtomicBool::new(false));
         if matches!(strategy, ErrorStrategy::ReturnResult) {
@@ -687,7 +691,7 @@ where
                 ProcessorChainError::Unexpected("stream map step configured for ReturnResult but wrong builder used (expected _result variant)".into()).into()
             );
         }
-        // 先并发执行，再根据策略进行过滤或停产
+        // Execute concurrently, then filter/stop according to strategy.
         let mapped = stream_in
             .map(move |elem| {
                 let ctx2 = ctx.clone();
@@ -721,7 +725,7 @@ where
                 }
             })
             .filter_map(futures::future::ready);
-        // mapped 现为 SyncBoxStream<'static, ElemOut>
+        // `mapped` is now `SyncBoxStream<'static, ElemOut>`.
         let mapped: SyncBoxStream<'static, ElemOut> = Box::pin(mapped);
         ProcessorResult::Success(Box::new(mapped) as Box<dyn Any + Send>)
     }
@@ -731,7 +735,7 @@ where
     }
 }
 
-/// 流式 map 执行器（返回 `Result<ElemOut, Error>` 的流）
+/// Stream-map executor that yields `Result<ElemOut, Error>` items.
 struct MapStreamInResultExecutor<ElemIn, ElemOut, P> {
     inner: Arc<TypedProcessorExecutor<ElemIn, ElemOut, P>>,
     concurrency: usize,
@@ -805,15 +809,16 @@ where
     }
 }
 impl ProcessorChain {
-    /// 创建一个空的处理器链
+    /// Creates an empty processor chain.
     pub fn new() -> Self {
         Self { steps: Vec::new() }
     }
 
-    /// 添加处理器到链中
+    /// Adds a processor to the chain tail.
     ///
-    /// 将一个 `ProcessorTrait<Input, Output>` 加入链尾。注意：该方法不会立即做类型连通性校验，
-    /// 可在构建完成后调用 `validate_link_types` 或使用 `try_add_processor` 进行一步到位校验。
+    /// This method does not immediately validate step type connectivity.
+    /// Call `validate_link_types` after assembly, or use `try_add_processor`
+    /// for add-and-validate in one step.
     pub fn add_processor<Input, Output, P>(mut self, processor: P) -> Self
     where
         Input: Send + Clone + 'static,
@@ -835,7 +840,7 @@ impl ProcessorChain {
         self
     }
 
-    /// 添加一次性处理器（不支持重试，不要求 Input: Clone）
+    /// Adds a one-shot processor (no retry support, no `Input: Clone` requirement).
     pub fn add_one_shot_processor<Input, Output, P>(mut self, processor: P) -> Self
     where
         Input: Send + 'static,
@@ -857,7 +862,7 @@ impl ProcessorChain {
         self
     }
 
-    /// 添加一个对 `Vec<ElemIn>` 进行逐元素处理的处理器（map）
+    /// Adds an element-wise map processor for `Vec<ElemIn>`.
     pub fn add_processor_map<ElemIn, ElemOut, P>(mut self, processor: P) -> Self
     where
         ElemIn: Send + Clone + 'static,
@@ -879,9 +884,9 @@ impl ProcessorChain {
         self
     }
 
-    /// 尝试添加处理器：在构建阶段进行类型连通性校验（上一步输出 == 本步输入）
+    /// Attempts to add a processor with build-time type connectivity validation.
     ///
-    /// 若校验失败返回错误，不会污染原有链（因 `self` 按值移动，新链在出错时被丢弃）。
+    /// Returns an error on mismatch without mutating the original chain state.
     pub fn try_add_processor<Input, Output, P>(
         self,
         processor: P,
@@ -896,10 +901,10 @@ impl ProcessorChain {
         Ok(new_self)
     }
 
-    /// 校验链路中相邻处理器的类型是否匹配
+    /// Validates that adjacent processor step types match.
     ///
-    /// 包括：上一步输出类型 `output_type_id` 必须等于下一步输入类型 `input_type_id`。
-    /// 校验失败将返回包含具体步骤与期望/实际类型名的错误，便于诊断。
+    /// Specifically, each previous step `output_type_id` must equal the next
+    /// step `input_type_id`. On failure, returns detailed step/type diagnostics.
     pub fn validate_link_types(&self) -> Result<(), ProcessorChainError> {
         for i in 1..self.steps.len() {
             let prev = &self.steps[i - 1];
@@ -922,7 +927,7 @@ impl ProcessorChain {
         Ok(())
     }
 
-    /// 添加并行 map 处理器（输入 `Vec<ElemIn>`，输出 `Vec<ElemOut>`），自定义并发度
+    /// Adds a parallel map processor (`Vec<ElemIn>` -> `Vec<ElemOut>`) with custom concurrency.
     pub fn add_processor_map_parallel_with<ElemIn, ElemOut, P>(
         mut self,
         processor: P,
@@ -946,7 +951,7 @@ impl ProcessorChain {
         self
     }
 
-    /// 添加并行 map 处理器（默认并发度 16）
+    /// Adds a parallel map processor with default concurrency `16`.
     pub fn add_processor_map_parallel<ElemIn, ElemOut, P>(self, processor: P) -> Self
     where
         ElemIn: Send + Clone + 'static,
@@ -956,7 +961,8 @@ impl ProcessorChain {
         self.add_processor_map_parallel_with::<ElemIn, ElemOut, P>(processor, 16)
     }
 
-    /// 添加并行 map 处理器（输入 `Vec<ElemIn>`，输出 `Vec<ElemOut>`），自定义并发度 + 错误策略
+    /// Adds a parallel map processor from `Vec<ElemIn>` to `Vec<ElemOut>` with custom
+    /// concurrency and error strategy.
     pub fn add_processor_map_parallel_with_strategy<ElemIn, ElemOut, P>(
         mut self,
         processor: P,
@@ -982,7 +988,8 @@ impl ProcessorChain {
         self
     }
 
-    /// 添加流式 map（输入 `SyncBoxStream<ElemIn>`，输出 `SyncBoxStream<ElemOut>`），自定义并发度
+    /// Adds a stream map processor from `SyncBoxStream<ElemIn>` to
+    /// `SyncBoxStream<ElemOut>` with custom concurrency.
     pub fn add_processor_map_stream_in_with<ElemIn, ElemOut, P>(
         mut self,
         processor: P,
@@ -1006,7 +1013,7 @@ impl ProcessorChain {
         self
     }
 
-    /// 添加流式 map（默认并发度 16）
+    /// Adds a stream map processor with default concurrency `16`.
     pub fn add_processor_map_stream_in<ElemIn, ElemOut, P>(self, processor: P) -> Self
     where
         ElemIn: Send + Clone + Sync + 'static,
@@ -1016,7 +1023,7 @@ impl ProcessorChain {
         self.add_processor_map_stream_in_with::<ElemIn, ElemOut, P>(processor, 16)
     }
 
-    /// 添加流式 map（自定义并发度 + 错误策略）
+    /// Adds a stream map processor with custom concurrency and error strategy.
     pub fn add_processor_map_stream_in_with_strategy<ElemIn, ElemOut, P>(
         mut self,
         processor: P,
@@ -1042,7 +1049,8 @@ impl ProcessorChain {
         self
     }
 
-    /// 添加流式 map（返回 `Result<ElemOut, Error>` 的项），自定义并发度
+    /// Adds a stream map processor whose output items are `Result<ElemOut, Error>`,
+    /// with custom concurrency.
     pub fn add_processor_map_stream_in_result_with<ElemIn, ElemOut, P>(
         mut self,
         processor: P,
@@ -1067,7 +1075,8 @@ impl ProcessorChain {
         self
     }
 
-    /// 添加流式 map（返回 Result 的项），默认并发度 16
+    /// Adds a stream map processor that returns `Result` items with default
+    /// concurrency `16`.
     pub fn add_processor_map_stream_in_result<ElemIn, ElemOut, P>(self, processor: P) -> Self
     where
         ElemIn: Send + Clone + Sync + 'static,
@@ -1077,7 +1086,7 @@ impl ProcessorChain {
         self.add_processor_map_stream_in_result_with::<ElemIn, ElemOut, P>(processor, 16)
     }
 
-    /// 添加一个扁平化步骤：将 Vec<Vec<T>> -> Vec<T>
+    /// Adds a flatten step from `Vec<Vec<T>>` to `Vec<T>`.
     pub fn add_flatten_vec<T>(mut self) -> Self
     where
         T: Send + Sync + 'static,
@@ -1094,11 +1103,11 @@ impl ProcessorChain {
         self
     }
 
-    /// 执行整个处理器链
+    /// Executes the entire processor chain.
     ///
-    /// 执行前做两类快速校验：
-    /// 1) 链路连通性（相邻类型匹配）；
-    /// 2) 首/尾类型与调用方声明的 `Input/Output` 是否一致（避免运行中再出错）。
+    /// Two fast validations are performed before execution:
+    /// 1) Link connectivity (adjacent input/output types must match).
+    /// 2) Head/tail types must match the caller-declared `Input`/`Output`.
     pub async fn execute<Input, Output>(
         &self,
         input: Input,
@@ -1114,7 +1123,7 @@ impl ProcessorChain {
             );
         }
 
-        // 运行前的快速类型校验：首入/末出 以及 链路连通性
+        // Fast pre-run type checks: head input, tail output, and link connectivity.
         if let Err(e) = self.validate_link_types() {
             return ProcessorResult::FatalFailure(e.into());
         }
@@ -1150,7 +1159,7 @@ impl ProcessorChain {
 
         let mut current_data: Box<dyn Any + Send> = Box::new(input);
 
-        // 逐步执行每个处理器：每一步返回的 Any 会成为下一步的输入
+        // Execute each processor step by step: each `Any` output becomes next input.
         for (idx, step) in self.steps.iter().enumerate() {
             debug!(
                 "Executing processor [{} / {}]: {}",
@@ -1159,13 +1168,13 @@ impl ProcessorChain {
                 step.name
             );
 
-            // 执行处理器（重试逻辑由 TypedProcessorExecutor 处理）
+            // Execute processor (retry behavior is handled inside `TypedProcessorExecutor`).
             match step.executor.execute(current_data, context.clone()).await {
                 ProcessorResult::Success(output) => {
                     current_data = output;
                 }
                 ProcessorResult::RetryableFailure(_retry_policy) => {
-                    // 这种情况不应该发生，因为 TypedProcessorExecutor 应该处理所有重试
+                    // This path should not happen because retries are handled at executor level.
                     error!(
                         "Unexpected RetryableFailure from processor {} - retries should be handled at processor level",
                         step.name
@@ -1184,7 +1193,7 @@ impl ProcessorChain {
                 }
             }
         }
-        // 尝试将最终结果转换为期望的输出类型
+        // Try downcasting the final output to the expected type.
         match current_data.downcast::<Output>() {
             Ok(typed_output) => ProcessorResult::Success(*typed_output),
             Err(_e) => ProcessorResult::FatalFailure(
@@ -1200,17 +1209,17 @@ impl ProcessorChain {
         }
     }
 
-    /// 获取处理器链的长度
+    /// Returns the number of processors in the chain.
     pub fn len(&self) -> usize {
         self.steps.len()
     }
 
-    /// 检查处理器链是否为空
+    /// Returns `true` when the chain has no processors.
     pub fn is_empty(&self) -> bool {
         self.steps.is_empty()
     }
 
-    /// 获取所有处理器的名称（按执行顺序）
+    /// Returns all processor names in execution order.
     pub fn processor_names(&self) -> Vec<&str> {
         self.steps.iter().map(|step| step.executor.name()).collect()
     }
@@ -1222,7 +1231,10 @@ impl Default for ProcessorChain {
     }
 }
 
-/// 静态类型版 Chain：在编译期通过类型参数约束确保相邻步骤的 Input/Output 连通
+/// Statically typed chain wrapper.
+///
+/// Uses type parameters to enforce adjacent step `Input`/`Output` compatibility at compile
+/// time, while runtime link validation is still performed before execution.
 pub struct TypedChain<In, Out> {
     inner: ProcessorChain,
     _marker: std::marker::PhantomData<fn(In) -> Out>,
@@ -1254,7 +1266,7 @@ where
         Next: Send + 'static,
         P: ProcessorTrait<Out, Next> + Send + Sync + 'static,
     {
-        // 在类型层面对 Out -> Next 做编译期约束；运行期依然会做链路校验
+        // `Out -> Next` is enforced at compile time; runtime link checks still apply.
         TypedChain {
             inner: self.inner.add_processor::<Out, Next, _>(processor),
             _marker: std::marker::PhantomData,
@@ -1278,7 +1290,7 @@ where
     }
 }
 
-// 针对 Vec 输出的特化：在链上追加“逐元素 map”的步骤
+// Specialization for `Vec` outputs: append per-element map steps.
 impl<In, ElemIn> TypedChain<In, Vec<ElemIn>>
 where
     In: Send + Clone + 'static,
@@ -1337,7 +1349,7 @@ where
     }
 }
 
-// 针对 Vec<Vec<T>> 输出的特化：提供扁平化为 Vec<T>
+// Specialization for `Vec<Vec<T>>` outputs with flattening helpers.
 impl<In, T> TypedChain<In, Vec<Vec<T>>>
 where
     In: Send + Clone + 'static,
@@ -1350,7 +1362,7 @@ where
         }
     }
 
-    /// 先扁平化为 Vec<T>，再对每个 T 应用处理器，得到 Vec<U>
+    /// Flattens into `Vec<T>`, then maps each `T` into `Vec<U>`.
     pub fn then_map_nested_vec_flatten<ElemOut, P>(
         self,
         processor: P,
@@ -1369,7 +1381,7 @@ where
         }
     }
 
-    /// 先扁平化为 Vec<T>，再并行 map 为 Vec<U>
+    /// Flattens into `Vec<T>`, then performs parallel map into `Vec<U>`.
     pub fn then_map_nested_vec_flatten_parallel_with<ElemOut, P>(
         self,
         processor: P,
@@ -1389,7 +1401,7 @@ where
         }
     }
 
-    /// 先扁平化为 Vec<T>，再并行 map 并应用错误策略
+    /// Flattens into `Vec<T>`, then performs parallel map with error strategy.
     pub fn then_map_nested_vec_flatten_parallel_with_strategy<ElemOut, P>(
         self,
         processor: P,
@@ -1415,7 +1427,7 @@ where
     }
 }
 
-// 针对 Stream 输出的特化：在链上追加“流式逐元素 map”的步骤
+// Specialization for stream outputs: append stream element-wise map steps.
 impl<In, ElemIn> TypedChain<In, SyncBoxStream<'static, ElemIn>>
 where
     In: Send + Clone + 'static,
@@ -1627,7 +1639,7 @@ mod tests {
         }
     }
 
-    // B -> C 这里 B=i32, C=String
+    // B -> C where B=i32 and C=String
     struct ElemIntToString;
     #[async_trait]
     impl ProcessorTrait<i32, String> for ElemIntToString {
@@ -1662,7 +1674,7 @@ mod tests {
 
     // Removed: wrong input type test not applicable with TypedChain
 
-    // 并行 map: 使用并发度处理 Vec<i32> -> Vec<String>
+    // Parallel map: process `Vec<i32> -> Vec<String>` with configured concurrency.
     #[tokio::test]
     async fn chain_vec_parallel_map() {
         init_logger();
@@ -1674,7 +1686,7 @@ mod tests {
         match out {
             ProcessorResult::Success(v) => {
                 assert_eq!(v.len(), 20);
-                // 并行保持原顺序
+                // Parallel mode preserves original order.
                 for (i, s) in v.iter().enumerate() {
                     assert_eq!(s, &format!("n={}", i as i32));
                 }
@@ -1701,7 +1713,7 @@ mod tests {
         }
     }
 
-    // 收集逻辑在测试里直接对 SyncBoxStream 进行 collect，不再作为处理器加入链
+    // Collection is done directly in tests via `SyncBoxStream::collect`, not as a chain step.
 
     #[tokio::test]
     async fn chain_stream_in_map_and_collect() {
@@ -1728,9 +1740,9 @@ mod tests {
         }
     }
 
-    // ==== 新增：超时 / 取消 / 流式错误策略 测试 ====
+    // ==== New tests: timeout / cancellation / stream error strategies ====
 
-    // 模拟一个慢处理器：i32 -> i32，延迟指定毫秒
+    // Simulates a slow processor: `i32 -> i32` with a configured delay in milliseconds.
     struct SlowAddOne {
         delay_ms: u64,
     }
@@ -1785,7 +1797,7 @@ mod tests {
         }
     }
 
-    // 元素级处理器：失败在某个元素上
+    // Element-level processor that fails on a specific input value.
     struct ElemIntToStringMaybeFail {
         fail_on: i32,
     }
@@ -1821,7 +1833,7 @@ mod tests {
             ProcessorResult::Success(st) => {
                 let mut v: Vec<String> = st.collect().await;
                 v.sort();
-                // 应包含 0,1,3,4 四个元素
+                // Should include four elements: 0, 1, 3, and 4.
                 assert_eq!(
                     v,
                     vec!["n=0", "n=1", "n=3", "n=4"]
@@ -1839,7 +1851,7 @@ mod tests {
         init_logger();
         let chain = TypedChain::<(i32, i32), (i32, i32)>::new()
             .then::<SyncBoxStream<'static, i32>, _>(RangeToStream)
-            // 并发度 1 以获得确定的顺序与停点
+            // Concurrency `1` for deterministic ordering and stop point.
             .then_map_stream_in_with_strategy::<String, _>(
                 ElemIntToStringMaybeFail { fail_on: 2 },
                 1,
@@ -1850,7 +1862,7 @@ mod tests {
         match out {
             ProcessorResult::Success(st) => {
                 let v: Vec<String> = st.collect().await;
-                // 0->ok, 1->ok, 2->error then stop, 后面不再产出
+                // 0->ok, 1->ok, 2->error then stop; no further output is produced.
                 assert_eq!(v, vec!["n=0".to_string(), "n=1".to_string()]);
             }
             _other => panic!("unexpected non-success result"),
@@ -1985,9 +1997,9 @@ mod tests {
         }
     }
 
-    // ==== 新增测试：读取 test.txt -> 二进制 -> String -> Vec<String> -> Vec<i32> -> i64 求和 ====
+    // ==== New test: read test.txt -> bytes -> String -> Vec<String> -> Vec<i32> -> i64 sum ====
 
-    // 读取文件路径(String) -> 二进制(Vec<u8>)
+    // Read file path (`String`) -> bytes (`Vec<u8>`)
     struct PathToBytes;
     #[async_trait]
     impl ProcessorTrait<String, Vec<u8>> for PathToBytes {
@@ -2009,7 +2021,7 @@ mod tests {
         }
     }
 
-    // 二进制(Vec<u8>) -> UTF-8 字符串(String)
+    // Bytes (`Vec<u8>`) -> UTF-8 string (`String`)
     struct BytesToString;
     #[async_trait]
     impl ProcessorTrait<Vec<u8>, String> for BytesToString {
@@ -2027,7 +2039,7 @@ mod tests {
         }
     }
 
-    // 字符串(String) -> 按行 Vec<String>
+    // String (`String`) -> line-based `Vec<String>`
     struct StringToLines;
     #[async_trait]
     impl ProcessorTrait<String, Vec<String>> for StringToLines {
@@ -2049,7 +2061,8 @@ mod tests {
         }
     }
 
-    // 元素级：String -> i32（解析失败返回错误，不再将非数字行视为 0）
+    // Element-level: `String -> i32` (parse failures return errors; non-numeric lines are not
+    // treated as `0`).
     struct StrToI32;
     #[async_trait]
     impl ProcessorTrait<String, i32> for StrToI32 {
@@ -2067,7 +2080,7 @@ mod tests {
         }
     }
 
-    // Vec<i32> -> i64（求和）
+    // `Vec<i32> -> i64` (sum)
     struct SumVecI32ToI64;
     #[async_trait]
     impl ProcessorTrait<Vec<i32>, i64> for SumVecI32ToI64 {
@@ -2089,8 +2102,10 @@ mod tests {
         let content = "10\n20\n30\nnot_a_number\n40";
         tokio::fs::write(path, content).await.unwrap();
 
-        // 构建 typed 链：路径(String) -> 二进制(Vec<u8>) -> String -> Vec<String> -> Vec<i32> -> i64
-        // 由于 StrToI32 在解析失败时返回错误，若文件包含非数字行，则该链会失败
+        // Build typed chain: path (`String`) -> bytes (`Vec<u8>`) -> `String` -> `Vec<String>`
+        // -> `Vec<i32>` -> `i64`.
+        // Since `StrToI32` returns errors on parse failures, non-numeric lines would fail the
+        // pipeline without an error strategy like `Skip`.
         let chain = TypedChain::<String, String>::new()
             .then::<Vec<u8>, _>(PathToBytes)
             .then::<String, _>(BytesToString)
@@ -2098,7 +2113,7 @@ mod tests {
             .then_map_vec_parallel_with_strategy::<i32, _>(StrToI32, 8, ErrorStrategy::Skip)
             .then::<i64, _>(SumVecI32ToI64);
 
-        // 运行
+        // Execute
         let ctx = ProcessorContext::default();
         let res = chain.execute(path.to_string(), ctx).await;
 
@@ -2114,7 +2129,7 @@ mod tests {
         }
     }
 
-    // ==== 新增测试：Vec 并行 map 的错误策略（Drop / Stop）====
+    // ==== New tests: error strategies for parallel `Vec` map (`Skip` / `Stop`) ====
 
     #[tokio::test]
     async fn vec_parallel_map_drop_strategy_drops_bad_element() {
@@ -2156,7 +2171,7 @@ mod tests {
         let out = chain.execute((0, 6), ProcessorContext::default()).await;
         match out {
             ProcessorResult::Success(v) => {
-                // 期望返回第一个错误前的前缀 [0,1]
+                // Expected prefix before first error: [0, 1]
                 assert_eq!(v, vec!["n=0".to_string(), "n=1".to_string()]);
             }
             other => panic!("unexpected result: {:?}", other),

@@ -1,21 +1,12 @@
 #![allow(unused)]
 
-/// 多层级错误跟踪系统
+/// Multi-level error tracking used by task, module, and request workflows.
 ///
-/// 设计原则：
-/// 1. Task 级别：控制整体任务的错误容忍度（10次）
-/// 2. Module 级别：控制单个模块的错误容忍度（3次）
-/// 3. Request 级别：控制单个请求的重试次数（3次）
-///
-/// 错误计数策略：
-/// - 下载失败：Request +1, Module +1, Task +1
-/// - 重试成功：Request -1（不影响 Module 和 Task）
-/// - 解析失败：独立计数，不影响下载错误
-///
-/// 阈值到达后：
-/// - Request 达到阈值：放弃该 Request，继续其他 Request
-/// - Module 达到阈值：停止该 Module，Task 继续其他 Module
-/// - Task 达到阈值：停止整个 Task
+/// Core semantics:
+/// - Download failures increment request/module/task counters.
+/// - Parse failures use independent counters.
+/// - Success clears request-local cached state and does not rewrite historical task/module failures.
+/// - Thresholds can lead to `Skip` (request) or `Terminate` (module/task).
 use cacheable::{CacheAble, CacheService};
 use errors::{CacheError, Error, Result};
 use log::warn;
@@ -24,33 +15,33 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH, Instant};
 use utils::redis_lock::DistributedLockManager;
 
-/// 错误类型分类
+/// High-level category assigned to an error record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ErrorCategory {
-    /// 下载错误（网络、超时等）
+    /// Download and transport failures.
     Download,
-    /// 解析错误（内容解析失败）
+    /// Parsing and extraction failures.
     Parse,
-    /// 认证错误（登录失效等）
+    /// Authentication or authorization failures.
     Auth,
-    /// 限流错误
+    /// Quota and throttling failures.
     RateLimit,
-    /// 其他错误
+    /// Any category not explicitly covered above.
     Other,
 }
 
-/// 错误严重程度
+/// Severity level used for decisioning.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ErrorSeverity {
-    /// 轻微错误（可重试）
+    /// Low impact and usually retryable.
     Minor,
-    /// 严重错误（需要关注）
+    /// Significant but not immediately fatal.
     Major,
-    /// 致命错误（立即终止）
+    /// Fatal condition that should terminate execution.
     Fatal,
 }
 
-/// 错误记录
+/// Immutable single error entry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ErrorRecord {
     pub timestamp: u64,
@@ -64,20 +55,20 @@ impl CacheAble for ErrorRecord {
         "error_record".to_string()
     }
 }
-/// 错误统计
+/// Aggregated counters and state flags for an error key.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ErrorStats {
-    /// 总错误次数
+    /// Total error count.
     pub total_errors: usize,
-    /// 成功次数
+    /// Total success count.
     pub success_count: usize,
-    /// 当前连续错误次数
+    /// Current streak of consecutive errors.
     pub consecutive_errors: usize,
-    /// 按类别分类的错误次数
+    /// Error counts grouped by category.
     pub errors_by_category: std::collections::HashMap<ErrorCategory, usize>,
-    /// 最后一次错误时间
+    /// UNIX timestamp of the latest error.
     pub last_error_time: Option<u64>,
-    /// 最后一次成功时间
+    /// UNIX timestamp of the latest success.
     pub last_success_time: Option<u64>,
     pub is_task_terminated: bool,
     pub is_module_terminated: bool,
@@ -90,6 +81,7 @@ impl CacheAble for ErrorStats {
 }
 
 impl ErrorStats {
+    /// Returns error ratio in `[0.0, 1.0]`.
     pub fn error_rate(&self) -> f64 {
         let total = self.total_errors + self.success_count;
         if total == 0 {
@@ -99,8 +91,24 @@ impl ErrorStats {
         }
     }
 
+    /// Computes a bounded health score where `1.0` is healthiest.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use common::status_tracker::ErrorStats;
+    ///
+    /// let mut stats = ErrorStats::default();
+    /// stats.total_errors = 3;
+    /// stats.success_count = 7;
+    /// assert_eq!(stats.error_rate(), 0.3);
+    /// assert!(stats.health_score() > 0.6);
+    ///
+    /// stats.consecutive_errors = 5;
+    /// assert!(stats.health_score() < 0.5);
+    /// ```
     pub fn health_score(&self) -> f64 {
-        // 健康度评分：0.0（非常不健康）到 1.0（非常健康）
+        // Health score in [0.0, 1.0].
         let error_rate = self.error_rate();
         let consecutive_penalty = (self.consecutive_errors as f64 * 0.1).min(0.5);
         (1.0 - error_rate - consecutive_penalty).max(0.0)
@@ -116,46 +124,45 @@ impl CacheAble for ModuleLocker {
         "module_locker".to_string()
     }
 }
-/// 错误决策
+/// Execution decision made after recording or checking errors.
 #[derive(Debug, Clone)]
 pub enum ErrorDecision {
-    /// 继续执行
+    /// Continue normal execution.
     Continue,
-    /// 延迟后重试
+    /// Retry after a delay.
     RetryAfter(Duration),
-    /// 跳过当前项（Request）
+    /// Skip current item (typically request-level).
     Skip,
-    /// 终止当前层级（Module 或 Task）
+    /// Terminate the current scope (module or task).
     Terminate(String),
 }
 
-/// 错误跟踪配置
+/// Runtime thresholds and behaviors for [`StatusTracker`].
 #[derive(Debug, Clone)]
 pub struct ErrorTrackerConfig {
-    /// Task 级别最大错误次数
+    /// Max task-level errors before termination.
     pub task_max_errors: usize,
-    /// Module 级别最大错误次数
+    /// Max module-level errors before termination.
     pub module_max_errors: usize,
-    /// Request 级别最大重试次数
+    /// Max request-level retries for download errors.
     pub request_max_retries: usize,
-    /// Parse 级别最大重试次数
+    /// Max request-level retries for parse errors.
     pub parse_max_retries: usize,
 
-    /// 是否启用成功后的错误衰减
+    /// Whether to apply decay after successful execution.
     pub enable_success_decay: bool,
-    /// 成功后减少的错误计数
+    /// Error decrement amount when decay is enabled.
     pub success_decay_amount: usize,
 
-    /// 是否启用时间窗口统计
+    /// Whether rolling time-window logic is enabled.
     pub enable_time_window: bool,
-    /// 时间窗口大小（秒）
+    /// Time-window size in seconds.
     pub time_window_seconds: u64,
 
-    /// 连续错误阈值（达到后降低健康度）
+    /// Consecutive-error threshold used by health scoring.
     pub consecutive_error_threshold: usize,
 
-    /// 错误记录过期时间（秒），从配置的 cache_ttl 读取
-    /// 用于自动清理过期的错误记录，避免历史错误永久影响判断
+    /// Error TTL in seconds for persisted tracker data.
     pub error_ttl: u64,
 }
 
@@ -171,14 +178,14 @@ impl Default for ErrorTrackerConfig {
             enable_time_window: false,
             time_window_seconds: 3600,
             consecutive_error_threshold: 3,
-            error_ttl: 3600, // 默认 1 小时过期
+            error_ttl: 3600,
         }
     }
 }
 
 use dashmap::DashMap;
 
-/// 多层级错误跟踪器
+/// Tracks and evaluates failures across request/module/task levels.
 #[derive(Clone)]
 pub struct StatusTracker {
     cache_service: Arc<CacheService>,
@@ -201,9 +208,9 @@ impl StatusTracker {
         }
     }
 
-    /// 记录下载错误
+    /// Records a download error and returns the next execution decision.
     ///
-    /// 影响范围：Request、Module、Task 三个层级都增加错误计数
+    /// Affects request, module, and task counters.
     pub async fn record_download_error(
         &self,
         task_id: &str,
@@ -229,7 +236,7 @@ impl StatusTracker {
         let module_errors = module_res?;
         let task_errors = task_res?;
 
-        // 4. 决策
+        // Decision stage.
         if severity == ErrorSeverity::Fatal {
             return Ok(ErrorDecision::Terminate(format!(
                 "Fatal error encountered: {}",
@@ -245,7 +252,7 @@ impl StatusTracker {
         }
 
         if module_errors >= self.config.module_max_errors {
-            // Module 达到错误阈值，释放锁
+            // Release lock when module threshold is reached.
             self.release_module_locker(module_id).await;
 
             return Ok(ErrorDecision::Terminate(format!(
@@ -258,7 +265,7 @@ impl StatusTracker {
             return Ok(ErrorDecision::Skip);
         }
 
-        // 根据错误类型决定重试延迟
+        // Delay strategy by category.
         let delay = match category {
             ErrorCategory::RateLimit => Duration::from_secs(60),
             ErrorCategory::Auth => Duration::from_secs(10),
@@ -268,11 +275,9 @@ impl StatusTracker {
         Ok(ErrorDecision::RetryAfter(delay))
     }
 
-    /// 记录下载成功（仅减少 Request 级别的错误计数）
+    /// Records a download success for request-local state.
     ///
-    /// 设计理念：
-    /// - Request 重试成功后，减少 Request 级别的错误（允许后续重试）
-    /// - Module 和 Task 级别的错误不减少（因为确实发生过错误）
+    /// This intentionally does not decrement historical module/task counters.
     pub async fn record_download_success(&self, request_id: &str) -> Result<()> {
         let request_key = format!("request:{}:download", request_id);
         
@@ -288,7 +293,7 @@ impl StatusTracker {
         Ok(())
     }
 
-    /// 记录解析错误（独立于下载错误）
+    /// Records a parse error using counters independent from download errors.
     pub async fn record_parse_error(
         &self,
         task_id: &str,
@@ -307,7 +312,7 @@ impl StatusTracker {
             error
         );
 
-        // 解析错误也影响三个层级，但使用独立的计数器
+        // Parse counters use separate keys while still updating three levels.
         let request_key = format!("request:{}:parse", request_id);
         let module_key = format!("module:{}:parse", module_id);
         let task_key = format!("task:{}:total", task_id);
@@ -332,7 +337,7 @@ impl StatusTracker {
             self.config.parse_max_retries
         );
 
-        // 决策逻辑与下载类似
+        // Decision logic mirrors download handling.
         if task_errors >= self.config.task_max_errors {
             return Ok(ErrorDecision::Terminate(format!(
                 "Task {} reached max errors: {}/{}",
@@ -341,7 +346,7 @@ impl StatusTracker {
         }
 
         if module_errors >= self.config.module_max_errors {
-            // Module 达到错误阈值，释放锁
+            // Release lock when module threshold is reached.
             self.release_module_locker(module_id).await;
 
             warn!(
@@ -362,7 +367,7 @@ impl StatusTracker {
         Ok(ErrorDecision::RetryAfter(Duration::from_secs(1)))
     }
 
-    /// 记录解析成功
+    /// Records a parse success by clearing request-local cached parse state.
     pub async fn record_parse_success(&self, request_id: &str) -> Result<()> {
         let request_key = format!("request:{}:parse", request_id);
         
@@ -374,9 +379,9 @@ impl StatusTracker {
         Ok(())
     }
 
-    /// 检查 Module 是否应该继续
+    /// Checks whether a module should continue execution.
     ///
-    /// 如果 Module 达到错误阈值，会自动释放该 Module 的分布式锁
+    /// Automatically releases module lock on termination threshold.
     pub async fn should_module_continue(&self, module_id: &str) -> Result<ErrorDecision> {
         // [OPTIMIZATION] Check cache first
         if let Some(entry) = self.cache.get(module_id) {
@@ -398,7 +403,7 @@ impl StatusTracker {
             self.get_error_count(&parse_key)
         );
 
-        // 先检查是否已被标记为终止
+        // Check explicit termination marker first.
         if terminated_res? {
             warn!(
                 "[ErrorTracker] module already terminated: module_id={}",
@@ -424,7 +429,7 @@ impl StatusTracker {
         );
 
         if total_errors >= self.config.module_max_errors {
-            // Module 达到错误阈值，标记为终止并释放锁
+            // Mark terminated and release lock when threshold is reached.
             self.mark_module_terminated(module_id).await?;
             self.release_module_locker(module_id).await;
 
@@ -450,7 +455,7 @@ impl StatusTracker {
         }
     }
 
-    /// 检查 Task 是否应该继续
+    /// Checks whether a task should continue execution.
     pub async fn should_task_continue(&self, task_id: &str) -> Result<ErrorDecision> {
         // [OPTIMIZATION] Check cache first
         if let Some(entry) = self.cache.get(task_id) {
@@ -470,7 +475,7 @@ impl StatusTracker {
             self.get_error_count(&task_key)
         );
 
-        // 先检查是否已被标记为终止
+        // Check explicit termination marker first.
         if terminated_res? {
             return Ok(ErrorDecision::Terminate(format!(
                 "Task {} has been terminated",
@@ -481,7 +486,7 @@ impl StatusTracker {
         let task_errors = count_res?;
 
         if task_errors >= self.config.task_max_errors {
-            // Task 达到错误阈值，标记为终止
+            // Mark terminated when threshold is reached.
             self.mark_task_terminated(task_id).await?;
 
             Ok(ErrorDecision::Terminate(format!(
@@ -493,7 +498,7 @@ impl StatusTracker {
         }
     }
 
-    /// 获取统计信息
+    /// Loads stats from in-memory cache first, then storage.
     pub async fn get_stats(&self, key: &str) -> Result<ErrorStats> {
          if let Some(entry) = self.cache.get(key) {
             let (stats, expires_at) = entry.value();
@@ -528,7 +533,7 @@ impl StatusTracker {
         }
     }
 
-    /// 标记 Task 为已终止
+    /// Marks a task as terminated.
     pub async fn mark_task_terminated(&self, task_id: &str) -> Result<()> {
         let cache_id = ErrorStats::cache_id(task_id, &self.cache_service);
         self.locker
@@ -543,12 +548,12 @@ impl StatusTracker {
         Ok(())
     }
 
-    /// 检查 Task 是否已被标记为终止
+    /// Returns whether a task is marked as terminated.
     pub async fn is_task_terminated(&self, task_id: &str) -> Result<bool> {
         match self.get_stats(task_id).await {
             Ok(stats) => Ok(stats.is_task_terminated),
             Err(e) => {
-                // 如果是 NotFound，说明还没有任何错误记录，肯定未终止
+                // NotFound means no record exists yet; treat as not terminated.
                 if let Some(cache_err) = e
                     .inner
                     .source
@@ -566,7 +571,7 @@ impl StatusTracker {
         }
     }
 
-    /// 标记 Module 为已终止
+    /// Marks a module as terminated.
     pub async fn mark_module_terminated(&self, module_id: &str) -> Result<()> {
         let cache_id = ErrorStats::cache_id(module_id, &self.cache_service);
         self.locker
@@ -581,12 +586,12 @@ impl StatusTracker {
         Ok(())
     }
 
-    /// 检查 Module 是否已被标记为终止
+    /// Returns whether a module is marked as terminated.
     pub async fn is_module_terminated(&self, module_id: &str) -> Result<bool> {
         match self.get_stats(module_id).await {
             Ok(stats) => Ok(stats.is_module_terminated),
             Err(e) => {
-                // 如果是 NotFound，说明还没有任何错误记录，肯定未终止
+                // NotFound means no record exists yet; treat as not terminated.
                 if let Some(cache_err) = e
                     .inner
                     .source
@@ -604,9 +609,9 @@ impl StatusTracker {
         }
     }
 
-    // === 私有辅助方法 ===
+    // Private helpers.
 
-    /// 递增错误计数 (使用 Redis 原子操作优化)
+    /// Increments error counters using atomic cache operations.
     async fn increment_error(
         &self,
         key: &str,
@@ -637,7 +642,7 @@ impl StatusTracker {
         Ok(total)
     }
 
-    /// 递减错误计数
+    /// Decrements total error counters.
     async fn decrement_error(&self, key: &str, amount: usize) -> Result<()> {
         let count_key = format!("{}:total_errors", key);
         // Atomic Decrement
@@ -651,7 +656,7 @@ impl StatusTracker {
     }
     
 
-    /// 递增成功计数
+    /// Increments success counters.
     async fn increment_success(&self, key: &str) -> Result<()> {
         let mut stats = self.get_stats(key).await.unwrap_or_default();
         stats.success_count += 1;
@@ -660,7 +665,7 @@ impl StatusTracker {
         Ok(())
     }
 
-    /// 重置连续错误计数
+    /// Resets consecutive error counters.
     async fn reset_consecutive_errors(&self, key: &str) -> Result<()> {
         let mut stats = self.get_stats(key).await.unwrap_or_default();
         stats.consecutive_errors = 0;
@@ -668,7 +673,7 @@ impl StatusTracker {
         Ok(())
     }
 
-    /// 获取错误计数
+    /// Reads the total error count for a key.
     async fn get_error_count(&self, key: &str) -> Result<usize> {
         let count_key = format!("{}:total_errors", key);
         if let Some(val) = self.cache_service.get(&count_key).await? {
@@ -683,12 +688,12 @@ impl StatusTracker {
         Ok(0)
     }
 
-    /// 保存统计信息
+    /// Saves stats using default TTL behavior.
     async fn save_stats(&self, key: &str, stats: &ErrorStats) -> Result<()> {
         self.save_stats_with_ttl(key, stats).await
     }
 
-    /// 保存统计信息（带 TTL）
+    /// Saves stats and refreshes short-lived in-memory cache.
     async fn save_stats_with_ttl(&self, key: &str, stats: &ErrorStats) -> Result<()> {
         self.cache.insert(key.to_string(), (stats.clone(), Instant::now() + Duration::from_secs(10)));
         stats
@@ -697,7 +702,7 @@ impl StatusTracker {
             .map_err(Error::from)
     }
 
-    /// 错误严重程度分类
+    /// Classifies raw error text into severity tiers.
     fn classify_error_severity(&self, error: &Error) -> ErrorSeverity {
         let error_str = error.to_string().to_lowercase();
 

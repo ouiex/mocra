@@ -1,12 +1,12 @@
 #![allow(unused)]
-// 模块链式处理器（无全局状态机版本）
-// 设计要点：
-// - 不维护全局 step 索引，所有上下文通过 Request/Response 自带的 ExecutionMark 传递（包含 module_id/step_idx）。
-// - 链式回退通过 request.prefix_request（指向“前置请求”的 request.id）来追溯，所有 Request 以 request.id 为 key 持久化到 Redis。
-// - 生成失败（execute_request）时：若存在前置请求可回退，则最多回退一次（FallbackGate 门闸），否则直接报错。
-// - 解析失败（execute_parser）时：直接返回带错误的 ParserData（ErrorTaskModel），并通过 ExecutionMark.context 标记当前步；
-//   错误链路重入生成时，通过外部传入的 ExecutionMark（例如 ErrorTaskModel.context）精确重试当前步的 generate（不推进到下一步），不再污染 metadata。
-// - 若解析成功但未返回 ParserTaskModel 且存在下一步，使用一次性门闸（AdvanceGate）合成“占位任务”推进下一步，避免多实例重复推进。
+// Chain-oriented module processor without a global state machine index.
+// Design principles:
+// - Step routing uses ExecutionMark carried by Request/Response (module_id + step_idx).
+// - Fallback traces prior request via prefix_request; requests are persisted by request.id.
+// - Generation failure allows at most one fallback per (step, prefix) gate.
+// - Parser failure emits ErrorTaskModel tagged with current step context.
+// - If parser succeeds but yields no ParserTaskModel while next step exists,
+//   a one-shot advance gate can synthesize a placeholder task.
 
 use common::model::ExecutionMark;
 use common::model::chain_key;
@@ -66,7 +66,7 @@ impl CacheAble for RequeueData {
 
 // --------------------------
 
-/// 执行状态信息（用于调试和监控）
+/// Execution status snapshot for diagnostics and observability.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExecutionStatus {
     pub module_id: String,
@@ -75,16 +75,16 @@ pub struct ExecutionStatus {
     pub active_gates: Vec<GateInfo>,
 }
 
-/// 门闸状态信息
+/// Gate status details.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GateInfo {
-    pub gate_type: String, // "advance" or "fallback"
+    pub gate_type: String,
     pub step_idx: Option<usize>,
     pub field_name: String,
     pub value: serde_json::Value,
 }
 
-/// 步骤执行统计信息
+/// Per-step lightweight statistics payload.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StepStats {
     pub step_idx: usize,
@@ -92,10 +92,12 @@ pub struct StepStats {
     pub run_id: Uuid,
 }
 
-/// 链式处理器：不依赖全局状态机/索引。
-/// - 每个 Request/Response 自带 ExecutionMark（module_id/step_idx）。
-/// - 节点间的链式追溯通过 request.prefix_request（指向前置 request.id）。
-/// - Request 以 request.id 持久化在 Redis，失败时可从 Redis 恢复上一个请求。
+/// Chain processor that routes execution by per-request context instead of global cursor.
+///
+/// Key behavior:
+/// - ExecutionMark drives node selection.
+/// - prefix_request enables fallback tracing.
+/// - Request persistence allows recovering previous hop on failure.
 #[derive(Clone)]
 pub struct ModuleProcessorWithChain {
     module_id: String,
@@ -108,6 +110,7 @@ pub struct ModuleProcessorWithChain {
 }
 
 impl ModuleProcessorWithChain {
+    /// Creates a chain processor scoped to one module + run id.
     pub fn new<M: Into<String>>(
         module_id: M,
         state: Arc<CacheService>,
@@ -125,9 +128,9 @@ impl ModuleProcessorWithChain {
         }
     }
 
-    // 内部：为单个 step 生成请求（可链式/非链式），由统一入口调用 execute_request_impl
+    // Internal helper note: single-step request generation is delegated by execute_request_impl.
 
-    /// 添加一个节点（顺序即执行顺序）
+    /// Adds one step node. Insertion order equals execution order.
     pub async fn add_step_node(&self, node: Arc<dyn ModuleNodeTrait>) {
         let mut steps_guard = self.steps.write().await;
         steps_guard.push(node);
@@ -147,7 +150,7 @@ impl ModuleProcessorWithChain {
         chain_key::legacy_execution_state_key(self.run_id, &self.module_id)
     }
 
-    /// 将 Request 以 request.id 作为 key 持久化（供回退/恢复使用）
+    /// Persists request by request.id for fallback/recovery lookup.
     async fn save_request(&self, req: &Request) -> Result<()> {
         let id = req.id.to_string();
         req.send(&id,&self.cache).await.ok();
@@ -163,8 +166,7 @@ impl ModuleProcessorWithChain {
         Ok(())
     }
 
-    // 使用一次性门闸标记“已推进到下一步”：
-    // 仅用于在解析成功但未返回 ParserTaskModel 时，合成占位任务推进下一步（避免多实例重复推进）。
+    // One-shot advance marker used when synthesizing placeholder task progression.
     async fn try_mark_step_advanced_once(&self, step_idx: usize) -> Result<bool> {
         let id_str = chain_key::module_step_advance_once_key(self.run_id, &self.module_id, step_idx);
         let legacy_id_str =
@@ -187,7 +189,7 @@ impl ModuleProcessorWithChain {
         Ok(won)
     }
 
-    // 回退门闸：对同一 (step_idx, prefix_request) 仅允许回退一次，防止生成失败时的无限回退循环。
+    // One-shot fallback marker to prevent infinite fallback loops.
     async fn try_allow_fallback_once(&self, step_idx: usize, prefix: &Uuid) -> Result<bool> {
         let id_str =
             chain_key::module_step_fallback_once_key(self.run_id, &self.module_id, step_idx, *prefix);
@@ -227,11 +229,10 @@ impl ModuleProcessorWithChain {
         Ok(None)
     }
 
-    /// 将“需要重入队列”的意图持久化（上层可据此拉起重入）。
-    /// 返回可恢复的前置 Request（若存在）。
+    /// Persists requeue intent and returns recoverable previous request when available.
     pub async fn mark_requeue(&self, id: &Uuid) -> Result<Option<Request>> {
         if id.is_nil() {
-            // 非链式或首节点，无需回退
+            // First-step/non-chain path has no previous request to recover.
             return Ok(None);
         }
         debug!(
@@ -260,7 +261,7 @@ impl ModuleProcessorWithChain {
         self.steps.read().await.len()
     }
 
-    /// 获取当前执行状态（用于调试和监控）
+    /// Returns current execution status summary.
     pub async fn get_execution_status(&self) -> Result<ExecutionStatus> {
         let steps_count = self.steps.read().await.len();
         let active_gates = self.query_active_gates().await?;
@@ -273,7 +274,7 @@ impl ModuleProcessorWithChain {
         })
     }
 
-    /// 查询所有活跃的门闸状态
+    /// Scans and returns active advance/fallback gates.
     async fn query_active_gates(&self) -> Result<Vec<GateInfo>> {
         let mut gates = Vec::new();
         let id_base = self.advance_key(); // run:{run}:module:{mod}
@@ -331,7 +332,7 @@ impl ModuleProcessorWithChain {
         Ok(gates)
     }
 
-    /// 获取指定步骤的执行统计
+    /// Returns step-level stats payload for one step index.
     pub async fn get_step_stats(&self, step_idx: usize) -> Result<StepStats> {
         let steps_count = self.steps.read().await.len();
 
@@ -345,15 +346,13 @@ impl ModuleProcessorWithChain {
             step_idx,
             module_id: self.module_id.clone(),
             run_id: self.run_id,
-            // 这里可以扩展更多统计信息，如执行次数、成功率等
+            // Extension point for richer metrics (attempt count, success rate, latency).
         })
     }
 
-    // 已移除：steps_len（非链式遍历不再支持，统一按链式推进）
+    // Removed legacy steps_len traversal path; chain progression is context-driven.
 
-    /// 判断任务是否面向当前模块
-    /// - 若 context.module_id 明确指定，直接比较
-    /// - 若 context.module_id 缺省，检查 TaskModel.module 列表是否包含当前模块
+    /// Returns whether a parser task targets current module.
     fn is_task_for_current_module(
         &self,
         ctx: &ExecutionMark,
@@ -362,12 +361,11 @@ impl ModuleProcessorWithChain {
         if let Some(mid) = &ctx.module_id {
             return mid == &self.module_id;
         }
-        // context 没有 module_id，检查 task 的 module 列表
+        // If context has no module id, fallback to task module list.
         task_modules.iter().any(|m| m == &self.module_id)
     }
 
-    /// 判断是否应该在最后一步终止
-    /// 避免无限循环：在最后一步且没有明确推进到更远步骤时应该终止
+    /// Determines whether chain should terminate at last step to avoid loops.
     pub fn should_terminate_at_last_step(
         &self,
         current_step: usize,
@@ -380,14 +378,11 @@ impl ModuleProcessorWithChain {
             return false;
         }
 
-        // 在最后一步且没有显式推进到更远的步骤
-        // 注意：即使 stay_current_step=true，如果 task_step <= current_step 也应该终止
-        // 否则会陷入无限重入循环
+        // Last-step loop guard.
         task_step <= current_step && !stay_current
     }
 
-    /// 解析执行上下文：统一处理 ctx 和 prefix_request 的各种组合
-    /// 返回 (ExecutionMark, prefix_uuid)
+    /// Resolves effective execution context from optional ctx + prefix request.
     async fn resolve_execution_context(
         &self,
         ctx: Option<ExecutionMark>,
@@ -395,16 +390,14 @@ impl ModuleProcessorWithChain {
     ) -> Result<(ExecutionMark, Uuid)> {
         let prefix = prefix_request.unwrap_or(Uuid::nil());
 
-        // 情况1: 需要从 prefix_request 推断下一步
-        // - ctx 不存在，或
-        // - ctx 存在但 module_id 匹配且 step_idx 缺失
+        // Case 1: infer next step from prefix request when allowed.
         let should_infer_from_prefix = if let Some(ref existing_ctx) = ctx {
-            // ctx 存在：只有当 module_id 匹配且 step_idx 缺失时才推断
+            // Infer only when module matches and step is absent.
             existing_ctx.module_id.as_ref().map(|m| m == &self.module_id).unwrap_or(false)
                 && existing_ctx.step_idx.is_none()
                 && !prefix.is_nil()
         } else {
-            // ctx 不存在：如果有非空 prefix 则推断
+            // No ctx: infer when prefix exists.
             !prefix.is_nil()
         };
 
@@ -431,11 +424,10 @@ impl ModuleProcessorWithChain {
             }
         }
 
-        // 情况2: 使用传入的 ctx（需要验证和补全）
+        // Case 2: normalize provided context.
         let mut effective_ctx = match ctx {
             Some(ctx) => {
-                // 若传递的 ctx.module_id 与当前不符，则重建上下文
-                // 此情况适用于跨模块调用时，确保上下文正确
+            // Rebuild context when module_id mismatches current module.
                 if ctx.module_id.as_ref().map(|m| m == &self.module_id).unwrap_or(false) {
                     ctx
                 } else {
@@ -455,7 +447,7 @@ impl ModuleProcessorWithChain {
             }
         };
 
-        // 确保 module_id 和 step_idx 都有值
+        // Ensure module_id and step_idx are set.
         if effective_ctx.module_id.is_none() {
             effective_ctx = effective_ctx.with_module_id(self.module_id.clone());
         }
@@ -466,10 +458,11 @@ impl ModuleProcessorWithChain {
         Ok((effective_ctx, prefix))
     }
 
-    /// 统一入口：按链式生成当前 step 的请求
-    /// 行为规则
-    /// - 若未提供 step 且传入非空 prefix_request：从前置 Request 推断下一步并生成。
-    /// - 否则：使用 ctx.step_idx（默认 0）在当前节点生成；prefix 缺省为 Nil（首节点）。
+    /// Unified request-generation entry for chain mode.
+    ///
+    /// Rules:
+    /// - when prefix is provided and context lacks explicit step, infer next step;
+    /// - otherwise use ctx.step_idx (default 0).
     pub async fn execute_request(
         &self,
         config: Arc<ModuleConfig>,
@@ -481,7 +474,7 @@ impl ModuleProcessorWithChain {
         if self.is_stopped().await? {
             return Ok(Box::pin(futures::stream::empty()));
         }
-        // 统一解析执行上下文
+        // Resolve effective execution context.
         let (effective_ctx, effective_prefix) = self
             .resolve_execution_context(ctx, prefix_request)
             .await?;
@@ -498,9 +491,9 @@ impl ModuleProcessorWithChain {
             .await
     }
 
-    /// 在 ctx.step_idx（默认 0）所指节点生成请求（无全局状态）。
-    /// - 成功：每个 Request 以 request.id 持久化。
-    /// - 失败：若 prefix_request 非 Nil，则尝试回退到前置 Request 并返回；否则（首节点）冒泡错误。
+    /// Generates requests for one resolved step.
+    ///
+    /// On failure with non-nil prefix, a one-shot fallback may return previous request.
     async fn execute_request_impl(
         &self,
         config: Arc<ModuleConfig>,
@@ -521,7 +514,7 @@ impl ModuleProcessorWithChain {
             }
             steps[step_idx].clone()
         };
-        // 非链式的“只推进一次”逻辑已移至 execute_parser 的占位任务生成前做校验
+        // One-time advancement logic lives in execute_parser placeholder synthesis path.
         let gen_ctx = {
             // Ensure module_id and step_idx are set
             let mut mark = ctx.clone();
@@ -593,17 +586,16 @@ impl ModuleProcessorWithChain {
                 Ok(Box::pin(stream))
             }
             Err(e) => {
-                // 生成失败恢复策略
+                // Generation failure recovery policy.
                 if prefix_request.is_nil() {
-                    // 首节点：没有前驱请求可回退，直接返回错误
+                    // First step: no fallback target.
                     warn!(
                         "[chain] module={} run={} execute_request_impl: generation error at first step={}, no prefix, err={}",
                         self.module_id, self.run_id, step_idx, e
                     );
                     Err(e)
                 } else {
-                    // 非首节点：优先返回“前置 Request”给上层，触发上一跳重试；
-                    // 使用一次性门闸避免在同一 (step_idx, prefix_request) 上无限回退。
+                    // Non-first step: try one-shot fallback to previous request.
                     if self
                         .try_allow_fallback_once(step_idx, &prefix_request)
                         .await?
@@ -622,10 +614,10 @@ impl ModuleProcessorWithChain {
                                     self.module_id, self.run_id, step_idx, e
                                 );
                                 Err(e)
-                            } // 未能找回前置请求，则退回错误
+                            }
                         }
                     } else {
-                        // 回退已发生过：直接冒泡错误，打破死循环
+                        // Fallback already consumed.
                         warn!(
                             "[chain] module={} run={} execute_request_impl: generation error at step={}, fallback suppressed (already done), err={}",
                             self.module_id, self.run_id, step_idx, e
@@ -637,13 +629,10 @@ impl ModuleProcessorWithChain {
         }
     }
 
-    /// 将 Response 路由到其 context.step_idx 对应的解析节点（无全局状态）。
-    /// - 若解析成功：
-    ///   - 返回 ParserTaskModel 时：如未明确推进且存在下一步，则自动推进一步；同时绑定 prefix_request。
-    ///   - 未返回 ParserTaskModel 且存在下一步：通过一次性门闸合成“占位任务”推进下一步（避免重复推进）。
-    /// - 若解析失败：
-    ///   - 返回携带 ErrorTaskModel 的 ParserData，使用 ExecutionMark.context 标明当前步；
-    ///     后续错误链路重入时，上层将该 context 传回 execute_request 以精确重试当前步。
+    /// Parses response at routed step and decides next task progression.
+    ///
+    /// Success path may advance context or synthesize placeholder task via one-shot gate.
+    /// Failure path emits ErrorTaskModel with current-step context for precise retry.
     pub async fn execute_parser(
         &self,
         response: Response,
@@ -669,17 +658,17 @@ impl ModuleProcessorWithChain {
                 }
                 // Ensure chain prefix points to the current request (request.id carried in response.prefix_request)
                 if let Some(ref mut task) = data.parser_task {
-                    // 1) 将回退指针绑定到“当前这一步的请求”（即 request.id，经 downloader 写入 response.prefix_request）
+                    // 1) Bind fallback pointer to the current-step request id.
                     task.prefix_request = response.prefix_request;
 
-                    // 2) 防御性推进：若解析返回的任务未设置下一步上下文，或仍停留在当前 step，则推进到下一步
-                    //    - 确保 module_id 存在
-                    //    - 当存在下一步节点时，step_idx 置为 step_idx + 1
+                    // 2) Defensive step advancement:
+                    //    - ensure module_id exists for same-module continuation,
+                    //    - advance to next step when parser didn't explicitly advance.
                     let total = {
                         let steps = self.steps.read().await;
                         steps.len()
                     };
-                    // 以当前任务的上下文为基准；避免覆盖跨模块交接
+                    // Base adjustments on task context to avoid overriding cross-module handoff.
                     let mut next_ctx = task.context.clone();
                     let task_modules = task
                         .account_task
@@ -687,22 +676,22 @@ impl ModuleProcessorWithChain {
                         .clone()
                         .unwrap_or_default();
 
-                    // 使用辅助方法判定该任务是否面向当前模块
+                    // Check whether task targets current module.
                     let same_module = self.is_task_for_current_module(&next_ctx, &task_modules);
 
-                    // 仅当确认同模块时，才补齐 module_id，确保跨模块时不被错误覆盖
+                    // Fill module_id only for same-module path.
                     if same_module && next_ctx.module_id.is_none() {
                         next_ctx = next_ctx.with_module_id(self.module_id.clone());
                     }
 
-                    // 当前/缺省步骤索引
+                    // Current/default step index.
                     let task_step = next_ctx.step_idx.unwrap_or(step_idx as u32) as usize;
                     let mut desired_step = task_step;
 
                     if same_module {
-                        // honour stay_current_step：若显式要求停留在当前步，则不推进
+                        // Honor stay_current_step: do not advance when explicitly requested.
                         if !next_ctx.stay_current_step {
-                            // 当任务没有显式推进，且尚有下一步时，推进到下一步
+                            // Auto-advance by one when parser did not explicitly advance.
                             if task_step <= step_idx {
                                 let maybe_next = step_idx + 1;
                                 if maybe_next < total {
@@ -713,7 +702,7 @@ impl ModuleProcessorWithChain {
                             desired_step = step_idx;
                         }
 
-                        // 使用辅助方法判断是否应该终止
+                        // Apply last-step loop guard.
                         if self.should_terminate_at_last_step(
                             step_idx,
                             task_step,
@@ -728,7 +717,7 @@ impl ModuleProcessorWithChain {
                             return Ok(data);
                         }
                     } else {
-                        // 跨模块任务：不在本模块内调整步进或终止，直接返回由上层调度到目标模块
+                        // Cross-module task: leave context untouched for upper-layer routing.
                         task.context = next_ctx;
                         debug!(
                             "[chain] module={} run={} execute_parser: task targets other module -> pass-through",
@@ -737,7 +726,7 @@ impl ModuleProcessorWithChain {
                         return Ok(data);
                     }
 
-                    // 只有在需要变更时才写入，避免无意义写入
+                    // Write context only when changed.
                     if next_ctx.step_idx.map(|s| s as usize) != Some(desired_step) {
                         next_ctx = next_ctx.with_step_idx(desired_step as u32);
                         task.context = next_ctx;
@@ -746,7 +735,7 @@ impl ModuleProcessorWithChain {
                             self.module_id, self.run_id, desired_step, step_idx
                         );
                     } else {
-                        // 也要确保 module_id 一致
+                        // Keep module id consistent even without step movement.
                         task.context = next_ctx;
                         debug!(
                             "[chain] module={} run={} execute_parser: task present, keep context at step {}",
@@ -754,7 +743,7 @@ impl ModuleProcessorWithChain {
                         );
                     }
                 } else {
-                    // 若无 ParserTaskModel，且存在下一个 step，则尝试通过一次性门闸合成“占位”任务推进下一步
+                    // No ParserTaskModel: optionally synthesize placeholder task for next step.
                     let total = {
                         let steps = self.steps.read().await;
                         steps.len()
@@ -765,8 +754,7 @@ impl ModuleProcessorWithChain {
                             "[chain] module={} run={} execute_parser: no task, consider advance to step {} via advance gate",
                             self.module_id, self.run_id, next_idx
                         );
-                        // 统一：不再依赖 prefix 判定链式/非链式；仅通过一次性门闸控制推进
-                        // 可选：若担心下一步已执行过，可在此处先查 exec gate 再决定是否推进
+                        // Progression is gate-driven rather than prefix-driven.
                         if self.try_mark_step_advanced_once(step_idx).await? {
                             let base: ParserTaskModel = (&response).into();
                             let next_ctx = ExecutionMark::default()
@@ -790,9 +778,9 @@ impl ModuleProcessorWithChain {
                 Ok(data)
             }
             Err(e) => {
-                // 解析失败：直接返回一个 ErrorTaskModel，标明当前 step，以便错误链路据此重试当前节点
+                // Parser failure: emit ErrorTaskModel for precise same-step retry.
                 let step_idx_u32 = response.context.step_idx.unwrap_or(0);
-                // 直接透传现有元数据；重试步信息不再写入 metadata，避免污染
+                // Preserve metadata as-is; avoid retry-step metadata pollution.
                 let meta =
                     serde_json::to_value(&response.metadata).unwrap_or(serde_json::json!({}));
                 let error_task =ErrorTaskModel {

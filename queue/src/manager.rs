@@ -542,8 +542,9 @@ impl QueueManager {
         self.channel.response_sender.clone()
     }
 
-    /// 尝试直接发送到本地消费者 (绕过 Redis/Kafka)
-    /// 用于优化：如果本地有消费者且 channel 未满，直接发送，避免序列化和网络开销。
+    /// Attempts to send directly to local consumers (bypassing Redis/Kafka).
+    /// Optimization: if local consumers exist and the channel is not full, send
+    /// directly to avoid serialization and network overhead.
     pub fn try_send_local_response(&self, item: QueuedItem<Response>) -> Result<(), tokio::sync::mpsc::error::TrySendError<QueuedItem<Response>>> {
         self.channel.remote_response_sender.try_send(item)
     }

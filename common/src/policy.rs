@@ -1,35 +1,55 @@
 use errors::{Error, ErrorKind};
 use serde::{Deserialize, Serialize};
 
+/// Retry backoff strategy used by a resolved policy.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum BackoffPolicy {
+    /// Do not delay between retries.
     None,
+    /// Increase delay by a fixed amount each retry until `max_ms`.
     Linear { base_ms: u64, max_ms: u64 },
+    /// Increase delay exponentially until `max_ms`.
     Exponential { base_ms: u64, max_ms: u64 },
 }
 
+/// Dead-letter queue strategy for failed events.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum DlqPolicy {
+    /// Never route to DLQ.
     Never,
+    /// Route to DLQ only after retries are exhausted.
     OnExhausted,
+    /// Always route to DLQ immediately.
     Always,
 }
 
+/// Alert severity emitted for a handled error.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum AlertLevel {
+    /// Informational signal.
     Info,
+    /// Warning-level alert.
     Warn,
+    /// Error-level alert.
     Error,
+    /// Critical operational alert.
     Critical,
 }
 
+/// Fully materialized policy returned by the resolver.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Policy {
+    /// Whether retry is allowed.
     pub retryable: bool,
+    /// Backoff strategy for retries.
     pub backoff: BackoffPolicy,
+    /// DLQ routing behavior.
     pub dlq: DlqPolicy,
+    /// Alerting level.
     pub alert: AlertLevel,
+    /// Maximum retry attempts.
     pub max_retries: u32,
+    /// Initial backoff value in milliseconds.
     pub backoff_ms: u64,
 }
 
@@ -51,35 +71,52 @@ impl Default for Policy {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct PolicyConfig {
+    /// Override rules applied on top of built-in defaults.
     pub overrides: Vec<PolicyOverride>,
 }
 
+/// A conditional rule used to override the default policy.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PolicyOverride {
+    /// Optional domain match, e.g. `engine`.
     pub domain: Option<String>,
+    /// Optional event type match, e.g. `download`.
     pub event_type: Option<String>,
+    /// Optional lifecycle phase match, e.g. `failed`.
     pub phase: Option<String>,
+    /// Required error kind match.
     pub kind: ErrorKind,
+    /// Optional override for retryability.
     pub retryable: Option<bool>,
+    /// Optional override for backoff strategy.
     pub backoff: Option<BackoffPolicy>,
+    /// Optional override for DLQ strategy.
     pub dlq: Option<DlqPolicy>,
+    /// Optional override for alert level.
     pub alert: Option<AlertLevel>,
+    /// Optional override for max retries.
     pub max_retries: Option<u32>,
+    /// Optional override for initial backoff in milliseconds.
     pub backoff_ms: Option<u64>,
 }
 
+/// Resolver output with the selected policy and a normalized reason key.
 #[derive(Debug, Clone)]
 pub struct Decision {
+    /// The resolved policy after defaults + overrides.
     pub policy: Policy,
+    /// A normalized trace key in the format `domain/event/phase/kind`.
     pub reason: String,
 }
 
+/// Resolves runtime error handling policies using default rules and optional overrides.
 #[derive(Debug, Clone)]
 pub struct PolicyResolver {
     overrides: Vec<PolicyOverride>,
 }
 
 impl PolicyResolver {
+    /// Creates a resolver from optional config.
     pub fn new(config: Option<&PolicyConfig>) -> Self {
         let overrides = config
             .map(|cfg| cfg.overrides.clone())
@@ -87,6 +124,7 @@ impl PolicyResolver {
         Self { overrides }
     }
 
+    /// Resolves a policy from a concrete [`Error`].
     pub fn resolve_with_error(
         &self,
         domain: &str,
@@ -97,6 +135,25 @@ impl PolicyResolver {
         self.resolve_with_kind(domain, event_type, phase, err.kind().clone())
     }
 
+    /// Resolves a policy from a known [`ErrorKind`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use common::policy::{DlqPolicy, PolicyResolver};
+    /// use errors::ErrorKind;
+    ///
+    /// let resolver = PolicyResolver::new(None);
+    /// let decision = resolver.resolve_with_kind(
+    ///     "engine",
+    ///     Some("parser"),
+    ///     Some("failed"),
+    ///     ErrorKind::Parser,
+    /// );
+    ///
+    /// assert!(!decision.policy.retryable);
+    /// assert_eq!(decision.policy.dlq, DlqPolicy::Always);
+    /// ```
     pub fn resolve_with_kind(
         &self,
         domain: &str,

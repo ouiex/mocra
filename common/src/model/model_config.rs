@@ -3,19 +3,19 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use cacheable::CacheAble;
 
-/// 工作模块配置信息
+/// Module-level configuration snapshot.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModuleConfig {
-    pub account_config: serde_json::Value,  // 来自账号表的配置
-    pub platform_config: serde_json::Value, // 来自平台表的配置
-    pub module_config: serde_json::Value,   // 来自模块本身的配置
-    pub data_middleware_config: HashMap<String, serde_json::Value>, // 来自数据中间件表的配置
-    pub download_middleware_config: HashMap<String, serde_json::Value>, // 来自下载中间件表的配置
+    pub account_config: serde_json::Value,  // Configuration loaded from account table.
+    pub platform_config: serde_json::Value, // Configuration loaded from platform table.
+    pub module_config: serde_json::Value,   // Configuration defined on the module itself.
+    pub data_middleware_config: HashMap<String, serde_json::Value>, // Data middleware configs.
+    pub download_middleware_config: HashMap<String, serde_json::Value>, // Download middleware configs.
     pub rel_account_platform_config: serde_json::Value,
-    pub rel_module_account_config: serde_json::Value, // 模块与账号的关联配置
-    pub rel_module_platform_config: serde_json::Value, // 模块与平台的关联配置
-    pub rel_module_data_middleware_config: HashMap<String, serde_json::Value>, // 模块与数据中间件的关联配置
-    pub rel_module_download_middleware_config: HashMap<String, serde_json::Value>, // 模块与下载中间件的关联配置
+    pub rel_module_account_config: serde_json::Value, // Module-account relation config.
+    pub rel_module_platform_config: serde_json::Value, // Module-platform relation config.
+    pub rel_module_data_middleware_config: HashMap<String, serde_json::Value>, // Module-data-middleware relation config.
+    pub rel_module_download_middleware_config: HashMap<String, serde_json::Value>, // Module-download-middleware relation config.
 }
 impl Default for ModuleConfig {
     fn default() -> Self {
@@ -34,29 +34,29 @@ impl Default for ModuleConfig {
     }
 }
 impl ModuleConfig {
-    /// 获取合并后的配置，优先级：module_config > rel_platform_config >
+    /// Returns merged configuration with priority: `module_config > rel_platform_config >`
     /// rel_account_config > rel_data_middleware_config > rel_download_middleware_config >
     /// platform_config > account_config
     pub fn get_merged_config(&self) -> serde_json::Value {
         let mut merged = serde_json::Map::new();
 
-        // 按优先级从低到高添加配置
+        // Merge from lower priority to higher priority.
 
-        // 1. 最低优先级：账号基础配置
+        // 1. Lowest priority: account base config.
         if let serde_json::Value::Object(account_config) = &self.account_config {
             for (key, value) in account_config {
                 merged.insert(key.clone(), value.clone());
             }
         }
 
-        // 2. 平台基础配置
+        // 2. Platform base config.
         if let serde_json::Value::Object(platform_config) = &self.platform_config {
             for (key, value) in platform_config {
                 merged.insert(key.clone(), value.clone());
             }
         }
 
-        // 3. 下载中间件基础配置
+        // 3. Download middleware base config.
         for (_, config) in self.download_middleware_config.iter() {
             if let serde_json::Value::Object(download_config) = config {
                 for (key, value) in download_config {
@@ -65,7 +65,7 @@ impl ModuleConfig {
             }
         }
 
-        // 4. 数据中间件基础配置
+        // 4. Data middleware base config.
         for (_, config) in self.data_middleware_config.iter() {
             if let serde_json::Value::Object(data_config) = config {
                 for (key, value) in data_config {
@@ -80,7 +80,7 @@ impl ModuleConfig {
             }
         }
 
-        // 5. 模块与下载中间件关联配置
+        // 5. Module-download-middleware relation config.
         for (_, config) in self.rel_module_download_middleware_config.iter() {
             if let serde_json::Value::Object(rel_download_config) = config {
                 for (key, value) in rel_download_config {
@@ -89,7 +89,7 @@ impl ModuleConfig {
             }
         }
 
-        // 6. 模块与数据中间件关联配置
+        // 6. Module-data-middleware relation config.
         for (_, config) in self.rel_module_data_middleware_config.iter() {
             if let serde_json::Value::Object(rel_data_config) = config {
                 for (key, value) in rel_data_config {
@@ -98,21 +98,21 @@ impl ModuleConfig {
             }
         }
 
-        // 7. 模块与账号关联配置
+        // 7. Module-account relation config.
         if let serde_json::Value::Object(rel_account_config) = &self.rel_module_account_config {
             for (key, value) in rel_account_config {
                 merged.insert(key.clone(), value.clone());
             }
         }
 
-        // 8. 模块与平台关联配置
+        // 8. Module-platform relation config.
         if let serde_json::Value::Object(rel_platform_config) = &self.rel_module_platform_config {
             for (key, value) in rel_platform_config {
                 merged.insert(key.clone(), value.clone());
             }
         }
 
-        // 9. 最高优先级：模块自身配置
+        // 9. Highest priority: module self config.
         if let serde_json::Value::Object(module_config) = &self.module_config {
             for (key, value) in module_config {
                 merged.insert(key.clone(), value.clone());
@@ -122,27 +122,27 @@ impl ModuleConfig {
         serde_json::Value::Object(merged)
     }
 
-    /// 获取特定键的配置值，按优先级查找
+    /// Returns the configuration value for a key using priority-based lookup.
     pub fn get_config_value(&self, key: &str) -> Option<&serde_json::Value> {
-        // 1. 最高优先级：模块自身配置
+        // 1. Highest priority: module self config.
         if let serde_json::Value::Object(module_config) = &self.module_config
             && let Some(value) = module_config.get(key) {
                 return Some(value);
             }
 
-        // 2. 模块与平台关联配置
+        // 2. Module-platform relation config.
         if let serde_json::Value::Object(rel_platform_config) = &self.rel_module_platform_config
             && let Some(value) = rel_platform_config.get(key) {
                 return Some(value);
             }
 
-        // 3. 模块与账号关联配置
+        // 3. Module-account relation config.
         if let serde_json::Value::Object(rel_account_config) = &self.rel_module_account_config
             && let Some(value) = rel_account_config.get(key) {
                 return Some(value);
             }
 
-        // 4. 模块与数据中间件关联配置
+        // 4. Module-data-middleware relation config.
         for (_, config) in self.rel_module_data_middleware_config.iter() {
             if let serde_json::Value::Object(rel_data_config) = config
                 && let Some(value) = rel_data_config.get(key) {
@@ -150,7 +150,7 @@ impl ModuleConfig {
                 }
         }
 
-        // 5. 模块与下载中间件关联配置
+        // 5. Module-download-middleware relation config.
         for (_, config) in self.rel_module_download_middleware_config.iter() {
             if let serde_json::Value::Object(rel_download_config) = config
                 && let Some(value) = rel_download_config.get(key) {
@@ -163,17 +163,17 @@ impl ModuleConfig {
             && let Some(value) = rel_account_platform_config.get(key) {
                 return Some(value);
             }
-        // 6. 平台基础配置
+        // 6. Platform base config.
         if let serde_json::Value::Object(platform_config) = &self.platform_config
             && let Some(value) = platform_config.get(key) {
                 return Some(value);
             }
-        // 账号基础配置
+        // Account base config.
         if let serde_json::Value::Object(account_config) = &self.account_config
             && let Some(value) = account_config.get(key) {
                 return Some(value);
             }
-        // 7. 数据中间件基础配置
+        // 7. Data middleware base config.
         for (_, config) in self.download_middleware_config.iter() {
             if let serde_json::Value::Object(data_config) = config
                 && let Some(value) = data_config.get(key) {
@@ -181,7 +181,7 @@ impl ModuleConfig {
                 }
         }
 
-        // 8. 下载中间件基础配置
+        // 8. Download middleware base config.
         for (_, config) in self.data_middleware_config.iter() {
             if let serde_json::Value::Object(download_config) = config
                 && let Some(value) = download_config.get(key) {

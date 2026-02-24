@@ -33,17 +33,22 @@ use crate::deduplication::Deduplicator;
 use crate::lua::LuaScriptRegistry;
 use crate::chain::backpressure::{BackpressureSendState, send_with_backpressure};
 
+/// High-level action produced by threshold checks in ingress chains.
 #[derive(Debug, Clone)]
 pub enum ChainDecision {
+    /// Continue processing without side effects.
     Continue,
+    /// Retry current path after delay.
     RetryAfter {
         delay: std::time::Duration,
         action_applied: bool,
     },
+    /// Stop processing for the current module scope.
     TerminateModule {
         reason: String,
         action_applied: bool,
     },
+    /// Stop processing for the current task scope.
     TerminateTask {
         reason: String,
         action_applied: bool,
@@ -106,11 +111,15 @@ mod decision_tests {
 }
 
 #[async_trait]
+/// Abstraction for threshold and termination decisions.
 pub trait ThresholdDecisionService: Send + Sync {
+    /// Performs preflight validation before task expansion.
     async fn task_precheck(&self, task_id: &str) -> ChainDecision;
+    /// Decides how to handle an `ErrorTaskModel` path.
     async fn error_task_decide(&self, input: &ErrorTaskModel) -> ChainDecision;
 }
 
+/// Default threshold decision service backed by `StatusTracker` and optional Lua atomics.
 #[derive(Clone)]
 pub struct StatusTrackerThresholdDecisionService {
     state: Arc<State>,
@@ -118,6 +127,7 @@ pub struct StatusTrackerThresholdDecisionService {
 }
 
 impl StatusTrackerThresholdDecisionService {
+    /// Creates a service with fallback-safe behavior when Lua is unavailable.
     pub fn new(state: Arc<State>, lua_registry: Option<Arc<LuaScriptRegistry>>) -> Self {
         Self { state, lua_registry }
     }
@@ -409,10 +419,13 @@ impl ThresholdDecisionService for StatusTrackerThresholdDecisionService {
     }
 }
 
-/// 任务模型处理器
+/// First ingress processor for `TaskModel` and `ParserTaskModel` variants.
 ///
-/// 负责处理 TaskModel，协调配置加载、任务转换、请求发布等流程。
-/// 作为事件驱动的处理链的一部分，它会发布处理过程中的状态变更事件。
+/// Responsibilities:
+/// - pre-check task thresholds,
+/// - load/construct `Task`,
+/// - handle error-task retry/terminate decisions,
+/// - emit semantic events for observability.
 pub struct TaskModelProcessor {
     task_manager: Arc<TaskManager>,
     state: Arc<State>,
@@ -768,7 +781,7 @@ impl ProcessorTrait<ParserTaskModel, Task> for TaskModelProcessor {
                 .unwrap_or(0)
         );
 
-        // 首先检查 Task 是否已被标记为终止
+        // Check whether this task scope has already been terminated.
         let task_id = chain_key::task_runtime_id(
             &input.account_task.platform,
             &input.account_task.account,
@@ -1038,19 +1051,6 @@ impl ProcessorTrait<ErrorTaskModel, Task> for TaskModelProcessor {
     async fn pre_process(&self, _input: &ErrorTaskModel, _context: &ProcessorContext) -> Result<()> {
         Ok(())
     }
-    // async fn handle_error(
-    //     &self,
-    //     input: &ParserErrorMessage,
-    //     _error: Error,
-    //     _context: &ProcessorContext,
-    // ) -> ProcessorResult<Task> {
-    //     // 由于使用的是动态加载dylib,task_manager.load_error可能未能加载到正确的库
-    //     let sender = self.queue_manager.get_error_push_channel();
-    //     sender.send(input.to_owned()).await.unwrap();
-    //     ProcessorResult::FatalFailure(
-    //         ModuleError::ModuleNotFound("Failed to load task, re-queued".into()).into(),
-    //     )
-    // }
 }
 #[async_trait]
 impl EventProcessorTrait<ErrorTaskModel, Task> for TaskModelProcessor {
@@ -1126,7 +1126,7 @@ impl ProcessorTrait<Task, Vec<Module>> for TaskModuleProcessor {
         let mut modules: Vec<Module> = Vec::new();
         let default_locker_ttl = self.state.config.read().await.crawler.module_locker_ttl;
         for mut module in input.modules {
-            // 使用 ErrorTracker 检查 Module 是否应该继续
+            // Check module-level threshold before generating requests.
             match self
                 .state
                 .status_tracker
@@ -1140,13 +1140,13 @@ impl ProcessorTrait<Task, Vec<Module>> for TaskModuleProcessor {
                     );
                 }
                 Ok(ErrorDecision::Terminate(reason)) => {
-                    // Module 已达到错误阈值，跳过该 Module，继续处理其他 Module
+                    // Module reached threshold; skip it and continue with others.
                     error!(
                         "[TaskModuleProcessor] skip terminated module: module_id={} reason={}",
                         module.id(),
                         reason
                     );
-                    // 不返回错误，只是跳过这个 Module
+                    // Skip only this module; keep pipeline alive.
                     continue;
                 }
                 Err(e) => {
@@ -1220,10 +1220,8 @@ impl ProcessorTrait<Module, SyncBoxStream<'static, Request>> for TaskProcessor {
         );
 
         let (meta, login_info) = input.runtime_task_context();
-        // TaskModel
-        // ParserTaskModel.meta=>Task.metadata=>Module.bind_task_context=>Module.generate=>ModuleTrait.generate
-        // [LOG_OPTIMIZATION] debug!("[TaskProcessor] start generate: module_id={}", input.id());
-        // panic!("DEBUG PANIC: Reached input.generate"); 
+        // Context propagation path:
+        // `ParserTaskModel.meta -> Task.metadata -> Module.bind_task_context -> Module.generate`.
         let requests: SyncBoxStream<'static, Request> = match input.generate(meta, login_info).await {
             Ok(stream) => stream,
             Err(e) => {
@@ -1243,12 +1241,7 @@ impl ProcessorTrait<Module, SyncBoxStream<'static, Request>> for TaskProcessor {
         _output: &SyncBoxStream<'static, Request>,
         _context: &ProcessorContext,
     ) -> Result<()> {
-        // Stream based post_process can't easily check for empty output without consuming.
-        // We might need to move lock release logic elsewhere or wrap the stream.
-        // For now, we skip the empty check.
-        // if output.is_empty() {
-        //    self.sync_service.release_module_locker(&input.id()).await;
-        // }
+        // Stream-based output cannot be checked for emptiness here without consumption.
         Ok(())
     }
 }
@@ -1348,12 +1341,10 @@ impl ProcessorTrait<Request, ()> for RequestPublish {
             module_id
         );
 
-        // 1. Persist request to Redis (for chain fallback)
-        // Moved from ModuleProcessorWithChain to support streaming
+        // Persist request for downstream fallback/recovery.
         let id = input.id.to_string();
 
-        // Performance Optimization: Fire-and-forget cache write using spawn
-        // Offload serialization and IO to background task to unblock stream processing
+        // Fire-and-forget cache persistence to avoid blocking hot stream path.
         let cache_service = self.state.cache_service.clone();
         let request_clone = input.clone();
 
@@ -1364,7 +1355,6 @@ impl ProcessorTrait<Request, ()> for RequestPublish {
             }
         });
 
-        // [LOG_OPTIMIZATION] debug!("[RequestPublish] start queue send: request_id={}", request_id);
         let tx = self.queue_manager.get_request_push_channel();
         match send_with_backpressure(&tx, QueuedItem::new(input)).await {
             Ok(BackpressureSendState::Direct) => {}
@@ -1402,7 +1392,6 @@ impl ProcessorTrait<Request, ()> for RequestPublish {
                 return ProcessorResult::RetryableFailure(retry_policy);
             }
         }
-        // [LOG_OPTIMIZATION] debug!("[RequestPublish] end queue send: request_id={}", id); // id is string here
         ProcessorResult::Success(())
     }
     async fn handle_error(
@@ -1480,8 +1469,7 @@ impl ProcessorTrait<Request, (Request, Option<ModuleConfig>)> for ConfigProcesso
         input: Request,
         context: ProcessorContext,
     ) -> ProcessorResult<(Request, Option<ModuleConfig>)> {
-        // ModuleConfig在factory::load_with_model里进行了上传，使用module::id()作为唯一标识
-        // 这里进行下载
+        // ModuleConfig is persisted by loader flow keyed by `module_id`; read-through here.
         match ModuleConfig::sync(&input.module_id(), &self.state.cache_service).await {
             Ok(Some(config)) => ProcessorResult::Success((input, Some(config))),
             Ok(None) => ProcessorResult::Success((input, None)),
@@ -1547,7 +1535,7 @@ use crate::task::module::Module;
 
 pub type SyncBoxStream<'a, T> = Pin<Box<dyn Stream<Item=T> + Send + Sync + 'a>>;
 
-/// task_model -> task -> request -> () (publish request to queue)
+/// Converts a vector into a boxed stream for stream-native chain stages.
 pub struct VecToStreamProcessor<T> {
     _marker: PhantomData<T>,
 }
@@ -1777,12 +1765,16 @@ async fn build_request_deduplicator(state: &Arc<State>) -> Option<Arc<Deduplicat
 }
 
 pub struct UnifiedTaskIngressChain {
+    /// Ingress chain for standard task creation path.
     task_chain: Arc<EventAwareTypedChain<TaskModel, SyncBoxStream<'static, ()>>>,
+    /// Ingress chain for parser-produced follow-up tasks.
     parser_chain: Arc<EventAwareTypedChain<ParserTaskModel, SyncBoxStream<'static, ()>>>,
+    /// Ingress chain for error-task retries/termination path.
     error_chain: Arc<EventAwareTypedChain<ErrorTaskModel, SyncBoxStream<'static, ()>>>,
 }
 
 impl UnifiedTaskIngressChain {
+    /// Constructs a multiplexer over three ingress typed chains.
     pub fn new(
         task_chain: Arc<EventAwareTypedChain<TaskModel, SyncBoxStream<'static, ()>>>,
         parser_chain: Arc<EventAwareTypedChain<ParserTaskModel, SyncBoxStream<'static, ()>>>,
@@ -1808,6 +1800,12 @@ impl UnifiedTaskIngressChain {
     }
 }
 
+/// Builds the unified ingress chain graph used by task workers.
+///
+/// The resulting chain set handles three inputs:
+/// - `TaskModel` (initial tasks),
+/// - `ParserTaskModel` (parser-produced tasks),
+/// - `ErrorTaskModel` (retry/threshold-controlled tasks).
 pub async fn create_unified_task_ingress_chain(
     task_manager: Arc<TaskManager>,
     queue_manager: Arc<QueueManager>,

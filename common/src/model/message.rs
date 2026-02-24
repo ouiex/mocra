@@ -10,20 +10,20 @@ use uuid::Uuid;
 
 #[derive(Debug, Clone, Copy)]
 pub enum TopicType {
-    /// 任务队列
+    /// Task queue.
     Task,
-    /// 请求队列
+    /// Request queue.
     Request,
-    /// 响应队列 (原始任务数据)
+    /// Response queue (raw task output).
     Response,
-    /// 解析任务队列 (处理结果)
+    /// Parser task queue (processed results).
     ParserTask,
-    /// 错误队列 (错误信息)
+    /// Error queue (error details).
     Error,
 }
 
 impl TopicType {
-    /// 获取topic后缀
+    /// Returns topic suffix.
     pub(crate) fn suffix(&self) -> &'static str {
         match self {
             TopicType::Response => "response",
@@ -38,27 +38,27 @@ impl TopicType {
     }
 }
 
-/// 任务消息模型
+/// Parser task message model.
 ///
-/// 用于在解析完成后生成新的任务，或者流转到下一个处理阶段。
-/// 包含了任务的基本信息、元数据、上下文以及前置请求的引用。
+/// Used to create downstream tasks after parsing, or move to the next processing stage.
+/// Contains task identity, metadata, execution context, and predecessor request reference.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ParserTaskModel {
-    /// 唯一标识
+    /// Unique identifier.
     pub id: Uuid,
-    /// 关联的账号任务信息
+    /// Associated account task information.
     pub account_task: TaskModel,
-    /// 时间戳
+    /// Timestamp.
     pub timestamp: u64,
-    /// 元数据 (ParserTaskModel.meta => Task.metadata => Context.meta.task_meta => Module.generate)
+    /// Metadata (`ParserTaskModel.meta => Task.metadata => Context.meta.task_meta => Module.generate`).
     #[serde(with = "crate::model::serde_value::value")]
     pub metadata: serde_json::Value,
-    /// 执行上下文 (ExecutionMark)
+    /// Execution context (`ExecutionMark`).
     pub context: ExecutionMark,
-    /// 运行标识 (Run ID)
+    /// Run identifier (Run ID).
     #[serde(default = "default_run_id")]
     pub run_id: Uuid,
-    /// 前置请求标识
+    /// Predecessor request identifier.
     pub prefix_request: Uuid,
 }
 
@@ -76,23 +76,22 @@ impl Offloadable for ParserTaskModel {
 }
 
 impl ParserTaskModel {
-    /// 为解析链设置明确的执行上下文（ExecutionMark）。
+    /// Sets explicit execution context (`ExecutionMark`) for parser-chain execution.
     ///
-    /// 用途：
-    /// - 精确控制目标模块从哪一个 step 开始执行（例如从 0 开始，或在错误重试时停留在当前步）。
-    /// - 可结合 `stay_current_step` 防止自动推进到下一步。
+    /// Typical uses:
+    /// - Precisely control which step index target module starts from.
+    /// - Combine with `stay_current_step` to prevent auto-advancing.
     pub fn with_context(mut self, ctx: ExecutionMark) -> Self {
         self.context = ctx;
         self
     }
-    /// 标记：本次任务应当停留在当前解析节点，避免自动推进到下一步。
+    /// Marks this task to stay on the current parser node and avoid auto-advance.
     ///
-    /// 说明：
-    /// - 当解析器返回 ParserTaskModel 且调用了该方法时，链式处理器会在本步循环（不前进）。
-    /// - 若未调用该方法（或解析器未返回 ParserTaskModel），则视为本步循环结束，继续后续流程。
+    /// Behavior:
+    /// - When parser returns `ParserTaskModel` and this is set, the chain loops on this step.
+    /// - Otherwise, the loop is considered complete and processing continues.
     pub fn stay_current_step(mut self) -> Self {
-        // 仅需设置 ExecutionMark 的 stay_current_step 标志；
-        // 实际执行时，处理器会将步进锁定在当前 Response 的 step 索引。
+        // Set `ExecutionMark.stay_current_step`; executor locks progress to current response step.
         self.context.stay_current_step = true;
         self
     }
@@ -122,15 +121,15 @@ impl ParserTaskModel {
         }
         self
     }
-    /// 覆盖链式回溯指针（指向前置 Request 的 request.id）。
+    /// Overrides chain backtracking pointer (points to predecessor `Request.id`).
     ///
-    /// 默认情况下，`ParserTaskModel` 会从 `Response.prefix_request` 继承该指针，
-    /// 在跨模块时可按需显式指定，以改变首次失败回溯的落点。
+    /// By default this pointer is inherited from `Response.prefix_request`.
+    /// For cross-module jumps, you can set it explicitly to change first-failure fallback target.
     pub fn with_prefix_request(mut self, prefix: Uuid) -> Self {
         self.prefix_request = prefix;
         self
     }
-    // 为指定的模块创建一个新的ParserTaskModel，必须来自同一个account+platform
+    // Creates a new `ParserTaskModel` for target module within same account + platform.
     pub fn start_other_module(response: &Response, module_name: impl AsRef<str>) -> Self {
         debug_assert!(
             !module_name.as_ref().is_empty(),
@@ -147,17 +146,17 @@ impl ParserTaskModel {
             },
             timestamp: chrono::Utc::now().timestamp() as u64,
             metadata: json!({}),
-            // 重置context  确保指定的模块从头开始执行
+            // Reset context to ensure target module starts from the beginning.
             context: ExecutionMark::default(),
             run_id: Uuid::now_v7(),
             prefix_request: response.prefix_request,
         }
     }
-    /// 为指定的模块创建 ParserTaskModel（可显式指定上下文）。
+    /// Creates `ParserTaskModel` for target module with explicit context.
     ///
-    /// 典型用法：
-    /// - 从其它模块跨跳到目标模块的第 0 步：传入 `ExecutionMark::default().with_step_idx(0)`。
-    /// - 在错误重试场景中，停留在当前步：传入带 `stay_current_step=true` 的 `ExecutionMark`。
+    /// Typical usage:
+    /// - Cross-jump to step 0: pass `ExecutionMark::default().with_step_idx(0)`.
+    /// - Stay on current step during retry: pass `ExecutionMark` with `stay_current_step=true`.
     pub fn start_other_module_with_ctx(
         response: &Response,
         module_name: impl AsRef<str>,
@@ -185,28 +184,28 @@ impl ParserTaskModel {
     }
 }
 
-/// 错误消息模型
+/// Error task message model.
 ///
-/// 记录任务处理过程中发生的错误，包含错误信息和上下文。
+/// Records processing-time errors, including error details and execution context.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ErrorTaskModel {
-    /// 唯一标识
+    /// Unique identifier.
     pub id: Uuid,
-    /// 关联的账号任务信息
+    /// Associated account task information.
     pub account_task: TaskModel,
-    /// 错误信息
+    /// Error message.
     pub error_msg: String,
-    /// 时间戳
+    /// Timestamp.
     pub timestamp: u64,
-    /// 元数据
+    /// Metadata.
     #[serde(with = "crate::model::serde_value::value")]
     pub metadata: serde_json::Value,
-    /// 执行上下文
+    /// Execution context.
     pub context: ExecutionMark,
-    /// 运行标识
+    /// Run identifier.
     #[serde(default = "default_run_id")]
     pub run_id: Uuid,
-    /// 前置请求标识 (指向前置 Request.id)
+    /// Predecessor request identifier (points to predecessor `Request.id`).
     pub prefix_request: Uuid,
 }
 
@@ -232,21 +231,21 @@ impl ErrorTaskModel {
         self
     }
 }
-/// 基础任务模型
+/// Base task model.
 ///
-/// 定义了任务的最小单元，包含账号、平台和模块信息。
+/// Defines minimal task identity with account, platform, and module information.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskModel {
-    /// 账号标识
+    /// Account identifier.
     pub account: String,
-    /// 平台标识
+    /// Platform identifier.
     pub platform: String,
-    /// 模块列表 (可选，若为空则包含所有模块)
+    /// Module list (optional; empty means all modules).
     pub module: Option<Vec<String>>,
-    /// 优先级
+    /// Priority.
     #[serde(default)]
     pub priority: crate::model::Priority,
-    /// 运行标识
+    /// Run identifier.
     #[serde(default = "default_run_id")]
     pub run_id: Uuid,
 }
@@ -364,18 +363,18 @@ fn default_run_id() -> Uuid {
     Uuid::now_v7()
 }
 
-/// 解析器数据封装
+/// Parser output envelope.
 ///
-/// 包含解析出的数据、新的任务、错误信息以及控制指令。
+/// Contains parsed data, next task, error task, and control flags.
 #[derive(Debug, Default)]
 pub struct ParserData {
-    /// 解析出的数据列表
+    /// Parsed data list.
     pub data: Vec<Data>,
-    /// 生成的新任务 (可选)
+    /// Generated next parser task (optional).
     pub parser_task: Option<ParserTaskModel>,
-    /// 生成的错误任务 (可选)
+    /// Generated error task (optional).
     pub error_task: Option<ErrorTaskModel>,
-    /// 停止标志 (可选)
+    /// Stop flag (optional).
     pub stop: Option<bool>,
 }
 impl ParserData {
@@ -392,8 +391,8 @@ impl ParserData {
         self
     }
 
-    /// wss 连接关闭标志，用于通知上层模块关闭连接
-    /// 模块级别的停止标志，true=>后续的请求将不再被处理，
+    /// Module-level stop flag; when `true`, subsequent requests are no longer processed.
+    /// For WSS flows this can be used to signal upper layers to close connection.
     pub fn with_stop(mut self, stop: bool) -> Self {
         self.stop = Some(stop);
         self

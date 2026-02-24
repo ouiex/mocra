@@ -5,6 +5,10 @@ use queue::Identifiable;
 use metrics::gauge;
 use tracing::Instrument;
 
+/// Generic concurrent runner for queue-driven processors.
+///
+/// The runner coordinates pause/resume state, graceful shutdown, and bounded
+/// in-flight concurrency via a semaphore.
 pub struct ProcessorRunner {
     pub name: String,
     pub shutdown_rx: broadcast::Receiver<()>,
@@ -13,6 +17,7 @@ pub struct ProcessorRunner {
 }
 
 impl ProcessorRunner {
+    /// Creates a named runner with pause/shutdown controls and max concurrency.
     pub fn new(
         name: &str,
         shutdown_rx: broadcast::Receiver<()>,
@@ -27,6 +32,12 @@ impl ProcessorRunner {
         }
     }
 
+    /// Starts consuming items and dispatching processing tasks.
+    ///
+    /// Behavior:
+    /// - Pulls one item, then greedily drains a small batch.
+    /// - Uses a semaphore permit per spawned task to cap parallelism.
+    /// - Reacts to pause/shutdown signals between receives and dispatch.
     pub async fn run<T, F, Fut>(
         mut self,
         receiver: Arc<Mutex<mpsc::Receiver<T>>>,
@@ -45,7 +56,7 @@ impl ProcessorRunner {
         let mut loop_count: u64 = 0;
 
         loop {
-            // Check pause state
+            // Honor pause signal before attempting to receive.
             if *self.pause_rx.borrow() {
                 if self.pause_rx.changed().await.is_err() { break; }
                 continue;
@@ -65,8 +76,7 @@ impl ProcessorRunner {
                             let mut items = Vec::with_capacity(100);
                             items.push(first_item);
 
-                            // Greedy batch receive
-                            // Limit batch size to 100 or concurrency/10 to avoid starving others or holding too much memory
+                            // Greedy batch receive with conservative upper bound.
                             let batch_limit = 100.min(self.concurrency / 2).max(1);
                             for _ in 0..batch_limit {
                                 match rx.try_recv() {
@@ -82,7 +92,7 @@ impl ProcessorRunner {
 
                             for item in items {
                                 let permit = loop {
-                                    // 1. Check if paused
+                                    // 1) Check pause state.
                                     if *self.pause_rx.borrow() {
                                          tokio::select! {
                                              _ = self.shutdown_rx.recv() => break None,
@@ -90,7 +100,7 @@ impl ProcessorRunner {
                                          }
                                     }
 
-                                    // 2. Try acquire or wait for pause/shutdown
+                                    // 2) Acquire permit or react to pause/shutdown.
                                     tokio::select! {
                                         _ = self.shutdown_rx.recv() => break None,
                                         _ = self.pause_rx.changed() => continue,
@@ -105,7 +115,7 @@ impl ProcessorRunner {
 
                                 let permit = match permit {
                                     Some(p) => p,
-                                    None => break, // Shutdown or error, break items loop
+                                    None => break,
                                 };
 
                                 let execute_fn = execute_fn.clone();
@@ -115,7 +125,7 @@ impl ProcessorRunner {
 
                                 tokio::spawn(async move {
                                     gauge!("engine_active_tasks", "processor" => metric_label.clone()).increment(1.0);
-                                    let _permit = permit; // Hold permit
+                                    let _permit = permit;
                                     execute_fn(item).await;
                                     gauge!("engine_active_tasks", "processor" => metric_label).decrement(1.0);
                                 }.instrument(tracing::info_span!("processor_execution", processor_type = %span_name, item_id = %task_id)));

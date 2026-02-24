@@ -9,7 +9,8 @@ use serde::{Deserialize, Deserializer, Serialize};
 use url::Url;
 use std::fmt;
 
-/// cookie由外部来保证是否有效，这里只做简单的序列化和反序列化，不验证有效性
+/// Cookie validity is managed externally.
+/// This type only performs serialization/deserialization and does not validate cookie validity.
 #[derive(Serialize, Clone)]
 pub struct CookieItem {
     pub name: String,
@@ -49,7 +50,7 @@ impl<'de> Deserialize<'de> for CookieItem {
             match v {
                 serde_json::Value::Null => None,
                 serde_json::Value::Number(n) => n.as_f64().map(|u| {
-                    // 处理毫秒时间戳（大于等于 1e12 视为毫秒）
+                    // Handle millisecond timestamps (>= 1e12 is treated as milliseconds).
                     if u.abs() >= 1_000_000_000_000.0 {
                         u / 1000.0
                     } else {
@@ -61,7 +62,7 @@ impl<'de> Deserialize<'de> for CookieItem {
             }
         }
 
-        // 简单解析 "YYYY/M/D HH:MM:SS" 或 "YYYY-MM-DD HH:MM:SS" 到秒
+        // Parse "YYYY/M/D HH:MM:SS" or "YYYY-MM-DD HH:MM:SS" into seconds.
         fn parse_expiration_date_str(s: &str) -> Option<f64> {
             let (date_part, time_part) = s.split_once(' ')?;
 
@@ -331,20 +332,20 @@ impl From<Cookies> for Jar {
         let jar = Jar::default();
 
         for cookie_item in value.cookies {
-            // 构建 cookie 字符串
+            // Build cookie string.
             let mut cookie_str = format!("{}={}", cookie_item.name, cookie_item.value);
 
-            // 添加域名
+            // Add domain.
             if !cookie_item.domain.is_empty() {
                 cookie_str.push_str(&format!("; Domain={}", cookie_item.domain));
             }
 
-            // 添加路径
+            // Add path.
             if !cookie_item.path.is_empty() {
                 cookie_str.push_str(&format!("; Path={}", cookie_item.path));
             }
 
-            // 添加过期时间（按 Cookie 标准使用 GMT 时间）
+            // Add expiration (GMT, per cookie spec).
             if let Some(expires) = cookie_item.expires
                 && let Some(dt) = Utc.timestamp_opt(expires as i64, 0).single() {
                     cookie_str.push_str(&format!(
@@ -353,22 +354,22 @@ impl From<Cookies> for Jar {
                     ));
                 }
 
-            // 添加 Max-Age（秒）
+            // Add Max-Age (seconds).
             if let Some(max_age) = cookie_item.max_age {
                 cookie_str.push_str(&format!("; Max-Age={max_age}"));
             }
 
-            // 添加 Secure 标志
+            // Add Secure flag.
             if cookie_item.secure {
                 cookie_str.push_str("; Secure");
             }
 
-            // 添加 HttpOnly 标志
+            // Add HttpOnly flag.
             if cookie_item.http_only == Some(true) {
                 cookie_str.push_str("; HttpOnly");
             }
 
-            // 构建 URL（使用域名）
+            // Build URL using domain.
             let url_str = if cookie_item.secure {
                 format!("https://{}", cookie_item.domain)
             } else {
@@ -415,23 +416,23 @@ impl From<CookieStore> for Cookies {
     fn from(value: CookieStore) -> Self {
         let mut cookies = Vec::new();
 
-        // 遍历 CookieStore 中的所有 cookies
+        // Iterate through all cookies in `CookieStore`.
         for cookie in value.iter_any() {
             let cookie_item = CookieItem {
                 name: cookie.name().to_string(),
                 value: cookie.value().to_string(),
                 domain: cookie.domain().map(|d| d.to_string()).unwrap_or_default(),
                 path: cookie.path().map(|p| p.to_string()).unwrap_or_default(),
-                // 将过期时间统一转换为秒（Unix 时间戳，u64）
+                // Normalize expiration to seconds (Unix timestamp, `u64`).
                 expires: cookie.expires().and_then(|exp| {
                     exp.datetime().map(|x| {
                         let ts = x.unix_timestamp();
                         if ts < 0 { 0 } else { ts as u64 }
                     })
                 }),
-                // Max-Age（秒），若不可用则为 None
+                // Max-Age (seconds), or `None` when unavailable.
                 max_age: cookie.max_age().map(|duration| {
-                    // cookie_store 的 Duration 通常来自 time crate
+                    // `cookie_store` duration usually comes from `time` crate.
                     {
                         (duration.whole_seconds()).max(0) as u64
                     }
@@ -452,23 +453,23 @@ impl TryFrom<&Cookies> for CookieStore {
         let mut store = CookieStore::default();
 
         for cookie_item in &value.cookies {
-            // 构建 cookie 字符串
+            // Build cookie string.
             let mut cookie_str = format!("{}={}", cookie_item.name, cookie_item.value);
 
-            // 若提供了域名，则设置为 Domain Cookie；规范上不需要前导点，统一去掉
+            // If domain is provided, create Domain Cookie; leading dot is stripped per normalization.
             let normalized_domain = cookie_item.domain.trim().trim_start_matches('.');
             if !normalized_domain.is_empty() {
                 cookie_str.push_str(&format!("; Domain={}", normalized_domain));
             }
 
-            // Path（默认为 "/" 覆盖更广）
+            // Path (default `/` for broader matching).
             if !cookie_item.path.is_empty() {
                 cookie_str.push_str(&format!("; Path={}", cookie_item.path));
             } else {
                 cookie_str.push_str("; Path=/");
             }
 
-            // Expires（GMT 格式）
+            // Expires (GMT format).
             // if let Some(expires) = &cookie_item.expires {
             //     if let Some(dt) = Utc.timestamp_opt(*expires as i64, 0).single() {
             //         cookie_str.push_str(&format!(
@@ -477,12 +478,12 @@ impl TryFrom<&Cookies> for CookieStore {
             //         ));
             //     }
             // }
-            // Max-Age（秒）
+            // Max-Age (seconds).
             // if let Some(max_age) = &cookie_item.max_age {
             //     cookie_str.push_str(&format!("; Max-Age={}", max_age));
             // }
 
-            // 标志位
+            // Flags.
             if cookie_item.secure {
                 cookie_str.push_str("; Secure");
             }
@@ -490,10 +491,11 @@ impl TryFrom<&Cookies> for CookieStore {
                 cookie_str.push_str("; HttpOnly");
             }
 
-            // 构建 URL（修剪前导点，避免诸如 .example.com 导致的非法主机）
+            // Build URL (trim leading dot to avoid invalid hosts like `.example.com`).
             let host = normalized_domain;
             if host.is_empty() {
-                // 缺少域名时无法确定 Host-Only 的宿主，这里跳过（若需绑定到特定域，请使用 into_store_for_base_url）
+                // Without domain we cannot infer host-only owner; skip here.
+                // Use `into_store_for_base_url` when binding to a specific host is required.
                 continue;
             }
             let url_str = if cookie_item.secure {

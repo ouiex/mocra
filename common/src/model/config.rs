@@ -328,7 +328,7 @@ impl Config {
 
     /// Loads configuration from a TOML file
     pub fn load(path: &str) -> Result<Self, String> {
-        // 读取config.toml文件
+        // Read `config.toml` file content.
         let config_str = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
         let config: Config = toml::from_str(&config_str).map_err(|e| e.to_string())?;
         Ok(config)

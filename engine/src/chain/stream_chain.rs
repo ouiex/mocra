@@ -22,6 +22,10 @@ use common::model::{ModuleConfig, Request};
 use common::state::State;
 use common::stream_stats::StreamStats;
 
+/// WebSocket download processor that delegates response publishing in post-process.
+///
+/// This processor emits `()` on success because actual response handling is driven
+/// by the websocket subscription loop started in `post_process`.
 struct WebSocketDownloadProcessor {
     queue_manager: Arc<QueueManager>,
     wss_downloader: Arc<WebSocketDownloader>,
@@ -47,9 +51,7 @@ impl ProcessorTrait<(Option<Request>, Option<ModuleConfig>), ()> for WebSocketDo
         let module_id = request.module_id();
         let response = self.wss_downloader.send(request).await;
         match response {
-            // web_socket_downloader需要持有一个与queue_manager不同的消息队列，需要取出Response进行middleware处理和发布
-            // 这种情况下，返回值为()，表示下载成功，需要在post_process中使用middleware处理和发布
-            // post_process
+            // For websocket mode, response forwarding happens asynchronously in post-process.
             Ok(_resp) => ProcessorResult::Success(()),
             Err(e) => {
                 warn!(
@@ -72,13 +74,13 @@ impl ProcessorTrait<(Option<Request>, Option<ModuleConfig>), ()> for WebSocketDo
             Some(request) => request,
             None => return Ok(()),
         };
-        // 从response_recv中取出Response进行middleware处理和发布
+        // Read responses from websocket receiver and publish through queue manager.
         let (tx, mut rx) = tokio::sync::mpsc::channel(100);
         let timeout = input.1.as_ref().and_then(|x|x.get_config::<u64>("wss_timeout")).unwrap_or(60);
         let module_id = request.module_id();
 
 
-        // 注册监听器，确保只接收当前模块的消息
+        // Register module-scoped subscription.
         self.wss_downloader.subscribe(module_id.clone(), tx).await;
 
         let sender = self.queue_manager.get_response_push_channel().clone();
@@ -97,7 +99,7 @@ impl ProcessorTrait<(Option<Request>, Option<ModuleConfig>), ()> for WebSocketDo
                 tokio::select! {
                     _ = stop_check.tick() => {
                         let key = format!("run:{}:module:{}", run_id, module_id_clone);
-                        // 检查 Redis 中的 stop 字段
+                        // Check distributed stop flag.
                         let stream_stats = StreamStats::sync(&key,&cache_service).await;
                         if let Ok(Some(val)) = stream_stats
                              && val.0{
@@ -106,7 +108,7 @@ impl ProcessorTrait<(Option<Request>, Option<ModuleConfig>), ()> for WebSocketDo
                                  break;
                              }
                         
-                        // 检查空闲超时 (60s)
+                        // Check idle timeout.
                         if last_activity.elapsed() > Duration::from_secs(timeout) {
                              let active = wss_downloader.active_count().await;
                              if active == 0 {
@@ -119,7 +121,7 @@ impl ProcessorTrait<(Option<Request>, Option<ModuleConfig>), ()> for WebSocketDo
                         last_activity = tokio::time::Instant::now();
                         match res {
                             Some(response) => {
-                                // 收到响应，进行处理
+                                // Handle middleware + queue publish.
                                 let modified_response = middleware_manager.handle_response(response, &config).await;
                                 let Some(modified_response) = modified_response else {
                                     continue;
@@ -137,7 +139,7 @@ impl ProcessorTrait<(Option<Request>, Option<ModuleConfig>), ()> for WebSocketDo
                                 }
                             }
                             None => {
-                                // 通道已关闭，正常退出
+                                // Channel closed, exit loop gracefully.
                                 log::info!("[ResponsePublish] WebSocket response channel closed for module {}, exiting...", module_id_clone);
                                 break;
                             }
@@ -145,7 +147,7 @@ impl ProcessorTrait<(Option<Request>, Option<ModuleConfig>), ()> for WebSocketDo
                     }
                 }
             }
-            // 任务结束时取消注册
+            // Always remove subscription on task exit.
             wss_downloader.unsubscribe(&module_id_clone).await;
             log::info!("[ResponsePublish] Task completed for module {}", module_id_clone);
         });
@@ -237,6 +239,8 @@ impl EventProcessorTrait<(Option<Request>, Option<ModuleConfig>), ()> for WebSoc
     }
 }
 
+/// Builds websocket request chain:
+/// config -> proxy middleware -> request middleware -> websocket download/subscription.
 pub async fn create_wss_download_chain(
     state:Arc<State>,
     downloader_manager: Arc<DownloaderManager>,

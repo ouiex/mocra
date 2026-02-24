@@ -26,6 +26,11 @@ use std::time::{Instant, Duration};
 use common::status_tracker::ErrorDecision;
 use serde_json::json;
 use crate::chain::backpressure::{BackpressureSendState, send_with_backpressure};
+
+/// Download-stage processor.
+///
+/// It performs defensive threshold checks, selects a downloader implementation,
+/// executes the request, and maps outcomes into chain semantics.
 pub struct DownloadProcessor {
     pub(crate) downloader_manager: Arc<DownloaderManager>,
     pub(crate) state: Arc<State>,
@@ -60,16 +65,15 @@ for DownloadProcessor
         let is_retry = context.retry_policy.as_ref().map(|r| r.current_retry > 0).unwrap_or(false);
 
         if !is_retry {
-            // 分布式场景下的防御性检查
-            // TaskModelChain 和 DownloadChain 运行在不同节点，需要在执行前再次检查最新错误状态
+            // Defensive checks in distributed mode: ingress and download may run on different nodes.
 
-            // 1. 检查 Task 级别错误 (带缓存优化)
+            // 1) Task-level threshold check with short local cache.
             let task_id = request.task_id();
-            // 尝试从缓存获取决策
+            // Try cached decision first.
             let cached_task_decision = {
                 if let Some(entry) = self.decision_cache.get(&task_id) {
                     let (ts, decision) = entry.value();
-                    // 缓存有效期 1 秒
+                    // 1s TTL to avoid hot-path Redis amplification.
                     if ts.elapsed() < Duration::from_secs(1) {
                         Some(Ok(decision.clone()))
                     } else {
@@ -115,13 +119,13 @@ for DownloadProcessor
                 _ => {}
             }
 
-            // 2. 检查 Module 级别错误 (带缓存优化)
+            // 2) Module-level threshold check with short local cache.
             let module_id = request.module_id();
-            // 尝试从缓存获取决策
+            // Try cached decision first.
             let cached_decision = {
                 if let Some(entry) = self.decision_cache.get(&module_id) {
                     let (ts, decision) = entry.value();
-                    // 缓存有效期 1 秒，避免高频请求打爆 Redis
+                    // 1s TTL to cap status-check pressure.
                     if ts.elapsed() < Duration::from_secs(1) {
                         Some(Ok(decision.clone()))
                     } else {
@@ -132,7 +136,7 @@ for DownloadProcessor
                 }
             };
 
-            // 缓存未命中或过期，则查询 Redis 并更新缓存
+            // On miss/expiry, fetch fresh status and refresh local cache.
             let decision_result = match cached_decision {
                 Some(res) => res,
                 None => {
@@ -154,14 +158,13 @@ for DownloadProcessor
                         request.module_id(),
                         reason
                     );
-                    // Module 已终止，释放锁并返回 None，让链路继续处理其他请求
+                    // Module terminated: release lock and skip this request.
                     self.state
                         .status_tracker
                         .release_module_locker(&request.module_id())
                         .await;
 
-                    // 返回 None 表示跳过该请求，而不是 FatalFailure
-                    // 这样可以让其他请求继续处理
+                    // Return success with None to keep stream progressing.
                     return ProcessorResult::Success((None, input.1));
                 }
                 Err(e) => {
@@ -207,7 +210,7 @@ for DownloadProcessor
                     module_id
                 );
 
-                // 记录下载成功（仅减少 Request 级别的错误计数）
+                // Record request-local success.
                 let state_clone = self.state.clone();
                 let request_id_clone = request_id.to_string();
                 tokio::spawn(async move {
@@ -221,7 +224,7 @@ for DownloadProcessor
                 ProcessorResult::Success((Some(response), input.1))
             }
             Err(e) => {
-                // 1. 检查是否可以本地重试
+                // 1) Local retry first.
                 let retry_policy = context.retry_policy.clone().unwrap_or_default();
                 if retry_policy.should_retry() {
                     debug!(
@@ -240,7 +243,7 @@ for DownloadProcessor
                     e
                 );
 
-                // 2. 超过重试次数，记录下载错误并获取决策
+                // 2) Retries exhausted; record error and follow tracker decision.
                 match self.state
                     .status_tracker
                     .record_download_error(&task_id, &module_id, &request_id.to_string(), &e)
@@ -252,14 +255,14 @@ for DownloadProcessor
                             ModuleError::ModuleMaxError(reason.into()).into()
                         )
                     }
-                    // 其他情况（Continue, RetryAfter, Skip）都视为放弃当前请求
+                    // Continue/RetryAfter/Skip all map to dropping current request here.
                     Ok(_) => {
                         warn!("[DownloadProcessor] skip request after max retries (recorded in tracker): request_id={}", request_id);
                         ProcessorResult::Success((None, input.1))
                     }
                     Err(err) => {
                         error!("[DownloadProcessor] error tracker failed: {}", err);
-                        // 追踪器失败，保守起见放弃请求
+                        // Tracker failure: conservatively drop this request.
                         ProcessorResult::Success((None, input.1))
                     }
                 }
@@ -276,6 +279,7 @@ for DownloadProcessor
             Some(request) => request,
             None => return ProcessorResult::Success((None, _input.1.clone())),
         };
+
         error!(
             "[DownloadProcessor] handle_error: request_id={} module_id={} error={}",
             request.id,
@@ -283,8 +287,8 @@ for DownloadProcessor
             _error
         );
 
-        // 错误已经在 process() 方法中通过 error_tracker 记录
-        // 这里只需要释放模块锁并返回 None
+        // Error is already tracked in `process()` via `error_tracker`.
+        // Only release lock and return `None` here.
 
         // Download failed terminally in this chain; no parser stage will release the lock.
         // Ensure we release the module lock to avoid stale locks.
@@ -523,9 +527,8 @@ impl ProcessorTrait<Option<Response>, ()> for ResponsePublishProcessor {
                 .release_module_locker(&resp.module_id())
                 .await;
 
-            // Response publish 错误不记录到错误计数
-            // 因为这是消息队列的问题，不是爬取逻辑的问题
-            // 如果需要监控 publish 失败，应该使用独立的监控系统
+            // Response publish failures are queue-transport issues,
+            // not crawler business-logic failures.
 
             error!(
                 "[ResponsePublish] fatal error publishing response: request_id={} module_id={} error={}",
@@ -922,6 +925,8 @@ for ProxyMiddlewareProcessor
     }
 }
 
+/// Builds request download chain:
+/// config -> proxy middleware -> request middleware -> download -> response middleware -> publish.
 pub async fn create_download_chain(
     state: Arc<State>,
     downloader_manager: Arc<DownloaderManager>,

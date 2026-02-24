@@ -14,47 +14,47 @@ use common::model::message::ParserData;
 use errors::RequestError;
 use crate::task::module_processor_with_chain::ModuleProcessorWithChain;
 
-/// 模块实体
+/// Runtime module instance bound to account/platform context.
 ///
-/// 代表一个具体的爬虫模块实例，包含配置、账户、平台信息以及执行逻辑。
-/// 负责生成请求、管理处理流程（chain）以及解析响应。
+/// A Module aggregates static module behavior, resolved configuration,
+/// middleware bindings, and chain-runtime metadata.
 #[derive(Clone)]
 pub struct Module {
-    /// 模块配置
+    /// Resolved module configuration.
     pub config: Arc<ModuleConfig>,
-    /// 关联账户
+    /// Bound account model.
     pub account: AccountModel,
-    /// 关联平台
+    /// Bound platform model.
     pub platform: PlatformModel,
-    /// 错误次数统计
+    /// In-memory error counter snapshot.
     pub error_times: u32,
-    /// 是否已完成
+    /// Completion flag at module level.
     pub finished: bool,
-    /// 数据中间件列表
+    /// Data middleware names.
     pub data_middleware: Vec<String>,
-    /// 下载中间件列表
+    /// Download middleware names.
     pub download_middleware: Vec<String>,
-    /// 模块核心逻辑 trait
+    /// Module behavior implementation.
     pub module: Arc<dyn ModuleTrait>,
-    /// 是否启用分布式锁
+    /// Whether distributed locking is enabled.
     pub locker: bool,
-    /// 锁的 TTL
+    /// Lock TTL in seconds.
     pub locker_ttl: u64,
-    /// 模块处理器（包含处理链）
+    /// Chain processor for step generation and parsing.
     pub processor: ModuleProcessorWithChain,
-    /// 运行 ID，用于区分不同的运行实例
+    /// Run identifier for cross-stage scoping.
     pub run_id: Uuid,
-    /// 前缀请求 ID，用于链路追踪
+    /// Prefix request for fallback tracing.
     pub prefix_request: Uuid,
-    /// 挂起的执行上下文（可选）
-    // Optional execution context to drive precise step selection (e.g., retry current step)
+    /// Optional execution context for precise step targeting.
     pub pending_ctx: Option<common::model::ExecutionMark>,
-    /// 绑定的任务元数据（由 TaskModuleProcessor 统一注入）
+    /// Task metadata injected by TaskModuleProcessor.
     pub bound_task_meta: Option<Map<String, serde_json::Value>>,
-    /// 绑定的登录信息（由 TaskModuleProcessor 统一注入）
+    /// Login context injected by TaskModuleProcessor.
     pub bound_login_info: Option<LoginInfo>,
 }
 impl Module {
+    /// Binds task metadata and optional login context.
     pub fn bind_task_context(
         &mut self,
         task_meta: Map<String, serde_json::Value>,
@@ -64,6 +64,7 @@ impl Module {
         self.bound_login_info = login_info;
     }
 
+    /// Returns task metadata and login info used by generate.
     pub fn runtime_task_context(&self) -> (Map<String, serde_json::Value>, Option<LoginInfo>) {
         (
             self.bound_task_meta.clone().unwrap_or_default(),
@@ -71,10 +72,10 @@ impl Module {
         )
     }
 
-    /// 生成请求流
+    /// Generates request stream for the current chain step.
     ///
-    /// 根据任务元数据和登录信息，调用内部处理器的 `execute_request` 生成请求流。
-    /// 会自动注入模块、平台、中间件等上下文信息。
+    /// Besides delegating to ModuleProcessorWithChain, this method enriches each request
+    /// with module/account/platform identity, middleware, config payloads, and run markers.
     pub async fn generate(
         &self,
         task_meta: Map<String, serde_json::Value>,
@@ -153,9 +154,7 @@ impl Module {
                     request = request.with_cookies(cookies.clone());
                 }
 
-                // 添加来自于登录信息的cookies和headers
-                // 自动添加UA
-                // 如果有登录信息则自动添加UA，没有登录信息需要手动在trait中添加UA
+                // Merge login-provided headers and cookies.
                 if let Some(ref info) = login_info {
                     let cookies = Cookies::from(info);
                     let headers = Headers::from(info);
@@ -181,9 +180,7 @@ impl Module {
         Ok(Box::pin(stream))
     }
 
-    /// 添加处理步骤
-    ///
-    /// 调用模块的 `pre_process` 和 `add_step` 方法，将步骤节点添加到处理器链中。
+    /// Loads module step nodes and appends them to the chain processor.
     pub async fn add_step(&self) {
         // Run module-level pre_process once before registering steps
         if let Err(e) = self
@@ -191,7 +188,7 @@ impl Module {
             .pre_process(Some(self.config.clone()))
             .await
         {
-            // Keep non-breaking: log and continue to allow default/no-op usage
+            // Keep non-breaking behavior for default/no-op modules.
             warn!(
                 "module pre_process failed for {}: {}",
                 self.module.name(),
@@ -204,10 +201,7 @@ impl Module {
         }
     }
     
-    /// 解析响应
-    ///
-    /// 调用处理器的 `execute_parser` 方法解析响应数据。
-    /// 并处理模块生命周期（如 `post_process`）。
+    /// Parses response at the routed step and handles terminal lifecycle hook.
     pub async fn parser(
         &self,
         response: Response,
@@ -227,8 +221,7 @@ impl Module {
         }
 
 
-        // If we've reached the last step and there's no further task to advance,
-        // trigger the module-level post_process hook.
+        // Run post_process only when chain reaches terminal step without next task.
         let total_steps = self.processor.get_total_steps().await;
         let is_last_step = current_step + 1 >= total_steps && total_steps > 0;
         let no_next_task = data.parser_task.is_none();
@@ -239,9 +232,7 @@ impl Module {
         Ok(data)
     }
 
-    /// 获取模块唯一标识
-    ///
-    /// 格式: `{account}-{platform}-{module_name}`
+    /// Returns stable module runtime id in account-platform-module format.
     pub fn id(&self) -> String {
         format!(
             "{}-{}-{}",
@@ -271,9 +262,7 @@ impl Serialize for Module {
 }
 
 
-/// 模块构建实体
-///
-/// 用于构建 `Module` 的辅助结构，包含核心模块 trait 以及关联的中间件列表。
+/// Assembly helper for creating Module runtime instances.
 pub struct ModuleEntity{
     pub module_work:Arc<dyn ModuleTrait>,
     pub download_middleware:Vec<Arc<dyn ModuleTrait>>,
@@ -292,19 +281,19 @@ impl From<Arc<dyn ModuleTrait>> for ModuleEntity {
     }
 }
 impl ModuleEntity {
-    /// 添加下载中间件
+    /// Adds a download middleware module.
     pub fn add_download_middleware(mut self, middleware: Arc<dyn ModuleTrait>)->Self {
         self.download_middleware.push(middleware);
         self
     }
 
-    /// 添加数据处理中间件
+    /// Adds a data middleware implementation.
     pub fn add_data_middleware(mut self, middleware: Arc<dyn DataMiddleware>) ->Self{
         self.data_middleware.push(middleware);
         self
     }
 
-    /// 添加数据存储中间件
+    /// Adds a data store middleware implementation.
     pub fn add_store_middleware(mut self, middleware: Arc<dyn DataStoreMiddleware>)->Self {
         self.store_middleware.push(middleware);
         self

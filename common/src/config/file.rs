@@ -6,18 +6,18 @@ use std::path::PathBuf;
 use std::time::Duration;
 use log::{error, info};
 
-/// 基于文件的配置提供者
+/// File-based configuration provider.
 ///
-/// 从本地文件系统加载配置，并支持文件变更监听（热重载）。
+/// Loads config from local filesystem and supports file-change watching (hot reload).
 pub struct FileConfigProvider {
     path: PathBuf,
 }
 
 impl FileConfigProvider {
-    /// 创建新的文件配置提供者
+    /// Creates a new file config provider.
     ///
     /// # Arguments
-    /// * `path` - 配置文件路径
+    /// * `path` - Configuration file path.
     pub fn new(path: &str) -> Self {
         Self {
             path: PathBuf::from(path),

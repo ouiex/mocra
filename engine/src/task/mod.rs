@@ -8,6 +8,6 @@ pub mod repository;
 pub mod task;
 pub mod task_manager;
 
-// 重导出主要的类型和 trait
+// Re-export primary task runtime types.
 pub use task::Task;
 pub use task_manager::TaskManager;

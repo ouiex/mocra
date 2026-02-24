@@ -117,10 +117,11 @@ impl DateUtils {
         let d = Self::ensure_date(day);
         d + Duration::days(n)
     }
-    // 返回的是不带时区的时间戳  即utc+0，如果需要带时区的时间戳，需要在此基础上加上时区偏移量
+    // Returns timezone-naive timestamp (UTC+0 baseline).
+    // If timezone-aware timestamp is needed, add timezone offset on top of this value.
     pub fn local_ts(day: Option<NaiveDate>) -> i64 {
-        // 返回“无时区”的时间戳：直接以 1970-01-01 00:00:00（Naive）为基准，
-        // 计算该日期 00:00:00（Naive）到 epoch 的毫秒差，不做任何时区偏移。
+        // Compute timezone-naive timestamp by measuring milliseconds from
+        // naive epoch `1970-01-01 00:00:00` to the given date at `00:00:00`.
         let d = Self::ensure_date(day);
         let ndt: NaiveDateTime = d.and_time(chrono::NaiveTime::MIN);
         let epoch: NaiveDateTime = NaiveDate::from_ymd_opt(1970, 1, 1)

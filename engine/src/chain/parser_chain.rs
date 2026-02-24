@@ -30,6 +30,7 @@ use common::model::login_info::LoginInfo;
 use serde_json::json;
 use crate::chain::backpressure::{BackpressureSendState, send_with_backpressure};
 
+/// Resolves response to module/config/login context before parsing.
 pub struct ResponseModuleProcessor {
     task_manager: Arc<TaskManager>,
     cache_service: Arc<CacheService>,
@@ -54,8 +55,8 @@ impl ProcessorTrait<Response, (Response, Arc<Module>, Arc<ModuleConfig>, Option<
         //     input.module_id()
         // );
 
-        // 在解析之前检查 Task 和 Module 是否已达到错误阈值
-        // 1. 检查 Task 级别
+        // Guard checks before parser execution.
+        // 1) Task-level threshold.
         match self
             .state
             .status_tracker
@@ -71,7 +72,7 @@ impl ProcessorTrait<Response, (Response, Arc<Module>, Arc<ModuleConfig>, Option<
                     input.task_id(),
                     reason
                 );
-                // 释放锁
+                // Release lock on task termination path.
                 self.state.status_tracker
                     .release_module_locker(&input.module_id())
                     .await;
@@ -89,7 +90,7 @@ impl ProcessorTrait<Response, (Response, Arc<Module>, Arc<ModuleConfig>, Option<
             _ => {}
         }
 
-        // 2. 检查 Module 级别
+        // 2) Module-level threshold.
         match self
             .state
             .status_tracker
@@ -105,7 +106,7 @@ impl ProcessorTrait<Response, (Response, Arc<Module>, Arc<ModuleConfig>, Option<
                     input.module_id(),
                     reason
                 );
-                // 释放锁
+                // Release lock on module termination path.
                 self.state.status_tracker
                     .release_module_locker(&input.module_id())
                     .await;
@@ -126,7 +127,7 @@ impl ProcessorTrait<Response, (Response, Arc<Module>, Arc<ModuleConfig>, Option<
         let task: Result<(Arc<Module>, Option<LoginInfo>)> = self.task_manager.load_module_with_response(&input).await;
         match task {
             Ok((module, login_info)) => {
-                // 优先从本地缓存获取配置
+                // Prefer local short-lived config cache.
                 let module_id = module.id();
                 let cached_config = if let Some(entry) = self.config_cache.get(&module_id) {
                     let (cfg, expires_at) = entry.value();
@@ -336,7 +337,7 @@ impl ProcessorTrait<(Response, Arc<Module>, Arc<ModuleConfig>, Option<LoginInfo>
                     has_error
                 );
 
-                // 记录解析成功
+                // Record parser success metrics/state.
                 self.state
                     .status_tracker
                     .record_parse_success(&request_id)
@@ -348,7 +349,7 @@ impl ProcessorTrait<(Response, Arc<Module>, Arc<ModuleConfig>, Option<LoginInfo>
             Err(e) => {
                 warn!("[ResponseParserProcessor] parser error: err={e}");
 
-                // 记录解析错误并获取决策
+                // Record parser error and retrieve threshold decision.
                 match self
                     .state
                     .status_tracker
@@ -372,7 +373,7 @@ impl ProcessorTrait<(Response, Arc<Module>, Arc<ModuleConfig>, Option<LoginInfo>
                             "[ResponseParserProcessor] skip parse after max retries: request_id={}",
                             request_id
                         );
-                        // 跳过该解析，返回空数据
+                        // Skip this parse attempt and return empty output.
                         return ProcessorResult::Success(vec![]);
                     }
                     Ok(ErrorDecision::Terminate(reason)) => {
@@ -584,19 +585,14 @@ impl ProcessorTrait<(Response, Arc<Module>, Arc<ModuleConfig>, Option<LoginInfo>
                 ).await;
             }
 
-            // 不再使用旧的 record_response_error
-            // 错误已经通过 error_tracker 记录
+            // Legacy `record_response_error` is no longer used.
+            // Errors are already tracked via `error_tracker`.
         }
 
         data.data.iter_mut().for_each(|x| {
             x.account = input.0.account.clone();
             x.platform = input.0.platform.clone();
-            // 保留原有的data_middleware，避免覆盖掉之前的中间件
-            // 一般情况下data_middleware不会在parser中设置
-            // 只有在特殊情况下才会在parser中设置data_middleware，比如需要对某些数据进行特殊处理或者在测试情况下
-            // 这种情况下需要在module的config中设置data_middleware
-            // 如果parser中没有设置data_middleware，则使用module的config中的data_middleware
-            // 如果parser中设置了data_middleware，则使用parser中的data_middleware
+            // Keep parser-provided middleware when present; otherwise inherit module defaults.
             if x.data_middleware.is_empty() {
                 x.data_middleware = input.0.data_middleware.clone();
             }
@@ -611,12 +607,11 @@ impl ProcessorTrait<(Response, Arc<Module>, Arc<ModuleConfig>, Option<LoginInfo>
         _output: &Vec<Data>,
         _context: &ProcessorContext,
     ) -> Result<()> {
-        // 若parser返回了ParserTaskModel 需要释放锁避免死锁
-        // 所有的锁释放都在这里进行，避免重复释放锁
+        // Centralized lock release after parsing to avoid deadlocks and duplicate unlocks.
 
         let config = self.state.config.read().await;
 
-        // 缓存响应结果，出现重复下载可跳过下载阶段
+        // Cache response payload so duplicate downloads can be short-circuited.
         if config.download_config.enable_cache {
             if let Some(request_hash) = &input.0.request_hash
             {
@@ -648,8 +643,8 @@ impl ProcessorTrait<(Response, Arc<Module>, Arc<ModuleConfig>, Option<LoginInfo>
             error
         );
 
-        // 错误已经在 process() 方法中通过 error_tracker 记录
-        // 这里只需要创建 ErrorTaskModel 并入队
+        // Error has already been tracked in `process()` via `error_tracker`.
+        // Here we only need to build and enqueue `ErrorTaskModel`.
 
         let timestamp = match SystemTime::now().duration_since(UNIX_EPOCH) {
             Ok(duration) => duration.as_secs(),
@@ -690,7 +685,7 @@ impl ProcessorTrait<(Response, Arc<Module>, Arc<ModuleConfig>, Option<LoginInfo>
             error!("[ResponseParserProcessor] failed to enqueue ErrorTaskModel: {}", context);
         }
 
-        // 释放模块锁
+        // Release module lock after enqueueing error task.
         if self.state.config.read().await.download_config.enable_locker {
            self.state
                .status_tracker
@@ -855,7 +850,10 @@ impl ProcessorTrait<Data, ()> for DataStoreProcessor {
     fn name(&self) -> &'static str {
         "DataStoreProcessor"
     }
-    /// 此阶段使用RetryableFailure来触发重试机制,并使用retry_policy的meta字段来传递一些重试的参数，供以后使用重试功能作参考
+    /// This stage uses `RetryableFailure` to trigger retries.
+    ///
+    /// Additional retry context can be passed through `retry_policy.meta`
+    /// for downstream retry behavior customization.
     async fn process(&self, input: Data, context: ProcessorContext) -> ProcessorResult<()> {
         info!(
             "[DataStoreProcessor] start store: request_id={} account={} platform={} module={} size={}",
@@ -974,10 +972,14 @@ impl EventProcessorTrait<Data, ()> for DataStoreProcessor {
     }
 }
 
-/// 解析与存储暂时只作为一个整体来处理
-/// 同一个chain属于同一个response，即所有的Data使用的ModuleConfig是同样的
-/// 使用ProcessorContext.meta来传递module的config，这样Data可以拆分出来，不用将Vec<Data>作为一个整体
-/// response -> (module, config) -> parser -> data -> (data, config) -> data_middleware -> data -> data_store -> ()
+/// Builds parser chain for response processing and data persistence.
+///
+/// Flow:
+/// `response -> module/context -> parser -> data middleware -> data store`.
+///
+/// Notes:
+/// - All `Data` emitted from one response share the same module config context.
+/// - Data middleware and store stages run in parallel map form with skip-on-error strategy.
 pub async fn create_parser_chain(
     state: Arc<State>,
     task_manager: Arc<TaskManager>,

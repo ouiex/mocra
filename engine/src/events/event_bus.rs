@@ -5,7 +5,7 @@ use tokio::sync::RwLock;
 use log::{error, info};
 use dashmap::DashMap;
 
-/// 事件总线
+/// In-process event bus for fan-out delivery to typed subscribers.
 pub struct EventBus {
     /// Subscribers map: EventType -> List of Senders
     subscribers: Arc<DashMap<String, Vec<mpsc::Sender<EventEnvelope>>>>,
@@ -24,8 +24,10 @@ impl EventBus {
         }
     }
 
-    /// 订阅事件
-    /// Returns a receiver that will receive events of the specified type.
+    /// Subscribes to a specific event key (or `*` for all events).
+    ///
+    /// Returns a bounded receiver that yields cloned envelopes published to
+    /// the matching topic.
     pub async fn subscribe(&self, event_type: String) -> mpsc::Receiver<EventEnvelope> {
         let (tx, rx) = mpsc::channel(1000);
         self.subscribers
@@ -35,7 +37,10 @@ impl EventBus {
         rx
     }
 
-    /// 发布事件
+    /// Publishes an event into the internal queue.
+    ///
+    /// When the queue is full, the event is intentionally dropped to avoid
+    /// propagating backpressure into critical producer paths.
     pub async fn publish(&self, event: EventEnvelope) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         match self.sender.try_send(event) {
             Ok(_) => Ok(()),
@@ -49,7 +54,7 @@ impl EventBus {
         }
     }
 
-    /// 启动事件处理循环
+    /// Starts the dedicated dispatch loop that forwards events to subscribers.
     pub async fn start(&self) {
         let receiver = {
             let mut receiver_guard = self._receiver.write().await;

@@ -6,9 +6,9 @@ use redis::AsyncCommands;
 use log::{error, info};
 use std::time::Duration;
 
-/// 基于 Redis 的配置提供者
+/// Redis-backed configuration provider.
 ///
-/// 从 Redis 键中加载配置 JSON 字符串，并支持变更监听（轮询）。
+/// Loads configuration JSON from a Redis key and supports change watching via polling.
 pub struct RedisConfigProvider {
     client: redis::Client,
     key: String,
@@ -16,12 +16,12 @@ pub struct RedisConfigProvider {
 }
 
 impl RedisConfigProvider {
-    /// 创建新的 Redis 配置提供者
+    /// Creates a new Redis config provider.
     ///
     /// # Arguments
-    /// * `redis_url` - Redis 连接字符串
-    /// * `key` - 配置存储的 Key
-    /// * `_channel` - (未使用) Pub/Sub 通道
+    /// * `redis_url` - Redis connection string.
+    /// * `key` - Key where config is stored.
+    /// * `_channel` - (unused) Pub/Sub channel.
     pub fn new(redis_url: &str, key: &str, _channel: &str) -> Result<Self, String> {
         let client = redis::Client::open(redis_url).map_err(|e| e.to_string())?;
         Ok(Self {
@@ -30,7 +30,7 @@ impl RedisConfigProvider {
         })
     }
     
-    /// 从 Redis 获取配置
+    /// Fetches config from Redis.
     async fn fetch_config(&self) -> Result<Config, String> {
         let mut con = self.client.get_multiplexed_async_connection().await.map_err(|e| e.to_string())?;
         let config_str: String = con.get(&self.key).await.map_err(|e| e.to_string())?;

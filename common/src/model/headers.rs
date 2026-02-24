@@ -119,34 +119,34 @@ impl From<&Headers> for HeaderMap {
                 HeaderValue::from_str(&header_item.value),
             ) {
                 (Ok(name), Ok(value)) => {
-                    // 支持多个值的 headers 使用 append
+                    // Use `append` for headers that can contain multiple values.
                     let name_str = name.as_str().to_lowercase();
                     if matches!(
                         name_str.as_str(),
-                        // Cookie 相关
+                        // Cookie-related
                         "set-cookie" | "cookie" |
-                        // 内容协商
+                        // Content negotiation
                         "accept" | "accept-encoding" | "accept-language" | "accept-charset" |
-                        // 缓存控制
+                        // Cache control
                         "cache-control" | "pragma" |
-                        // 链接和转发
+                        // Links and forwarding
                         "link" | "forwarded" | "x-forwarded-for" | "x-forwarded-proto" |
-                        // 安全策略
+                        // Security policies
                         "content-security-policy" | "x-content-security-policy" |
                         "x-webkit-csp" | "feature-policy" | "permissions-policy" |
                         // CORS
                         "access-control-allow-origin" | "access-control-allow-methods" |
                         "access-control-allow-headers" | "access-control-expose-headers" |
-                        // 认证
+                        // Authentication
                         "www-authenticate" | "proxy-authenticate" |
-                        // 变体和内容
+                        // Variants and content
                         "vary" | "via" | "warning" |
-                        // 自定义和扩展
+                        // Custom and extension headers
                         "x-forwarded-host" | "x-real-ip" | "x-original-forwarded-for"
                     ) {
                         header_map.append(name, value);
                     } else {
-                        // 其他 headers 使用覆盖
+                        // Overwrite behavior for other headers.
                         header_map.insert(name, value);
                     }
                 }

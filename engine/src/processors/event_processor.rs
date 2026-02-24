@@ -10,7 +10,7 @@ use common::processors::processor_chain::{ErrorStrategy, TypedChain, SyncBoxStre
 use std::sync::Arc;
 use crate::chain::DataMiddlewareProcessor;
 
-/// 带事件发布的处理器
+/// Processor wrapper that publishes lifecycle events around processor execution.
 pub struct EventAwareProcessor<P> {
     inner_processor: P,
     event_bus: Option<Arc<EventBus>>,
@@ -27,7 +27,7 @@ impl<P> EventAwareProcessor<P> {
         }
     }
 
-    /// 发布事件
+    /// Publishes an event envelope when both event and bus are available.
     async fn publish_event(&self, event: Option<EventEnvelope>) {
         if let (Some(event), Some(event_bus)) = (event, &self.event_bus) {
             if let Err(_e) = event_bus.publish(event).await {
@@ -58,7 +58,8 @@ where
 
     async fn process(&self, input: Input, context: ProcessorContext) -> ProcessorResult<Output> {
         debug!("Starting processing with processor: {}", self.name());
-        // 执行主要处理逻辑（重试逻辑由 TypedProcessorExecutor 处理）
+        // Execute primary processing logic.
+        // Retry orchestration is handled by the typed chain executor.
         self.publish_event(self.inner_processor.working_status(&input))
             .await;
         self.inner_processor
@@ -83,7 +84,7 @@ where
             .post_process(input, output, context)
             .await;
         if r.is_ok() {
-            // 成功后的 finish 事件放在真正 post_process 完成之后
+            // Emit finish event only after `post_process` succeeds.
             self.publish_event(self.inner_processor.finish_status(input, output))
                 .await;
         }
@@ -96,7 +97,7 @@ where
         error: Error,
         context: &ProcessorContext,
     ) -> ProcessorResult<Output> {
-        // 发布事件：进入 handle_error
+        // Emit error event when entering error handling.
         self.publish_event(self.inner_processor.error_status(input, &error))
             .await;
         self.inner_processor
@@ -109,7 +110,10 @@ where
     }
 }
 
-/// 事件感知的 TypedChain 包装器：保持 TypedChain 的完整功能，对每一步处理器进行事件增强
+/// Event-aware typed-chain wrapper.
+///
+/// Preserves the original typed-chain behavior while adding event emission to
+/// each wrapped processor stage.
 pub struct EventAwareTypedChain<In, Out> {
     inner: TypedChain<In, Out>,
     event_bus: Option<Arc<EventBus>>,
@@ -207,7 +211,7 @@ where
     }
 }
 
-// Vec 输出特化：追加逐元素 map
+// Vec-output specialization with element-wise map helpers.
 impl<In, ElemIn> EventAwareTypedChain<In, Vec<ElemIn>>
 where
     In: Send + Clone + 'static,
@@ -297,7 +301,7 @@ where
 
 }
 
-// Vec<Vec<T>> 输出特化：提供扁平化为 Vec<T>
+// Vec<Vec<T>> specialization with flattening helpers.
 impl<In, T> EventAwareTypedChain<In, Vec<Vec<T>>>
 where
     In: Send + Clone + 'static,
@@ -372,7 +376,7 @@ where
     }
 }
 
-// Stream 输出特化：追加流式 map
+// Stream-output specialization with streaming map helpers.
 impl<In, ElemIn> EventAwareTypedChain<In, SyncBoxStream<'static, ElemIn>>
 where
     In: Send + Clone + 'static,
@@ -439,7 +443,7 @@ where
     }
 }
 
-// 一个空类型占位，仅用于访问静态 now_ts 方法
+// Empty marker type kept for static method access compatibility.
 struct Dummy;
 
 pub trait EventProcessorTrait<Input, Output>: ProcessorTrait<Input, Output> {
