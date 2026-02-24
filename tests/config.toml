@@ -1,4 +1,4 @@
-name = "lunaler_rpa"
+name = "app_rpa"
 
 # [api]
 # port = 8905
@@ -71,4 +71,4 @@ type = "console"
 
 [[logger.outputs]]
 type = "file"
-path = "logs/lunaler_rpa.log"
+path = "logs/app.log"

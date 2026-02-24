@@ -8,3 +8,6 @@ data/
 .vscode/
 .pytest_cache/
 .venv/
+.github/
+.DS_Store
+.cargo/
