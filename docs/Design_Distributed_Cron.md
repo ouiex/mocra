@@ -19,16 +19,16 @@
 
 ## 3. 总体架构 (Architecture)
 
-将在 `engine` crate 中引入一个新的组件 `CronScheduler`。该组件作为后台任务运行，周期性扫描所有活跃的 Module 实例，检查是否满足 Cron 触发条件。如果满足，则通过 Redis 分布式锁竞争执行权，胜者负责构造 `TaskModel` 并推送到 Queue。
+将在 `src/engine` 模块中引入一个新的组件 `CronScheduler`。该组件作为后台任务运行，周期性扫描所有活跃的 Module 实例，检查是否满足 Cron 触发条件。如果满足，则通过 Redis 分布式锁竞争执行权，胜者负责构造 `TaskModel` 并推送到 Queue。
 
 ### 3.1 模块配置扩展 (`ModuleTrait`)
 
-在 `common` crate 中引入 `CronConfig` 并更新 `ModuleTrait`。
+在 `src/common` 模块中引入 `CronConfig` 并更新 `ModuleTrait`。
 
 **Struct Definition:**
 
 ```rust
-// common/src/model/cron_config.rs (新建)
+// src/common/model/cron_config.rs (新建)
 use cron::Schedule;
 use std::str::FromStr;
 
@@ -147,7 +147,7 @@ impl CronBuilder {
 **Trait Update:**
 
 ```rust
-// common/src/interface/module.rs
+// src/common/interface/module.rs
 
 pub trait ModuleTrait: Send + Sync {
     // ... 原有方法 ...
@@ -200,7 +200,7 @@ pub trait ModuleTrait: Send + Sync {
 ## 4. 详细实施步骤
 
 ### Step 1: 引入依赖
-在 `common` 和 `engine` 的 `Cargo.toml` 中添加 `cron` crate。
+在根 `Cargo.toml` 中添加 `cron` 依赖。
 
 ```toml
 [dependencies]
@@ -208,12 +208,12 @@ cron = "0.15"
 ```
 
 ### Step 2: 定义数据结构
-在 `common/src/model/` 下创建 `cron.rs` (或在 `config.rs` 中添加)，定义 `CronConfig`。
+在 `src/common/model/` 下创建 `cron.rs` (或在 `config.rs` 中添加)，定义 `CronConfig`。
 
 并在 `ModuleTrait` 中添加钩子方法。
 
-### Step 3: 实现调度器 (`engine`)
-在 `engine/src/scheduler` (新建目录) 中实现 `CronScheduler`.
+### Step 3: 实现调度器 (`src/engine`)
+在 `src/engine/scheduler` (新建目录) 中实现 `CronScheduler`.
 
 **注意**: 所有时间计算统一使用 **UTC**，避免跨时区部署导致的不一致。
 
@@ -263,14 +263,14 @@ impl CronScheduler {
 ```
 
 ### Step 4: 集成到 Engine 启动流程
-在 `engine/src/engine.rs` 的启动逻辑中，初始化 `CronScheduler` 并通过 `tokio::spawn` 启动其主循环。我们需要确保它能访问到所有加载的 `Module` 实例以及 `redis` 和 `queue` 句柄。
+在 `src/engine/engine.rs` 的启动逻辑中，初始化 `CronScheduler` 并通过 `tokio::spawn` 启动其主循环。我们需要确保它能访问到所有加载的 `Module` 实例以及 `redis` 和 `queue` 句柄。
 
-> **性能优化建议**: 由于 `ModuleTrait::cron()` 可能会重新构建 `CronConfig`（涉及字符串解析），建议在 `Module` 结构体（`engine/src/task/module.rs`）初始化时，将 `CronConfig` 解析并缓存到 `Module` 实例中，或者在 `CronScheduler` 内部维护一个 `HashMap<ModuleId, CronConfig>` 缓存，避免每秒重复解析造成的 CPU 浪费。
+> **性能优化建议**: 由于 `ModuleTrait::cron()` 可能会重新构建 `CronConfig`（涉及字符串解析），建议在 `Module` 结构体（`src/engine/task/module.rs`）初始化时，将 `CronConfig` 解析并缓存到 `Module` 实例中，或者在 `CronScheduler` 内部维护一个 `HashMap<ModuleId, CronConfig>` 缓存，避免每秒重复解析造成的 CPU 浪费。
 
 ## 5. 依赖检查
 
 *   **Redis**: 现有 `utils::redis_lock` 或直接使用 `deadpool-redis` 均可支持。
-*   **Queue**: `queue` crate 已经提供了推送接口。
+*   **Queue**: `src/queue` 模块已经提供了推送接口。
 *   **ModuleRegistry**: Engine 需要暴露当前持有的 `Module` 列表给 Scheduler。目前的架构中 Engine 应该持有 `Vec<Arc<Module>>` 或类似的 Map，需要确保 Scheduler 能读取它。
 
 ## 6. 总结

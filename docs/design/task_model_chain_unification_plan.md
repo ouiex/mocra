@@ -834,7 +834,7 @@ Redis 模式天然支持 TTL；单节点必须显式模拟：
 ### T04 ModuleProcessorWithChain 职责收敛
 
 - 状态：✅ 已完成
-- 进度：已完成第一刀入口减责：`TaskProcessor` 从“生成+去重+发布”收敛为“仅生成请求流”，请求去重与发布统一下沉到 `RequestPublish`；`Module.generate/execute_request` 继续作为 step 语义入口。并通过 `cargo check -p engine` 与 `cargo test -p engine`（13/13）。
+- 进度：已完成第一刀入口减责：`TaskProcessor` 从“生成+去重+发布”收敛为“仅生成请求流”，请求去重与发布统一下沉到 `RequestPublish`；`Module.generate/execute_request` 继续作为 step 语义入口。并通过 `cargo check` 与 `cargo test`（13/13）。
 - 进度：已完成第二刀入口边界收敛：`task_meta/login_info` 不再经 `ProcessorContext.metadata` 透传，改为在 `TaskModuleProcessor` 统一绑定到 `Module`（`bind_task_context`），`TaskProcessor` 仅消费模块已绑定上下文并触发生成。
 - 进度：已完成第三刀入口分支收敛：`TaskProcessor` 移除登录校验分支，统一复用 `Module.generate` 的错误语义，入口进一步收敛为“终止检查 + 生成触发”。
 - 进度：已完成第四刀入口去重：移除 `TaskProcessor` 的重复模块终止预检（该逻辑保留在 `TaskModuleProcessor`），`TaskProcessor` 进一步收敛为“读取绑定上下文并触发 generate”。
@@ -891,7 +891,7 @@ Redis 模式天然支持 TTL；单节点必须显式模拟：
 - 进度：已完成 `execution_state_key` 系列扩展：新增 legacy 兼容构造器（`legacy_execution_state_key`）与兼容键集合（`execution_state_compat_keys`），统一新旧键并行识别语义。
 - 进度：已完成 step 门闸键构造器收口：新增 `module_step_advance_once_key` / `module_step_fallback_once_key` 及 legacy 对应构造器，避免业务侧字符串手拼漂移。
 - 进度：已完成 `ModuleProcessorWithChain` 全链路迁移与兼容读写：推进门闸、回退门闸、stop 标记均支持“先读新键、再读旧键；写入双键”策略。
-- 进度：已补齐并通过回归验证：`cargo test -p common execution_state_compat_keys_include_new_and_legacy`、`cargo test -p common module_step_gate_keys_are_stable_and_legacy_compatible`、`cargo test -p engine execute_parser_success_advances_to_next_step_and_keeps_prefix`、`cargo test -p engine execute_parser_failure_emits_error_task_with_stay_current_step`。
+- 进度：已补齐并通过回归验证：`cargo test execution_state_compat_keys_include_new_and_legacy`、`cargo test module_step_gate_keys_are_stable_and_legacy_compatible`、`cargo test execute_parser_success_advances_to_next_step_and_keeps_prefix`、`cargo test execute_parser_failure_emits_error_task_with_stay_current_step`。
 
 - 任务目标
    - 统一 `ptm_key` 与所有 Redis/DashMap 状态键，避免跨模块漂移。
@@ -914,7 +914,7 @@ Redis 模式天然支持 TTL；单节点必须显式模拟：
 - 状态：✅ 已完成
 - 进度：已补齐 PTM 脚本返回码边界覆盖：`ptm_claim.lua` 校验 `EXECUTE/DUPLICATE_DONE/STALE_STEP/OUT_OF_ORDER/LOCKED_BY_OTHER`，`ptm_commit_success.lua` 与 `ptm_commit_error.lua` 校验 fencing/CAS/重复提交语义。
 - 进度：已补齐 Redis 集成状态机回归：新增 `redis_ptm_claim_and_commit_success_follow_expected_state_machine`，覆盖 claim->commit->duplicate claim 主链路，且无 Redis 环境自动跳过。
-- 进度：已完成定向验证：`cargo test -p engine ptm_claim_contains_step_and_state_guards` 与 `cargo test -p engine redis_ptm_claim_and_commit_success_follow_expected_state_machine` 通过。
+- 进度：已完成定向验证：`cargo test ptm_claim_contains_step_and_state_guards` 与 `cargo test redis_ptm_claim_and_commit_success_follow_expected_state_machine` 通过。
 
 - 任务目标
    - 将关键状态迁移改为单脚本原子执行，消除 GET/SET 竞态。
@@ -938,7 +938,7 @@ Redis 模式天然支持 TTL；单节点必须显式模拟：
 - 状态：✅ 已完成
 - 进度：已完成 LocalBackend 精简（移除本地 Lua 模拟）与单节点基础回归测试（KV/TTL/set_nx/zset/脚本接口不支持）。
 - 进度：已补齐 Redis vs single_node 一致性对照测试：新增 `redis_and_single_node_set_get_behave_consistently`，覆盖同键写入/覆盖后的读取一致性与清理。
-- 进度：已完成定向验证：`cargo test -p cacheable redis_and_single_node_set_get_behave_consistently` 通过（无 Redis 环境自动跳过）。
+- 进度：已完成定向验证：`cargo test redis_and_single_node_set_get_behave_consistently` 通过（无 Redis 环境自动跳过）。
 
 - 任务目标
    - 在单节点模式提供轻量本地缓存后端，避免为分布式语义引入额外复杂度。
@@ -965,10 +965,10 @@ Redis 模式天然支持 TTL；单节点必须显式模拟：
 - 进度：已补充 `TaskTerminatedByThreshold` 事件输出（模块终止/任务终止），用于阈值治理审计与告警联动。
 - 进度：已补充最小单测覆盖（Lua 脚本注册完整性、`TaskTerminatedByThreshold` 事件类型映射），并通过定向测试与编译验证。
 - 进度：已收敛决策语义（标记动作是否已执行），避免 Lua 路径与非 Lua 回退路径重复写入重试调度/终止标记。
-- 进度：已新增 `ChainDecision::action_applied()` 语义稳定性单测，并完成 `cargo check -p engine` 与 `cargo test -p engine` 全量验证（当前 11/11 通过）。
+- 进度：已新增 `ChainDecision::action_applied()` 语义稳定性单测，并完成 `cargo check` 与 `cargo test` 全量验证（当前 11/11 通过）。
 - 进度：已新增 Lua 语义护栏测试：阈值边界采用 `>=`（包含边界值），终止脚本具备 `EXISTS` 幂等防重与 `ALREADY_TERMINATED` 返回语义。
 - 进度：已新增 Redis 集成并发测试入口（环境变量 `REDIS_URL` / `MOCRA_REDIS_TEST_URL`）：覆盖 `etm_threshold_decide` 边界命中与 `etm_terminate_mark` 并发幂等（无 Redis 环境自动跳过）。
-- 进度：已接入 CI 合同测试脚本可选门禁（`scripts/ci_contract_tests.ps1` / `scripts/ci_contract_tests.sh`），在有 Redis 地址时自动执行 `cargo test -p engine redis_`。
+- 进度：已接入 CI 合同测试脚本可选门禁（`scripts/ci_contract_tests.ps1` / `scripts/ci_contract_tests.sh`），在有 Redis 地址时自动执行 `cargo test redis_`。
 - 进度：已新增 CI 强制门禁开关 `MOCRA_REQUIRE_REDIS_CONTRACT_TESTS=1`：当未注入 `REDIS_URL`/`MOCRA_REDIS_TEST_URL` 时直接失败，支持预发/CI 从“可选执行”升级为“必选执行”。
 - 进度：已修复 PowerShell 合同脚本退出码传播：`scripts/ci_contract_tests.ps1` 现对 `cargo test` 失败立即中断并返回非零，避免门禁误放行。
 
@@ -996,7 +996,7 @@ Redis 模式天然支持 TTL；单节点必须显式模拟：
 - 进度：已扩展到 `parser_chain` 关键发送路径（request/parser_task/error）：统一 `try_send -> await send` 降级，新增 `parser_chain_backpressure_total{queue,reason}` 指标并保留原失败语义。
 - 进度：已扩展到 `download_chain` 的 Response 发布路径：本地 response channel 与后备 response channel 均接入 `queue_full/queue_closed` 细分指标与降级发送。
 - 进度：已完成背压重试策略参数化：新增 `crawler.backpressure_retry_delay_ms`，并接入 `task_model_chain` / `download_chain` 的 `RetryableFailure` 路径。
-- 进度：已完成背压发送逻辑系统性重构：新增共享模块 `engine/src/chain/backpressure.rs`，统一 `task/parser/download` 三链路的 `try_send -> await send` 行为与错误语义，并通过 `cargo check -p common -p engine` + `cargo test -p engine` 验证。
+- 进度：已完成背压发送逻辑系统性重构：新增共享模块 `src/engine/chain/backpressure.rs`，统一 `task/parser/download` 三链路的 `try_send -> await send` 行为与错误语义，并通过 `cargo check` + `cargo test` 验证。
 
 - 任务目标
    - 建立统一并发控制与队列背压策略，避免热点放大。
@@ -1082,17 +1082,17 @@ Redis 模式天然支持 TTL；单节点必须显式模拟：
 
 | 任务 | 当前状态 | 估算完成度 | 代码证据（示例） | 主要剩余风险 | 下一步建议 |
 |---|---|---:|---|---|---|
-| T01 | ✅ 已完成 | 100% | `common/src/model/config.rs`, `common/src/state.rs` | 低 | 仅保持回归 |
-| T02 | ✅ 已完成 | 100% | `common/src/model/message.rs`, `engine/src/chain/task_model_chain.rs`, `engine/src/engine.rs` | 低 | 仅保持回归 |
-| T03 | ✅ 已完成 | 100% | `engine/src/chain/task_model_chain.rs` | 低 | 仅保持回归 |
-| T04 | ✅ 已完成 | 100% | `engine/src/chain/task_model_chain.rs`, `engine/src/task/module.rs`, `engine/src/task/module_processor_with_chain.rs` | 低 | 转入 T06 键构造器收口 |
-| T05 | ✅ 已完成 | 100% | `engine/src/task/module_processor_with_chain.rs`, `engine/src/chain/task_model_chain.rs`, `engine/src/events/events.rs`, `engine/src/chain/parser_chain.rs`, `engine/src/events/event_bus.rs` | 低 | 转入 T06 键构造器收口 |
-| T06 | ✅ 已完成 | 100% | `common/src/model/chain_key.rs`, `engine/src/task/module_processor_with_chain.rs` | 低 | 仅保持回归 |
-| T07 | ✅ 已完成 | 100% | `engine/lua/*.lua`, `engine/src/lua/registry.rs`, `cacheable/src/cache_service.rs` | 低 | 仅保持回归 |
-| T08 | ✅ 已完成 | 100% | `cacheable/src/cache_service.rs`, `engine/src/engine.rs` | 低 | 仅保持回归 |
-| T09 | ✅ 已完成 | 100% | `engine/src/chain/task_model_chain.rs`, `engine/src/events/events.rs`, `engine/src/lua/registry.rs`, `engine/lua/etm_*.lua`, `scripts/ci_contract_tests.ps1`, `scripts/ci_contract_tests.sh` | 低 | 仅保持回归 |
-| T10 | 🟡 进行中（暂缓） | 64% | `common/src/model/config.rs`, `engine/src/chain/backpressure.rs`, `engine/src/chain/task_model_chain.rs`, `engine/src/chain/parser_chain.rs`, `engine/src/chain/download_chain.rs`, `docs/configuration.md` | 非当前主线，动态并发调节尚未落地 | 主线完成后再进入调参与阈值固化 |
-| T11 | 🟡 进行中（暂缓） | 91% | `engine/src/chain/backpressure.rs`, `engine/src/chain/task_model_chain.rs`, `engine/src/chain/parser_chain.rs`, `engine/src/chain/download_chain.rs`, `docs/alerts/logging_alerts.yml`, `docs/alerts/policy_alerts.yml`, `docs/dashboards/logging_dashboard.md`, `docs/alerts/backpressure_runbook.md`, `docs/alerts/cas_fencing_runbook.md`, `docs/dashboards/threshold_calibration_template.md`, `docs/dashboards/baseline_report_template.md` | 非当前主线，阈值未完成实测校准 | 主线完成后按模板回填并定版阈值 |
+| T01 | ✅ 已完成 | 100% | `src/common/model/config.rs`, `src/common/state.rs` | 低 | 仅保持回归 |
+| T02 | ✅ 已完成 | 100% | `src/common/model/message.rs`, `src/engine/chain/task_model_chain.rs`, `src/engine/engine.rs` | 低 | 仅保持回归 |
+| T03 | ✅ 已完成 | 100% | `src/engine/chain/task_model_chain.rs` | 低 | 仅保持回归 |
+| T04 | ✅ 已完成 | 100% | `src/engine/chain/task_model_chain.rs`, `src/engine/task/module.rs`, `src/engine/task/module_processor_with_chain.rs` | 低 | 转入 T06 键构造器收口 |
+| T05 | ✅ 已完成 | 100% | `src/engine/task/module_processor_with_chain.rs`, `src/engine/chain/task_model_chain.rs`, `src/engine/events/events.rs`, `src/engine/chain/parser_chain.rs`, `src/engine/events/event_bus.rs` | 低 | 转入 T06 键构造器收口 |
+| T06 | ✅ 已完成 | 100% | `src/common/model/chain_key.rs`, `src/engine/task/module_processor_with_chain.rs` | 低 | 仅保持回归 |
+| T07 | ✅ 已完成 | 100% | `src/lua/*.lua`, `src/engine/lua/registry.rs`, `src/cacheable/cache_service.rs` | 低 | 仅保持回归 |
+| T08 | ✅ 已完成 | 100% | `src/cacheable/cache_service.rs`, `src/engine/engine.rs` | 低 | 仅保持回归 |
+| T09 | ✅ 已完成 | 100% | `src/engine/chain/task_model_chain.rs`, `src/engine/events/events.rs`, `src/engine/lua/registry.rs`, `src/lua/etm_*.lua`, `scripts/ci_contract_tests.ps1`, `scripts/ci_contract_tests.sh` | 低 | 仅保持回归 |
+| T10 | 🟡 进行中（暂缓） | 64% | `src/common/model/config.rs`, `src/engine/chain/backpressure.rs`, `src/engine/chain/task_model_chain.rs`, `src/engine/chain/parser_chain.rs`, `src/engine/chain/download_chain.rs`, `docs/configuration.md` | 非当前主线，动态并发调节尚未落地 | 主线完成后再进入调参与阈值固化 |
+| T11 | 🟡 进行中（暂缓） | 91% | `src/engine/chain/backpressure.rs`, `src/engine/chain/task_model_chain.rs`, `src/engine/chain/parser_chain.rs`, `src/engine/chain/download_chain.rs`, `docs/alerts/logging_alerts.yml`, `docs/alerts/policy_alerts.yml`, `docs/dashboards/logging_dashboard.md`, `docs/alerts/backpressure_runbook.md`, `docs/alerts/cas_fencing_runbook.md`, `docs/dashboards/threshold_calibration_template.md`, `docs/dashboards/baseline_report_template.md` | 非当前主线，阈值未完成实测校准 | 主线完成后按模板回填并定版阈值 |
 | T12 | 🟡 进行中（暂缓） | 22% | `docs/design/gray_release_sop.md`, `docs/design/rollback_drill_checklist.md` | 非当前主线，尚未完成真实演练 | 主线完成后执行演练并固化开关配置 |
 
 ### 20.1 近期优先级建议（按收益/风险）

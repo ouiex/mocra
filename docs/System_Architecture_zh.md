@@ -19,9 +19,9 @@ Mocra 是一个**分布式、事件驱动的爬虫、采集与数据处理系统
 
 ## 2. 详细组件设计 (Component Deep Dive)
 
-系统采用 Rust Workspace 组织，包含多个功能独立的 Crate：
+系统采用单包（single-package）组织，核心能力按模块划分在 `src/*` 下：
 
-### 2.1 Engine (核心引擎) `engine`
+### 2.1 Engine (核心引擎) `src/engine`
 **Engine 是系统的大脑**，负责编排整个爬取和处理流程。它不直接执行 HTTP 请求或数据库操作，而是协调各个 Processor 工作。
 
 *   **核心 Pipeline**: 采用经典的 Scrapy 风格的 Pipeline 设计，但完全异步且分布式。
@@ -31,32 +31,32 @@ Mocra 是一个**分布式、事件驱动的爬虫、采集与数据处理系统
     *   **MiddlewareManager**: 管理下载中间件（签名、代理）、数据中间件（清洗）和存储中间件。
     *   **Zombie Killer**: 监控并清理卡死的任务。
 
-### 2.2 Common (公共基础) `common`
+### 2.2 Common (公共基础) `src/common`
 **Common 是系统的骨架**，定义了所有模块必须遵循的契约。
 
 *   **Global State (`State`)**: 单例上下文对象，持有 DB 连接池、Redis 连接、配置对象、分布式限流器等，通过依赖注入传递给所有组件。
 *   **Registry**: 服务注册与发现。每个节点启动时都会在 Redis 中注册（附带 UUID 和元数据），并定期发送心跳。
 
-### 2.3 Queue (消息队列抽象) `queue`
+### 2.3 Queue (消息队列抽象) `src/queue`
 **Queue 是系统的神经网络**，负责组件间的异步通信。支持 Redis Streams 和 Kafka，提供统一的 `MqBackend` 接口和各业务 Topic (TopicType: Task, Request, Response, ParserTask, Error)。
 
-### 2.4 Downloader (下载器) `downloader`
+### 2.4 Downloader (下载器) `src/downloader`
 **Downloader 是系统的触手**，负责实际的网络交互。支持 HTTP/1.1, H2 和 WebSocket。内置了连接复用、Redis 缓存（Gzip压缩）、分布式限流。
 
-### 2.5 JS-V8 (动态执行环境) `js-v8`
+### 2.5 JS-V8 (动态执行环境) `src/js_v8`
 **JS-V8 是系统的扩展插件**，通过 Worker Pool 模型在多线程 Actor 中运行 V8 Isolate，用于执行复杂的 JS 逻辑（如反爬签名）。
 
-### 2.6 Sync (分布式协同) `sync`
+### 2.6 Sync (分布式协同) `src/sync`
 **Sync 是系统的协调者**，解决分布式一致性问题。提供 Leader Election 和 DistributedSync（基于 CAS 和 Pub/Sub 的共享状态同步）。
 
-### 2.7 Cacheable (统一缓存) `cacheable`
+### 2.7 Cacheable (统一缓存) `src/cacheable`
 **Cacheable 是系统的记忆**。提供 DashMap（本地）和 Redis（分布式）的统一接口。
 
 ---
 
 ## 3. 核心数据结构与生命周期 (Core Data Structures & Lifecycle)
 
-### 3.1 TaskModel (`common/src/model/message.rs`)
+### 3.1 TaskModel (`src/common/model/message.rs`)
 **定义**: 整个抓取任务的顶层描述，由调度器或 API 生成。
 *   **关键字段**: `account`, `platform`, `module` (可选列表), `priority`, `run_id`.
 *   **生命周期**:
@@ -65,7 +65,7 @@ Mocra 是一个**分布式、事件驱动的爬虫、采集与数据处理系统
     3.  **Consumption**: `TaskModelProcessor` 消费。
     4.  **Transformation**: 加载对应 Module，调用 `Module.generate()` 生成 `Request`。
 
-### 3.2 Request (`common/src/model/request.rs`)
+### 3.2 Request (`src/common/model/request.rs`)
 **定义**: 表示一个具体的 HTTP/WebSocket 请求。
 *   **关键字段**: `url`, `method`, `headers`, `cookies`, `meta`, `limit_id`, `context` (执行标记), `run_id`.
 *   **生命周期**:
@@ -75,7 +75,7 @@ Mocra 是一个**分布式、事件驱动的爬虫、采集与数据处理系统
     4.  **Consumption**: `DownloadProcessor` 消费。
     5.  **Execution**: 转换为网络流，发送至目标服务器。
 
-### 3.3 Response (`common/src/model/response.rs`)
+### 3.3 Response (`src/common/model/response.rs`)
 **定义**: 网络请求的原始返回结果，尚未解析。
 *   **关键字段**: `status_code`, `content` (Bytes), `headers`, `context`, `run_id`, `request_hash`.
 *   **生命周期**:
@@ -84,7 +84,7 @@ Mocra 是一个**分布式、事件驱动的爬虫、采集与数据处理系统
     3.  **Consumption**: `ResponseModuleProcessor` 消费。
     4.  **Parsing**: 传递给 `Module.parser()` 进行解析。
 
-### 3.4 ParserTaskModel (`common/src/model/message.rs`)
+### 3.4 ParserTaskModel (`src/common/model/message.rs`)
 **定义**: 解析过程中产生的需要“递归”处理或状态保持的中间态任务。通常用于多步流程（如 Step 1 -> Step 2）或复杂的分页。
 *   **关键字段**: `account_task`, `metadata` (携带上下文数据), `context` (`ExecutionMark`), `prefix_request`.
 *   **生命周期**:
@@ -92,7 +92,7 @@ Mocra 是一个**分布式、事件驱动的爬虫、采集与数据处理系统
     2.  **Queue**: 推送到 `Topic: ParserTask`。
     3.  **Consumption**: `TaskModelProcessor` (或专门的 `ParserTaskProcessor`) 消费，通常作为带有特定 Context 的新 `Task` 处理，重新触发生成逻辑或特定步骤逻辑。
 
-### 3.5 Data (`common/src/model/data.rs`)
+### 3.5 Data (`src/common/model/data.rs`)
 **定义**: 最终提取的业务数据封装。
 *   **关键字段**: `request_id`, `platform`, `account`, `module`, `meta` (元数据), `data` (`DataType` 枚举), `data_middleware`.
 *   **支持数据类型 (`DataType`)**:
@@ -108,19 +108,19 @@ Mocra 是一个**分布式、事件驱动的爬虫、采集与数据处理系统
 
 ## 4. 关键接口与契约 (Key Interfaces & Contracts)
 
-### 4.1 ModuleTrait (`common/src/interface/module.rs`)
+### 4.1 ModuleTrait (`src/common/interface/module.rs`)
 核心业务逻辑接口，每个具体的 Crawler 必须实现。
 *   `generate()`: 根据配置和参数生成 `Request`流。
 *   `parser()`: 接收 `Response`，返回 `ParserData`（包含数据 `Data`、新请求 `Request`、新任务 `ParserTask`）。
 *   `add_step()`: 定义多步执行流（DAG）。
 *   `cron()`: 可选的定时调度配置。
 
-### 4.2 DownloadMiddleware (`common/src/interface/middleware.rs`)
+### 4.2 DownloadMiddleware (`src/common/interface/middleware.rs`)
 拦截和处理网络请求/响应的钩子。
 *   `before_request(request)`: 请求发送前调用（签名、加 Header）。
 *   `after_response(response)`: 响应接收后调用（验证状态码、解密）。
 
-### 4.3 DataMiddleware & DataStoreMiddleware (`common/src/interface/middleware.rs`)
+### 4.3 DataMiddleware & DataStoreMiddleware (`src/common/interface/middleware.rs`)
 处理和存储提取出的数据。
 *   `handle_data(data)`: 数据清洗、去重、转换。
 *   `store_data(data)`: 数据持久化接口。
@@ -309,16 +309,17 @@ graph TD
 
 ```text
 mocra/
-  ├── cacheable/      # 缓存抽象层
-  ├── common/         # 共享类型、State、Config、接口定义
-  ├── downloader/     # HTTP/WS 客户端实现
-  ├── engine/         # 核心业务编排、Processor、EventBus
-  ├── errors/         # 统一错误类型定义
-  ├── js-v8/          # 基于 Rusty_v8 的 JS 运行时池
-  ├── queue/          # Redis/Kafka 队列封装
-  ├── sync/           # 分布式锁、状态同步、选主
-  ├── proxy/          # 代理池管理
-  ├── utils/          # 工具库（加密、日期处理、算法）
-  ├── docs/           # 详细的设计文档
-  └── src/            # Workspace 根，统一导出
+    ├── src/
+    │   ├── cacheable/   # 缓存抽象层
+    │   ├── common/      # 共享类型、State、Config、接口定义
+    │   ├── downloader/  # HTTP/WS 客户端实现
+    │   ├── engine/      # 核心业务编排、Processor、EventBus
+    │   ├── errors/      # 统一错误类型定义
+    │   ├── js_v8/       # 基于 Rusty_v8 的 JS 运行时池
+    │   ├── queue/       # Redis/Kafka 队列封装
+    │   ├── sync/        # 分布式锁、状态同步、选主
+    │   ├── proxy/       # 代理池管理
+    │   ├── utils/       # 工具库（加密、日期处理、算法）
+    │   └── lua/         # Lua 脚本资源
+    └── docs/            # 详细的设计文档
 ```

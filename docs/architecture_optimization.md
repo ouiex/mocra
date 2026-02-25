@@ -12,12 +12,12 @@ Simulate a Reviewer: Think like "Reviewer #2." Actively look for loopholes, flaw
 
 本文档结合 TODO 方向与代码证据，主要来源如下：
 
-- 引擎生命周期与编排：[engine/src/engine.rs](engine/src/engine.rs)
-- Cron 调度与缓存刷新：[engine/src/scheduler.rs](engine/src/scheduler.rs)
-- 队列语义与 Ack/Nack：[queue/src/lib.rs](queue/src/lib.rs)
-- 队列管理、编解码、压缩与批处理：[queue/src/manager.rs](queue/src/manager.rs)
-- 分布式同步服务：[sync/src/distributed.rs](sync/src/distributed.rs)
-- 错误模型与分类：[errors/src/error.rs](errors/src/error.rs)
+- 引擎生命周期与编排：[src/engine/engine.rs](src/engine/engine.rs)
+- Cron 调度与缓存刷新：[src/engine/scheduler.rs](src/engine/scheduler.rs)
+- 队列语义与 Ack/Nack：[src/queue/lib.rs](src/queue/lib.rs)
+- 队列管理、编解码、压缩与批处理：[src/queue/manager.rs](src/queue/manager.rs)
+- 分布式同步服务：[src/sync/distributed.rs](src/sync/distributed.rs)
+- 错误模型与分类：[src/errors/error.rs](src/errors/error.rs)
 
 目标是从“描述性架构”升级为“可验证、契约驱动”的行为体系。
 
@@ -126,12 +126,12 @@ Simulate a Reviewer: Think like "Reviewer #2." Actively look for loopholes, flaw
 
 ## 证据链接
 
-- 引擎编排与事件接入：[engine/src/engine.rs](engine/src/engine.rs)
-- Cron 调度缓存刷新：[engine/src/scheduler.rs](engine/src/scheduler.rs)
-- 队列 ack/nack 与 DLQ 接口：[queue/src/lib.rs](queue/src/lib.rs)
-- 队列批处理、编解码与压缩：[queue/src/manager.rs](queue/src/manager.rs)
-- Sync 流与 KV 刷新：[sync/src/distributed.rs](sync/src/distributed.rs)
-- 错误类型分类：[errors/src/error.rs](errors/src/error.rs)
+- 引擎编排与事件接入：[src/engine/engine.rs](src/engine/engine.rs)
+- Cron 调度缓存刷新：[src/engine/scheduler.rs](src/engine/scheduler.rs)
+- 队列 ack/nack 与 DLQ 接口：[src/queue/lib.rs](src/queue/lib.rs)
+- 队列批处理、编解码与压缩：[src/queue/manager.rs](src/queue/manager.rs)
+- Sync 流与 KV 刷新：[src/sync/distributed.rs](src/sync/distributed.rs)
+- 错误类型分类：[src/errors/error.rs](src/errors/error.rs)
 
 ## 待确认问题
 
@@ -222,16 +222,16 @@ Engine 契约：
 #### P0 当前实现与验证（已完成）
 
 实现要点：
-- Queue：落地 Nack 重试/DLQ 策略与投递头部，明确重试判定与 DLQ 路由。[queue/src/lib.rs](./queue/src/lib.rs) [queue/src/manager.rs](.././queue/src/manager.rs) [queue/src/redis.rs](./queue/src/redis.rs) [queue/src/kafka.rs](./queue/src/kafka.rs)
-- Sync：引入 SyncOptions 与 envelope 语义，支持回滚策略与配置化接入。[sync/src/distributed.rs](sync/src/distributed.rs) [common/src/model/config.rs](common/src/model/config.rs)
-- Cron：补齐配置传播的刷新间隔与最大陈旧窗口，并增加强制刷新逻辑。[engine/src/scheduler.rs](engine/src/scheduler.rs)
-- Engine：处理失败落地 Nack 语义，确保生命周期终结态可追踪。[engine/src/engine.rs](engine/src/engine.rs)
+- Queue：落地 Nack 重试/DLQ 策略与投递头部，明确重试判定与 DLQ 路由。[src/queue/lib.rs](./src/queue/lib.rs) [src/queue/manager.rs](.././src/queue/manager.rs) [src/queue/redis.rs](./src/queue/redis.rs) [src/queue/kafka.rs](./src/queue/kafka.rs)
+- Sync：引入 SyncOptions 与 envelope 语义，支持回滚策略与配置化接入。[src/sync/distributed.rs](src/sync/distributed.rs) [src/common/model/config.rs](src/common/model/config.rs)
+- Cron：补齐配置传播的刷新间隔与最大陈旧窗口，并增加强制刷新逻辑。[src/engine/scheduler.rs](src/engine/scheduler.rs)
+- Engine：处理失败落地 Nack 语义，确保生命周期终结态可追踪。[src/engine/engine.rs](src/engine/engine.rs)
 
 测试与结果：
-- Queue 契约与 Redis/Kafka 行为测试通过。[queue/src/tests.rs](queue/src/tests.rs)
-- Sync 回滚边界测试通过。[sync/src/tests/test_sync_rollback.rs](sync/src/tests/test_sync_rollback.rs)
-- Cron 陈旧窗口强制刷新测试通过。[engine/src/scheduler.rs](engine/src/scheduler.rs)
-- 最近验证命令：`cargo test -p queue`，`cargo test -p sync`，`cargo test -p engine`
+- Queue 契约与 Redis/Kafka 行为测试通过。[src/queue/tests.rs](src/queue/tests.rs)
+- Sync 回滚边界测试通过。[src/sync/tests/test_sync_rollback.rs](src/sync/tests/test_sync_rollback.rs)
+- Cron 陈旧窗口强制刷新测试通过。[src/engine/scheduler.rs](src/engine/scheduler.rs)
+- 最近验证命令：`cargo test`，`cargo test`，`cargo test`
 
 ### P1: 契约测试与关键失败场景回归
 
@@ -251,24 +251,24 @@ Engine 契约：
 - 每个场景必须映射到至少一个契约断言（Queue/Sync/Engine）。
 
 2) 统一测试基建与接口抽象
-- 复用现有契约测试框架扩展场景集。[queue/src/tests.rs](queue/src/tests.rs) [sync/src/tests/test_sync_rollback.rs](sync/src/tests/test_sync_rollback.rs)
-- 为 Redis/Kafka 构建相同语义的测试入口，确保“同一测试、不同后端”。[queue/src/redis.rs](queue/src/redis.rs) [queue/src/kafka.rs](queue/src/kafka.rs)
+- 复用现有契约测试框架扩展场景集。[src/queue/tests.rs](src/queue/tests.rs) [src/sync/tests/test_sync_rollback.rs](src/sync/tests/test_sync_rollback.rs)
+- 为 Redis/Kafka 构建相同语义的测试入口，确保“同一测试、不同后端”。[src/queue/redis.rs](src/queue/redis.rs) [src/queue/kafka.rs](src/queue/kafka.rs)
 
 3) 引入可控故障与时间控制
 - 在测试中引入“可控失败点”（例如重试次数耗尽、强制延迟、模拟重复投递）。
-- 对 Cron/Sync 使用时间窗口驱动的断言，避免不稳定的 sleep 依赖。[engine/src/scheduler.rs](engine/src/scheduler.rs) [sync/src/distributed.rs](sync/src/distributed.rs)
+- 对 Cron/Sync 使用时间窗口驱动的断言，避免不稳定的 sleep 依赖。[src/engine/scheduler.rs](src/engine/scheduler.rs) [src/sync/distributed.rs](src/sync/distributed.rs)
 
 #### 关键失败场景矩阵（最小集）
 
 | 场景 | 触发方式 | 预期行为 | 契约归属 | 覆盖文件 |
 | --- | --- | --- | --- | --- |
-| 重复投递 | producer 重试 / broker 重发 | 幂等处理，Ack 后不再投递 | Queue | [queue/src/tests.rs](queue/src/tests.rs) |
-| 乱序投递 | 多分区或并发消费 | 允许乱序但不违反幂等 | Queue | [queue/src/tests.rs](queue/src/tests.rs) |
-| 重试耗尽 -> DLQ | 连续 Nack | 进入 DLQ，且携带重试头 | Queue | [queue/src/tests.rs](queue/src/tests.rs) |
-| 毒消息 | 解码失败或业务异常 | 快速失败 + DLQ + 记录原因 | Queue/Engine | [queue/src/tests.rs](queue/src/tests.rs) [engine/src/engine.rs](engine/src/engine.rs) |
-| 消费者崩溃 | Ack 前崩溃 | 消息可重投递，最终有终结态 | Queue/Engine | [queue/src/tests.rs](queue/src/tests.rs) [engine/src/engine.rs](engine/src/engine.rs) |
-| Sync 回滚冲突 | 旧版本写入 | 按策略拒绝或记录回滚 | Sync | [sync/src/distributed.rs](sync/src/distributed.rs) [sync/src/tests/test_sync_rollback.rs](sync/src/tests/test_sync_rollback.rs) |
-| Cron 陈旧窗口 | 过期缓存 | 强制刷新并更新时间戳 | Engine | [engine/src/scheduler.rs](engine/src/scheduler.rs) |
+| 重复投递 | producer 重试 / broker 重发 | 幂等处理，Ack 后不再投递 | Queue | [src/queue/tests.rs](src/queue/tests.rs) |
+| 乱序投递 | 多分区或并发消费 | 允许乱序但不违反幂等 | Queue | [src/queue/tests.rs](src/queue/tests.rs) |
+| 重试耗尽 -> DLQ | 连续 Nack | 进入 DLQ，且携带重试头 | Queue | [src/queue/tests.rs](src/queue/tests.rs) |
+| 毒消息 | 解码失败或业务异常 | 快速失败 + DLQ + 记录原因 | Queue/Engine | [src/queue/tests.rs](src/queue/tests.rs) [src/engine/engine.rs](src/engine/engine.rs) |
+| 消费者崩溃 | Ack 前崩溃 | 消息可重投递，最终有终结态 | Queue/Engine | [src/queue/tests.rs](src/queue/tests.rs) [src/engine/engine.rs](src/engine/engine.rs) |
+| Sync 回滚冲突 | 旧版本写入 | 按策略拒绝或记录回滚 | Sync | [src/sync/distributed.rs](src/sync/distributed.rs) [src/sync/tests/test_sync_rollback.rs](src/sync/tests/test_sync_rollback.rs) |
+| Cron 陈旧窗口 | 过期缓存 | 强制刷新并更新时间戳 | Engine | [src/engine/scheduler.rs](src/engine/scheduler.rs) |
 
 #### 优化路径（与 P0 格式一致）
 
@@ -301,21 +301,21 @@ Engine 契约：
 #### P1 当前实现与验证（进行中）
 
 新增覆盖：
-- Queue：新增“消费者崩溃重投递”回归，并补齐重试路径的 Nack 原因头部断言。[queue/src/tests.rs](queue/src/tests.rs)
-- Queue：补齐 Kafka 语义对齐回归（重试与乱序 Ack）。[queue/src/tests.rs](queue/src/tests.rs)
-- Queue：补齐 Redis 并发/乱序 Ack 回归。[queue/src/tests.rs](queue/src/tests.rs)
-- Sync：新增“毒消息流更新被忽略”回归，避免异常字节污染状态。[sync/src/tests/test_sync_rollback.rs](sync/src/tests/test_sync_rollback.rs)
-- Engine：新增“毒消息触发 Nack”处理闭环回归。[engine/src/runner.rs](engine/src/runner.rs)
+- Queue：新增“消费者崩溃重投递”回归，并补齐重试路径的 Nack 原因头部断言。[src/queue/tests.rs](src/queue/tests.rs)
+- Queue：补齐 Kafka 语义对齐回归（重试与乱序 Ack）。[src/queue/tests.rs](src/queue/tests.rs)
+- Queue：补齐 Redis 并发/乱序 Ack 回归。[src/queue/tests.rs](src/queue/tests.rs)
+- Sync：新增“毒消息流更新被忽略”回归，避免异常字节污染状态。[src/sync/tests/test_sync_rollback.rs](src/sync/tests/test_sync_rollback.rs)
+- Engine：新增“毒消息触发 Nack”处理闭环回归。[src/engine/runner.rs](src/engine/runner.rs)
 - CI：补齐契约测试门禁脚本与流水线配置。[scripts/ci_contract_tests.ps1](scripts/ci_contract_tests.ps1) [scripts/ci_contract_tests.sh](scripts/ci_contract_tests.sh) [.github/workflows/contract-tests.yml](.github/workflows/contract-tests.yml)
 - 覆盖清单：输出 P1 契约测试覆盖报告。[docs/contract_test_coverage.md](docs/contract_test_coverage.md)
 
 测试与结果：
-- Queue 新增失败场景测试通过（11/11，含 Redis 并发回归与 Kafka 对齐用例）。[queue/src/tests.rs](queue/src/tests.rs)
-- Sync 新增失败场景测试通过（3/3）。[sync/src/tests/test_sync_rollback.rs](sync/src/tests/test_sync_rollback.rs)
-- Kafka 本地验证通过：`cargo test -p queue -- tests::test_kafka_retry_then_ack tests::test_kafka_out_of_order_ack`
-- Redis 并发回归验证通过：`cargo test -p queue -- tests::test_redis_concurrent_out_of_order_ack`
-- Engine 毒消息回归验证通过：`cargo test -p engine -- tests::test_poison_message_triggers_nack`
-- 最近验证命令：`cargo test -p queue`，`cargo test -p sync`
+- Queue 新增失败场景测试通过（11/11，含 Redis 并发回归与 Kafka 对齐用例）。[src/queue/tests.rs](src/queue/tests.rs)
+- Sync 新增失败场景测试通过（3/3）。[src/sync/tests/test_sync_rollback.rs](src/sync/tests/test_sync_rollback.rs)
+- Kafka 本地验证通过：`cargo test -- tests::test_kafka_retry_then_ack tests::test_kafka_out_of_order_ack`
+- Redis 并发回归验证通过：`cargo test -- tests::test_redis_concurrent_out_of_order_ack`
+- Engine 毒消息回归验证通过：`cargo test -- tests::test_poison_message_triggers_nack`
+- 最近验证命令：`cargo test`，`cargo test`
 
 #### P1 未完成项
 
@@ -331,18 +331,18 @@ Engine 契约：
 
 | 事件域 | 事件类型 | 典型错误来源 | ErrorKind | 处理策略 | 备注 |
 | --- | --- | --- | --- | --- | --- |
-| Engine | TaskModelReceived/Started/Completed/Failed/Retry | ModuleNotFound, TaskMaxError, 配置加载失败 | Task, Module, CacheService | 失败进入 ErrorTaskModel 或 DLQ | [engine/src/chain/task_model_chain.rs](engine/src/chain/task_model_chain.rs) [engine/src/events/events.rs](engine/src/events/events.rs) |
+| Engine | TaskModelReceived/Started/Completed/Failed/Retry | ModuleNotFound, TaskMaxError, 配置加载失败 | Task, Module, CacheService | 失败进入 ErrorTaskModel 或 DLQ | [src/engine/chain/task_model_chain.rs](src/engine/chain/task_model_chain.rs) [src/engine/events/events.rs](src/engine/events/events.rs) |
 | Engine | ParserTaskModelReceived/Started/Completed/Failed/Retry | 解析失败, 模块锁定 | Parser, ProcessorChain | 可重试或转入错误队列 | 同上 |
 | Engine | RequestPublishPrepared/Send/Completed/Failed/Retry | 队列写入失败 | Queue | 可重试, 超阈值 DLQ | 同上 |
-| Engine | RequestMiddlewarePrepared/Started/Completed/Failed/Retry | 参数非法, 中间件异常 | Request, ProcessorChain | 失败进入 DLQ | [engine/src/chain/download_chain.rs](engine/src/chain/download_chain.rs) |
+| Engine | RequestMiddlewarePrepared/Started/Completed/Failed/Retry | 参数非法, 中间件异常 | Request, ProcessorChain | 失败进入 DLQ | [src/engine/chain/download_chain.rs](src/engine/chain/download_chain.rs) |
 | Engine | DownloaderCreate/DownloadStarted/Completed/Failed/Retry | 网络超时, 连接失败, 限流/封禁 | Download, Proxy, RateLimit | 可重试, 超阈值 DLQ | 同上 |
 | Engine | ResponseMiddlewarePrepared/Started/Completed/Failed/Retry | 响应解析异常 | Response, ProcessorChain | 失败进入 DLQ | 同上 |
 | Engine | ResponsePublishPrepared/Send/Completed/Failed/Retry | 队列写入失败 | Queue | 可重试, 超阈值 DLQ | 同上 |
-| Engine | ModuleGenerate/Started/Completed/Failed/Retry | ModuleMaxError, TaskMaxError, 配置缺失 | Module, Task | 可重试或终止 | [engine/src/chain/parser_chain.rs](engine/src/chain/parser_chain.rs) |
+| Engine | ModuleGenerate/Started/Completed/Failed/Retry | ModuleMaxError, TaskMaxError, 配置缺失 | Module, Task | 可重试或终止 | [src/engine/chain/parser_chain.rs](src/engine/chain/parser_chain.rs) |
 | Engine | ParserReceived/Started/Completed/Failed/Retry | 反序列化失败, 业务逻辑异常 | Parser | 失败进入 DLQ | 同上 |
 | Engine | MiddlewareBefore/Started/Completed/Failed/Retry | 数据清洗异常 | DataMiddleware | 可重试或丢弃 | 同上 |
 | Engine | StoreBefore/Started/Completed/Failed/Retry | DB 超时, 约束冲突 | DataStore, Orm | 可重试, 幂等冲突不重试 | 同上 |
-| System | ErrorOccurred/ErrorHandled | 运行时异常, 依赖异常 | Service, Command, DynamicLibrary, CacheService | 记录 + 告警, 不进入 DLQ | [engine/src/events/events.rs](engine/src/events/events.rs) |
+| System | ErrorOccurred/ErrorHandled | 运行时异常, 依赖异常 | Service, Command, DynamicLibrary, CacheService | 记录 + 告警, 不进入 DLQ | [src/engine/events/events.rs](src/engine/events/events.rs) |
 | System | SystemStarted/SystemShutdown | 启停流程异常 | Service | 记录 + 告警 | 同上 |
 | System | ComponentHealthCheck | 组件健康异常 | Service, CacheService, Queue | 记录 + 告警 | 同上 |
 
@@ -405,7 +405,7 @@ Engine 契约：
 - `EventDomain`：事件域（Engine/System）。
 - `EventType`：具体事件类型（如 `TaskModelFailed`、`DownloadRetry`、`ErrorOccurred`）。
 - `EventPhase`：事件阶段（Started/Completed/Failed/Retry），作为策略分流主键。
-- `ErrorKind`：统一错误类型枚举（来自 `errors/src/error.rs`）。
+- `ErrorKind`：统一错误类型枚举（来自 `src/errors/error.rs`）。
 - `Policy`：错误处理策略（重试、退避、DLQ、告警）。
 - `Decision`：策略决策结果（用于执行 Ack/Nack/DLQ/告警）。
 - `StrategyResolver`：事件 + ErrorKind -> Policy 的解析器。
@@ -800,7 +800,7 @@ impl SystemEventKind {
 
 #### P2 分析：风险与缺口
 
-- ErrorKind 已存在但未绑定处理策略，导致重试风暴、静默丢失与告警噪音不可控。[errors/src/error.rs](errors/src/error.rs)
+- ErrorKind 已存在但未绑定处理策略，导致重试风暴、静默丢失与告警噪音不可控。[src/errors/error.rs](src/errors/error.rs)
 - Queue/Engine/Sync 的失败行为依赖局部实现，缺少统一的“错误 -> 动作”契约。
 - 缺少“策略变更可验证”的测试与指标闭环，线上回归难追踪。
 
@@ -824,12 +824,12 @@ impl SystemEventKind {
 - 统一事件模型：`EventEnvelope` + `EventDomain`/`EventType`/`EventPhase`，并统一 `event_key` 路由。
 - 事件链路落地：Engine 各链路与 EventBus/Handler 统一消费 `EventEnvelope`。
 - 错误类型清理：`ErrorKind` 移除 Cookie/Header/Sync，并保持统一语义；`EventError` 可序列化。
-- 策略映射与集中决策：新增 `PolicyResolver` 与默认策略映射，支持覆盖配置。[common/src/policy.rs](common/src/policy.rs) [common/src/model/config.rs](common/src/model/config.rs)
-- Queue/Engine/Sync 落地统一决策入口：Queue 的 Nack 策略、Engine 的失败处理、Sync 的编解码异常均走策略决策。[queue/src/manager.rs](queue/src/manager.rs) [engine/src/engine.rs](engine/src/engine.rs) [sync/src/distributed.rs](sync/src/distributed.rs)
-- 指标闭环雏形：新增 `policy_decisions_total` 统计重试/DLQ/丢弃等决策路径。[queue/src/redis.rs](queue/src/redis.rs) [queue/src/kafka.rs](queue/src/kafka.rs) [engine/src/engine.rs](engine/src/engine.rs) [sync/src/distributed.rs](sync/src/distributed.rs)
-- 策略契约测试最小集：Queue/Engine/Sync 统一入口新增最小覆盖，验证策略变更可追踪。[queue/src/tests.rs](queue/src/tests.rs) [engine/src/engine.rs](engine/src/engine.rs) [sync/src/distributed.rs](sync/src/distributed.rs)
+- 策略映射与集中决策：新增 `PolicyResolver` 与默认策略映射，支持覆盖配置。[src/common/policy.rs](src/common/policy.rs) [src/common/model/config.rs](src/common/model/config.rs)
+- Queue/Engine/Sync 落地统一决策入口：Queue 的 Nack 策略、Engine 的失败处理、Sync 的编解码异常均走策略决策。[src/queue/manager.rs](src/queue/manager.rs) [src/engine/engine.rs](src/engine/engine.rs) [src/sync/distributed.rs](src/sync/distributed.rs)
+- 指标闭环雏形：新增 `policy_decisions_total` 统计重试/DLQ/丢弃等决策路径。[src/queue/redis.rs](src/queue/redis.rs) [src/queue/kafka.rs](src/queue/kafka.rs) [src/engine/engine.rs](src/engine/engine.rs) [src/sync/distributed.rs](src/sync/distributed.rs)
+- 策略契约测试最小集：Queue/Engine/Sync 统一入口新增最小覆盖，验证策略变更可追踪。[src/queue/tests.rs](src/queue/tests.rs) [src/engine/engine.rs](src/engine/engine.rs) [src/sync/distributed.rs](src/sync/distributed.rs)
 - 告警规则与聚合查询模板：基于 `policy_decisions_total` 输出 Prometheus 规则与聚合维度示例。[docs/alerts/policy_alerts.yml](docs/alerts/policy_alerts.yml)
-- RetryableFailure 策略覆盖：RetryableFailure 进入统一策略决策，支持 DLQ/ACK 分流与指标统计。[engine/src/engine.rs](engine/src/engine.rs)
+- RetryableFailure 策略覆盖：RetryableFailure 进入统一策略决策，支持 DLQ/ACK 分流与指标统计。[src/engine/engine.rs](src/engine/engine.rs)
 - 基础回归验证：`cargo test` 全量通过，确认事件链路、策略与指标接入不破坏编译与基础测试。
 
 进行中：
@@ -939,17 +939,17 @@ path = "/metrics"
 #### P3 当前实现与验证（进展更新）
 
 已完成：
-- Logger 统一入口落地：新增 `LogSink`/`LogRecord`/分发器与配置映射，支持 console/file/mq/prometheus 四类输出。[utils/src/logger.rs](utils/src/logger.rs)
-- 配置结构落地：新增 P3 logger 配置模型（console/file/mq/prometheus）。[common/src/model/logger_config.rs](common/src/model/logger_config.rs)
-- 引擎接入：根据配置初始化 Logger + MQ 发送桥，EventBus 输出改为 MQ/Console/文件接入，移除 DB handler 注册。[engine/src/engine.rs](engine/src/engine.rs)
-- MQ 日志 topic 可配置：QueueManager 支持自定义 log topic（默认 `log`）。[queue/src/manager.rs](queue/src/manager.rs)
-- Prometheus 日志指标扩展：补齐 `log_queue_lag` 与 `log_batch_size` 统计。[utils/src/logger.rs](utils/src/logger.rs)
+- Logger 统一入口落地：新增 `LogSink`/`LogRecord`/分发器与配置映射，支持 console/file/mq/prometheus 四类输出。[src/utils/logger.rs](src/utils/logger.rs)
+- 配置结构落地：新增 P3 logger 配置模型（console/file/mq/prometheus）。[src/common/model/logger_config.rs](src/common/model/logger_config.rs)
+- 引擎接入：根据配置初始化 Logger + MQ 发送桥，EventBus 输出改为 MQ/Console/文件接入，移除 DB handler 注册。[src/engine/engine.rs](src/engine/engine.rs)
+- MQ 日志 topic 可配置：QueueManager 支持自定义 log topic（默认 `log`）。[src/queue/manager.rs](src/queue/manager.rs)
+- Prometheus 日志指标扩展：补齐 `log_queue_lag` 与 `log_batch_size` 统计。[src/utils/logger.rs](src/utils/logger.rs)
 - 文档更新：配置示例与约束（MQ json-only / console/file text-only）。[docs/configuration.md](docs/configuration.md)
-- 清理 DB 日志 sink：移除 `db_event_handler` 模块与引用。[engine/src/events/mod.rs](engine/src/events/mod.rs)
+- 清理 DB 日志 sink：移除 `db_event_handler` 模块与引用。[src/engine/events/mod.rs](src/engine/events/mod.rs)
 - Prometheus 仪表盘与告警建议：输出日志指标面板与告警规则示例。[docs/dashboards/logging_dashboard.md](docs/dashboards/logging_dashboard.md) [docs/alerts/logging_alerts.yml](docs/alerts/logging_alerts.yml)
 - 压测脚本与基线：提供日志链路压测入口与基线阈值说明。[scripts/logging_load_test.ps1](scripts/logging_load_test.ps1) [scripts/logging_load_test.sh](scripts/logging_load_test.sh) [tests/src/log_stress.rs](tests/src/log_stress.rs)
-- 回归验证：`cargo test -p utils -p queue -p engine -p common` 全部通过。
-- 最近验证：`cargo test -p utils -p queue -p engine -p common`，`cargo run -p tests --bin log_stress -- --total 200000 --concurrency 4 --buffer 20000`。
+- 回归验证：`cargo test` 全部通过。
+- 最近验证：`cargo test`，`cargo run -p tests --bin log_stress -- --total 200000 --concurrency 4 --buffer 20000`。
 
 进行中：
 - 无。

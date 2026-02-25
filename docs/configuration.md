@@ -18,7 +18,7 @@ Engine 在启动时会根据配置自动判断：
 - 当 `cache.redis` 已配置：判定为**分布式模式**。
 - 当 `cache.redis` 未配置：判定为**单节点模式**。
 
-对应代码入口：`Config::is_single_node_mode()`（`common/src/model/config.rs`）。
+对应代码入口：`Config::is_single_node_mode()`（`src/common/model/config.rs`）。
 
 影响（简述）：
 

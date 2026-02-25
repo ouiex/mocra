@@ -15,8 +15,7 @@ function Invoke-CargoChecked {
 
 Write-Host "Running contract tests"
 
-Invoke-CargoChecked -Args @("test", "-p", "queue")
-Invoke-CargoChecked -Args @("test", "-p", "sync")
+Invoke-CargoChecked -Args @("test", "--lib")
 
 $requireRedisTests = $env:MOCRA_REQUIRE_REDIS_CONTRACT_TESTS
 $redisUrl = $env:REDIS_URL
@@ -26,7 +25,7 @@ if (-not $redisUrl) {
 
 if ($redisUrl) {
 	Write-Host "Running optional Redis integration tests for T09"
-	Invoke-CargoChecked -Args @("test", "-p", "engine", "redis_", "--", "--nocapture")
+	Invoke-CargoChecked -Args @("test", "redis_", "--", "--nocapture")
 } elseif ($requireRedisTests -eq "1") {
 	Write-Error "MOCRA_REQUIRE_REDIS_CONTRACT_TESTS=1 but REDIS_URL/MOCRA_REDIS_TEST_URL is not set"
     exit 1

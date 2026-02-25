@@ -8,12 +8,12 @@ This report tracks P1 contract and failure scenario coverage across Queue, Sync,
 
 ## Queue Coverage
 
-- Redis duplicate delivery and out-of-order ack: [queue/src/tests.rs](queue/src/tests.rs)
-- Redis retry exhaustion -> DLQ: [queue/src/tests.rs](queue/src/tests.rs)
-- Redis consumer crash redelivery: [queue/src/tests.rs](queue/src/tests.rs)
-- Redis concurrent out-of-order ack: [queue/src/tests.rs](queue/src/tests.rs)
-- Kafka retry then ack: [queue/src/tests.rs](queue/src/tests.rs)
-- Kafka out-of-order ack: [queue/src/tests.rs](queue/src/tests.rs)
+- Redis duplicate delivery and out-of-order ack: [src/queue/tests.rs](src/queue/tests.rs)
+- Redis retry exhaustion -> DLQ: [src/queue/tests.rs](src/queue/tests.rs)
+- Redis consumer crash redelivery: [src/queue/tests.rs](src/queue/tests.rs)
+- Redis concurrent out-of-order ack: [src/queue/tests.rs](src/queue/tests.rs)
+- Kafka retry then ack: [src/queue/tests.rs](src/queue/tests.rs)
+- Kafka out-of-order ack: [src/queue/tests.rs](src/queue/tests.rs)
 
 Environment hints:
 - Redis: set `REDIS_HOST`, `REDIS_PORT` when running locally.
@@ -21,12 +21,12 @@ Environment hints:
 
 ## Sync Coverage
 
-- Disallow rollback ignores older version: [sync/src/tests/test_sync_rollback.rs](sync/src/tests/test_sync_rollback.rs)
-- Poison stream update ignored: [sync/src/tests/test_sync_rollback.rs](sync/src/tests/test_sync_rollback.rs)
+- Disallow rollback ignores older version: [src/sync/tests/test_sync_rollback.rs](src/sync/tests/test_sync_rollback.rs)
+- Poison stream update ignored: [src/sync/tests/test_sync_rollback.rs](src/sync/tests/test_sync_rollback.rs)
 
 ## Engine Coverage
 
-- Processor failure triggers Nack (poison message path): [engine/src/runner.rs](engine/src/runner.rs)
+- Processor failure triggers Nack (poison message path): [src/engine/runner.rs](src/engine/runner.rs)
 
 ## Pending Gaps
 
@@ -44,7 +44,7 @@ Contract test scripts now include an optional Engine Redis integration gate:
 Behavior:
 
 - Always run Queue + Sync contract tests.
-- Run `cargo test -p engine redis_ -- --nocapture` only when one of these env vars is set:
+- Run `cargo test redis_ -- --nocapture` only when one of these env vars is set:
 	- `REDIS_URL`
 	- `MOCRA_REDIS_TEST_URL`
 - If both are missing, Redis integration tests are explicitly skipped.
