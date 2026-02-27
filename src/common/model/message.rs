@@ -370,8 +370,8 @@ fn default_run_id() -> Uuid {
 pub struct ParserData {
     /// Parsed data list.
     pub data: Vec<Data>,
-    /// Generated next parser task (optional).
-    pub parser_task: Option<ParserTaskModel>,
+    /// Generated next parser tasks.
+    pub parser_task: Vec<ParserTaskModel>,
     /// Generated error task (optional).
     pub error_task: Option<ErrorTaskModel>,
     /// Stop flag (optional).
@@ -383,7 +383,11 @@ impl ParserData {
         self
     }
     pub fn with_task(mut self, task: ParserTaskModel) -> Self {
-        self.parser_task = Some(task);
+        self.parser_task.push(task);
+        self
+    }
+    pub fn with_tasks(mut self, tasks: Vec<ParserTaskModel>) -> Self {
+        self.parser_task.extend(tasks);
         self
     }
     pub fn with_error(mut self, error: ErrorTaskModel) -> Self {

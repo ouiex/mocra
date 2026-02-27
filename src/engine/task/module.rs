@@ -224,7 +224,7 @@ impl Module {
         // Run post_process only when chain reaches terminal step without next task.
         let total_steps = self.processor.get_total_steps().await;
         let is_last_step = current_step + 1 >= total_steps && total_steps > 0;
-        let no_next_task = data.parser_task.is_none();
+        let no_next_task = data.parser_task.is_empty();
         if is_last_step && no_next_task {
             self.module.post_process(cfg_for_post).await?;
             

@@ -1,8 +1,8 @@
 use async_trait::async_trait;
-use common::interface::{DataMiddleware, DataStoreMiddleware};
-use common::model::data::{Data, DataType};
-use common::model::ModuleConfig;
-use errors::Result;
+use mocra::common::interface::{DataMiddleware, DataStoreMiddleware};
+use mocra::common::model::data::{Data, DataType};
+use mocra::common::model::ModuleConfig;
+use mocra::errors::Result;
 use std::sync::Arc;
 
 pub struct ObjectStoreMiddleware;

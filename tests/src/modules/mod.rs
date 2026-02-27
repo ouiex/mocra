@@ -1,4 +1,4 @@
-use common::interface::ModuleTrait;
+use mocra::common::interface::ModuleTrait;
 use std::sync::Arc;
 
 mod test;

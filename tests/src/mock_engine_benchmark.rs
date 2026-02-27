@@ -4,12 +4,12 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::Semaphore;
 
-use common::interface::SyncBoxStream;
-use common::model::{Request, Response, ModuleConfig};
-use common::model::download_config::DownloadConfig;
-use common::model::login_info::LoginInfo;
-use downloader::Downloader;
-use errors::Result;
+use mocra::common::interface::SyncBoxStream;
+use mocra::common::model::{Request, Response, ModuleConfig};
+use mocra::common::model::download_config::DownloadConfig;
+use mocra::common::model::login_info::LoginInfo;
+use mocra::downloader::Downloader;
+use mocra::errors::Result;
 use semver::Version;
 use serde_json::Map;
 use futures::stream::{FuturesUnordered, StreamExt};

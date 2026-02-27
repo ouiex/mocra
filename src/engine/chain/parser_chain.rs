@@ -327,7 +327,7 @@ impl ProcessorTrait<(Response, Arc<Module>, Arc<ModuleConfig>, Option<LoginInfo>
         let data = module.parser(input.0.clone(), Some(config)).await;
         let mut data = match data {
             Ok(d) => {
-                let has_next_task = d.parser_task.is_some();
+                let has_next_task = !d.parser_task.is_empty();
                 let has_error = d.error_task.is_some();
                 info!(
                     "[ResponseParserProcessor] parser returned: request_id={} data_len={} has_next_task={} has_error={}",
@@ -388,7 +388,7 @@ impl ProcessorTrait<(Response, Arc<Module>, Arc<ModuleConfig>, Option<LoginInfo>
             }
         };
 
-           if let Some(task) = data.parser_task.take() {
+        for task in data.parser_task.drain(..) {
                let task_account = task.account_task.account.clone();
                let task_platform = task.account_task.platform.clone();
                let task_run_id = task.run_id;
@@ -413,7 +413,7 @@ impl ProcessorTrait<(Response, Arc<Module>, Arc<ModuleConfig>, Option<LoginInfo>
 
                  let task_meta = task.metadata.as_object().cloned().unwrap_or_default();
                  
-                 match module_clone.generate(task_meta, login_info).await {
+                 match module_clone.generate(task_meta, login_info.clone()).await {
                      Ok(mut stream) => {
                          let request_queue = self.queue_manager.get_request_push_channel();
                          let mut generated_count = 0;
@@ -550,8 +550,8 @@ impl ProcessorTrait<(Response, Arc<Module>, Arc<ModuleConfig>, Option<LoginInfo>
                         }),
                     ).await;
                 }
-             }
-        }
+               }
+           }
         
         if let Some(mut msg) = data.error_task {
             warn!(

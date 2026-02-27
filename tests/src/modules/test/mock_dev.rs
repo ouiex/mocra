@@ -1,11 +1,11 @@
 use async_trait::async_trait;
 
-use common::interface::{ModuleTrait, ModuleNodeTrait, SyncBoxStream, ToSyncBoxStream};
-use common::model::{ModuleConfig, Request, Response};
-use common::model::login_info::LoginInfo;
-use common::model::request::RequestMethod;
-use common::model::message::ParserData;
-use errors::Result;
+use mocra::common::interface::{ModuleTrait, ModuleNodeTrait, SyncBoxStream, ToSyncBoxStream};
+use mocra::common::model::{ModuleConfig, Request, Response};
+use mocra::common::model::login_info::LoginInfo;
+use mocra::common::model::request::RequestMethod;
+use mocra::common::model::message::ParserData;
+use mocra::errors::Result;
 
 use serde_json::{Map, Value};
 use std::sync::Arc;

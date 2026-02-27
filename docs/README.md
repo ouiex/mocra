@@ -55,6 +55,20 @@ Core components:
 **Purpose**: follow-up task and step-state artifact produced during parsing.
 - Main fields: `metadata`, `context`, `prefix_request`
 
+### 2.6 ParserData
+**Purpose**: parser output envelope; can carry extracted data and next-step control signals together.
+- Main fields:
+	- `data: Vec<Data>`
+	- `parser_task: Vec<ParserTaskModel>`
+	- `error_task: Option<ErrorTaskModel>`
+	- `stop: Option<bool>`
+
+**v0.1.1 change**:
+- `parser_task` was migrated from `Option<ParserTaskModel>` to `Vec<ParserTaskModel>`.
+- A parser node can now produce multiple downstream parser tasks in one parse cycle.
+- `with_task(...)` is backward-compatible (it now appends into `parser_task`).
+- Downstream should use vector semantics (e.g., `drain(..)` / `is_empty()`), not `take()` / `is_some()`.
+
 ### 2.5 Data
 **Purpose**: business data extracted by parsers.
 - Main fields: `data` (Json/DataFrame/File, etc.), `meta`, `data_middleware`

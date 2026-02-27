@@ -4,9 +4,9 @@ mod middleware;
 use tokio::signal;
 use std::path::Path;
 use std::sync::Arc;
-use common::state::State;
-use engine::engine::Engine;
-use utils::logger;
+use mocra::common::state::State;
+use mocra::engine::engine::Engine;
+use mocra::utils::logger;
 
 use mimalloc::MiMalloc;
 
@@ -15,11 +15,11 @@ static GLOBAL: MiMalloc = MiMalloc;
 
 use sea_orm::{ConnectionTrait, DatabaseBackend, Statement};
 use std::fs;
-use common::model::message::TaskModel;
+use mocra::common::model::message::TaskModel;
 use std::sync::atomic::{AtomicU64, Ordering};
 use wiremock::{MockServer, Mock, ResponseTemplate};
 use wiremock::matchers::{method, path};
-use engine::events::{DownloadEvent, EventEnvelope, EventPhase, EventType};
+use mocra::engine::events::{DownloadEvent, EventEnvelope, EventPhase, EventType};
 
 async fn seed_database(state: &Arc<State>) {
     let db_backend = state.db.get_database_backend();
@@ -192,7 +192,7 @@ async fn main() {
         run_id: uuid::Uuid::now_v7(),
     };
     let sender = queue_manager.get_task_push_channel();
-    if let Err(e) = sender.send(queue::QueuedItem::new(task)).await {
+        if let Err(e) = sender.send(mocra::queue::QueuedItem::new(task)).await {
         eprintln!("Failed to enqueue task: {e}");
         return;
     }

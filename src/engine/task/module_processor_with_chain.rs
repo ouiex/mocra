@@ -657,90 +657,91 @@ impl ModuleProcessorWithChain {
                     self.set_stopped().await?;
                 }
                 // Ensure chain prefix points to the current request (request.id carried in response.prefix_request)
-                if let Some(ref mut task) = data.parser_task {
-                    // 1) Bind fallback pointer to the current-step request id.
-                    task.prefix_request = response.prefix_request;
-
-                    // 2) Defensive step advancement:
-                    //    - ensure module_id exists for same-module continuation,
-                    //    - advance to next step when parser didn't explicitly advance.
+                if !data.parser_task.is_empty() {
                     let total = {
                         let steps = self.steps.read().await;
                         steps.len()
                     };
-                    // Base adjustments on task context to avoid overriding cross-module handoff.
-                    let mut next_ctx = task.context.clone();
-                    let task_modules = task
-                        .account_task
-                        .module
-                        .clone()
-                        .unwrap_or_default();
+                    for task in &mut data.parser_task {
+                        // 1) Bind fallback pointer to the current-step request id.
+                        task.prefix_request = response.prefix_request;
 
-                    // Check whether task targets current module.
-                    let same_module = self.is_task_for_current_module(&next_ctx, &task_modules);
+                        // 2) Defensive step advancement:
+                        //    - ensure module_id exists for same-module continuation,
+                        //    - advance to next step when parser didn't explicitly advance.
+                        let mut next_ctx = task.context.clone();
+                        let task_modules = task
+                            .account_task
+                            .module
+                            .clone()
+                            .unwrap_or_default();
 
-                    // Fill module_id only for same-module path.
-                    if same_module && next_ctx.module_id.is_none() {
-                        next_ctx = next_ctx.with_module_id(self.module_id.clone());
-                    }
+                        // Check whether task targets current module.
+                        let same_module = self.is_task_for_current_module(&next_ctx, &task_modules);
 
-                    // Current/default step index.
-                    let task_step = next_ctx.step_idx.unwrap_or(step_idx as u32) as usize;
-                    let mut desired_step = task_step;
+                        // Fill module_id only for same-module path.
+                        if same_module && next_ctx.module_id.is_none() {
+                            next_ctx = next_ctx.with_module_id(self.module_id.clone());
+                        }
 
-                    if same_module {
-                        // Honor stay_current_step: do not advance when explicitly requested.
-                        if !next_ctx.stay_current_step {
-                            // Auto-advance by one when parser did not explicitly advance.
-                            if task_step <= step_idx {
-                                let maybe_next = step_idx + 1;
-                                if maybe_next < total {
-                                    desired_step = maybe_next;
+                        // Current/default step index.
+                        let task_step = next_ctx.step_idx.unwrap_or(step_idx as u32) as usize;
+                        let mut desired_step = task_step;
+
+                        if same_module {
+                            // Honor stay_current_step: do not advance when explicitly requested.
+                            if !next_ctx.stay_current_step {
+                                // Auto-advance by one when parser did not explicitly advance.
+                                if task_step <= step_idx {
+                                    let maybe_next = step_idx + 1;
+                                    if maybe_next < total {
+                                        desired_step = maybe_next;
+                                    }
                                 }
+                            } else {
+                                desired_step = step_idx;
+                            }
+
+                            // Apply last-step loop guard.
+                            if self.should_terminate_at_last_step(
+                                step_idx,
+                                task_step,
+                                total,
+                                next_ctx.stay_current_step,
+                            ) {
+                                debug!(
+                                    "[chain] module={} run={} execute_parser: last step {} reached, terminating to avoid infinite loop",
+                                    self.module_id, self.run_id, step_idx
+                                );
+                                data.parser_task.clear();
+                                return Ok(data);
                             }
                         } else {
-                            desired_step = step_idx;
-                        }
-
-                        // Apply last-step loop guard.
-                        if self.should_terminate_at_last_step(
-                            step_idx,
-                            task_step,
-                            total,
-                            next_ctx.stay_current_step,
-                        ) {
+                            // Cross-module task: leave context untouched for upper-layer routing.
+                            task.context = next_ctx;
                             debug!(
-                                "[chain] module={} run={} execute_parser: last step {} reached, terminating to avoid infinite loop",
-                                self.module_id, self.run_id, step_idx
+                                "[chain] module={} run={} execute_parser: task targets other module -> pass-through",
+                                self.module_id, self.run_id
                             );
-                            data.parser_task = None;
-                            return Ok(data);
+                            continue;
                         }
-                    } else {
-                        // Cross-module task: leave context untouched for upper-layer routing.
-                        task.context = next_ctx;
-                        debug!(
-                            "[chain] module={} run={} execute_parser: task targets other module -> pass-through",
-                            self.module_id, self.run_id
-                        );
-                        return Ok(data);
-                    }
 
-                    // Write context only when changed.
-                    if next_ctx.step_idx.map(|s| s as usize) != Some(desired_step) {
-                        next_ctx = next_ctx.with_step_idx(desired_step as u32);
-                        task.context = next_ctx;
-                        debug!(
-                            "[chain] module={} run={} execute_parser: task present, advance context to step {} (from resp step {})",
-                            self.module_id, self.run_id, desired_step, step_idx
-                        );
-                    } else {
-                        // Keep module id consistent even without step movement.
-                        task.context = next_ctx;
-                        debug!(
-                            "[chain] module={} run={} execute_parser: task present, keep context at step {}",
-                            self.module_id, self.run_id, desired_step
-                        );
+                        // Write context only when changed.
+                        if next_ctx.step_idx.map(|s| s as usize) != Some(desired_step) {
+                            next_ctx = next_ctx.with_step_idx(desired_step as u32);
+                            task.context = next_ctx;
+                            debug!(
+                                "[chain] module={} run={} execute_parser: task present, advance context to step {} (from resp step {})",
+                                self.module_id, self.run_id, desired_step, step_idx
+                            );
+                        } else {
+                            // Keep module id consistent even without step movement.
+                            task.context = next_ctx;
+                            debug!(
+                                "[chain] module={} run={} execute_parser: task present, keep context at step {}",
+                                self.module_id, self.run_id, desired_step
+                            );
+                        }
                     }
                 } else {
                     // No ParserTaskModel: optionally synthesize placeholder task for next step.
@@ -990,7 +991,10 @@ mod tests {
         let response = build_response("m1", 0, prefix, run_id);
         let data = processor.execute_parser(response, None).await.expect("execute_parser should succeed");
 
-        let task = data.parser_task.expect("parser task should be produced");
+        let task = data
+            .parser_task
+            .first()
+            .expect("parser task should be produced");
         assert_eq!(task.context.step_idx, Some(1));
         assert_eq!(task.context.module_id.as_deref(), Some(module_id.as_str()));
         assert_eq!(task.prefix_request, prefix);

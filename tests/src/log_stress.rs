@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use tokio::sync::mpsc;
-use utils::logger::{self, LogOutputConfig, LogSender, LoggerConfig};
+use mocra::utils::logger::{self, LogOutputConfig, LogSender, LoggerConfig};
 
 #[tokio::main]
 async fn main() {

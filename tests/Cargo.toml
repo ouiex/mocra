@@ -5,27 +5,21 @@ edition = "2024"
 publish = false
 
 [dependencies]
-common.workspace = true
-engine.workspace = true
-queue.workspace = true
-utils.workspace = true
-errors.workspace = true
-cacheable.workspace = true
-downloader.workspace = true
-semver.workspace = true
-futures.workspace = true
-async-trait.workspace = true
-serde_json.workspace = true
-chrono.workspace = true
-tokio.workspace = true
-tracing.workspace = true
-sea-orm.workspace = true
-uuid.workspace = true
-log.workspace = true
-serde.workspace = true
-polars.workspace = true
+mocra = { path = "..", default-features = false }
 mimalloc = { version = "0.1", default-features = false }
 wiremock = "0.6"
+tokio = { version = "1", features = ["full"] }
+async-trait = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", features = ["serde"] }
+tracing = "0.1"
+log = "0.4"
+sea-orm = { version = "1", features = ["postgres-array", "runtime-tokio-native-tls", "sqlx-postgres", "sqlx-sqlite"] }
+semver = { version = "1", features = ["serde"] }
+futures = "0.3"
+polars = { version = "0.52.0", features = ["json", "lazy", "serde", "csv", "timezones", "strings", "ipc", "dtype-decimal"] }
+uuid = { version = "1", features = ["v7"] }
 
 [[bin]]
 name = "tests_debug"
