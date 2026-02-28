@@ -2,7 +2,7 @@
 
 
 use std::sync::Arc;
-use crate::common::interface::DownloadMiddleware;
+use crate::common::interface::DownloadMiddlewareHandle;
 use crate::common::model::ModuleConfig;
 
 /// Download middleware wrapper with bound config.
@@ -12,7 +12,7 @@ pub struct DownloaderMiddleware {
     /// Module configuration snapshot.
     pub config: ModuleConfig,
     /// Middleware implementation.
-    pub work: Arc<dyn DownloadMiddleware>,
+    pub work: DownloadMiddlewareHandle,
 }
 
 /// Data middleware wrapper.
@@ -22,5 +22,5 @@ pub struct DataMiddleware {
     /// Module configuration snapshot.
     pub config: ModuleConfig,
     /// Middleware implementation.
-    pub work: Arc<dyn DownloadMiddleware>,
+    pub work: DownloadMiddlewareHandle,
 }

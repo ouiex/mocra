@@ -1,7 +1,8 @@
 #![allow(unused)]
 use crate::errors::Result;
-use crate::common::interface::middleware::DataStoreMiddleware;
-use crate::common::interface::middleware::{DataMiddleware, DownloadMiddleware};
+use crate::common::interface::middleware::{
+    DataMiddlewareHandle, DataStoreMiddlewareHandle, DownloadMiddlewareHandle,
+};
 use crate::common::model::data::Data;
 use crate::common::state::State;
 use crate::common::model::ModuleConfig;
@@ -27,9 +28,9 @@ use tokio::sync::RwLock;
 /// - Lower weight executes earlier.
 ///
 pub struct MiddlewareManager {
-    pub download_middleware: Arc<RwLock<Vec<Arc<dyn DownloadMiddleware>>>>,
-    pub data_middleware: Arc<RwLock<Vec<Arc<dyn DataMiddleware>>>>,
-    pub store_middleware: Arc<RwLock<Vec<Arc<dyn DataStoreMiddleware>>>>,
+    pub download_middleware: Arc<RwLock<Vec<DownloadMiddlewareHandle>>>,
+    pub data_middleware: Arc<RwLock<Vec<DataMiddlewareHandle>>>,
+    pub store_middleware: Arc<RwLock<Vec<DataStoreMiddlewareHandle>>>,
     pub state: Arc<State>,
 }
 impl MiddlewareManager {
@@ -41,117 +42,114 @@ impl MiddlewareManager {
             state,
         }
     }
-    pub async fn register_download_middleware(&self, middleware: Arc<dyn DownloadMiddleware>) {
+    pub async fn register_download_middleware(&self, middleware: DownloadMiddlewareHandle) {
         let mut middlewares = self.download_middleware.write().await;
         middlewares.push(middleware);
-        middlewares.sort_by_key(|a| a.weight());
     }
 
     pub async fn register_download_middleware_from_vec(
         &self,
-        middlewares: Vec<Arc<dyn DownloadMiddleware>>,
+        middlewares: Vec<DownloadMiddlewareHandle>,
     ) {
         let mut existing_middlewares = self.download_middleware.write().await;
         for middleware in middlewares {
             existing_middlewares.push(middleware);
         }
-        existing_middlewares.sort_by_key(|a| a.weight());
     }
 
-    pub async fn register_data_middleware(&self, middleware: Arc<dyn DataMiddleware>) {
+    pub async fn register_data_middleware(&self, middleware: DataMiddlewareHandle) {
         let mut middlewares = self.data_middleware.write().await;
         middlewares.push(middleware);
-        middlewares.sort_by_key(|a| a.weight());
     }
     pub async fn register_data_middleware_from_vec(
         &self,
-        middlewares: Vec<Arc<dyn DataMiddleware>>,
+        middlewares: Vec<DataMiddlewareHandle>,
     ) {
         let mut existing_middlewares = self.data_middleware.write().await;
         for middleware in middlewares {
             existing_middlewares.push(middleware);
         }
-        existing_middlewares.sort_by_key(|a| a.weight());
     }
 
-    pub async fn register_store_middleware(&self, middleware: Arc<dyn DataStoreMiddleware>) {
+    pub async fn register_store_middleware(&self, middleware: DataStoreMiddlewareHandle) {
         let mut middlewares = self.store_middleware.write().await;
         middlewares.push(middleware);
-        middlewares.sort_by_key(|a| a.weight());
     }
     pub async fn register_store_middleware_from_vec(
         &self,
-        middlewares: Vec<Arc<dyn DataStoreMiddleware>>,
+        middlewares: Vec<DataStoreMiddlewareHandle>,
     ) {
         let mut existing_middlewares = self.store_middleware.write().await;
         for middleware in middlewares {
             existing_middlewares.push(middleware);
         }
-        existing_middlewares.sort_by_key(|a| a.weight());
     }
 
     async fn get_download_middleware(
         &self,
         middleware_name: &[String],
         config: &Option<ModuleConfig>,
-    ) -> Vec<(Arc<dyn DownloadMiddleware>, u32)> {
-        self.download_middleware
-            .read()
-            .await
-            .iter()
-            .filter(|x| middleware_name.contains(&x.name()))
-            .map(|x| {
-                (
-                    x.clone(),
-                    config
-                        .as_ref()
-                        .map(|m| m.get_middleware_weight(&x.name()).unwrap_or(x.weight()))
-                        .unwrap_or(x.weight()),
-                )
-            })
-            .collect()
+    ) -> Vec<(DownloadMiddlewareHandle, u32)> {
+        let middlewares = self.download_middleware.read().await.clone();
+        let mut out = Vec::new();
+        for middleware in middlewares {
+            let mut middleware_guard = middleware.lock().await;
+            let middleware_actual_name = middleware_guard.name();
+            if middleware_name.contains(&middleware_actual_name) {
+                let middleware_weight = config
+                    .as_ref()
+                    .and_then(|m| m.get_middleware_weight(&middleware_actual_name))
+                    .unwrap_or_else(|| middleware_guard.weight());
+                out.push((middleware.clone(), middleware_weight));
+            }
+        }
+        out
     }
     async fn get_data_middleware(
         &self,
         middleware_name: &[String],
         config: &Option<ModuleConfig>,
-    ) -> Vec<(Arc<dyn DataMiddleware>, u32)> {
-        self.data_middleware
-            .read()
-            .await
-            .iter()
-            .filter(|x| middleware_name.contains(&x.name()))
-            .map(|x| {
-                (
-                    x.clone(),
-                    config
-                        .as_ref()
-                        .map(|m| m.get_middleware_weight(&x.name()).unwrap_or(x.weight()))
-                        .unwrap_or(x.weight()),
-                )
-            })
-            .collect()
+    ) -> Vec<(DataMiddlewareHandle, u32)> {
+        let middlewares = self.data_middleware.read().await.clone();
+        let mut out = Vec::new();
+        for middleware in middlewares {
+            let mut middleware_guard = middleware.lock().await;
+            let middleware_actual_name = middleware_guard.name();
+            if middleware_name.contains(&middleware_actual_name) {
+                let middleware_weight = config
+                    .as_ref()
+                    .and_then(|m| m.get_middleware_weight(&middleware_actual_name))
+                    .unwrap_or_else(|| middleware_guard.weight());
+                out.push((middleware.clone(), middleware_weight));
+            }
+        }
+        out
     }
 
     async fn get_store_middleware(
         &self,
         middleware_name: &[String],
-    ) -> Vec<Arc<dyn DataStoreMiddleware>> {
-        self.store_middleware
-            .read()
-            .await
-            .iter()
-            .filter(|x| middleware_name.contains(&x.name())).cloned()
-            .collect()
+    ) -> Vec<DataStoreMiddlewareHandle> {
+        let middlewares = self.store_middleware.read().await.clone();
+        let mut out = Vec::new();
+        for middleware in middlewares {
+            let mut middleware_guard = middleware.lock().await;
+            let middleware_actual_name = middleware_guard.name();
+            if middleware_name.contains(&middleware_actual_name) {
+                out.push(middleware.clone());
+            }
+        }
+        out
     }
 
     pub async fn handle_request(&self, request: Request, config: &Option<ModuleConfig>) -> Option<Request> {
         let mut req = request;
-        let mut middleware: Vec<(Arc<dyn DownloadMiddleware>, u32)> = self
+        let mut middleware: Vec<(DownloadMiddlewareHandle, u32)> = self
             .get_download_middleware(&req.download_middleware, config)
             .await;
         middleware.sort_by(|x, y| x.1.cmp(&y.1));
         for (middleware, _) in middleware {
+            let mut middleware = middleware.lock().await;
             match middleware.before_request(req, config).await {
                 Some(next_req) => req = next_req,
                 None => return None,
@@ -165,32 +163,30 @@ impl MiddlewareManager {
         config: &Option<ModuleConfig>,
     ) -> Option<Response> {
         let mut resp = response;
-        let mut middleware: Vec<(Arc<dyn DownloadMiddleware>, u32)> = self
+        let mut middleware: Vec<(DownloadMiddlewareHandle, u32)> = self
             .get_download_middleware(&resp.download_middleware, config)
             .await;
         middleware.sort_by(|x, y| y.1.cmp(&x.1));
         for (middleware, _) in middleware {
-            if resp.download_middleware.contains(&middleware.name()) {
-                match middleware.after_response(resp, config).await {
-                    Some(next_resp) => resp = next_resp,
-                    None => return None,
-                }
+            let mut middleware = middleware.lock().await;
+            match middleware.after_response(resp, config).await {
+                Some(next_resp) => resp = next_resp,
+                None => return None,
             }
         }
         Some(resp)
     }
     pub async fn handle_data(&self, data: Data, config: &Option<ModuleConfig>) -> Option<Data> {
         let mut data = data;
-        let mut middleware: Vec<(Arc<dyn DataMiddleware>, u32)> = self
+        let mut middleware: Vec<(DataMiddlewareHandle, u32)> = self
             .get_data_middleware(&data.data_middleware, config)
             .await;
         middleware.sort_by(|x, y| x.1.cmp(&y.1));
         for (middleware, _) in middleware {
-            if data.data_middleware.contains(&middleware.name()) {
-                match middleware.handle_data(data, config).await {
-                    Some(next_data) => data = next_data,
-                    None => return None,
-                }
+            let mut middleware = middleware.lock().await;
+            match middleware.handle_data(data, config).await {
+                Some(next_data) => data = next_data,
+                None => return None,
             }
         }
         Some(data)
@@ -204,10 +200,25 @@ impl MiddlewareManager {
         let middleware = self.get_store_middleware(&data.data_middleware).await;
 
         // Run all store operations concurrently and collect (name, result)
-        let tasks = middleware.iter().map(|m| {
-            let name = format!("{}, schema: {}, table: {}", m.name(), data.module,m.name());
+        let tasks = middleware.into_iter().map(|m| {
             let data_cloned = data.clone();
-            async move { (name, m.store_data(data_cloned, config).await) }
+            let module_name = data.module.clone();
+            async move {
+                let mut middleware = m.lock().await;
+                let middleware_name = middleware.name();
+                let name = format!(
+                    "{}, schema: {}, table: {}",
+                    middleware_name, module_name, middleware_name
+                );
+                let result = match middleware.before_store(config).await {
+                    Ok(()) => match middleware.store_data(data_cloned, config).await {
+                        Ok(()) => middleware.after_store(config).await,
+                        Err(e) => Err(e),
+                    },
+                    Err(e) => Err(e),
+                };
+                (name, result)
+            }
         });
 
         let mut results: Vec<(String, Result<()>)> = join_all(tasks).await;
@@ -225,10 +236,20 @@ impl MiddlewareManager {
         let middleware = self.get_store_middleware(&middleware).await;
 
         // Run all store operations concurrently and collect (name, result)
-        let tasks = middleware.iter().map(|m| {
-            let name = m.name();
+        let tasks = middleware.into_iter().map(|m| {
             let data_cloned = data.clone();
-            async move { (name, m.store_data(data_cloned, config).await) }
+            async move {
+                let mut middleware = m.lock().await;
+                let name = middleware.name();
+                let result = match middleware.before_store(config).await {
+                    Ok(()) => match middleware.store_data(data_cloned, config).await {
+                        Ok(()) => middleware.after_store(config).await,
+                        Err(e) => Err(e),
+                    },
+                    Err(e) => Err(e),
+                };
+                (name, result)
+            }
         });
 
         let mut results: Vec<(String, Result<()>)> = join_all(tasks).await;

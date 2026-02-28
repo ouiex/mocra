@@ -5,7 +5,6 @@ use std::path::Path;
 use std::sync::Arc;
 use mocra::common::state::State;
 use mocra::engine::engine::Engine;
-use mocra::utils::logger;
 
 
 async fn build_engine_with_logger(enable_logger: bool) -> Engine {

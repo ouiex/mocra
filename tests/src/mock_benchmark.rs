@@ -26,7 +26,7 @@ use mocra::common::model::ModuleConfig;
 use mocra::downloader::Downloader;
 use mocra::common::model::Response;
 use mocra::common::model::download_config::DownloadConfig;
-use mocra::common::interface::DownloadMiddleware;
+use mocra::common::interface::{DownloadMiddleware, DownloadMiddlewareHandle};
 use mocra::common::model::config::Config;
 use mocra::errors::Result;
 use semver::Version;
@@ -149,22 +149,22 @@ struct CounterDownloadMiddleware {
 
 #[async_trait::async_trait]
 impl DownloadMiddleware for CounterDownloadMiddleware {
-    fn name(&self) -> String {
+    fn name(&mut self) -> String {
         "counter_download_middleware".to_string()
     }
 
-    async fn after_response(&self, response: Response, _config: &Option<ModuleConfig>) -> Option<Response> {
+    async fn after_response(&mut self, response: Response, _config: &Option<ModuleConfig>) -> Option<Response> {
         self.counter.fetch_add(1, Ordering::Relaxed);
         Some(response)
     }
 
-    fn default_arc() -> Arc<dyn DownloadMiddleware>
+    fn default_arc() -> DownloadMiddlewareHandle
     where
         Self: Sized,
     {
-        Arc::new(CounterDownloadMiddleware {
+        Arc::new(tokio::sync::Mutex::new(Box::new(CounterDownloadMiddleware {
             counter: Arc::new(AtomicU64::new(0)),
-        })
+        })))
     }
 }
 
@@ -285,9 +285,9 @@ async fn main() {
     let failed_counter = Arc::new(AtomicU64::new(0));
 
     engine
-        .register_download_middleware(Arc::new(CounterDownloadMiddleware {
+        .register_download_middleware(Arc::new(tokio::sync::Mutex::new(Box::new(CounterDownloadMiddleware {
             counter: completed_counter.clone(),
-        }))
+        }))))
         .await;
 
     // Register mock downloader (no network)

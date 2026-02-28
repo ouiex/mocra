@@ -29,7 +29,10 @@ use crate::proxy::ProxyManager;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{broadcast, watch};
-use crate::common::interface::{DataMiddleware, DataStoreMiddleware, DownloadMiddleware, MiddlewareManager, ModuleTrait};
+use crate::common::interface::{
+    DataMiddlewareHandle, DataStoreMiddlewareHandle, DownloadMiddlewareHandle, MiddlewareManager,
+    ModuleTrait,
+};
 use crate::common::registry::NodeRegistry;
 use crate::utils::connector::create_redis_pool;
 use crate::engine::task::TaskManager;
@@ -598,7 +601,7 @@ impl Engine {
     /// Register a download middleware.
     ///
     /// Download middleware intercepts requests before they are sent and responses after they are received.
-    pub async fn register_download_middleware(&self, middleware: Arc<dyn DownloadMiddleware>) {
+    pub async fn register_download_middleware(&self, middleware: DownloadMiddlewareHandle) {
         self.middleware_manager
             .register_download_middleware(middleware)
             .await;
@@ -606,7 +609,7 @@ impl Engine {
     /// Register a data processing middleware.
     ///
     /// Data middleware processes structured data extracted from responses.
-    pub async fn register_data_middleware(&self, middleware: Arc<dyn DataMiddleware>) {
+    pub async fn register_data_middleware(&self, middleware: DataMiddlewareHandle) {
         self.middleware_manager
             .register_data_middleware(middleware)
             .await;
@@ -614,7 +617,7 @@ impl Engine {
     /// Register a data storage middleware.
     ///
     /// Store middleware handles persistence of processed data.
-    pub async fn register_store_middleware(&self, middleware: Arc<dyn DataStoreMiddleware>) {
+    pub async fn register_store_middleware(&self, middleware: DataStoreMiddlewareHandle) {
         self.middleware_manager
             .register_store_middleware(middleware)
             .await;

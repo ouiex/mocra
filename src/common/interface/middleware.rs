@@ -3,15 +3,20 @@ use crate::common::model::{ModuleConfig, Request, Response};
 use async_trait::async_trait;
 use crate::errors::Result;
 use std::sync::Arc;
+use tokio::sync::Mutex;
+
+pub type DownloadMiddlewareHandle = Arc<Mutex<Box<dyn DownloadMiddleware>>>;
+pub type DataMiddlewareHandle = Arc<Mutex<Box<dyn DataMiddleware>>>;
+pub type DataStoreMiddlewareHandle = Arc<Mutex<Box<dyn DataStoreMiddleware>>>;
 
 #[async_trait]
 /// Middleware for intercepting download requests and responses.
 pub trait DownloadMiddleware: Send + Sync {
     /// Returns the unique name of the middleware instance.
-    fn name(&self) -> String;
+    fn name(&mut self) -> String;
     
     /// Returns the execution priority weight. Higher weights may execute earlier/later depending on implementation.
-    fn weight(&self) -> u32 {
+    fn weight(&mut self) -> u32 {
         0
     }
     
@@ -19,7 +24,7 @@ pub trait DownloadMiddleware: Send + Sync {
     /// 
     /// Can be used to modify headers, URL, or validation.
     /// Returning `None` will skip this request.
-    async fn before_request(&self, request: Request, _config: &Option<ModuleConfig>) -> Option<Request> {
+    async fn before_request(&mut self, request: Request, _config: &Option<ModuleConfig>) -> Option<Request> {
         Some(request)
     }
     
@@ -27,12 +32,12 @@ pub trait DownloadMiddleware: Send + Sync {
     /// 
     /// Can be used for validation, logging, or error handling.
     /// Returning `None` will skip subsequent response middleware and publishing.
-    async fn after_response(&self, response: Response, _config: &Option<ModuleConfig>) -> Option<Response> {
+    async fn after_response(&mut self, response: Response, _config: &Option<ModuleConfig>) -> Option<Response> {
         Some(response)
     }
     
     /// Returns a default shared instance of the middleware.
-    fn default_arc() -> Arc<dyn DownloadMiddleware>
+    fn default_arc() -> DownloadMiddlewareHandle
     where
         Self: Sized;
 }
@@ -41,10 +46,10 @@ pub trait DownloadMiddleware: Send + Sync {
 /// Middleware for processing extracted data.
 pub trait DataMiddleware: Send + Sync {
     /// Returns the unique name of the middleware instance.
-    fn name(&self) -> String;
+    fn name(&mut self) -> String;
     
     /// Returns the execution priority weight.
-    fn weight(&self) -> u32 {
+    fn weight(&mut self) -> u32 {
         0
     }
     
@@ -52,12 +57,12 @@ pub trait DataMiddleware: Send + Sync {
     /// 
     /// Can be used for cleaning, transformation, or enrichment.
     /// Returning `None` will skip subsequent data middleware and storage.
-    async fn handle_data(&self, data: Data, _config: &Option<ModuleConfig>) -> Option<Data> {
+    async fn handle_data(&mut self, data: Data, _config: &Option<ModuleConfig>) -> Option<Data> {
         Some(data)
     }
     
     /// Returns a default shared instance of the middleware.
-    fn default_arc() -> Arc<dyn DataMiddleware>
+    fn default_arc() -> DataMiddlewareHandle
     where
         Self: Sized;
 }
@@ -65,11 +70,21 @@ pub trait DataMiddleware: Send + Sync {
 #[async_trait]
 /// Middleware for persisting data to external storage.
 pub trait DataStoreMiddleware: DataMiddleware {
+    /// Hook executed before persisting data.
+    async fn before_store(&mut self, _config: &Option<ModuleConfig>) -> Result<()> {
+        Ok(())
+    }
+
     /// Stores the data item.
-    async fn store_data(&self, data: Data, config: &Option<ModuleConfig>) -> Result<()>;
+    async fn store_data(&mut self, data: Data, config: &Option<ModuleConfig>) -> Result<()>;
+
+    /// Hook executed after persisting data.
+    async fn after_store(&mut self, _config: &Option<ModuleConfig>) -> Result<()> {
+        Ok(())
+    }
     
     /// Returns a default shared instance of the middleware.
-    fn default_arc() -> Arc<dyn DataStoreMiddleware>
+    fn default_arc() -> DataStoreMiddlewareHandle
     where
         Self: Sized;
 }

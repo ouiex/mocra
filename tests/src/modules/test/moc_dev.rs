@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use mocra::common::model::cron_config::{CronConfig, CronInterval};
+use mocra::common::model::cron_config::CronConfig;
 use mocra::common::interface::{ModuleTrait, ModuleNodeTrait, SyncBoxStream, StoreTrait, ToSyncBoxStream};
 use mocra::common::model::{Headers, ModuleConfig, Request, Response};
 use mocra::common::model::login_info::LoginInfo;

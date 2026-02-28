@@ -6,7 +6,9 @@ use serde_json::Map;
 use std::sync::Arc;
 use uuid::Uuid;
 use futures::StreamExt;
-use crate::common::interface::{DataMiddleware, DataStoreMiddleware, ModuleTrait, SyncBoxStream};
+use crate::common::interface::{
+    DataMiddlewareHandle, DataStoreMiddlewareHandle, ModuleTrait, SyncBoxStream,
+};
 use crate::common::model::entity::{AccountModel, PlatformModel};
 use crate::common::model::login_info::LoginInfo;
 use crate::common::model::{Cookies, Headers, ModuleConfig, Response,Request};
@@ -266,8 +268,8 @@ impl Serialize for Module {
 pub struct ModuleEntity{
     pub module_work:Arc<dyn ModuleTrait>,
     pub download_middleware:Vec<Arc<dyn ModuleTrait>>,
-    pub data_middleware:Vec<Arc<dyn DataMiddleware>>,
-    pub store_middleware:Vec<Arc<dyn DataStoreMiddleware>>,
+    pub data_middleware:Vec<DataMiddlewareHandle>,
+    pub store_middleware:Vec<DataStoreMiddlewareHandle>,
 }
 
 impl From<Arc<dyn ModuleTrait>> for ModuleEntity {
@@ -288,13 +290,13 @@ impl ModuleEntity {
     }
 
     /// Adds a data middleware implementation.
-    pub fn add_data_middleware(mut self, middleware: Arc<dyn DataMiddleware>) ->Self{
+    pub fn add_data_middleware(mut self, middleware: DataMiddlewareHandle) ->Self{
         self.data_middleware.push(middleware);
         self
     }
 
     /// Adds a data store middleware implementation.
-    pub fn add_store_middleware(mut self, middleware: Arc<dyn DataStoreMiddleware>)->Self {
+    pub fn add_store_middleware(mut self, middleware: DataStoreMiddlewareHandle)->Self {
         self.store_middleware.push(middleware);
         self
     }

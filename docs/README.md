@@ -89,6 +89,14 @@ Flow highlights:
 - **DataMiddleware**: cleansing, validation, deduplication, format conversion
 - **DataStoreMiddleware**: persistence (PG/OSS/ES)
 
+**v0.1.2 middleware contract update**:
+- Middleware traits `DownloadMiddleware` / `DataMiddleware` / `DataStoreMiddleware` use `&mut self` in hook methods.
+- `DataStoreMiddleware` adds lifecycle hooks:
+	- `before_store(&mut self, _config: &Option<ModuleConfig>) -> Result<()>`
+	- `after_store(&mut self, _config: &Option<ModuleConfig>) -> Result<()>`
+- Store stage call order is `before_store -> store_data -> after_store`.
+- If `before_store` returns `Err`, store execution short-circuits and enters existing error handling/retry path.
+
 ---
 
 ## 4. Distributed Deployment
