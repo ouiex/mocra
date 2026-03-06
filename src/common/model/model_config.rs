@@ -219,36 +219,7 @@ impl ModuleConfig {
             }
         None
     }
-    pub fn get_postgres_config(&self) -> Option<DatabaseConfig> {
-        for (_, rel_module_data_middleware_config) in self.rel_module_data_middleware_config.iter()
-        {
-            if let Some(value) = rel_module_data_middleware_config.get("postgres")
-                && let Ok(config) = serde_json::from_value::<DatabaseConfig>(value.clone()) {
-                    return Some(config);
-                }
-        }
-        if let Some(module_config) = self.module_config.get("postgres")
-            && let Ok(config) = serde_json::from_value::<DatabaseConfig>(module_config.clone()) {
-                return Some(config);
-            }
-
-        for (_, data_middleware_config) in self.data_middleware_config.iter() {
-            if let Some(value) = data_middleware_config.get("postgres")
-                && let Ok(config) = serde_json::from_value::<DatabaseConfig>(value.clone()) {
-                    return Some(config);
-                }
-        }
-        if let Some(account_config) = self.account_config.get("postgres")
-            && let Ok(config) = serde_json::from_value::<DatabaseConfig>(account_config.clone()) {
-                return Some(config);
-            }
-        if let Some(platform_config) = self.platform_config.get("postgres")
-            && let Ok(config) = serde_json::from_value::<DatabaseConfig>(platform_config.clone()) {
-                return Some(config);
-            }
-
-        None
-    }
+    
     pub fn get_config<T: serde::de::DeserializeOwned>(&self, key: &str) -> Option<T> {
         if let Some(value) = self.get_config_value(key)
             && let Ok(config) = serde_json::from_value::<T>(value.clone()) {

@@ -1,6 +1,6 @@
 use crate::queue::QueuedItem;
-use crate::common::model::message::TaskModel;
-use crate::common::model::message::{ErrorTaskModel, ParserTaskModel};
+use crate::common::model::message::TaskEvent;
+use crate::common::model::message::{TaskErrorEvent, TaskParserEvent};
 use crate::common::model::{Request, Response};
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -17,8 +17,8 @@ pub struct Channel {
     // --- 1. 初始任务队列 (Task Queue) ---
     // 生产者: 外部API / 种子生成器
     // 消费者: 任务处理器 (TaskProcessor) -> 生成 Request
-    pub task_sender: Sender<QueuedItem<TaskModel>>,
-    pub task_receiver: Arc<Mutex<Receiver<QueuedItem<TaskModel>>>>,
+    pub task_sender: Sender<QueuedItem<TaskEvent>>,
+    pub task_receiver: Arc<Mutex<Receiver<QueuedItem<TaskEvent>>>>,
 
     // --- 2. 请求队列 (Request Queue) ---
     // 生产者: 任务处理器 / 响应处理器 (解析结果)
@@ -39,8 +39,8 @@ pub struct Channel {
     // --- 4. 辅助队列 (Auxiliary Queues) ---
 
     // 错误处理
-    pub error_sender: Sender<QueuedItem<ErrorTaskModel>>,
-    pub error_receiver: Arc<Mutex<Receiver<QueuedItem<ErrorTaskModel>>>>,
+    pub error_sender: Sender<QueuedItem<TaskErrorEvent>>,
+    pub error_receiver: Arc<Mutex<Receiver<QueuedItem<TaskErrorEvent>>>>,
 
     // 日志处理
     pub log_sender: Sender<QueuedItem<LogModel>>,
@@ -49,22 +49,22 @@ pub struct Channel {
     // --- 5. 其他/扩展队列 (Others) ---
 
     // 解析任务队列 (如果解析独立于响应处理)
-    pub parser_task_sender: Sender<QueuedItem<ParserTaskModel>>,
-    pub parser_task_receiver: Arc<Mutex<Receiver<QueuedItem<ParserTaskModel>>>>,
+    pub parser_task_sender: Sender<QueuedItem<TaskParserEvent>>,
+    pub parser_task_receiver: Arc<Mutex<Receiver<QueuedItem<TaskParserEvent>>>>,
 
     // 远程/分布式节点通信队列
     pub remote_response_sender: Sender<QueuedItem<Response>>,
     pub remote_response_receiver: Arc<Mutex<Receiver<QueuedItem<Response>>>>,
 
-    pub remote_parser_task_sender: Sender<QueuedItem<ParserTaskModel>>,
-    pub remote_parser_task_receiver: Arc<Mutex<Receiver<QueuedItem<ParserTaskModel>>>>,
+    pub remote_parser_task_sender: Sender<QueuedItem<TaskParserEvent>>,
+    pub remote_parser_task_receiver: Arc<Mutex<Receiver<QueuedItem<TaskParserEvent>>>>,
 
-    pub remote_error_sender: Sender<QueuedItem<ErrorTaskModel>>,
-    pub remote_error_receiver: Arc<Mutex<Receiver<QueuedItem<ErrorTaskModel>>>>,
+    pub remote_error_sender: Sender<QueuedItem<TaskErrorEvent>>,
+    pub remote_error_receiver: Arc<Mutex<Receiver<QueuedItem<TaskErrorEvent>>>>,
 
     // Distributed Task Queue (Outbound)
-    pub remote_task_sender: Sender<QueuedItem<TaskModel>>,
-    pub remote_task_receiver: Arc<Mutex<Receiver<QueuedItem<TaskModel>>>>,
+    pub remote_task_sender: Sender<QueuedItem<TaskEvent>>,
+    pub remote_task_receiver: Arc<Mutex<Receiver<QueuedItem<TaskEvent>>>>,
 }
 impl Clone for Channel {
     fn clone(&self) -> Self {

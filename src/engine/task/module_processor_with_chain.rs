@@ -23,7 +23,7 @@ use uuid::Uuid;
 use futures::StreamExt;
 use crate::cacheable::{CacheAble, CacheService};
 use crate::common::model::login_info::LoginInfo;
-use crate::common::model::message::{ErrorTaskModel, ParserData, ParserTaskModel, TaskModel};
+use crate::common::model::message::{TaskErrorEvent, TaskOutputEvent, TaskParserEvent, TaskEvent};
 // distributed atomic gating only; no in-memory state needed
 
 // --- Sync State Structs ---
@@ -472,7 +472,8 @@ impl ModuleProcessorWithChain {
         prefix_request: Option<Uuid>,
     ) -> Result<SyncBoxStream<'static, Request>> {
         if self.is_stopped().await? {
-            return Ok(Box::pin(futures::stream::empty()));
+            let empty: SyncBoxStream<'static, Request> = Box::pin(futures::stream::empty());
+            return Ok(empty);
         }
         // Resolve effective execution context.
         let (effective_ctx, effective_prefix) = self
@@ -510,7 +511,8 @@ impl ModuleProcessorWithChain {
         let step_node = {
             let steps = self.steps.read().await;
             if step_idx >= steps.len() {
-                return Ok(Box::pin(futures::stream::empty()));
+                let empty: SyncBoxStream<'static, Request> = Box::pin(futures::stream::empty());
+                return Ok(empty);
             }
             steps[step_idx].clone()
         };
@@ -583,7 +585,8 @@ impl ModuleProcessorWithChain {
                     );
                     req
                 });
-                Ok(Box::pin(stream))
+                let stream: SyncBoxStream<'static, Request> = Box::pin(stream);
+                Ok(stream)
             }
             Err(e) => {
                 // Generation failure recovery policy.
@@ -606,7 +609,9 @@ impl ModuleProcessorWithChain {
                                     "[chain] module={} run={} execute_request_impl: generation error at step={}, fallback allowed -> return previous request id={}",
                                     self.module_id, self.run_id, step_idx, prefix_request
                                 );
-                                Ok(Box::pin(futures::stream::once(async move { prev })))
+                                let stream: SyncBoxStream<'static, Request> =
+                                    Box::pin(futures::stream::once(async move { prev }));
+                                Ok(stream)
                             }
                             None => {
                                 debug!(
@@ -637,7 +642,7 @@ impl ModuleProcessorWithChain {
         &self,
         response: Response,
         config: Option<Arc<ModuleConfig>>,
-    ) -> Result<ParserData> {
+    ) -> Result<TaskOutputEvent> {
         // Route strictly by the step_idx from response.context
         let step_idx = response.context.step_idx.unwrap_or(0) as usize;
         debug!(
@@ -647,7 +652,7 @@ impl ModuleProcessorWithChain {
         let step_node = {
             let steps = self.steps.read().await;
             if step_idx >= steps.len() {
-                return Ok(ParserData::default());
+                return Ok(TaskOutputEvent::default());
             }
             steps[step_idx].clone()
         };
@@ -757,7 +762,7 @@ impl ModuleProcessorWithChain {
                         );
                         // Progression is gate-driven rather than prefix-driven.
                         if self.try_mark_step_advanced_once(step_idx).await? {
-                            let base: ParserTaskModel = (&response).into();
+                            let base: TaskParserEvent = (&response).into();
                             let next_ctx = ExecutionMark::default()
                                 .with_module_id(self.module_id.clone())
                                 .with_step_idx(next_idx as u32);
@@ -782,11 +787,13 @@ impl ModuleProcessorWithChain {
                 // Parser failure: emit ErrorTaskModel for precise same-step retry.
                 let step_idx_u32 = response.context.step_idx.unwrap_or(0);
                 // Preserve metadata as-is; avoid retry-step metadata pollution.
-                let meta =
-                    serde_json::to_value(&response.metadata).unwrap_or(serde_json::json!({}));
-                let error_task =ErrorTaskModel {
+                let meta = match serde_json::to_value(&response.metadata) {
+                    Ok(serde_json::Value::Object(map)) => map,
+                    _ => serde_json::Map::new(),
+                };
+                let error_task =TaskErrorEvent {
                     id: response.id,
-                    account_task: TaskModel {
+                    account_task: TaskEvent {
                         account: response.account.clone(),
                         platform: response.platform.clone(),
                         module: Some(vec![response.module.clone()]),
@@ -812,7 +819,7 @@ impl ModuleProcessorWithChain {
                     "[chain] module={} run={} execute_parser: parser error at step {} -> emit ErrorTaskModel",
                     self.module_id, self.run_id, step_idx_u32
                 );
-                Ok(ParserData::default().with_error(error_task))
+                Ok(TaskOutputEvent::default().with_error(error_task))
             }
         }
     }
@@ -906,8 +913,8 @@ mod tests {
             &self,
             _response: Response,
             _config: Option<Arc<ModuleConfig>>,
-        ) -> Result<ParserData> {
-            Ok(ParserData::default())
+        ) -> Result<TaskOutputEvent> {
+            Ok(TaskOutputEvent::default())
         }
     }
 
@@ -926,12 +933,12 @@ mod tests {
             &self,
             response: Response,
             _config: Option<Arc<ModuleConfig>>,
-        ) -> Result<ParserData> {
+        ) -> Result<TaskOutputEvent> {
             match self.behavior {
                 ParserBehavior::ReturnTask => {
-                    let task = ParserTaskModel::from(&response)
+                    let task = TaskParserEvent::from(&response)
                         .with_context(response.context.clone().with_module_id(self.module_id.clone()));
-                    Ok(ParserData::default().with_task(task))
+                    Ok(TaskOutputEvent::default().with_task(task))
                 }
                 ParserBehavior::ReturnError => {
                     Err(RequestError::BuildFailed("parser failed".into()).into())

@@ -12,7 +12,7 @@ use crate::common::interface::{
 use crate::common::model::entity::{AccountModel, PlatformModel};
 use crate::common::model::login_info::LoginInfo;
 use crate::common::model::{Cookies, Headers, ModuleConfig, Response,Request};
-use crate::common::model::message::ParserData;
+use crate::common::model::message::TaskOutputEvent;
 use crate::errors::RequestError;
 use crate::engine::task::module_processor_with_chain::ModuleProcessorWithChain;
 
@@ -208,7 +208,7 @@ impl Module {
         &self,
         response: Response,
         config: Option<Arc<ModuleConfig>>,
-    ) -> Result<ParserData> {
+    ) -> Result<TaskOutputEvent> {
         // Capture current step to determine if this is the last step
         let current_step = response.context.step_idx.unwrap_or(0) as usize;
         // Clone config for potential post_process

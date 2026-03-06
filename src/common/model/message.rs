@@ -2,10 +2,10 @@ use crate::common::interface::StoreTrait;
 use crate::common::interface::storage::{Offloadable, BlobStorage};
 use std::sync::Arc;
 use async_trait::async_trait;
-use crate::common::model::data::Data;
+use crate::common::model::data::DataEvent;
 use crate::common::model::{ExecutionMark, Response};
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::Value;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Copy)]
@@ -43,16 +43,15 @@ impl TopicType {
 /// Used to create downstream tasks after parsing, or move to the next processing stage.
 /// Contains task identity, metadata, execution context, and predecessor request reference.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ParserTaskModel {
+pub struct TaskParserEvent {
     /// Unique identifier.
     pub id: Uuid,
     /// Associated account task information.
-    pub account_task: TaskModel,
+    pub account_task: TaskEvent,
     /// Timestamp.
     pub timestamp: u64,
-    /// Metadata (`ParserTaskModel.meta => Task.metadata => Context.meta.task_meta => Module.generate`).
-    #[serde(with = "crate::common::model::serde_value::value")]
-    pub metadata: serde_json::Value,
+    /// Metadata (`TaskParserEvent.meta => Task.metadata => Context.meta.task_meta => Module.generate`).
+    pub metadata: serde_json::Map<String, Value>,
     /// Execution context (`ExecutionMark`).
     pub context: ExecutionMark,
     /// Run identifier (Run ID).
@@ -63,7 +62,7 @@ pub struct ParserTaskModel {
 }
 
 #[async_trait]
-impl Offloadable for ParserTaskModel {
+impl Offloadable for TaskParserEvent {
     fn should_offload(&self, _threshold: usize) -> bool {
         false
     }
@@ -75,7 +74,7 @@ impl Offloadable for ParserTaskModel {
     }
 }
 
-impl ParserTaskModel {
+impl TaskParserEvent {
     /// Sets explicit execution context (`ExecutionMark`) for parser-chain execution.
     ///
     /// Typical uses:
@@ -102,8 +101,8 @@ impl ParserTaskModel {
     where
         T: serde::Serialize,
     {
-        if let Ok(data) = serde_json::to_value(meta) {
-            self.metadata = data;
+        if let Ok(Value::Object(map)) = serde_json::to_value(meta) {
+            self.metadata = map;
         }
         self
     }
@@ -112,12 +111,7 @@ impl ParserTaskModel {
         T: serde::Serialize,
     {
         if let Ok(val) = serde_json::to_value(value) {
-            let mut map = match std::mem::take(&mut self.metadata) {
-                serde_json::Value::Object(map) => map,
-                _ => serde_json::Map::new(),
-            };
-            map.insert(key.as_ref().to_string(), val);
-            self.metadata = serde_json::Value::Object(map);
+            self.metadata.insert(key.as_ref().to_string(), val);
         }
         self
     }
@@ -135,9 +129,9 @@ impl ParserTaskModel {
             !module_name.as_ref().is_empty(),
             "module_name must not be empty"
         );
-        ParserTaskModel {
+        TaskParserEvent {
             id: Uuid::now_v7(),
-            account_task: TaskModel {
+            account_task: TaskEvent {
                 account: response.account.clone(),
                 platform: response.platform.clone(),
                 module: Some(vec![module_name.as_ref().to_string()]),
@@ -145,7 +139,7 @@ impl ParserTaskModel {
                 run_id: Uuid::now_v7(),
             },
             timestamp: chrono::Utc::now().timestamp() as u64,
-            metadata: json!({}),
+            metadata: serde_json::Map::new(),
             // Reset context to ensure target module starts from the beginning.
             context: ExecutionMark::default(),
             run_id: Uuid::now_v7(),
@@ -166,9 +160,9 @@ impl ParserTaskModel {
             !module_name.as_ref().is_empty(),
             "module_name must not be empty"
         );
-        ParserTaskModel {
+        TaskParserEvent {
             id: Uuid::now_v7(),
-            account_task: TaskModel {
+            account_task: TaskEvent {
                 account: response.account.clone(),
                 platform: response.platform.clone(),
                 module: Some(vec![module_name.as_ref().to_string()]),
@@ -176,7 +170,7 @@ impl ParserTaskModel {
                 run_id: Uuid::now_v7(),
             },
             timestamp: chrono::Utc::now().timestamp() as u64,
-            metadata: json!({}),
+            metadata: serde_json::Map::new(),
             context: ctx,
             run_id: Uuid::now_v7(),
             prefix_request: response.prefix_request,
@@ -188,18 +182,17 @@ impl ParserTaskModel {
 ///
 /// Records processing-time errors, including error details and execution context.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ErrorTaskModel {
+pub struct TaskErrorEvent {
     /// Unique identifier.
     pub id: Uuid,
     /// Associated account task information.
-    pub account_task: TaskModel,
+    pub account_task: TaskEvent,
     /// Error message.
     pub error_msg: String,
     /// Timestamp.
     pub timestamp: u64,
     /// Metadata.
-    #[serde(with = "crate::common::model::serde_value::value")]
-    pub metadata: serde_json::Value,
+    pub metadata: serde_json::Map<String, Value>,
     /// Execution context.
     pub context: ExecutionMark,
     /// Run identifier.
@@ -210,7 +203,7 @@ pub struct ErrorTaskModel {
 }
 
 #[async_trait]
-impl Offloadable for ErrorTaskModel {
+impl Offloadable for TaskErrorEvent {
     fn should_offload(&self, _threshold: usize) -> bool {
         false
     }
@@ -222,9 +215,27 @@ impl Offloadable for ErrorTaskModel {
     }
 }
 
-impl ErrorTaskModel {
+impl TaskErrorEvent {
     pub fn get_context(&self) -> &ExecutionMark {
         &self.context
+    }
+    pub fn with_meta<T>(mut self, meta: T) -> Self
+    where
+        T: serde::Serialize,
+    {
+        if let Ok(Value::Object(map)) = serde_json::to_value(meta) {
+            self.metadata = map;
+        }
+        self
+    }
+    pub fn add_meta<T>(mut self, key: impl AsRef<str>, value: T) -> Self
+    where
+        T: serde::Serialize,
+    {
+        if let Ok(val) = serde_json::to_value(value) {
+            self.metadata.insert(key.as_ref().to_string(), val);
+        }
+        self
     }
     pub fn with_context(mut self, ctx: ExecutionMark) -> Self {
         self.context = ctx;
@@ -235,7 +246,7 @@ impl ErrorTaskModel {
 ///
 /// Defines minimal task identity with account, platform, and module information.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TaskModel {
+pub struct TaskEvent {
     /// Account identifier.
     pub account: String,
     /// Platform identifier.
@@ -253,9 +264,9 @@ pub struct TaskModel {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "payload", rename_all = "snake_case")]
 pub enum UnifiedTaskInput {
-    Task(TaskModel),
-    ParserTask(ParserTaskModel),
-    ErrorTask(ErrorTaskModel),
+    Task(TaskEvent),
+    ParserTask(TaskParserEvent),
+    ErrorTask(TaskErrorEvent),
 }
 
 impl UnifiedTaskInput {
@@ -268,26 +279,26 @@ impl UnifiedTaskInput {
     }
 }
 
-impl From<TaskModel> for UnifiedTaskInput {
-    fn from(value: TaskModel) -> Self {
+impl From<TaskEvent> for UnifiedTaskInput {
+    fn from(value: TaskEvent) -> Self {
         UnifiedTaskInput::Task(value)
     }
 }
 
-impl From<ParserTaskModel> for UnifiedTaskInput {
-    fn from(value: ParserTaskModel) -> Self {
+impl From<TaskParserEvent> for UnifiedTaskInput {
+    fn from(value: TaskParserEvent) -> Self {
         UnifiedTaskInput::ParserTask(value)
     }
 }
 
-impl From<ErrorTaskModel> for UnifiedTaskInput {
-    fn from(value: ErrorTaskModel) -> Self {
+impl From<TaskErrorEvent> for UnifiedTaskInput {
+    fn from(value: TaskErrorEvent) -> Self {
         UnifiedTaskInput::ErrorTask(value)
     }
 }
 
 #[async_trait]
-impl Offloadable for TaskModel {
+impl Offloadable for TaskEvent {
     fn should_offload(&self, _threshold: usize) -> bool {
         false
     }
@@ -299,29 +310,29 @@ impl Offloadable for TaskModel {
     }
 }
 
-impl crate::common::model::priority::Prioritizable for TaskModel {
+impl crate::common::model::priority::Prioritizable for TaskEvent {
     fn get_priority(&self) -> crate::common::model::Priority {
         self.priority
     }
 }
 
-impl crate::common::model::priority::Prioritizable for ParserTaskModel {
+impl crate::common::model::priority::Prioritizable for TaskParserEvent {
     fn get_priority(&self) -> crate::common::model::Priority {
         self.account_task.priority
     }
 }
 
-impl crate::common::model::priority::Prioritizable for ErrorTaskModel {
+impl crate::common::model::priority::Prioritizable for TaskErrorEvent {
     fn get_priority(&self) -> crate::common::model::Priority {
         self.account_task.priority
     }
 }
 
-impl From<&Response> for ParserTaskModel {
+impl From<&Response> for TaskParserEvent {
     fn from(value: &Response) -> Self {
-        ParserTaskModel {
+        TaskParserEvent {
             id: Uuid::now_v7(),
-            account_task: TaskModel {
+            account_task: TaskEvent {
                 account: value.account.clone(),
                 platform: value.platform.clone(),
                 module: Some(vec![value.module.clone()]),
@@ -329,7 +340,7 @@ impl From<&Response> for ParserTaskModel {
                 run_id: value.run_id,
             },
             timestamp: chrono::Utc::now().timestamp() as u64,
-            metadata: json!({}),
+            metadata: serde_json::Map::new(),
             context: value.context.clone(),
             run_id: value.run_id,
             prefix_request: value.prefix_request,
@@ -337,11 +348,15 @@ impl From<&Response> for ParserTaskModel {
     }
 }
 
-impl From<&Response> for ErrorTaskModel {
+impl From<&Response> for TaskErrorEvent {
     fn from(value: &Response) -> Self {
-        ErrorTaskModel {
+        let metadata = match serde_json::to_value(value.metadata.clone()) {
+            Ok(Value::Object(map)) => map,
+            _ => serde_json::Map::new(),
+        };
+        TaskErrorEvent {
             id: Uuid::now_v7(),
-            account_task: TaskModel {
+            account_task: TaskEvent {
                 account: value.account.clone(),
                 platform: value.platform.clone(),
                 module: Some(vec![value.module.clone()]),
@@ -350,7 +365,7 @@ impl From<&Response> for ErrorTaskModel {
             },
             error_msg: "".to_string(),
             timestamp: chrono::Utc::now().timestamp() as u64,
-            metadata: value.metadata.clone().into(),
+            metadata,
             context: value.context.clone(),
             run_id: value.run_id,
             prefix_request: value.prefix_request,
@@ -367,30 +382,30 @@ fn default_run_id() -> Uuid {
 ///
 /// Contains parsed data, next task, error task, and control flags.
 #[derive(Debug, Default)]
-pub struct ParserData {
+pub struct TaskOutputEvent {
     /// Parsed data list.
-    pub data: Vec<Data>,
+    pub data: Vec<DataEvent>,
     /// Generated next parser tasks.
-    pub parser_task: Vec<ParserTaskModel>,
+    pub parser_task: Vec<TaskParserEvent>,
     /// Generated error task (optional).
-    pub error_task: Option<ErrorTaskModel>,
+    pub error_task: Option<TaskErrorEvent>,
     /// Stop flag (optional).
     pub stop: Option<bool>,
 }
-impl ParserData {
+impl TaskOutputEvent {
     pub fn with_data(mut self, data: Vec<impl StoreTrait>) -> Self {
         self.data = data.into_iter().map(|d| d.build()).collect();
         self
     }
-    pub fn with_task(mut self, task: ParserTaskModel) -> Self {
+    pub fn with_task(mut self, task: TaskParserEvent) -> Self {
         self.parser_task.push(task);
         self
     }
-    pub fn with_tasks(mut self, tasks: Vec<ParserTaskModel>) -> Self {
+    pub fn with_tasks(mut self, tasks: Vec<TaskParserEvent>) -> Self {
         self.parser_task.extend(tasks);
         self
     }
-    pub fn with_error(mut self, error: ErrorTaskModel) -> Self {
+    pub fn with_error(mut self, error: TaskErrorEvent) -> Self {
         self.error_task = Some(error);
         self
     }
@@ -424,9 +439,9 @@ mod tests {
         let run_id = Uuid::now_v7();
         let prefix_req = Uuid::now_v7();
         
-        let task = ParserTaskModel {
+        let task = TaskParserEvent {
             id,
-            account_task: TaskModel {
+            account_task: TaskEvent {
                 account: "acc".into(),
                 platform: "plat".into(),
                 module: None,
@@ -434,7 +449,7 @@ mod tests {
                 run_id,
             },
             timestamp: 123456,
-            metadata: json!({}),
+            metadata: serde_json::Map::new(),
             context: ExecutionMark::default(),
             run_id,
             prefix_request: prefix_req,
@@ -481,13 +496,13 @@ mod tests {
             priority: Default::default(),
         };
 
-        let parser_task: ParserTaskModel = (&response).into();
+        let parser_task: TaskParserEvent = (&response).into();
         assert_eq!(parser_task.account_task.account, "acc");
         assert_eq!(parser_task.account_task.platform, "plat");
         assert_eq!(parser_task.run_id, run_id);
         assert_eq!(parser_task.prefix_request, prefix_request);
         
-        let error_task: ErrorTaskModel = (&response).into();
+        let error_task: TaskErrorEvent = (&response).into();
         assert_eq!(error_task.account_task.account, "acc");
         assert_eq!(error_task.run_id, run_id);
     }

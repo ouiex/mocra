@@ -8,8 +8,8 @@ use async_trait::async_trait;
 use crate::errors::{DataMiddlewareError, Error, Result};
 use crate::engine::task::TaskManager;
 use crate::common::interface::middleware_manager::MiddlewareManager;
-use crate::common::model::data::Data;
-use crate::common::model::message::{ErrorTaskModel, TaskModel};
+use crate::common::model::data::DataEvent;
+use crate::common::model::message::{TaskErrorEvent, TaskEvent};
 use crate::common::model::{ModuleConfig, Response};
 use crate::common::state::State;
 
@@ -300,7 +300,7 @@ impl ResponseParserProcessor {
 }
 
 #[async_trait]
-impl ProcessorTrait<(Response, Arc<Module>, Arc<ModuleConfig>, Option<LoginInfo>), Vec<Data>> for ResponseParserProcessor {
+impl ProcessorTrait<(Response, Arc<Module>, Arc<ModuleConfig>, Option<LoginInfo>), Vec<DataEvent>> for ResponseParserProcessor {
     fn name(&self) -> &'static str {
         "ResponseParserProcessor"
     }
@@ -309,7 +309,7 @@ impl ProcessorTrait<(Response, Arc<Module>, Arc<ModuleConfig>, Option<LoginInfo>
         &self,
         input: (Response, Arc<Module>, Arc<ModuleConfig>, Option<LoginInfo>),
         context: ProcessorContext,
-    ) -> ProcessorResult<Vec<Data>> {
+    ) -> ProcessorResult<Vec<DataEvent>> {
         info!(
             "[ResponseParserProcessor] start parse: request_id={} module_id={}",
             input.0.id,
@@ -411,7 +411,7 @@ impl ProcessorTrait<(Response, Arc<Module>, Arc<ModuleConfig>, Option<LoginInfo>
                  module_clone.prefix_request = task.prefix_request;
                  module_clone.run_id = task.run_id;
 
-                 let task_meta = task.metadata.as_object().cloned().unwrap_or_default();
+                 let task_meta = task.metadata.clone();
                  
                  match module_clone.generate(task_meta, login_info.clone()).await {
                      Ok(mut stream) => {
@@ -604,7 +604,7 @@ impl ProcessorTrait<(Response, Arc<Module>, Arc<ModuleConfig>, Option<LoginInfo>
     async fn post_process(
         &self,
         input: &(Response, Arc<Module>, Arc<ModuleConfig>, Option<LoginInfo>),
-        _output: &Vec<Data>,
+        _output: &Vec<DataEvent>,
         _context: &ProcessorContext,
     ) -> Result<()> {
         // Centralized lock release after parsing to avoid deadlocks and duplicate unlocks.
@@ -635,7 +635,7 @@ impl ProcessorTrait<(Response, Arc<Module>, Arc<ModuleConfig>, Option<LoginInfo>
         input: &(Response, Arc<Module>, Arc<ModuleConfig>, Option<LoginInfo>),
         error: Error,
         _context: &ProcessorContext,
-    ) -> ProcessorResult<Vec<Data>> {
+    ) -> ProcessorResult<Vec<DataEvent>> {
         error!(
             "[ResponseParserProcessor] fatal parser error: request_id={} module_id={} error={}",
             input.0.id,
@@ -656,9 +656,13 @@ impl ProcessorTrait<(Response, Arc<Module>, Arc<ModuleConfig>, Option<LoginInfo>
                 0
             }
         };
-        let error_task = ErrorTaskModel {
+        let error_metadata = match serde_json::to_value(input.0.metadata.clone()) {
+            Ok(serde_json::Value::Object(map)) => map,
+            _ => serde_json::Map::new(),
+        };
+        let error_task = TaskErrorEvent {
             id: input.0.id,
-            account_task: TaskModel {
+            account_task: TaskEvent {
                 account: input.0.account.clone(),
                 platform: input.0.platform.clone(),
                 module: Some(vec![input.0.module.clone()]),
@@ -667,7 +671,7 @@ impl ProcessorTrait<(Response, Arc<Module>, Arc<ModuleConfig>, Option<LoginInfo>
             },
             error_msg: error.to_string(),
             timestamp,
-            metadata: input.0.metadata.clone().into(),
+            metadata: error_metadata,
             context: input.0.context.clone(),
             run_id: input.0.run_id,
             prefix_request: input.0.prefix_request,
@@ -696,7 +700,7 @@ impl ProcessorTrait<(Response, Arc<Module>, Arc<ModuleConfig>, Option<LoginInfo>
         ProcessorResult::FatalFailure(error)
     }
 }
-impl EventProcessorTrait<(Response, Arc<Module>, Arc<ModuleConfig>, Option<LoginInfo>), Vec<Data>> for ResponseParserProcessor {
+impl EventProcessorTrait<(Response, Arc<Module>, Arc<ModuleConfig>, Option<LoginInfo>), Vec<DataEvent>> for ResponseParserProcessor {
     fn pre_status(&self, input: &(Response, Arc<Module>, Arc<ModuleConfig>, Option<LoginInfo>)) -> Option<EventEnvelope> {
         Some(EventEnvelope::engine(
             EventType::Parser,
@@ -705,7 +709,7 @@ impl EventProcessorTrait<(Response, Arc<Module>, Arc<ModuleConfig>, Option<Login
         ))
     }
 
-    fn finish_status(&self, input: &(Response, Arc<Module>, Arc<ModuleConfig>, Option<LoginInfo>), _output: &Vec<Data>) -> Option<EventEnvelope> {
+    fn finish_status(&self, input: &(Response, Arc<Module>, Arc<ModuleConfig>, Option<LoginInfo>), _output: &Vec<DataEvent>) -> Option<EventEnvelope> {
         Some(EventEnvelope::engine(
             EventType::Parser,
             EventPhase::Completed,
@@ -752,12 +756,12 @@ pub struct DataMiddlewareProcessor {
 }
 
 #[async_trait]
-impl ProcessorTrait<Data, Data> for DataMiddlewareProcessor {
+impl ProcessorTrait<DataEvent, DataEvent> for DataMiddlewareProcessor {
     fn name(&self) -> &'static str {
         "DataMiddlewareProcessor"
     }
 
-    async fn process(&self, input: Data, context: ProcessorContext) -> ProcessorResult<Data> {
+    async fn process(&self, input: DataEvent, context: ProcessorContext) -> ProcessorResult<DataEvent> {
         // info!(
         //    "[DataMiddlewareProcessor] start: account={} platform={} size={}",
         //    input.account,
@@ -793,8 +797,8 @@ impl ProcessorTrait<Data, Data> for DataMiddlewareProcessor {
         }
     }
 }
-impl EventProcessorTrait<Data, Data> for DataMiddlewareProcessor {
-    fn pre_status(&self, input: &Data) -> Option<EventEnvelope> {
+impl EventProcessorTrait<DataEvent, DataEvent> for DataMiddlewareProcessor {
+    fn pre_status(&self, input: &DataEvent) -> Option<EventEnvelope> {
         Some(EventEnvelope::engine(
             EventType::MiddlewareBefore,
             EventPhase::Started,
@@ -802,7 +806,7 @@ impl EventProcessorTrait<Data, Data> for DataMiddlewareProcessor {
         ))
     }
 
-    fn finish_status(&self, input: &Data, output: &Data) -> Option<EventEnvelope> {
+    fn finish_status(&self, input: &DataEvent, output: &DataEvent) -> Option<EventEnvelope> {
         let mut event: DataMiddlewareEvent = input.into();
         event.after_size = output.size().into();
         Some(EventEnvelope::engine(
@@ -812,7 +816,7 @@ impl EventProcessorTrait<Data, Data> for DataMiddlewareProcessor {
         ))
     }
 
-    fn working_status(&self, input: &Data) -> Option<EventEnvelope> {
+    fn working_status(&self, input: &DataEvent) -> Option<EventEnvelope> {
         Some(EventEnvelope::engine(
             EventType::MiddlewareBefore,
             EventPhase::Started,
@@ -820,7 +824,7 @@ impl EventProcessorTrait<Data, Data> for DataMiddlewareProcessor {
         ))
     }
 
-    fn error_status(&self, input: &Data, err: &Error) -> Option<EventEnvelope> {
+    fn error_status(&self, input: &DataEvent, err: &Error) -> Option<EventEnvelope> {
         Some(EventEnvelope::engine_error(
             EventType::MiddlewareBefore,
             EventPhase::Failed,
@@ -829,7 +833,7 @@ impl EventProcessorTrait<Data, Data> for DataMiddlewareProcessor {
         ))
     }
 
-    fn retry_status(&self, input: &Data, retry_policy: &RetryPolicy) -> Option<EventEnvelope> {
+    fn retry_status(&self, input: &DataEvent, retry_policy: &RetryPolicy) -> Option<EventEnvelope> {
         Some(EventEnvelope::engine(
             EventType::MiddlewareBefore,
             EventPhase::Retry,
@@ -846,7 +850,7 @@ pub struct DataStoreProcessor {
     middleware_manager: Arc<MiddlewareManager>,
 }
 #[async_trait]
-impl ProcessorTrait<Data, ()> for DataStoreProcessor {
+impl ProcessorTrait<DataEvent, ()> for DataStoreProcessor {
     fn name(&self) -> &'static str {
         "DataStoreProcessor"
     }
@@ -854,7 +858,7 @@ impl ProcessorTrait<Data, ()> for DataStoreProcessor {
     ///
     /// Additional retry context can be passed through `retry_policy.meta`
     /// for downstream retry behavior customization.
-    async fn process(&self, input: Data, context: ProcessorContext) -> ProcessorResult<()> {
+    async fn process(&self, input: DataEvent, context: ProcessorContext) -> ProcessorResult<()> {
         info!(
             "[DataStoreProcessor] start store: request_id={} account={} platform={} module={} size={}",
             input.request_id,
@@ -925,8 +929,8 @@ impl ProcessorTrait<Data, ()> for DataStoreProcessor {
         }
     }
 }
-impl EventProcessorTrait<Data, ()> for DataStoreProcessor {
-    fn pre_status(&self, input: &Data) -> Option<EventEnvelope> {
+impl EventProcessorTrait<DataEvent, ()> for DataStoreProcessor {
+    fn pre_status(&self, input: &DataEvent) -> Option<EventEnvelope> {
         Some(EventEnvelope::engine(
             EventType::DataStore,
             EventPhase::Started,
@@ -934,7 +938,7 @@ impl EventProcessorTrait<Data, ()> for DataStoreProcessor {
         ))
     }
 
-    fn finish_status(&self, input: &Data, _output: &()) -> Option<EventEnvelope> {
+    fn finish_status(&self, input: &DataEvent, _output: &()) -> Option<EventEnvelope> {
         Some(EventEnvelope::engine(
             EventType::DataStore,
             EventPhase::Completed,
@@ -942,7 +946,7 @@ impl EventProcessorTrait<Data, ()> for DataStoreProcessor {
         ))
     }
 
-    fn working_status(&self, input: &Data) -> Option<EventEnvelope> {
+    fn working_status(&self, input: &DataEvent) -> Option<EventEnvelope> {
         Some(EventEnvelope::engine(
             EventType::DataStore,
             EventPhase::Started,
@@ -950,7 +954,7 @@ impl EventProcessorTrait<Data, ()> for DataStoreProcessor {
         ))
     }
 
-    fn error_status(&self, input: &Data, err: &Error) -> Option<EventEnvelope> {
+    fn error_status(&self, input: &DataEvent, err: &Error) -> Option<EventEnvelope> {
         Some(EventEnvelope::engine_error(
             EventType::DataStore,
             EventPhase::Failed,
@@ -959,7 +963,7 @@ impl EventProcessorTrait<Data, ()> for DataStoreProcessor {
         ))
     }
 
-    fn retry_status(&self, input: &Data, retry_policy: &RetryPolicy) -> Option<EventEnvelope> {
+    fn retry_status(&self, input: &DataEvent, retry_policy: &RetryPolicy) -> Option<EventEnvelope> {
         Some(EventEnvelope::engine(
             EventType::DataStore,
             EventPhase::Retry,
@@ -1007,8 +1011,8 @@ pub async fn create_parser_chain(
 
     EventAwareTypedChain::<Response, Response>::new(event_bus)
         .then::<(Response, Arc<Module>, Arc<ModuleConfig>, Option<LoginInfo>), _>(response_module_processor)
-        .then::<Vec<Data>, _>(response_parser_processor)
-        .then_map_vec_parallel_with_strategy_silent::<Data, _>(
+        .then::<Vec<DataEvent>, _>(response_parser_processor)
+        .then_map_vec_parallel_with_strategy_silent::<DataEvent, _>(
             data_middleware_processor,
             64,
             ErrorStrategy::Skip,

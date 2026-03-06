@@ -1,7 +1,7 @@
 use crate::common::model::login_info::LoginInfo;
 use crate::common::model::{Cookies, CronConfig, Headers, ModuleConfig, Request, Response};
 // use crate::common::parser::ParserTrait;
-use crate::common::model::message::ParserData;
+use crate::common::model::message::TaskOutputEvent;
 use async_trait::async_trait;
 use crate::errors::Result;
 use futures::Stream;
@@ -65,7 +65,7 @@ pub trait ModuleNodeTrait: Send + Sync {
         &self,
         response: Response,
         _config: Option<Arc<ModuleConfig>>,
-    ) -> Result<ParserData>;
+    ) -> Result<TaskOutputEvent>;
     fn retryable(&self) -> bool{
         true
     }

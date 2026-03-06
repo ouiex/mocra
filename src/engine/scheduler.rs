@@ -3,7 +3,7 @@ use chrono::{DateTime, TimeZone, Utc};
 use crate::common::model::entity::{
     account, module, platform, rel_account_platform, rel_module_account, rel_module_platform,
 };
-use crate::common::model::message::TaskModel;
+use crate::common::model::message::TaskEvent;
 use crate::common::model::CronConfig;
 use crate::common::state::State;
 use cron::Schedule;
@@ -531,7 +531,7 @@ impl CronScheduler {
 
     async fn trigger_single_task(&self, module_name: &str, account: &str, platform: &str) {
         counter!("scheduled_tasks_total", "module" => module_name.to_string()).increment(1);
-        let task = TaskModel {
+        let task = TaskEvent {
             account: account.to_string(),
             platform: platform.to_string(),
             module: Some(vec![module_name.to_string()]),

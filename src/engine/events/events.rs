@@ -1,7 +1,7 @@
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
-use crate::common::model::message::{ErrorTaskModel, ParserTaskModel, TaskModel};
+use crate::common::model::message::{TaskErrorEvent, TaskParserEvent, TaskEvent};
 use crate::common::model::{Request, Response};
 use crate::engine::task::module::Module;
 use crate::errors::{Error, ErrorKind};
@@ -207,7 +207,7 @@ impl EventEnvelope {
 #[cfg(test)]
 mod tests {
     use super::{EventEnvelope, EventPhase, EventType, ParserTaskModelEvent};
-    use crate::common::model::message::{ErrorTaskModel, ParserTaskModel, TaskModel};
+    use crate::common::model::message::{TaskErrorEvent, TaskParserEvent, TaskEvent};
     use crate::common::model::ExecutionMark;
     use serde_json::json;
     use uuid::Uuid;
@@ -231,7 +231,7 @@ mod tests {
     #[test]
     fn parser_task_model_event_mapping_is_consistent_for_parser_and_error_inputs() {
         let run_id = Uuid::now_v7();
-        let task_model = TaskModel {
+        let task_model = TaskEvent {
             account: "acc".to_string(),
             platform: "pf".to_string(),
             module: Some(vec!["m1".to_string()]),
@@ -239,11 +239,11 @@ mod tests {
             run_id,
         };
 
-        let parser_task = ParserTaskModel {
+        let parser_task = TaskParserEvent {
             id: Uuid::now_v7(),
             account_task: task_model.clone(),
             timestamp: 0,
-            metadata: json!({"k":"v"}),
+            metadata: json!({"k":"v"}).as_object().cloned().unwrap_or_default(),
             context: ExecutionMark::default(),
             run_id,
             prefix_request: Uuid::now_v7(),
@@ -253,12 +253,12 @@ mod tests {
         assert_eq!(parser_evt.platform, "pf");
         assert_eq!(parser_evt.modules, Some(vec!["m1".to_string()]));
 
-        let error_task = ErrorTaskModel {
+        let error_task = TaskErrorEvent {
             id: Uuid::now_v7(),
             account_task: task_model,
             error_msg: "err".to_string(),
             timestamp: 0,
-            metadata: json!({"e":"x"}),
+            metadata: json!({"e":"x"}).as_object().cloned().unwrap_or_default(),
             context: ExecutionMark::default(),
             run_id,
             prefix_request: Uuid::now_v7(),
@@ -284,8 +284,8 @@ pub struct TaskModelEvent {
     pub modules: Option<Vec<String>>,
     
 }
-impl From<&TaskModel> for TaskModelEvent {
-    fn from(value: &TaskModel) -> Self {
+impl From<&TaskEvent> for TaskModelEvent {
+    fn from(value: &TaskEvent) -> Self {
         TaskModelEvent {
             account: value.account.clone(),
             platform: value.platform.clone(),
@@ -303,8 +303,8 @@ pub struct ParserTaskModelEvent {
     #[serde(skip)]
     pub metadata: Option<serde_json::Value>,
 }
-impl From<&ParserTaskModel> for ParserTaskModelEvent {
-    fn from(value: &ParserTaskModel) -> Self {
+impl From<&TaskParserEvent> for ParserTaskModelEvent {
+    fn from(value: &TaskParserEvent) -> Self {
         ParserTaskModelEvent {
             account: value.account_task.account.clone(),
             platform: value.account_task.platform.clone(),
@@ -313,8 +313,8 @@ impl From<&ParserTaskModel> for ParserTaskModelEvent {
         }
     }
 }
-impl From<&ErrorTaskModel> for ParserTaskModelEvent {
-    fn from(value: &ErrorTaskModel) -> Self {
+impl From<&TaskErrorEvent> for ParserTaskModelEvent {
+    fn from(value: &TaskErrorEvent) -> Self {
         Self {
             account: value.account_task.account.clone(),
             platform: value.account_task.platform.clone(),
@@ -430,8 +430,8 @@ pub struct DataMiddlewareEvent {
     pub schema_size: usize,
     pub after_size: Option<usize>,
 }
-impl From<&crate::common::model::data::Data> for DataMiddlewareEvent {
-    fn from(value: &crate::common::model::data::Data) -> Self {
+impl From<&crate::common::model::data::DataEvent> for DataMiddlewareEvent {
+    fn from(value: &crate::common::model::data::DataEvent) -> Self {
         Self {
             account: value.account.clone(),
             platform: value.platform.clone(),
@@ -454,8 +454,8 @@ pub struct DataStoreEvent {
     pub schema_size: (usize, usize),
     pub store_middleware: Option<String>,
 }
-impl From<&crate::common::model::data::Data> for DataStoreEvent {
-    fn from(value: &crate::common::model::data::Data) -> Self {
+impl From<&crate::common::model::data::DataEvent> for DataStoreEvent {
+    fn from(value: &crate::common::model::data::DataEvent) -> Self {
         Self {
             account: value.account.clone(),
             platform: value.platform.clone(),

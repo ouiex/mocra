@@ -47,9 +47,9 @@ pub struct FileStore {
 }
 
 impl StoreTrait for FileStore {
-    fn build(&self) -> Data {
+    fn build(&self) -> DataEvent {
         // Preserve all metadata by cloning the current FileStore into the enum variant.
-        Data {
+        DataEvent {
             request_id: self.ctx.request_id,
             platform: self.ctx.platform.clone(),
             account: self.ctx.account.clone(),
@@ -62,10 +62,10 @@ impl StoreTrait for FileStore {
 }
 
 
-impl From<FileStore> for Data {
+impl From<FileStore> for DataEvent {
     fn from(value: FileStore) -> Self {
         let ctx_clone = value.ctx.clone();
-        Data {
+        DataEvent {
             request_id: ctx_clone.request_id,
             platform: ctx_clone.platform.clone(),
             account: ctx_clone.account.clone(),
@@ -82,8 +82,8 @@ impl From<FileStore> for Data {
         }
     }
 }
-impl From<Data> for FileStore {
-    fn from(value: Data) -> Self {
+impl From<DataEvent> for FileStore {
+    fn from(value: DataEvent) -> Self {
         match value.data {
             DataType::File(f) => f,
             _ => FileStore::default(),
@@ -136,9 +136,9 @@ pub struct DataFrameStore {
 }
 
 impl StoreTrait for DataFrameStore {
-    fn build(&self) -> Data {
+    fn build(&self) -> DataEvent {
         // Clone to preserve full metadata.
-        Data {
+        DataEvent {
             request_id: self.ctx.request_id,
             platform: self.ctx.platform.clone(),
             account: self.ctx.account.clone(),
@@ -149,9 +149,9 @@ impl StoreTrait for DataFrameStore {
         }
     }
 }
-impl From<DataFrameStore> for Data {
+impl From<DataFrameStore> for DataEvent {
     fn from(value: DataFrameStore) -> Self {
-        Data {
+        DataEvent {
             request_id: value.ctx.request_id,
             platform: value.ctx.platform.clone(),
             account: value.ctx.account.clone(),
@@ -197,7 +197,7 @@ pub enum DataType {
 
 /// Generic data transfer object wrapping metadata and concrete payload.
 #[derive(Debug, Clone)]
-pub struct Data {
+pub struct DataEvent {
     /// Unique request identifier.
     pub request_id: Uuid,
     /// Platform identifier.
@@ -214,7 +214,7 @@ pub struct Data {
     pub data_middleware: Vec<String>,
 }
 
-impl Default for Data {
+impl Default for DataEvent {
     fn default() -> Self {
         Self {
             request_id: Default::default(),
@@ -227,10 +227,10 @@ impl Default for Data {
         }
     }
 }
-impl Data {
+impl DataEvent {
     /// Builds `Data` from `Response`.
     pub fn from(response: &Response) -> Self {
-        Data {
+        DataEvent {
             request_id: response.id,
             platform: response.platform.clone(),
             account: response.account.clone(),
@@ -287,10 +287,10 @@ impl Data {
         }
     }
 }
-impl From<(DataFrame, &Response)> for Data {
+impl From<(DataFrame, &Response)> for DataEvent {
     fn from(value: (DataFrame, &Response)) -> Self {
         let (data, response) = value;
-        Data {
+        DataEvent {
             request_id: response.id,
             platform: response.platform.clone(),
             account: response.account.clone(),
@@ -301,8 +301,8 @@ impl From<(DataFrame, &Response)> for Data {
         }
     }
 }
-impl StoreTrait for Data {
-    fn build(&self) -> Data {
+impl StoreTrait for DataEvent {
+    fn build(&self) -> DataEvent {
         self.clone()
     }
 }

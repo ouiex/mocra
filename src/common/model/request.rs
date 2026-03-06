@@ -207,9 +207,20 @@ impl Request {
         self.form = Some(serde_json::to_value(form).unwrap());
         self
     }
-    pub fn with_trait_config<T>(mut self, key: impl AsRef<str>, value: T) -> Self
+    pub fn with_meta<T>(mut self, meta: T) -> Self
     where
-        T: Serialize + for<'de> Deserialize<'de>,
+        T: Serialize,
+    {
+        if let Ok(serde_json::Value::Object(map)) = serde_json::to_value(meta) {
+            for (key, value) in map {
+                self.meta = self.meta.add_trait_config(key, value);
+            }
+        }
+        self
+    }
+    pub fn add_meta<T>(mut self, key: impl AsRef<str>, value: T) -> Self
+    where
+        T: Serialize,
     {
         self.meta = self.meta.add_trait_config(key, value);
         self

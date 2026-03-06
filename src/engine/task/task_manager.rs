@@ -6,7 +6,7 @@ use super::{
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use crate::common::model::{Request, Response};
-use crate::common::model::message::{ErrorTaskModel, ParserTaskModel, TaskModel};
+use crate::common::model::message::{TaskErrorEvent, TaskParserEvent, TaskEvent};
 use crate::common::state::State;
 use crate::errors::Result;
 use crate::cacheable::{CacheAble,CacheService};
@@ -80,17 +80,17 @@ impl TaskManager {
         assembler.set_origin(names, origin);
     }
     /// Loads task from TaskModel and synchronizes initial state.
-    pub async fn load_with_model(&self, task_model: &TaskModel) -> Result<Task> {
+    pub async fn load_with_model(&self, task_model: &TaskEvent) -> Result<Task> {
         self.factory.load_with_model(task_model).await
     }
 
     /// Loads task from ParserTaskModel with historical state restoration.
-    pub async fn load_parser(&self, parser_model: &ParserTaskModel) -> Result<Task> {
+    pub async fn load_parser(&self, parser_model: &TaskParserEvent) -> Result<Task> {
         self.factory.load_parser_model(parser_model).await
     }
 
     /// Loads task from ErrorTaskModel and applies error accounting.
-    pub async fn load_error(&self, error_model: &ErrorTaskModel) -> Result<Task> {
+    pub async fn load_error(&self, error_model: &TaskErrorEvent) -> Result<Task> {
         self.factory.load_error_model(error_model).await
     }
 

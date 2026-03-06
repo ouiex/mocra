@@ -1,4 +1,4 @@
-use crate::common::model::data::Data;
+use crate::common::model::data::DataEvent;
 use crate::common::model::{ModuleConfig, Request, Response};
 use async_trait::async_trait;
 use crate::errors::Result;
@@ -57,7 +57,7 @@ pub trait DataMiddleware: Send + Sync {
     /// 
     /// Can be used for cleaning, transformation, or enrichment.
     /// Returning `None` will skip subsequent data middleware and storage.
-    async fn handle_data(&mut self, data: Data, _config: &Option<ModuleConfig>) -> Option<Data> {
+    async fn handle_data(&mut self, data: DataEvent, _config: &Option<ModuleConfig>) -> Option<DataEvent> {
         Some(data)
     }
     
@@ -76,7 +76,7 @@ pub trait DataStoreMiddleware: DataMiddleware {
     }
 
     /// Stores the data item.
-    async fn store_data(&mut self, data: Data, config: &Option<ModuleConfig>) -> Result<()>;
+    async fn store_data(&mut self, data: DataEvent, config: &Option<ModuleConfig>) -> Result<()>;
 
     /// Hook executed after persisting data.
     async fn after_store(&mut self, _config: &Option<ModuleConfig>) -> Result<()> {

@@ -11,7 +11,7 @@ use crate::engine::processors::event_processor::{EventAwareTypedChain, EventProc
 use async_trait::async_trait;
 use crate::errors::{Error, ModuleError, Result};
 use crate::common::model::chain_key;
-use crate::common::model::message::{ErrorTaskModel, ParserTaskModel, TaskModel, UnifiedTaskInput};
+use crate::common::model::message::{TaskErrorEvent, TaskParserEvent, TaskEvent, UnifiedTaskInput};
 use crate::common::model::{ModuleConfig, Request};
 use crate::common::state::State;
 
@@ -116,7 +116,7 @@ pub trait ThresholdDecisionService: Send + Sync {
     /// Performs preflight validation before task expansion.
     async fn task_precheck(&self, task_id: &str) -> ChainDecision;
     /// Decides how to handle an `ErrorTaskModel` path.
-    async fn error_task_decide(&self, input: &ErrorTaskModel) -> ChainDecision;
+    async fn error_task_decide(&self, input: &TaskErrorEvent) -> ChainDecision;
 }
 
 /// Default threshold decision service backed by `StatusTracker` and optional Lua atomics.
@@ -153,7 +153,7 @@ impl ThresholdDecisionService for StatusTrackerThresholdDecisionService {
         }
     }
 
-    async fn error_task_decide(&self, input: &ErrorTaskModel) -> ChainDecision {
+    async fn error_task_decide(&self, input: &TaskErrorEvent) -> ChainDecision {
         let task_id = chain_key::task_runtime_id(
             &input.account_task.platform,
             &input.account_task.account,
@@ -439,11 +439,11 @@ impl TaskModelProcessor {
         self.threshold_decision_service.task_precheck(task_id).await
     }
 
-    async fn error_task_decide(&self, input: &ErrorTaskModel) -> ChainDecision {
+    async fn error_task_decide(&self, input: &TaskErrorEvent) -> ChainDecision {
         self.threshold_decision_service.error_task_decide(input).await
     }
 
-    async fn persist_error_retry_schedule(&self, input: &ErrorTaskModel, delay: std::time::Duration) {
+    async fn persist_error_retry_schedule(&self, input: &TaskErrorEvent, delay: std::time::Duration) {
         let task_id = chain_key::task_runtime_id(
             &input.account_task.platform,
             &input.account_task.account,
@@ -496,7 +496,7 @@ impl TaskModelProcessor {
 
     async fn persist_terminate_mark(
         &self,
-        input: &ErrorTaskModel,
+        input: &TaskErrorEvent,
         terminate_module: Option<&str>,
         reason: &str,
     ) {
@@ -541,7 +541,7 @@ impl TaskModelProcessor {
 
     async fn emit_threshold_terminated_event(
         &self,
-        input: &ErrorTaskModel,
+        input: &TaskErrorEvent,
         decision: &str,
         reason: &str,
     ) {
@@ -576,12 +576,12 @@ impl TaskModelProcessor {
     }
 }
 #[async_trait]
-impl ProcessorTrait<TaskModel, Task> for TaskModelProcessor {
+impl ProcessorTrait<TaskEvent, Task> for TaskModelProcessor {
     fn name(&self) -> &'static str {
         "TaskModelProcessor"
     }
 
-    async fn process(&self, input: TaskModel, context: ProcessorContext) -> ProcessorResult<Task> {
+    async fn process(&self, input: TaskEvent, context: ProcessorContext) -> ProcessorResult<Task> {
         debug!(
             "[TaskModelProcessor] Processing Task: account={} platform={} modules={:?} retry={}",
             input.account,
@@ -681,17 +681,17 @@ impl ProcessorTrait<TaskModel, Task> for TaskModelProcessor {
             }
         }
     }
-    async fn pre_process(&self, _input: &TaskModel, _context: &ProcessorContext) -> Result<()> {
+    async fn pre_process(&self, _input: &TaskEvent, _context: &ProcessorContext) -> Result<()> {
         Ok(())
     }
     async fn handle_error(
         &self,
-        input: &TaskModel,
+        input: &TaskEvent,
         error: Error,
         _context: &ProcessorContext,
     ) -> ProcessorResult<Task> {
         let sender = self.queue_manager.get_error_push_channel();
-        let error_msg = ErrorTaskModel {
+        let error_msg = TaskErrorEvent {
             id: Default::default(),
             account_task: input.clone(),
             error_msg: error.to_string(),
@@ -710,8 +710,8 @@ impl ProcessorTrait<TaskModel, Task> for TaskModelProcessor {
     }
 }
 #[async_trait]
-impl EventProcessorTrait<TaskModel, Task> for TaskModelProcessor {
-    fn pre_status(&self, input: &TaskModel) -> Option<EventEnvelope> {
+impl EventProcessorTrait<TaskEvent, Task> for TaskModelProcessor {
+    fn pre_status(&self, input: &TaskEvent) -> Option<EventEnvelope> {
         Some(EventEnvelope::engine(
             EventType::TaskModel,
             EventPhase::Started,
@@ -719,7 +719,7 @@ impl EventProcessorTrait<TaskModel, Task> for TaskModelProcessor {
         ))
     }
 
-    fn finish_status(&self, input: &TaskModel, output: &Task) -> Option<EventEnvelope> {
+    fn finish_status(&self, input: &TaskEvent, output: &Task) -> Option<EventEnvelope> {
         let mut task_model_event: TaskModelEvent = input.into();
         task_model_event.modules = Some(output.get_module_names());
         Some(EventEnvelope::engine(
@@ -729,7 +729,7 @@ impl EventProcessorTrait<TaskModel, Task> for TaskModelProcessor {
         ))
     }
 
-    fn working_status(&self, input: &TaskModel) -> Option<EventEnvelope> {
+    fn working_status(&self, input: &TaskEvent) -> Option<EventEnvelope> {
         Some(EventEnvelope::engine(
             EventType::TaskModel,
             EventPhase::Started,
@@ -737,7 +737,7 @@ impl EventProcessorTrait<TaskModel, Task> for TaskModelProcessor {
         ))
     }
 
-    fn error_status(&self, input: &TaskModel, error: &Error) -> Option<EventEnvelope> {
+    fn error_status(&self, input: &TaskEvent, error: &Error) -> Option<EventEnvelope> {
         Some(EventEnvelope::engine_error(
             EventType::TaskModel,
             EventPhase::Failed,
@@ -746,7 +746,7 @@ impl EventProcessorTrait<TaskModel, Task> for TaskModelProcessor {
         ))
     }
 
-    fn retry_status(&self, input: &TaskModel, retry_policy: &RetryPolicy) -> Option<EventEnvelope> {
+    fn retry_status(&self, input: &TaskEvent, retry_policy: &RetryPolicy) -> Option<EventEnvelope> {
         Some(EventEnvelope::engine(
             EventType::TaskModel,
             EventPhase::Retry,
@@ -759,14 +759,14 @@ impl EventProcessorTrait<TaskModel, Task> for TaskModelProcessor {
     }
 }
 #[async_trait]
-impl ProcessorTrait<ParserTaskModel, Task> for TaskModelProcessor {
+impl ProcessorTrait<TaskParserEvent, Task> for TaskModelProcessor {
     fn name(&self) -> &'static str {
         "TaskModelProcessor"
     }
 
     async fn process(
         &self,
-        input: ParserTaskModel,
+        input: TaskParserEvent,
         context: ProcessorContext,
     ) -> ProcessorResult<Task> {
         debug!(
@@ -824,19 +824,19 @@ impl ProcessorTrait<ParserTaskModel, Task> for TaskModelProcessor {
     }
     async fn pre_process(
         &self,
-        _input: &ParserTaskModel,
+        _input: &TaskParserEvent,
         _context: &ProcessorContext,
     ) -> Result<()> {
         Ok(())
     }
     async fn handle_error(
         &self,
-        input: &ParserTaskModel,
+        input: &TaskParserEvent,
         error: Error,
         _context: &ProcessorContext,
     ) -> ProcessorResult<Task> {
         let sender = self.queue_manager.get_error_push_channel();
-        let error_msg = ErrorTaskModel {
+        let error_msg = TaskErrorEvent {
             id: Default::default(),
             account_task: input.account_task.clone(),
             error_msg: error.to_string(),
@@ -855,8 +855,8 @@ impl ProcessorTrait<ParserTaskModel, Task> for TaskModelProcessor {
     }
 }
 #[async_trait]
-impl EventProcessorTrait<ParserTaskModel, Task> for TaskModelProcessor {
-    fn pre_status(&self, input: &ParserTaskModel) -> Option<EventEnvelope> {
+impl EventProcessorTrait<TaskParserEvent, Task> for TaskModelProcessor {
+    fn pre_status(&self, input: &TaskParserEvent) -> Option<EventEnvelope> {
         Some(EventEnvelope::engine(
             EventType::ParserTaskModel,
             EventPhase::Started,
@@ -864,7 +864,7 @@ impl EventProcessorTrait<ParserTaskModel, Task> for TaskModelProcessor {
         ))
     }
 
-    fn finish_status(&self, input: &ParserTaskModel, output: &Task) -> Option<EventEnvelope> {
+    fn finish_status(&self, input: &TaskParserEvent, output: &Task) -> Option<EventEnvelope> {
         let mut evt: ParserTaskModelEvent = input.into();
         evt.modules = Some(output.get_module_names());
         Some(EventEnvelope::engine(
@@ -874,7 +874,7 @@ impl EventProcessorTrait<ParserTaskModel, Task> for TaskModelProcessor {
         ))
     }
 
-    fn working_status(&self, input: &ParserTaskModel) -> Option<EventEnvelope> {
+    fn working_status(&self, input: &TaskParserEvent) -> Option<EventEnvelope> {
         Some(EventEnvelope::engine(
             EventType::ParserTaskModel,
             EventPhase::Started,
@@ -882,7 +882,7 @@ impl EventProcessorTrait<ParserTaskModel, Task> for TaskModelProcessor {
         ))
     }
 
-    fn error_status(&self, input: &ParserTaskModel, err: &Error) -> Option<EventEnvelope> {
+    fn error_status(&self, input: &TaskParserEvent, err: &Error) -> Option<EventEnvelope> {
         Some(EventEnvelope::engine_error(
             EventType::ParserTaskModel,
             EventPhase::Failed,
@@ -891,7 +891,7 @@ impl EventProcessorTrait<ParserTaskModel, Task> for TaskModelProcessor {
         ))
     }
 
-    fn retry_status(&self, input: &ParserTaskModel, retry_policy: &RetryPolicy) -> Option<EventEnvelope> {
+    fn retry_status(&self, input: &TaskParserEvent, retry_policy: &RetryPolicy) -> Option<EventEnvelope> {
         Some(EventEnvelope::engine(
             EventType::ParserTaskModel,
             EventPhase::Retry,
@@ -904,14 +904,14 @@ impl EventProcessorTrait<ParserTaskModel, Task> for TaskModelProcessor {
     }
 }
 #[async_trait]
-impl ProcessorTrait<ErrorTaskModel, Task> for TaskModelProcessor {
+impl ProcessorTrait<TaskErrorEvent, Task> for TaskModelProcessor {
     fn name(&self) -> &'static str {
         "TaskModelProcessor"
     }
 
     async fn process(
         &self,
-        input: ErrorTaskModel,
+        input: TaskErrorEvent,
         context: ProcessorContext,
     ) -> ProcessorResult<Task> {
         debug!(
@@ -1048,13 +1048,13 @@ impl ProcessorTrait<ErrorTaskModel, Task> for TaskModelProcessor {
             }
         }
     }
-    async fn pre_process(&self, _input: &ErrorTaskModel, _context: &ProcessorContext) -> Result<()> {
+    async fn pre_process(&self, _input: &TaskErrorEvent, _context: &ProcessorContext) -> Result<()> {
         Ok(())
     }
 }
 #[async_trait]
-impl EventProcessorTrait<ErrorTaskModel, Task> for TaskModelProcessor {
-    fn pre_status(&self, input: &ErrorTaskModel) -> Option<EventEnvelope> {
+impl EventProcessorTrait<TaskErrorEvent, Task> for TaskModelProcessor {
+    fn pre_status(&self, input: &TaskErrorEvent) -> Option<EventEnvelope> {
         Some(EventEnvelope::engine(
             EventType::ParserTaskModel,
             EventPhase::Started,
@@ -1062,7 +1062,7 @@ impl EventProcessorTrait<ErrorTaskModel, Task> for TaskModelProcessor {
         ))
     }
 
-    fn finish_status(&self, input: &ErrorTaskModel, output: &Task) -> Option<EventEnvelope> {
+    fn finish_status(&self, input: &TaskErrorEvent, output: &Task) -> Option<EventEnvelope> {
         let mut evt: ParserTaskModelEvent = input.into();
         evt.modules = Some(output.get_module_names());
         Some(EventEnvelope::engine(
@@ -1072,7 +1072,7 @@ impl EventProcessorTrait<ErrorTaskModel, Task> for TaskModelProcessor {
         ))
     }
 
-    fn working_status(&self, input: &ErrorTaskModel) -> Option<EventEnvelope> {
+    fn working_status(&self, input: &TaskErrorEvent) -> Option<EventEnvelope> {
         Some(EventEnvelope::engine(
             EventType::ParserTaskModel,
             EventPhase::Started,
@@ -1080,7 +1080,7 @@ impl EventProcessorTrait<ErrorTaskModel, Task> for TaskModelProcessor {
         ))
     }
 
-    fn error_status(&self, input: &ErrorTaskModel, err: &Error) -> Option<EventEnvelope> {
+    fn error_status(&self, input: &TaskErrorEvent, err: &Error) -> Option<EventEnvelope> {
         Some(EventEnvelope::engine_error(
             EventType::ParserTaskModel,
             EventPhase::Failed,
@@ -1089,7 +1089,7 @@ impl EventProcessorTrait<ErrorTaskModel, Task> for TaskModelProcessor {
         ))
     }
 
-    fn retry_status(&self, input: &ErrorTaskModel, retry_policy: &RetryPolicy) -> Option<EventEnvelope> {
+    fn retry_status(&self, input: &TaskErrorEvent, retry_policy: &RetryPolicy) -> Option<EventEnvelope> {
         Some(EventEnvelope::engine(
             EventType::ParserTaskModel,
             EventPhase::Retry,
@@ -1766,19 +1766,19 @@ async fn build_request_deduplicator(state: &Arc<State>) -> Option<Arc<Deduplicat
 
 pub struct UnifiedTaskIngressChain {
     /// Ingress chain for standard task creation path.
-    task_chain: Arc<EventAwareTypedChain<TaskModel, SyncBoxStream<'static, ()>>>,
+    task_chain: Arc<EventAwareTypedChain<TaskEvent, SyncBoxStream<'static, ()>>>,
     /// Ingress chain for parser-produced follow-up tasks.
-    parser_chain: Arc<EventAwareTypedChain<ParserTaskModel, SyncBoxStream<'static, ()>>>,
+    parser_chain: Arc<EventAwareTypedChain<TaskParserEvent, SyncBoxStream<'static, ()>>>,
     /// Ingress chain for error-task retries/termination path.
-    error_chain: Arc<EventAwareTypedChain<ErrorTaskModel, SyncBoxStream<'static, ()>>>,
+    error_chain: Arc<EventAwareTypedChain<TaskErrorEvent, SyncBoxStream<'static, ()>>>,
 }
 
 impl UnifiedTaskIngressChain {
     /// Constructs a multiplexer over three ingress typed chains.
     pub fn new(
-        task_chain: Arc<EventAwareTypedChain<TaskModel, SyncBoxStream<'static, ()>>>,
-        parser_chain: Arc<EventAwareTypedChain<ParserTaskModel, SyncBoxStream<'static, ()>>>,
-        error_chain: Arc<EventAwareTypedChain<ErrorTaskModel, SyncBoxStream<'static, ()>>>,
+        task_chain: Arc<EventAwareTypedChain<TaskEvent, SyncBoxStream<'static, ()>>>,
+        parser_chain: Arc<EventAwareTypedChain<TaskParserEvent, SyncBoxStream<'static, ()>>>,
+        error_chain: Arc<EventAwareTypedChain<TaskErrorEvent, SyncBoxStream<'static, ()>>>,
     ) -> Self {
         Self {
             task_chain,
@@ -1835,7 +1835,7 @@ pub async fn create_unified_task_ingress_chain(
 
     let task_deduplicator = build_request_deduplicator(&state).await;
     let task_chain = Arc::new(
-        EventAwareTypedChain::<TaskModel, TaskModel>::new(event_bus.clone())
+        EventAwareTypedChain::<TaskEvent, TaskEvent>::new(event_bus.clone())
             .then::<Task, _>(TaskModelProcessor {
                 task_manager: task_manager.clone(),
                 state: state.clone(),
@@ -1875,7 +1875,7 @@ pub async fn create_unified_task_ingress_chain(
 
     let parser_deduplicator = build_request_deduplicator(&state).await;
     let parser_chain = Arc::new(
-        EventAwareTypedChain::<ParserTaskModel, ParserTaskModel>::new(event_bus.clone())
+        EventAwareTypedChain::<TaskParserEvent, TaskParserEvent>::new(event_bus.clone())
             .then::<Task, _>(TaskModelProcessor {
                 task_manager: task_manager.clone(),
                 state: state.clone(),
@@ -1909,7 +1909,7 @@ pub async fn create_unified_task_ingress_chain(
 
     let error_deduplicator = build_request_deduplicator(&state).await;
     let error_chain = Arc::new(
-        EventAwareTypedChain::<ErrorTaskModel, ErrorTaskModel>::new(event_bus)
+        EventAwareTypedChain::<TaskErrorEvent, TaskErrorEvent>::new(event_bus)
             .then::<Task, _>(TaskModelProcessor {
                 task_manager,
                 state: state.clone(),

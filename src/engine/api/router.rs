@@ -2,7 +2,7 @@
 use axum::extract::State;
 use axum::{Json, Router, middleware};
 use axum::routing::{post, get};
-use crate::common::model::message::TaskModel;
+use crate::common::model::message::TaskEvent;
 use crate::queue::QueuedItem;
 use crate::engine::api::state::ApiState;
 use crate::engine::api::control::{get_nodes, pause_engine, resume_engine};
@@ -60,7 +60,7 @@ pub async fn metrics_handler(
 /// Useful for testing or triggering specific tasks.
 pub async fn start_work(
     State(app_state): State<ApiState>,
-    Json(task): Json<TaskModel>,
+    Json(task): Json<TaskEvent>,
 ){
     let task_pop_chain = app_state.queue_manager.get_task_push_channel().clone();
     if let Err(e) = task_pop_chain.send(QueuedItem::new(task)).await {

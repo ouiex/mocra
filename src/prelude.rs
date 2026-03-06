@@ -3,9 +3,9 @@ pub use crate::common::interface::{
     DataMiddleware, DataStoreMiddleware, DownloadMiddleware, MiddlewareManager, ModuleNodeTrait,
     ModuleTrait, StoreTrait, SyncBoxStream,
 };
-pub use crate::common::model::data::Data;
+pub use crate::common::model::data::DataEvent;
 pub use crate::common::model::login_info::LoginInfo;
-pub use crate::common::model::message::{ParserData, ParserTaskModel};
+pub use crate::common::model::message::{TaskOutputEvent, TaskParserEvent};
 pub use crate::common::model::request::RequestMethod;
 pub use crate::common::model::{
     Cookies, ExecutionMark, Headers, ModuleConfig, Request, Response,

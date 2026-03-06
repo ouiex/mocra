@@ -3,7 +3,7 @@ use crate::errors::Result;
 use crate::common::interface::middleware::{
     DataMiddlewareHandle, DataStoreMiddlewareHandle, DownloadMiddlewareHandle,
 };
-use crate::common::model::data::Data;
+use crate::common::model::data::DataEvent;
 use crate::common::state::State;
 use crate::common::model::ModuleConfig;
 use crate::common::model::{Request, Response};
@@ -176,7 +176,7 @@ impl MiddlewareManager {
         }
         Some(resp)
     }
-    pub async fn handle_data(&self, data: Data, config: &Option<ModuleConfig>) -> Option<Data> {
+    pub async fn handle_data(&self, data: DataEvent, config: &Option<ModuleConfig>) -> Option<DataEvent> {
         let mut data = data;
         let mut middleware: Vec<(DataMiddlewareHandle, u32)> = self
             .get_data_middleware(&data.data_middleware, config)
@@ -194,7 +194,7 @@ impl MiddlewareManager {
     /// Returns a map of storage results (`middleware_name -> result`), filtered to errors only.
     pub async fn handle_store_data(
         &self,
-        data: Data,
+        data: DataEvent,
         config: &Option<ModuleConfig>,
     ) -> HashMap<String, Result<()>> {
         let middleware = self.get_store_middleware(&data.data_middleware).await;
@@ -229,7 +229,7 @@ impl MiddlewareManager {
     }
     pub async fn handle_store_data_with_middleware(
         &self,
-        data: Data,
+        data: DataEvent,
         middleware: Vec<String>,
         config: &Option<ModuleConfig>,
     ) -> HashMap<String, Result<()>> {

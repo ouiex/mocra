@@ -8,7 +8,7 @@ use crate::queue::compensation::{Compensator, Identifiable, RedisCompensator};
 use crate::queue::redis::RedisQueue;
 use crate::queue::kafka::KafkaQueue;
 use crate::common::policy::PolicyResolver;
-use crate::common::model::message::{ErrorTaskModel, ParserTaskModel, TaskModel};
+use crate::common::model::message::{TaskErrorEvent, TaskParserEvent, TaskEvent};
 use crate::common::model::{Request, Response, Prioritizable, Priority};
 use crate::common::model::config::Config;
 use crate::common::interface::storage::{BlobStorage, Offloadable};
@@ -517,13 +517,13 @@ impl QueueManager {
         });
     }
 
-    pub fn get_task_push_channel(&self) -> Sender<QueuedItem<TaskModel>> {
+    pub fn get_task_push_channel(&self) -> Sender<QueuedItem<TaskEvent>> {
         if self.backend.is_none() {
             return self.channel.task_sender.clone();
         }
         self.channel.remote_task_sender.clone()
     }
-    pub fn get_task_pop_channel(&self) -> Arc<Mutex<Receiver<QueuedItem<TaskModel>>>> {
+    pub fn get_task_pop_channel(&self) -> Arc<Mutex<Receiver<QueuedItem<TaskEvent>>>> {
         Arc::clone(&self.channel.task_receiver)
     }
     pub fn get_request_pop_channel(&self) -> Arc<Mutex<Receiver<QueuedItem<Request>>>> {
@@ -552,19 +552,19 @@ impl QueueManager {
     pub fn get_response_pop_channel(&self) -> Arc<Mutex<Receiver<QueuedItem<Response>>>> {
         Arc::clone(&self.channel.remote_response_receiver)
     }
-    pub fn get_parser_task_pop_channel(&self) -> Arc<Mutex<Receiver<QueuedItem<ParserTaskModel>>>> {
+    pub fn get_parser_task_pop_channel(&self) -> Arc<Mutex<Receiver<QueuedItem<TaskParserEvent>>>> {
         self.channel.remote_parser_task_receiver.clone()
     }
-    pub fn get_parser_task_push_channel(&self) -> Sender<QueuedItem<ParserTaskModel>> {
+    pub fn get_parser_task_push_channel(&self) -> Sender<QueuedItem<TaskParserEvent>> {
         if self.backend.is_none() {
             return self.channel.remote_parser_task_sender.clone();
         }
         self.channel.parser_task_sender.clone()
     }
-    pub fn get_error_pop_channel(&self) -> Arc<Mutex<Receiver<QueuedItem<ErrorTaskModel>>>> {
+    pub fn get_error_pop_channel(&self) -> Arc<Mutex<Receiver<QueuedItem<TaskErrorEvent>>>> {
         Arc::clone(&self.channel.remote_error_receiver)
     }
-    pub fn get_error_push_channel(&self) -> Sender<QueuedItem<ErrorTaskModel>> {
+    pub fn get_error_push_channel(&self) -> Sender<QueuedItem<TaskErrorEvent>> {
         if self.backend.is_none() {
             return self.channel.remote_error_sender.clone();
         }

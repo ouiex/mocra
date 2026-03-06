@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use crate::common::model::config::RedisConfig;
 use crate::common::model::{
     Request, Response,
-    message::{ErrorTaskModel, ParserTaskModel, TaskModel},
+    message::{TaskErrorEvent, TaskParserEvent, TaskEvent},
 };
 use crate::errors::Result;
 use crate::errors::error::QueueError;
@@ -37,19 +37,19 @@ impl Identifiable for Response {
     }
 }
 
-impl Identifiable for ParserTaskModel {
+impl Identifiable for TaskParserEvent {
     fn get_id(&self) -> String {
         self.id.to_string()
     }
 }
 
-impl Identifiable for ErrorTaskModel {
+impl Identifiable for TaskErrorEvent {
     fn get_id(&self) -> String {
         self.id.to_string()
     }
 }
 
-impl Identifiable for TaskModel {
+impl Identifiable for TaskEvent {
     fn get_id(&self) -> String {
         self.run_id.to_string()
     }

@@ -6,7 +6,7 @@ use super::{
 use crate::errors::{ModuleError::ModuleNotFound, Result};
 
 use crate::common::model::login_info::LoginInfo;
-use crate::common::model::message::{ErrorTaskModel, ParserTaskModel, TaskModel};
+use crate::common::model::message::{TaskErrorEvent, TaskParserEvent, TaskEvent};
 use crate::common::model::{ModuleConfig, Response};
 use crate::common::state::State;
 use crate::cacheable::{CacheAble, CacheService};
@@ -76,7 +76,7 @@ impl TaskFactory {
 
     }
     /// Creates task from TaskModel and optionally filters requested modules.
-    pub async fn create_task_from_model(&self, task_model: &TaskModel) -> Result<Task> {
+    pub async fn create_task_from_model(&self, task_model: &TaskEvent) -> Result<Task> {
         let mut task = (*self
             .create_task_with_modules(&task_model.platform, &task_model.account, task_model.run_id)
             .await?).clone();
@@ -328,7 +328,7 @@ impl TaskFactory {
     }
 
     /// Loads task from TaskModel and synchronizes initial runtime state.
-    pub async fn load_with_model(&self, task_model: &TaskModel) -> Result<Task> {
+    pub async fn load_with_model(&self, task_model: &TaskEvent) -> Result<Task> {
         let task = self.create_task_from_model(task_model).await;
         match task {
             Ok(mut task) => {
@@ -372,7 +372,7 @@ impl TaskFactory {
     }
 
     /// Loads task from ParserTaskModel and restores parser-driven context.
-    pub async fn load_parser_model(&self, parser_model: &ParserTaskModel) -> Result<Task> {
+    pub async fn load_parser_model(&self, parser_model: &TaskParserEvent) -> Result<Task> {
         let mut task = self
             .create_task_from_model(&parser_model.account_task)
             .await?;
@@ -385,11 +385,7 @@ impl TaskFactory {
 
         // Restore historical metadata and parser progression context.
         // task.error_times = self.sync_service.load_task_status(&task.id()).await;
-        task.metadata = parser_model
-            .metadata
-            .as_object()
-            .cloned()
-            .unwrap_or_default();
+        task.metadata = parser_model.metadata.clone();
         for module in task.modules.iter_mut() {
             // let (error_times, _) = self.cache_service.load_module_status(&module.id()).await;
             // module.error_times = error_times;
@@ -408,7 +404,7 @@ impl TaskFactory {
     }
 
     /// Loads task from ErrorTaskModel and propagates retry context.
-    pub async fn load_error_model(&self, error_model: &ErrorTaskModel) -> Result<Task> {
+    pub async fn load_error_model(&self, error_model: &TaskErrorEvent) -> Result<Task> {
         let mut task = self
             .create_task_from_model(&error_model.account_task)
             .await?;
@@ -455,11 +451,7 @@ impl TaskFactory {
         // Module filtering by error threshold placeholder.
         // let max_errors = self.state.config.read().await.crawler.task_max_errors;
         // task.crawler.retain(|m| m.error_times < max_errors);
-        task.metadata = error_model
-            .metadata
-            .as_object()
-            .cloned()
-            .unwrap_or_default();
+        task.metadata = error_model.metadata.clone();
         Ok(task)
     }
 
