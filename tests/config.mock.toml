@@ -15,7 +15,7 @@ downloader_expire = 3600
 # keep timeout small for mock
 timeout = 10
 rate_limit = 0
-enable_cache = false
+enable_session = false
 enable_locker = false
 enable_rate_limit = false
 cache_ttl = 30

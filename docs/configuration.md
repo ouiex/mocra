@@ -274,13 +274,36 @@ crawler_local:cookie:login_info:benchmark-test
 | downloader_expire | 是 | number | 下载器实例过期时间（秒）。 | Downloader instance expiration (seconds). |
 | timeout | 是 | number | 请求超时（秒）。 | Request timeout (seconds). |
 | rate_limit | 是 | number | 全局请求速率限制（QPS），0 表示不限制。 | Global request rate limit (QPS); 0 means unlimited. |
-| enable_cache | 是 | bool | 是否启用响应缓存（配合 `cache` 配置）。 | Enable response caching (uses `cache`). |
+| enable_session | 是 | bool | 是否启用会话态同步（headers/cookies）与相关缓存逻辑。 | Enable session-state sync (headers/cookies) and related cache logic. |
 | enable_locker | 是 | bool | 是否启用分布式锁（防止并发冲突）。 | Enable distributed locking to prevent concurrent conflicts. |
 | enable_rate_limit | 是 | bool | 是否启用限速逻辑（依赖 `rate_limit`）。 | Enable rate limiting (uses `rate_limit`). |
 | cache_ttl | 是 | number | 响应缓存 TTL（秒）。 | Response cache TTL (seconds). |
 | wss_timeout | 是 | number | WebSocket 超时（秒）。 | WebSocket timeout (seconds). |
 | pool_size | 否 | number | HTTP 客户端连接池大小。 | HTTP client pool size. |
 | max_response_size | 否 | number | 最大响应体大小（字节）。 | Max response size in bytes. |
+
+#### enable_session 行为说明 (Session Behavior)
+
+当 `enable_session = true` 时，下载器会启用分布式会话同步：
+
+- 会话对象：`SessionState`
+	- 字段：`session_id`、`module_id`、`headers`、`cookies`、`version`
+- 存储位置：Redis（通过 `CacheService`）
+- 会话作用域：`module_id + run_id`
+	- 这样同一模块不同运行批次互不污染
+- 读取时机：请求发送前
+	- 从 Redis 拉取 `SessionState`，将其中 `headers/cookies` 合并到当前请求
+	- 当前请求自带 `headers/cookies` 优先，session 仅补充缺失项
+- 写入时机：响应返回后
+	- 从响应中更新 `cookies`
+	- 仅将 `request.cache_headers` 指定的 header 键更新到 session
+- Host-only Cookie 自动处理：
+	- 若响应 cookie 未携带 `Domain`，系统会用 `request.url` 的 host 自动回填 domain，再写入 session
+
+建议：
+
+- 需要登录态/会话连续性的任务开启 `enable_session`
+- 纯无状态抓取任务可关闭以降低 Redis 读写开销
 
 ### [crawler]
 

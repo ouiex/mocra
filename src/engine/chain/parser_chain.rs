@@ -612,7 +612,7 @@ impl ProcessorTrait<(Response, Arc<Module>, Arc<ModuleConfig>, Option<LoginInfo>
         let config = self.state.config.read().await;
 
         // Cache response payload so duplicate downloads can be short-circuited.
-        if config.download_config.enable_cache {
+        if config.download_config.enable_session {
             if let Some(request_hash) = &input.0.request_hash
             {
                 input.0.send(request_hash, &self.cache_service).await.ok();

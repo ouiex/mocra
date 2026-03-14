@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct DownloadConfig {
-    pub enable_cache: bool,
+    pub enable_session: bool,
     pub enable_locker: bool,
     pub enable_rate_limit: bool,
     pub rate_limit: f32,
@@ -20,9 +20,9 @@ impl DownloadConfig {
     ) -> Self {
         if let Some(module_config) = module_config {
             Self {
-                enable_cache: module_config
-                    .get_config_value("enable_cache")
-                    .is_some_and(|x| x.as_bool().unwrap_or(default_config.enable_cache)),
+                enable_session: module_config
+                    .get_config_value("enable_session")
+                    .is_some_and(|x| x.as_bool().unwrap_or(default_config.enable_session)),
                 enable_locker: module_config
                     .get_config_value("enable_locker")
                     .is_some_and(|x| x.as_bool().unwrap_or(default_config.enable_locker)),
@@ -50,7 +50,7 @@ impl DownloadConfig {
             }
         } else {
             Self {
-                enable_cache: default_config.enable_cache,
+                enable_session: default_config.enable_session,
                 enable_locker: default_config.enable_locker,
                 enable_rate_limit: default_config.enable_rate_limit,
                 rate_limit: default_config.rate_limit,

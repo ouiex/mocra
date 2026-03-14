@@ -256,6 +256,9 @@ impl Cookies {
             }
         }
     }
+    pub fn merge_if_absent(&mut self, other: &Cookies) {
+        self.merge(other);
+    }
     pub fn merge_cookie_store(&mut self, other: &CookieStore) {
         let other_cookies: Cookies = other.clone().into();
         self.merge(&other_cookies)

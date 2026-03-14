@@ -22,10 +22,26 @@ use crate::common::model::headers::HeaderItem;
 use dashmap::DashMap;
 use metrics::{counter, histogram};
 use rand::Rng;
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct SessionState {
+    session_id: String,
+    module_id: String,
+    headers: Headers,
+    cookies: Cookies,
+    version: u64,
+}
+
+impl CacheAble for SessionState {
+    fn field() -> impl AsRef<str> {
+        "session_state"
+    }
+}
 
 /// RequestDownloader implements the Downloader trait and provides HTTP download capability.
 /// It supports cookie/header caching, rate limiting, and task locking.
-/// The corresponding features can be enabled via `enable_cache`, `enable_locker`,
+/// The corresponding features can be enabled via `enable_session`, `enable_locker`,
 /// and `enable_rate_limit`.
 /// This downloader uses `reqwest` for HTTP requests and relies on `Arc`/`Mutex`-style
 /// shared state patterns for thread safety.
@@ -38,18 +54,26 @@ pub struct RequestDownloader {
     /// Distributed lock manager.
     pub locker: Arc<DistributedLockManager>,
     cache_service: Arc<CacheService>,
-    enable_cache: Arc<AtomicBool>,
+    enable_session: Arc<AtomicBool>,
     enable_locker: Arc<AtomicBool>,
     enable_rate_limit: Arc<AtomicBool>,
     proxy_clients: Arc<DashMap<String, (Client, Instant)>>,
     default_client: Client,
-    headers_cache: Arc<DashMap<String, (Instant, Option<Headers>)>>,
-    cookies_cache: Arc<DashMap<String, (Instant, Option<Cookies>)>>,
     pool_size: usize,
     max_response_size: usize,
 }
 
 impl RequestDownloader {
+    #[inline]
+    fn is_session_enabled(&self, request: &Request) -> bool {
+        request.enable_session || self.enable_session.load(Ordering::Relaxed)
+    }
+
+    #[inline]
+    fn session_scope_key(&self, request: &Request) -> String {
+        format!("{}:{}", request.module_id(), request.run_id)
+    }
+
     pub fn new(
         limit: Arc<DistributedSlidingWindowRateLimiter>,
         locker: Arc<DistributedLockManager>,
@@ -89,171 +113,144 @@ impl RequestDownloader {
             limit,
             locker,
             cache_service: sync,
-            enable_cache: Arc::new(AtomicBool::new(false)),
+            enable_session: Arc::new(AtomicBool::new(false)),
             enable_locker: Arc::new(AtomicBool::new(false)),
             enable_rate_limit: Arc::new(AtomicBool::new(true)),
             proxy_clients,
             default_client,
-            headers_cache: Arc::new(DashMap::new()),
-            cookies_cache: Arc::new(DashMap::new()),
             pool_size,
             max_response_size,
         }
     }
 
     async fn process_request(&self, request: Request) -> Result<Request> {
-        let cache_enabled = self.enable_cache.load(Ordering::Relaxed);
-        if !cache_enabled {
+        if !self.is_session_enabled(&request) {
             return Ok(request);
         }
 
-        let module_id = request.module_id();
+        let session_key = self.session_scope_key(&request);
         let mut modified_request = request;
 
-        // Load cached headers and cookies in parallel.
-        let headers_future = self.load_cached_headers(&module_id, &modified_request.cache_headers);
-        let cookies_future = self.load_cached_cookies(&module_id);
-
-        let (cached_headers, cached_cookies) = tokio::try_join!(headers_future, cookies_future)?;
-
-        // Apply cached headers.
-        if let Some(headers) = cached_headers {
-            modified_request.headers.merge(&headers);
-        }
-
-        // Apply cached cookies.
-        if let Some(cookies) = cached_cookies {
-            modified_request.cookies.merge(&cookies);
+        if let Some(session_state) = self.load_session_state(&session_key).await? {
+            modified_request.headers.merge_if_absent(&session_state.headers);
+            modified_request.cookies.merge_if_absent(&session_state.cookies);
         }
 
         Ok(modified_request)
     }
 
-    /// Loads cached headers using fine-grained locking and an L1 cache.
-    async fn load_cached_headers(
+    async fn load_session_state(&self, session_key: &str) -> Result<Option<SessionState>> {
+        Ok(SessionState::sync(session_key, &self.cache_service).await?)
+    }
+
+    async fn save_session_state(
         &self,
-        module_id: &str,
-        cache_headers: &Option<Vec<String>>,
-    ) -> Result<Option<Headers>> {
-        if let Some(cache_headers) = cache_headers {
-            // L1 Cache Check
-            if let Some(entry) = self.headers_cache.get(module_id) {
-                let (ts, headers_opt) = entry.value();
-                if ts.elapsed() < Duration::from_secs(5) {
-                    if let Some(headers) = headers_opt {
-                        let filtered_headers = Headers {
-                            headers: headers
-                                .headers
-                                .iter()
-                                .filter(|x| cache_headers.contains(&x.key))
-                                .cloned()
-                                .collect::<Vec<HeaderItem>>(),
-                        };
-                        return Ok(Some(filtered_headers));
-                    } else {
-                        return Ok(None);
-                    }
+        session_key: &str,
+        module_id: String,
+        request: &Request,
+        response: &Response,
+    ) {
+        let mut session_state = match self.load_session_state(session_key).await {
+            Ok(Some(v)) => v,
+            Ok(None) => SessionState {
+                session_id: session_key.to_string(),
+                module_id,
+                headers: Headers::default(),
+                cookies: Cookies::default(),
+                version: 0,
+            },
+            Err(err) => {
+                warn!(
+                    "Failed to load session state for {}: {:?}",
+                    session_key, err
+                );
+                SessionState {
+                    session_id: session_key.to_string(),
+                    module_id,
+                    headers: Headers::default(),
+                    cookies: Cookies::default(),
+                    version: 0,
                 }
             }
-
-            // Redis Fetch
-            let result_headers = if let Ok(Some(headers)) =
-                Headers::sync(module_id, &self.cache_service).await
-            {
-                Some(headers)
-            } else {
-                None
-            };
-
-            // Update L1 Cache
-            self.headers_cache.insert(module_id.to_string(), (Instant::now(), result_headers.clone()));
-
-            if let Some(headers) = result_headers {
-                let filtered_headers = Headers {
-                    headers: headers
-                        .headers
-                        .into_iter()
-                        .filter(|x| cache_headers.contains(&x.key))
-                        .collect::<Vec<HeaderItem>>(),
-                };
-                Ok(Some(filtered_headers))
-            } else {
-                Ok(None)
-            }
-        } else {
-            Ok(None)
-        }
-    }
-
-    /// Loads cached cookies using fine-grained locking and an L1 cache.
-    async fn load_cached_cookies(&self, module_id: &str) -> Result<Option<Cookies>> {
-        // L1 Cache Check
-        if let Some(entry) = self.cookies_cache.get(module_id) {
-            let (ts, cookies_opt) = entry.value();
-            if ts.elapsed() < Duration::from_secs(5) {
-                 return Ok(cookies_opt.clone());
-            }
-        }
-
-        // Redis Fetch
-        let result = if let Ok(Some(cache_cookies)) =
-            Cookies::sync(module_id, &self.cache_service).await
-        {
-            Some(cache_cookies)
-        } else {
-            None
         };
 
-        // Update L1 Cache
-        self.cookies_cache.insert(module_id.to_string(), (Instant::now(), result.clone()));
+        let request_host = Url::parse(&request.url)
+            .ok()
+            .and_then(|u| u.host_str().map(|h| h.to_ascii_lowercase()));
 
-        Ok(result)
+        session_state.cookies.merge_if_absent(&request.cookies);
+        for item in &response.cookies.cookies {
+            let mut normalized_item = item.clone();
+            if normalized_item.domain.trim().is_empty()
+                && let Some(host) = &request_host
+            {
+                normalized_item.domain = host.clone();
+            }
+
+            if let Some(existing) = session_state
+                .cookies
+                .cookies
+                .iter_mut()
+                .find(|c| c.name == normalized_item.name && c.domain == normalized_item.domain)
+            {
+                *existing = normalized_item;
+            } else {
+                session_state.cookies.cookies.push(normalized_item);
+            }
+        }
+
+        if let Some(cache_headers) = &request.cache_headers
+            && !cache_headers.is_empty()
+        {
+            let cache_headers_set: std::collections::HashSet<String> = cache_headers
+                .iter()
+                .map(|h| h.to_lowercase())
+                .collect();
+
+            for (name, value) in &response.headers {
+                if !cache_headers_set.contains(&name.to_lowercase()) {
+                    continue;
+                }
+
+                if let Some(existing) = session_state
+                    .headers
+                    .headers
+                    .iter_mut()
+                    .find(|h| h.key.eq_ignore_ascii_case(name))
+                {
+                    existing.value = value.clone();
+                } else {
+                    session_state.headers.headers.push(HeaderItem {
+                        key: name.clone(),
+                        value: value.clone(),
+                    });
+                }
+            }
+        }
+
+        session_state.version = session_state.version.saturating_add(1);
+        if let Err(err) = session_state.send(session_key, &self.cache_service).await {
+            warn!(
+                "Failed to cache session state for {}: {:?}",
+                session_key, err
+            );
+        }
     }
+
     async fn process_response(
         &self,
         request: Request,
         response: reqwest::Response,
         pre_calculated_hash: Option<String>,
     ) -> Result<Response> {
+        let session_enabled = self.is_session_enabled(&request);
         let request_id = request.id;
         // Use pre-calculated hash if available, otherwise calculate it
-        let request_hash = if request.enable_cache {
+        let request_hash = if session_enabled {
             pre_calculated_hash.or_else(|| Some(request.hash()))
         } else {
             None
         };
-        // Update response headers based on `request.cache_headers`.
-        let cache_enabled = self.enable_cache.load(Ordering::Relaxed);
-        if cache_enabled
-            && let Some(cache_headers) = &request.cache_headers
-                && !cache_headers.is_empty() {
-                    let mut update_headers = Headers::default();
-                    // Pre-compute lowercase cache headers set for O(1) lookup
-                    let cache_headers_set: std::collections::HashSet<String> = cache_headers
-                        .iter()
-                        .map(|h| h.to_lowercase())
-                        .collect();
-
-                    for (name, value) in response.headers().iter() {
-                        let header_name = name.as_str().to_lowercase();
-                        if cache_headers_set.contains(&header_name) {
-                            update_headers.headers.push(HeaderItem {
-                                key: name.to_string(),
-                                value: value.to_str().unwrap_or("").to_string(),
-                            });
-                        }
-                    }
-                    if !update_headers.headers.is_empty() {
-                        let module_id = request.module_id();
-                        let cache_service = self.cache_service.clone();
-                        tokio::spawn(async move {
-                            update_headers
-                            .send(&module_id, &cache_service)
-                            .await
-                            .ok();
-                        });
-                    }
-                }
         let status_code = response.status().as_u16();
         let response_headers: Vec<(String, String)> = response
             .headers()
@@ -355,6 +352,7 @@ impl RequestDownloader {
 
     async fn do_download(&self, request: Request, pre_calculated_hash: Option<String>) -> Result<Response> {
         let _request_id = request.id;
+        let session_enabled = self.is_session_enabled(&request);
         if let Some(seconds) = request.time_sleep_secs {
             tokio::time::sleep(Duration::from_secs(seconds)).await;
         }
@@ -487,48 +485,32 @@ impl RequestDownloader {
         histogram!("downloader_request_duration_seconds", "module" => request.module.clone()).record(duration);
         counter!("downloader_requests_total", "status_code" => response.status().as_u16().to_string(), "module" => request.module.clone()).increment(1);
 
-        // Process cookies: merge response cookies into request cookies and cache them.
-        let cache_enabled = self.enable_cache.load(Ordering::Relaxed);
-        if cache_enabled {
-            let mut current_cookies = request.cookies.clone();
-            for cookie in response.cookies() {
-                let item = CookieItem {
-                    name: cookie.name().to_string(),
-                    value: cookie.value().to_string(),
-                    domain: cookie.domain().unwrap_or("").to_string(),
-                    path: cookie.path().unwrap_or("/").to_string(),
-                    expires: cookie
-                        .expires()
-                        .and_then(|exp| exp.duration_since(UNIX_EPOCH).ok())
-                        .map(|d| d.as_secs()),
-                    max_age: cookie.max_age().map(|d| d.as_secs()),
-                    secure: cookie.secure(),
-                    http_only: Some(cookie.http_only()),
-                };
-                    if let Some(existing) = current_cookies
-                        .cookies
-                        .iter_mut()
-                        .find(|c| c.name == item.name && c.domain == item.domain)
-                    {
-                        *existing = item;
-                    } else {
-                        current_cookies.cookies.push(item);
-                    }
-                }
-
-                let cache_service = self.cache_service.clone();
-                let module_id = request.module_id();
-                let cookies_to_cache = current_cookies.clone();
-                
-                tokio::spawn(async move {
-                    cookies_to_cache
-                    .send(&module_id, &cache_service)
-                    .await
-                    .ok();
-                });
-            }
+        let session_key_for_state_cache = if session_enabled {
+            Some(self.session_scope_key(&request))
+        } else {
+            None
+        };
+        let request_for_state_cache = if session_enabled {
+            Some(request.clone())
+        } else {
+            None
+        };
+        let module_id_for_state_cache = if session_enabled {
+            Some(request.module_id())
+        } else {
+            None
+        };
 
         let response_processed = self.process_response(request, response, pre_calculated_hash.clone()).await?;
+
+        if let (Some(session_key), Some(module_id), Some(request_for_cache)) =
+            (session_key_for_state_cache, module_id_for_state_cache, request_for_state_cache)
+        {
+            self
+                .save_session_state(&session_key, module_id, &request_for_cache, &response_processed)
+                .await;
+        }
+
         Ok(response_processed)
     }
     pub async fn set_limit_config(&self, id: &str, limit: f32) {
@@ -538,11 +520,11 @@ impl RequestDownloader {
 #[async_trait::async_trait]
 impl Downloader for RequestDownloader {
     async fn set_config(&self, id: &str, config: DownloadConfig) {
-        if config.enable_cache {
+        if config.enable_session {
              // Cache clearing logic if needed
         }
-        if self.enable_cache.load(Ordering::Relaxed) != config.enable_cache {
-            self.enable_cache.store(config.enable_cache, Ordering::Relaxed);
+        if self.enable_session.load(Ordering::Relaxed) != config.enable_session {
+            self.enable_session.store(config.enable_session, Ordering::Relaxed);
         }
         if self.enable_locker.load(Ordering::Relaxed) != config.enable_locker {
             self.enable_locker.store(config.enable_locker, Ordering::Relaxed);
@@ -565,7 +547,8 @@ impl Downloader for RequestDownloader {
         Version::parse("0.1.0").unwrap()
     }
     async fn download(&self, request: Request) -> Result<Response> {
-        let request_hash = if request.enable_cache {
+        let session_enabled = self.is_session_enabled(&request);
+        let request_hash = if session_enabled {
             Some(request.hash())
         } else {
             None
@@ -573,6 +556,13 @@ impl Downloader for RequestDownloader {
         if let Some(hash) = request_hash.as_ref()
             && let Ok(Some(response)) = Response::sync(hash, &self.cache_service).await {
                 info!("Cache hit for request: {}", request.id);
+                if session_enabled {
+                    let session_key = self.session_scope_key(&request);
+                    let module_id = request.module_id();
+                    self
+                        .save_session_state(&session_key, module_id, &request, &response)
+                        .await;
+                }
                 return Ok(Response {
                     id: request.id,
                     platform: request.platform.clone(),

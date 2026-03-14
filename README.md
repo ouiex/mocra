@@ -3,7 +3,7 @@
 A distributed, event-driven crawling and data collection framework for Rust.
 
 ## Documentation
-- version 0.1.2
+- version 0.1.4
 
 - Middleware interface update (v0.1.2):
 	- `DownloadMiddleware` / `DataMiddleware` / `DataStoreMiddleware` methods now use `&mut self`.

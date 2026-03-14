@@ -84,7 +84,7 @@ mod tests {
             downloader_expire = 3600
             timeout = 30
             rate_limit = 10.0
-            enable_cache = true
+            enable_session = true
             enable_locker = false
             enable_rate_limit = true
             cache_ttl = 600

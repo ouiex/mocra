@@ -131,7 +131,7 @@ fn minimal_config(policy: Option<PolicyConfig>) -> crate::common::model::config:
             downloader_expire: 1,
             timeout: 1,
             rate_limit: 0.0,
-            enable_cache: false,
+            enable_session: false,
             enable_locker: false,
             enable_rate_limit: false,
             cache_ttl: 1,

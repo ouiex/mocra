@@ -9,9 +9,11 @@ mocra = { path = "..", default-features = false }
 mimalloc = { version = "0.1", default-features = false }
 wiremock = "0.6"
 tokio = { version = "1", features = ["full"] }
+axum = { version = "0.8", features = ["http1"] }
 async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+deadpool-redis = { version = "0.22", features = ["json", "script", "serde", "streams"] }
 chrono = { version = "0.4", features = ["serde"] }
 tracing = "0.1"
 log = "0.4"
@@ -40,6 +42,10 @@ path = "src/mock_prod_like_benchmark.rs"
 [[bin]]
 name = "log_stress"
 path = "src/log_stress.rs"
+
+[[bin]]
+name = "session_e2e"
+path = "src/session_e2e.rs"
 
 
 

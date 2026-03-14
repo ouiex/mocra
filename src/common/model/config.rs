@@ -101,8 +101,8 @@ pub struct DownloadConfig {
     pub timeout: u32,
     /// Rate limit in requests per second
     pub rate_limit: f32,
-    /// Enable caching of responses
-    pub enable_cache: bool,
+    /// Enable session cache/sync behavior
+    pub enable_session: bool,
     /// Enable distributed locking
     pub enable_locker: bool,
     /// Enable rate limiting
@@ -356,7 +356,7 @@ mod tests {
             downloader_expire = 3600
             timeout = 30
             rate_limit = 10.0
-            enable_cache = true
+            enable_session = true
             enable_locker = false
             enable_rate_limit = true
             cache_ttl = 600

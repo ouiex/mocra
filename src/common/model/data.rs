@@ -122,17 +122,33 @@ impl FileStore {
     }
 }
 
+#[derive(Clone, Debug)]
+pub enum DataframeStoreData {
+    Bytes(Vec<u8>),
+    DataFrame(DataFrame),
+}
+
 /// DataFrame storage structure for tabular data.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct DataFrameStore {
     /// Context information.
     ctx: StoreContext,
     /// Serialized DataFrame payload (IPC format).
-    pub data: Vec<u8>,
+    pub data: DataframeStoreData,
     /// Database schema.
     pub schema: String,
     /// Database table name.
     pub table: String,
+}
+impl Default for DataFrameStore {
+    fn default() -> Self {
+        Self {
+            ctx: StoreContext::default(),
+            data: DataframeStoreData::Bytes(vec![]),
+            schema: String::new(),
+            table: String::new(),
+        }
+    }
 }
 
 impl StoreTrait for DataFrameStore {
@@ -171,7 +187,7 @@ impl DataFrameStore {
         let mut df = data;
         let mut writer = IpcWriter::new(&mut buffer); // default options
         writer.finish(&mut df).expect("serialize DataFrame to IPC");
-        self.data = buffer;
+        self.data = DataframeStoreData::Bytes(buffer);
         self
     }
     /// Sets schema.
@@ -183,6 +199,16 @@ impl DataFrameStore {
     pub fn with_table(mut self, table: impl AsRef<str>) -> Self {
         self.table = table.as_ref().to_string();
         self
+    }
+    pub fn get_data(&self) -> Option<DataFrame> {
+        match &self.data {
+            DataframeStoreData::Bytes(bytes) => {
+                let cursor = std::io::Cursor::new(bytes);
+                let reader = polars::io::ipc::IpcReader::new(cursor);
+                reader.finish().ok()
+            }
+            DataframeStoreData::DataFrame(df) => Some(df.clone()),
+        }
     }
 }
 
@@ -282,7 +308,10 @@ impl DataEvent {
     /// Returns payload size (bytes or rows).
     pub fn size(&self) -> usize {
         match &self.data {
-            DataType::DataFrame(df_store) => df_store.data.len(),
+            DataType::DataFrame(df_store) => match &df_store.data {
+                DataframeStoreData::Bytes(bytes) => bytes.len(),
+                DataframeStoreData::DataFrame(df) => df.height() as usize * df.width() as usize, // rough estimate: rows * columns
+            },
             DataType::File(file_store) => file_store.content.len(),
         }
     }

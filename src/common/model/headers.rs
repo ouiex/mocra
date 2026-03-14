@@ -81,6 +81,17 @@ impl Headers {
             self.headers.push(header_item.clone());
         }
     }
+    pub fn merge_if_absent(&mut self, other: &Headers) {
+        for header_item in &other.headers {
+            if !self
+                .headers
+                .iter()
+                .any(|h| h.key.eq_ignore_ascii_case(&header_item.key))
+            {
+                self.headers.push(header_item.clone());
+            }
+        }
+    }
     pub fn merge_map(&mut self, other: &HeaderMap) {
         for (key, value) in other.iter() {
             if let Ok(value_str) = value.to_str() {

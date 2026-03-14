@@ -130,8 +130,23 @@ Detailed configuration reference: `docs/configuration.md`
 - `[db]`: database connection (`url`/`pool_size`)
 - `[cache.redis]`: cache Redis
 - `[channel_config.redis]`: queue Redis (Stream)
-- `[download_config]`: downloader concurrency, timeout, rate limit
+- `[download_config]`: downloader concurrency, timeout, rate limit, `enable_session`
 - `[crawler]`: global task fault tolerance and concurrency settings
+
+### 5.1 Distributed Session
+
+`RequestDownloader` supports distributed session synchronization when `download_config.enable_session = true`.
+
+- Session object: `SessionState`
+	- `session_id`, `module_id`, `headers`, `cookies`, `version`
+- Scope key: `module_id + run_id`
+	- Ensures isolation across different runs of the same module
+- Read path:
+	- Before request dispatch, downloader loads `SessionState` from Redis and merges headers/cookies into request
+	- Request-local headers/cookies take precedence; session only fills missing items
+- Write path:
+	- After response, downloader updates session cookies and selected headers (`request.cache_headers`)
+	- Host-only cookies (missing `Domain`) are auto-normalized using request host before persistence
 
 **Runtime mode auto-detection**:
 - `runtime.mode` is no longer used.

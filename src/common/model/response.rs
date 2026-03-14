@@ -37,27 +37,27 @@ impl Response {
     pub fn module_id(&self) -> String {
         format!("{}-{}-{}", self.account, self.platform, self.module)
     }
-    pub fn get_trait_config<T>(&self, key: &str) -> Option<T>
+    pub fn get_meta<T>(&self, key: &str) -> Option<T>
     where
-        T: for<'de> Deserialize<'de> + Serialize,
+        T: for<'de> Deserialize<'de>,
     {
         self.metadata.get_trait_config::<T>(key)
     }
     pub fn get_login_config<T>(&self, key: &str) -> Option<T>
     where
-        T: for<'de> Deserialize<'de> + Serialize,
+        T: for<'de> Deserialize<'de>,
     {
         self.metadata.get_login_config::<T>(key)
     }
     pub fn get_module_config<T>(&self, key: &str) -> Option<T>
     where
-        T: for<'de> Deserialize<'de> + Serialize,
+        T: for<'de> Deserialize<'de>,
     {
         self.metadata.get_module_config::<T>(key)
     }
     pub fn get_task_config<T>(&self, key: &str) -> Option<T>
     where
-        T: for<'de> Deserialize<'de> + Serialize,
+        T: for<'de> Deserialize<'de>,
     {
         self.metadata.get_task_config::<T>(key)
     }
