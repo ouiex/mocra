@@ -275,11 +275,12 @@ impl TaskFactory {
                 continue;
             }
 
+            let app_config = self.state.config.read().await;
             let locker = module_config
                 .get_config_value("module_locker")
                 .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-            let cache_ttl = self.state.config.read().await.cache.ttl;
+                .unwrap_or(app_config.download_config.enable_locker);
+            let cache_ttl = app_config.cache.ttl;
             let module_instance = Module {
                 config: Arc::new(module_config),
                 account: account.clone(),

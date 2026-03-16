@@ -103,7 +103,10 @@ pub struct Request {
     pub prefix_request: Uuid,
     /// Custom hash string used to override default request hash calculation.
     pub hash_str: Option<String>,
+    #[serde(default)]
     pub enable_session: bool,
+    #[serde(default)]
+    pub enable_response_cache: bool,
     /// Enable distributed lock for this request to ensure serial execution within the same task/run
     pub enable_locker: Option<bool>,
     pub downloader: String,
@@ -158,6 +161,7 @@ impl Request {
             prefix_request: Uuid::nil(),
             hash_str: None,
             enable_session: false,
+            enable_response_cache: false,
             enable_locker: None,
             downloader: "request_downloader".to_string(),
             priority: crate::common::model::Priority::default(),
@@ -279,12 +283,26 @@ impl Request {
         self.enable_session = enable;
         self
     }
+    pub fn enable_response_cache(mut self, enable: bool) -> Self {
+        self.enable_response_cache = enable;
+        self
+    }
     pub fn enable_session_with<T>(mut self, hash_able: &T) -> Self
     where
         T: Serialize,
     {
         if let Ok(hash_str) = serde_json::to_string(hash_able) {
             self.enable_session = true;
+            self.hash_str = Some(md5(hash_str.as_bytes()));
+        }
+        self
+    }
+    pub fn enable_response_cache_with<T>(mut self, hash_able: &T) -> Self
+    where
+        T: Serialize,
+    {
+        if let Ok(hash_str) = serde_json::to_string(hash_able) {
+            self.enable_response_cache = true;
             self.hash_str = Some(md5(hash_str.as_bytes()));
         }
         self

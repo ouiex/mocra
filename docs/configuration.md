@@ -9,6 +9,16 @@
 - 毫秒：`claim_*`（Redis Stream 相关）
 - 字节：`compression_threshold`、`max_response_size`
 
+## 配置优先级 (Precedence)
+
+运行时配置解析统一遵循三层优先级：
+
+1. ORM/模块配置（最高优先）
+2. `config.toml` 全局配置
+3. 硬编码默认值（仅当前两层都缺失时生效）
+
+典型字段包括 `enable_session`、`enable_locker`、`enable_rate_limit`、`module_locker`、`wss_timeout`。
+
 ## 运行模式判定（单节点 / 分布式）
 
 当前版本**不需要也不支持**通过 `RuntimeMode` 手动指定模式。

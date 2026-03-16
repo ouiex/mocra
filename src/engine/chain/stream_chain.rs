@@ -31,7 +31,9 @@ struct WebSocketDownloadProcessor {
     wss_downloader: Arc<WebSocketDownloader>,
     middleware_manager: Arc<MiddlewareManager>,
     cache_service: Arc<CacheService>,
+    state: Arc<State>,
 }
+
 #[async_trait]
 impl ProcessorTrait<(Option<Request>, Option<ModuleConfig>), ()> for WebSocketDownloadProcessor {
     fn name(&self) -> &'static str {
@@ -76,7 +78,11 @@ impl ProcessorTrait<(Option<Request>, Option<ModuleConfig>), ()> for WebSocketDo
         };
         // Read responses from websocket receiver and publish through queue manager.
         let (tx, mut rx) = tokio::sync::mpsc::channel(100);
-        let timeout = input.1.as_ref().and_then(|x|x.get_config::<u64>("wss_timeout")).unwrap_or(60);
+        let timeout = input
+            .1
+            .as_ref()
+            .and_then(|x| x.get_config::<u64>("wss_timeout"))
+            .unwrap_or(self.state.config.read().await.download_config.wss_timeout as u64);
         let module_id = request.module_id();
 
 
@@ -255,6 +261,7 @@ pub async fn create_wss_download_chain(
         wss_downloader: downloader_manager.wss_downloader.clone(),
         middleware_manager: middleware_manager.clone(),
         cache_service: cache_service.clone(),
+        state: state.clone(),
     };
 
     let request_middleware = RequestMiddlewareProcessor {

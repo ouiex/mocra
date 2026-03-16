@@ -70,6 +70,11 @@ impl RequestDownloader {
     }
 
     #[inline]
+    fn is_response_cache_enabled(&self, request: &Request) -> bool {
+        request.enable_response_cache
+    }
+
+    #[inline]
     fn session_scope_key(&self, request: &Request) -> String {
         format!("{}:{}", request.module_id(), request.run_id)
     }
@@ -243,10 +248,10 @@ impl RequestDownloader {
         response: reqwest::Response,
         pre_calculated_hash: Option<String>,
     ) -> Result<Response> {
-        let session_enabled = self.is_session_enabled(&request);
+        let response_cache_enabled = self.is_response_cache_enabled(&request);
         let request_id = request.id;
         // Use pre-calculated hash if available, otherwise calculate it
-        let request_hash = if session_enabled {
+        let request_hash = if response_cache_enabled {
             pre_calculated_hash.or_else(|| Some(request.hash()))
         } else {
             None
@@ -548,7 +553,8 @@ impl Downloader for RequestDownloader {
     }
     async fn download(&self, request: Request) -> Result<Response> {
         let session_enabled = self.is_session_enabled(&request);
-        let request_hash = if session_enabled {
+        let response_cache_enabled = self.is_response_cache_enabled(&request);
+        let request_hash = if response_cache_enabled {
             Some(request.hash())
         } else {
             None

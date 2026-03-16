@@ -3,7 +3,12 @@
 A distributed, event-driven crawling and data collection framework for Rust.
 
 ## Documentation
-- version 0.1.4
+- version 0.1.5
+
+- Config precedence fix (v0.1.5):
+	- Effective config now consistently follows: ORM/module config > config.toml > hardcoded default.
+	- Fixed fallback behavior for `module_locker` and `wss_timeout` when ORM value is missing.
+	- Fixed boolean fallback in download config loading to inherit from config.toml when module value is absent.
 
 - Middleware interface update (v0.1.2):
 	- `DownloadMiddleware` / `DataMiddleware` / `DataStoreMiddleware` methods now use `&mut self`.
