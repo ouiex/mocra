@@ -129,16 +129,23 @@ impl ProcessorTrait<Response, (Response, Arc<Module>, Arc<ModuleConfig>, Option<
             Ok((module, login_info)) => {
                 // Prefer local short-lived config cache.
                 let module_id = module.id();
+                let now = Instant::now();
+                let mut should_prune_cache = false;
                 let cached_config = if let Some(entry) = self.config_cache.get(&module_id) {
                     let (cfg, expires_at) = entry.value();
-                    if Instant::now() < *expires_at {
+                    if now < *expires_at {
                         Some(cfg.clone())
                     } else {
+                        should_prune_cache = true;
                         None
                     }
                 } else {
                     None
                 };
+
+                if should_prune_cache {
+                    self.config_cache.remove(&module_id);
+                }
 
                 let config = if let Some(c) = cached_config {
                     c
@@ -260,12 +267,12 @@ impl ResponseParserProcessor {
 
     async fn send_with_backpressure<T>(
         &self,
-        tx: tokio::sync::mpsc::Sender<QueuedItem<T>>,
+        tx: &tokio::sync::mpsc::Sender<QueuedItem<T>>,
         item: QueuedItem<T>,
         queue_kind: &'static str,
         log_context: &str,
     ) -> bool {
-        match send_with_backpressure(&tx, item).await {
+        match send_with_backpressure(tx, item).await {
             Ok(BackpressureSendState::Direct) => true,
             Ok(BackpressureSendState::RecoveredFromFull) => {
                 counter!("parser_chain_backpressure_total", "queue" => queue_kind, "reason" => "queue_full").increment(1);
@@ -318,6 +325,26 @@ impl ProcessorTrait<(Response, Arc<Module>, Arc<ModuleConfig>, Option<LoginInfo>
         let module = input.1.clone();
         let config = input.2.clone();
         let login_info = input.3.clone();
+
+        // Propagate module config through processor context for downstream data stages.
+        // DataMiddlewareProcessor/DataStoreProcessor read `context.metadata["config"]`.
+        match serde_json::to_value(config.as_ref()) {
+            Ok(cfg_val) => {
+                context
+                    .metadata
+                    .write()
+                    .await
+                    .insert("config".to_string(), cfg_val);
+            }
+            Err(e) => {
+                warn!(
+                    "[ResponseParserProcessor] failed to serialize module config into context: request_id={} module_id={} error={}",
+                    input.0.id,
+                    input.0.module_id(),
+                    e
+                );
+            }
+        }
 
         // StateHandle has been removed; SyncService is used internally by ModuleProcessor.
         let task_id = input.0.task_id();
@@ -388,6 +415,7 @@ impl ProcessorTrait<(Response, Arc<Module>, Arc<ModuleConfig>, Option<LoginInfo>
             }
         };
 
+        let parser_task_queue = self.queue_manager.get_parser_task_push_channel();
         for task in data.parser_task.drain(..) {
                let task_account = task.account_task.account.clone();
                let task_platform = task.account_task.platform.clone();
@@ -427,7 +455,7 @@ impl ProcessorTrait<(Response, Arc<Module>, Arc<ModuleConfig>, Option<LoginInfo>
                                );
                                if self
                                    .send_with_backpressure(
-                                       request_queue.clone(),
+                                       &request_queue,
                                        QueuedItem::new(req),
                                        "request",
                                        &context,
@@ -468,7 +496,6 @@ impl ProcessorTrait<(Response, Arc<Module>, Arc<ModuleConfig>, Option<LoginInfo>
                      Err(e) => {
                          error!("[ResponseParserProcessor] Failed to generate requests locally: {}, falling back to queue", e);
                          // Fallback: put the task back into parser_task queue
-                         let queue = self.queue_manager.get_parser_task_push_channel();
                          let context = format!(
                              "parser_task_fallback account={} platform={} run_id={} module_id={}",
                              task.account_task.account,
@@ -478,7 +505,7 @@ impl ProcessorTrait<(Response, Arc<Module>, Arc<ModuleConfig>, Option<LoginInfo>
                          );
                          if !self
                              .send_with_backpressure(
-                                 queue,
+                                 &parser_task_queue,
                                  QueuedItem::new(task),
                                  "parser_task",
                                  &context,
@@ -518,7 +545,6 @@ impl ProcessorTrait<(Response, Arc<Module>, Arc<ModuleConfig>, Option<LoginInfo>
                  }
              } else {
                 // Different module/context, enqueue as usual
-                let queue = self.queue_manager.get_parser_task_push_channel();
                 let context = format!(
                     "parser_task account={} platform={} run_id={} module_id={}",
                     task.account_task.account,
@@ -528,7 +554,7 @@ impl ProcessorTrait<(Response, Arc<Module>, Arc<ModuleConfig>, Option<LoginInfo>
                 );
                 if !self
                     .send_with_backpressure(
-                        queue,
+                        &parser_task_queue,
                         QueuedItem::new(task),
                         "parser_task",
                         &context,
@@ -567,7 +593,7 @@ impl ProcessorTrait<(Response, Arc<Module>, Arc<ModuleConfig>, Option<LoginInfo>
                 input.0.module_id()
             );
             if !self
-                .send_with_backpressure(queue, QueuedItem::new(msg), "error", &context)
+                .send_with_backpressure(&queue, QueuedItem::new(msg), "error", &context)
                 .await
             {
                 error!("[ResponseParserProcessor] failed to send parser error: {}", context);
@@ -683,7 +709,7 @@ impl ProcessorTrait<(Response, Arc<Module>, Arc<ModuleConfig>, Option<LoginInfo>
             input.0.module_id()
         );
         if !self
-            .send_with_backpressure(queue, QueuedItem::new(error_task), "error", &context)
+            .send_with_backpressure(&queue, QueuedItem::new(error_task), "error", &context)
             .await
         {
             error!("[ResponseParserProcessor] failed to enqueue ErrorTaskModel: {}", context);
@@ -786,8 +812,9 @@ impl ProcessorTrait<DataEvent, DataEvent> for DataMiddlewareProcessor {
                 })
             });
         let modified_data = self.middleware_manager.handle_data(input, &config).await;
-        if start.elapsed().as_millis() > 10 {
-            info!("[DataMiddlewareProcessor] SLOW middleware execution: {} ms", start.elapsed().as_millis());
+        let elapsed_ms = start.elapsed().as_millis();
+        if elapsed_ms > 10 {
+            info!("[DataMiddlewareProcessor] SLOW middleware execution: {} ms", elapsed_ms);
         }
         match modified_data {
             Some(data) => ProcessorResult::Success(data),
