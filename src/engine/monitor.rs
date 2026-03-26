@@ -2,7 +2,6 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::sleep;
 use sysinfo::System;
-use metrics::gauge;
 use log::{info, debug};
 use crate::common::state::State;
 
@@ -50,14 +49,14 @@ impl SystemMonitor {
             
             let total_swap = self.sys.total_swap();
             let used_swap = self.sys.used_swap();
-            
-            // Export to Prometheus.
-            gauge!("system_cpu_usage_percent").set(cpu_usage as f64);
-            gauge!("system_memory_used_bytes").set(used_memory as f64);
-            gauge!("system_memory_total_bytes").set(total_memory as f64);
-            gauge!("system_memory_usage_percent").set(memory_percent);
-            gauge!("system_swap_used_bytes").set(used_swap as f64);
-            gauge!("system_swap_total_bytes").set(total_swap as f64);
+
+            crate::common::metrics::set_component_health("system_monitor", true);
+            crate::common::metrics::observe_resource("cpu_usage_percent", cpu_usage as f64);
+            crate::common::metrics::observe_resource("memory_used_bytes", used_memory as f64);
+            crate::common::metrics::observe_resource("memory_total_bytes", total_memory as f64);
+            crate::common::metrics::observe_resource("memory_usage_percent", memory_percent);
+            crate::common::metrics::observe_resource("swap_used_bytes", used_swap as f64);
+            crate::common::metrics::observe_resource("swap_total_bytes", total_swap as f64);
             
             // Debug log for local diagnosis.
             debug!("System Metrics: CPU: {:.2}%, Mem: {:.2}% ({}/{})", 

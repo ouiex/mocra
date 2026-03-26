@@ -1,0 +1,96 @@
+groups:
+  - name: mocra-node-health
+    rules:
+      - alert: MocraNodeDown
+        expr: mocra_node_up == 0
+        for: 1m
+        labels:
+          severity: critical
+          service: mocra
+        annotations:
+          summary: "Mocra node is down"
+          description: "Node {{ $labels.node }} has reported down state for over 1 minute."
+
+      - alert: MocraComponentUnhealthy
+        expr: min_over_time(mocra_component_health[3m]) < 1
+        for: 2m
+        labels:
+          severity: warning
+          service: mocra
+        annotations:
+          summary: "Mocra component unhealthy"
+          description: "Component {{ $labels.component }} on node {{ $labels.node }} is unhealthy."
+
+  - name: mocra-node-performance
+    rules:
+      - alert: MocraHighCpuUsage
+        expr: avg_over_time(mocra_resource_usage{resource="cpu_usage_percent"}[5m]) > 85
+        for: 5m
+        labels:
+          severity: warning
+          service: mocra
+        annotations:
+          summary: "High CPU usage"
+          description: "Node {{ $labels.node }} CPU usage is above 85% for 5 minutes."
+
+      - alert: MocraHighMemoryUsage
+        expr: avg_over_time(mocra_resource_usage{resource="memory_usage_percent"}[5m]) > 90
+        for: 5m
+        labels:
+          severity: warning
+          service: mocra
+        annotations:
+          summary: "High memory usage"
+          description: "Node {{ $labels.node }} memory usage is above 90% for 5 minutes."
+
+      - alert: MocraInflightSaturated
+        expr: max_over_time(mocra_inflight[10m]) > 500
+        for: 5m
+        labels:
+          severity: warning
+          service: mocra
+        annotations:
+          summary: "In-flight task saturation"
+          description: "Node {{ $labels.node }} stage {{ $labels.stage }} has sustained high inflight load."
+
+  - name: mocra-node-pipeline
+    rules:
+      - alert: MocraQueueBacklogHigh
+        expr: max_over_time(mocra_backlog_depth{pipeline="queue"}[10m]) > 10000
+        for: 10m
+        labels:
+          severity: warning
+          service: mocra
+        annotations:
+          summary: "Queue backlog high"
+          description: "Queue {{ $labels.queue }} on node {{ $labels.node }} backlog depth exceeded 10k."
+
+      - alert: MocraQueueBacklogNoDrain
+        expr: max_over_time(mocra_backlog_depth{pipeline="queue"}[15m]) > 0 and rate(mocra_throughput_total{pipeline="queue",stage="consumer",operation="consume",result="success"}[15m]) == 0
+        for: 5m
+        labels:
+          severity: critical
+          service: mocra
+        annotations:
+          summary: "Queue backlog not draining"
+          description: "Node {{ $labels.node }} has backlog but no consumer throughput for 15 minutes."
+
+      - alert: MocraDownloaderP95High
+        expr: histogram_quantile(0.95, sum by (le, node) (rate(mocra_latency_seconds_bucket{pipeline="engine",stage="downloader",operation="http_request"}[5m]))) > 3
+        for: 10m
+        labels:
+          severity: warning
+          service: mocra
+        annotations:
+          summary: "Downloader p95 latency high"
+          description: "Node {{ $labels.node }} downloader p95 latency is above 3s."
+
+      - alert: MocraErrorRateHigh
+        expr: sum by (node, pipeline, stage) (rate(mocra_errors_total[5m])) > 5
+        for: 5m
+        labels:
+          severity: warning
+          service: mocra
+        annotations:
+          summary: "Error rate high"
+          description: "Node {{ $labels.node }} pipeline {{ $labels.pipeline }}/{{ $labels.stage }} error rate exceeds threshold."

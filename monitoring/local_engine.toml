@@ -1,0 +1,57 @@
+name = "mocra_local"
+
+[api]
+port = 8905
+
+[db]
+url = "sqlite://monitoring/tmp/mocra_metrics.sqlite?mode=rwc"
+pool_size = 5
+
+[download_config]
+downloader_expire = 3600
+timeout = 30
+rate_limit = 5
+enable_session = false
+enable_locker = false
+enable_rate_limit = false
+cache_ttl = 60
+wss_timeout = 30
+pool_size = 100
+max_response_size = 10485760
+
+[cache]
+ttl = 60
+
+[crawler]
+request_max_retries = 1
+task_max_errors = 100
+module_max_errors = 10
+module_locker_ttl = 5
+task_concurrency = 16
+publish_concurrency = 16
+parser_concurrency = 16
+error_task_concurrency = 16
+backpressure_retry_delay_ms = 50
+dedup_ttl_secs = 3600
+idle_stop_secs = 0
+
+[scheduler]
+refresh_interval_secs = 60
+max_staleness_secs = 120
+
+[channel_config]
+minid_time = 12
+capacity = 5000
+queue_codec = "msgpack"
+compression_threshold = 1048576
+batch_concurrency = 32
+nack_max_retries = 0
+nack_backoff_ms = 0
+
+[event_bus]
+capacity = 1024
+concurrency = 64
+
+[sync]
+allow_rollback = true
+envelope_enabled = false

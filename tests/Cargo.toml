@@ -51,6 +51,10 @@ path = "src/session_e2e.rs"
 name = "dag_module_trait_e2e"
 path = "src/dag_module_trait_e2e.rs"
 
+[[bin]]
+name = "httpbin_prometheus_benchmark"
+path = "src/httpbin_prometheus_benchmark.rs"
+
 
 
 

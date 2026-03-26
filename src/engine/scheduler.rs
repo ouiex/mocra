@@ -442,7 +442,7 @@ impl CronScheduler {
         }
         
         let duration = start.elapsed().as_secs_f64();
-        histogram!("scheduler_tick_duration_seconds").record(duration);
+        histogram!("mocra_scheduler_tick_duration_seconds").record(duration);
         if total_triggered > 0 {
             info!("Scheduler tick processed {} potential tasks in {:.4}s", total_triggered, duration);
         }
@@ -498,7 +498,7 @@ impl CronScheduler {
                 {
                     Ok(results) => {
                         let lock_duration = lock_start.elapsed().as_secs_f64();
-                        histogram!("scheduler_lock_acquisition_seconds").record(lock_duration);
+                        histogram!("mocra_scheduler_lock_acquisition_seconds").record(lock_duration);
                         for (i, success) in results.into_iter().enumerate() {
                             if success {
                                 let (account, platform) = batch_items[i];
@@ -530,7 +530,7 @@ impl CronScheduler {
     }
 
     async fn trigger_single_task(&self, module_name: &str, account: &str, platform: &str) {
-        counter!("scheduled_tasks_total", "module" => module_name.to_string()).increment(1);
+        counter!("mocra_scheduled_tasks_total", "module" => module_name.to_string()).increment(1);
         let task = TaskEvent {
             account: account.to_string(),
             platform: platform.to_string(),

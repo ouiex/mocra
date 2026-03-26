@@ -20,7 +20,6 @@ use crate::common::model::cookies::CookieItem;
 use crate::common::model::download_config::DownloadConfig;
 use crate::common::model::headers::HeaderItem;
 use dashmap::DashMap;
-use metrics::{counter, histogram};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 
@@ -448,6 +447,7 @@ impl RequestDownloader {
         let response = match result {
             Ok(res) => res,
             Err(e) => {
+                crate::common::metrics::inc_error("engine", "downloader", "network", "send_failed", 1);
                 // Circuit Breaker for Network Errors (Timeout, Connection Refused)
                 if self.enable_rate_limit.load(Ordering::Relaxed) {
                     let limit_id = if request.limit_id.is_empty() {
@@ -487,8 +487,8 @@ impl RequestDownloader {
         }
             
         let duration = start.elapsed().as_secs_f64();
-        histogram!("downloader_request_duration_seconds", "module" => request.module.clone()).record(duration);
-        counter!("downloader_requests_total", "status_code" => response.status().as_u16().to_string(), "module" => request.module.clone()).increment(1);
+        crate::common::metrics::observe_latency("engine", "downloader", "http_request", "success", duration);
+        crate::common::metrics::inc_throughput("engine", "downloader", "http_request", "success", 1);
 
         let session_key_for_state_cache = if session_enabled {
             Some(self.session_scope_key(&request))

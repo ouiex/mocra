@@ -172,7 +172,7 @@ impl Engine {
         let kind_label = Self::policy_kind_label(err.kind());
 
         counter!(
-            "policy_decisions_total",
+            "mocra_policy_decisions_total",
             "domain" => "engine",
             "event_type" => event_label,
             "phase" => "failed",
@@ -246,7 +246,7 @@ impl Engine {
         let kind_label = Self::policy_kind_label(err.kind());
 
         counter!(
-            "policy_decisions_total",
+            "mocra_policy_decisions_total",
             "domain" => "engine",
             "event_type" => event_label,
             "phase" => "retry",
@@ -474,6 +474,9 @@ impl Engine {
         let cfg = state.config.read().await.clone();
         let _channel_config = cfg.channel_config.clone();
         let namespace = cfg.name.clone();
+        crate::common::metrics::init_metrics(&namespace);
+        crate::common::metrics::set_node_up(true);
+        crate::common::metrics::set_component_health("engine", true);
 
         let queue_manager = if let Some(qm) = queue_manager {
             qm

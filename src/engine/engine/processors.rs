@@ -402,13 +402,13 @@ impl Engine {
 
                                 match commit_result {
                                     Ok((0, _, _)) => {
-                                        counter!("ptm_commit_total", "result" => "success").increment(1);
+                                        counter!("mocra_ptm_commit_total", "result" => "success").increment(1);
                                     }
                                     Ok((3, _, _)) => {
-                                        counter!("ptm_commit_total", "result" => "already_committed").increment(1);
+                                        counter!("mocra_ptm_commit_total", "result" => "already_committed").increment(1);
                                     }
                                     Ok((1, msg, _)) => {
-                                        counter!("ptm_commit_total", "result" => "fencing_reject").increment(1);
+                                        counter!("mocra_ptm_commit_total", "result" => "fencing_reject").increment(1);
                                         let retry_policy = RetryPolicy::default().with_reason(format!(
                                             "ptm_commit_success fencing reject: {}",
                                             msg
@@ -427,7 +427,7 @@ impl Engine {
                                         return;
                                     }
                                     Ok((2, msg, _)) => {
-                                        counter!("ptm_commit_total", "result" => "cas_conflict").increment(1);
+                                        counter!("mocra_ptm_commit_total", "result" => "cas_conflict").increment(1);
                                         let retry_policy = RetryPolicy::default()
                                             .with_reason(format!("ptm_commit_success cas conflict: {}", msg));
                                         Self::handle_policy_retry(
@@ -444,7 +444,7 @@ impl Engine {
                                         return;
                                     }
                                     Ok((code, msg, _)) => {
-                                        counter!("ptm_commit_total", "result" => "unknown").increment(1);
+                                        counter!("mocra_ptm_commit_total", "result" => "unknown").increment(1);
                                         warn!(
                                             "Unexpected ptm_commit_success code={} msg={}, fallback retry",
                                             code, msg
@@ -467,7 +467,7 @@ impl Engine {
                                         return;
                                     }
                                     Err(err) => {
-                                        counter!("ptm_commit_total", "result" => "redis_error").increment(1);
+                                        counter!("mocra_ptm_commit_total", "result" => "redis_error").increment(1);
                                         warn!("ptm_commit_success failed: {}", err);
                                         let retry_policy = RetryPolicy::default().with_reason(format!(
                                             "ptm_commit_success redis error: {}",
@@ -528,14 +528,14 @@ impl Engine {
                                     .await;
                                 match commit_err_res {
                                     Ok((0, _, _)) => {
-                                        counter!("ptm_commit_total", "result" => "error_emit_ok").increment(1);
+                                        counter!("mocra_ptm_commit_total", "result" => "error_emit_ok").increment(1);
                                     }
                                     Ok((1, _, _)) => {
-                                        counter!("ptm_commit_total", "result" => "error_already_emitted")
+                                        counter!("mocra_ptm_commit_total", "result" => "error_already_emitted")
                                             .increment(1);
                                     }
                                     Ok((2, msg, _)) => {
-                                        counter!("ptm_commit_total", "result" => "fencing_reject").increment(1);
+                                        counter!("mocra_ptm_commit_total", "result" => "fencing_reject").increment(1);
                                         let retry_policy = RetryPolicy::default().with_reason(format!(
                                             "ptm_commit_error fencing reject: {}",
                                             msg
@@ -554,14 +554,14 @@ impl Engine {
                                         return;
                                     }
                                     Ok((code, msg, _)) => {
-                                        counter!("ptm_commit_total", "result" => "unknown").increment(1);
+                                        counter!("mocra_ptm_commit_total", "result" => "unknown").increment(1);
                                         warn!(
                                             "Unexpected ptm_commit_error code={} msg={}, continue retry flow",
                                             code, msg
                                         );
                                     }
                                     Err(err) => {
-                                        counter!("ptm_commit_total", "result" => "redis_error").increment(1);
+                                        counter!("mocra_ptm_commit_total", "result" => "redis_error").increment(1);
                                         warn!("ptm_commit_error failed on retryable branch: {}", err);
                                     }
                                 }
@@ -611,20 +611,20 @@ impl Engine {
                                     .await;
                                 match commit_err_res {
                                     Ok((0, _, _)) => {
-                                        counter!("ptm_commit_total", "result" => "error_emit_ok").increment(1);
+                                        counter!("mocra_ptm_commit_total", "result" => "error_emit_ok").increment(1);
                                     }
                                     Ok((1, _, _)) => {
-                                        counter!("ptm_commit_total", "result" => "error_already_emitted")
+                                        counter!("mocra_ptm_commit_total", "result" => "error_already_emitted")
                                             .increment(1);
                                     }
                                     Ok((2, _, _)) => {
-                                        counter!("ptm_commit_total", "result" => "fencing_reject").increment(1);
+                                        counter!("mocra_ptm_commit_total", "result" => "fencing_reject").increment(1);
                                     }
                                     Ok((_, _, _)) => {
-                                        counter!("ptm_commit_total", "result" => "unknown").increment(1);
+                                        counter!("mocra_ptm_commit_total", "result" => "unknown").increment(1);
                                     }
                                     Err(_) => {
-                                        counter!("ptm_commit_total", "result" => "redis_error").increment(1);
+                                        counter!("mocra_ptm_commit_total", "result" => "redis_error").increment(1);
                                     }
                                 }
                             }

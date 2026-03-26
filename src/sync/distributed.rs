@@ -27,7 +27,7 @@ fn record_sync_policy(event_type: &str, kind: ErrorKind) -> &'static str {
         _ => "unknown",
     };
     counter!(
-        "policy_decisions_total",
+        "mocra_policy_decisions_total",
         "domain" => "sync",
         "event_type" => event_label,
         "phase" => "failed",

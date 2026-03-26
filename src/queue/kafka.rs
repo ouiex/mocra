@@ -367,7 +367,7 @@ impl MqBackend for KafkaQueue {
                                  NackDisposition::Dlq => "dlq",
                              };
                              counter!(
-                                 "policy_decisions_total",
+                                 "mocra_policy_decisions_total",
                                  "domain" => "queue",
                                  "event_type" => "nack",
                                  "phase" => "failed",

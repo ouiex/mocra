@@ -276,7 +276,7 @@ impl ResponseParserProcessor {
         match send_with_backpressure(tx, item).await {
             Ok(BackpressureSendState::Direct) => true,
             Ok(BackpressureSendState::RecoveredFromFull) => {
-                counter!("parser_chain_backpressure_total", "queue" => queue_kind, "reason" => "queue_full").increment(1);
+                counter!("mocra_parser_chain_backpressure_total", "queue" => queue_kind, "reason" => "queue_full").increment(1);
                 warn!(
                     "[ResponseParserProcessor] queue full, fallback to awaited send: queue={} context={} remaining_capacity={}",
                     queue_kind,
@@ -287,7 +287,7 @@ impl ResponseParserProcessor {
             }
             Err(err) => {
                 if err.after_full {
-                    counter!("parser_chain_backpressure_total", "queue" => queue_kind, "reason" => "queue_full").increment(1);
+                    counter!("mocra_parser_chain_backpressure_total", "queue" => queue_kind, "reason" => "queue_full").increment(1);
                     warn!(
                         "[ResponseParserProcessor] queue full before close: queue={} context={} remaining_capacity={}",
                         queue_kind,
@@ -295,7 +295,7 @@ impl ResponseParserProcessor {
                         tx.capacity()
                     );
                 }
-                counter!("parser_chain_backpressure_total", "queue" => queue_kind, "reason" => "queue_closed").increment(1);
+                counter!("mocra_parser_chain_backpressure_total", "queue" => queue_kind, "reason" => "queue_closed").increment(1);
                 error!(
                     "[ResponseParserProcessor] queue closed before send: queue={} context={}",
                     queue_kind,

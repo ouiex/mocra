@@ -1,7 +1,7 @@
 name = "app_rpa"
 
-# [api]
-# port = 8905
+[api]
+port = 8905
 
 [db]
 url = "postgres://eason:Qaz.123456@localhost:5433/crawler"

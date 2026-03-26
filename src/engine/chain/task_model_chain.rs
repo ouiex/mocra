@@ -224,24 +224,24 @@ impl ThresholdDecisionService for StatusTrackerThresholdDecisionService {
                         .await
                     {
                         Ok((0, _, _)) => {
-                            counter!("error_task_lua_action_total", "action" => "retry_scheduled").increment(1);
+                            counter!("mocra_error_task_lua_action_total", "action" => "retry_scheduled").increment(1);
                         }
                         Ok((1, msg, _)) | Ok((2, msg, _)) => {
-                            counter!("error_task_lua_action_total", "action" => "retry_schedule_rejected").increment(1);
+                            counter!("mocra_error_task_lua_action_total", "action" => "retry_schedule_rejected").increment(1);
                             warn!(
                                 "[ThresholdDecisionService] etm_retry_schedule rejected: task_id={} module_id={} msg={}",
                                 task_id, module_id, msg
                             );
                         }
                         Ok((code, msg, _)) => {
-                            counter!("error_task_lua_action_total", "action" => "retry_schedule_unknown").increment(1);
+                            counter!("mocra_error_task_lua_action_total", "action" => "retry_schedule_unknown").increment(1);
                             warn!(
                                 "[ThresholdDecisionService] etm_retry_schedule unexpected code={} task_id={} module_id={} msg={}",
                                 code, task_id, module_id, msg
                             );
                         }
                         Err(err) => {
-                            counter!("error_task_lua_action_total", "action" => "retry_schedule_error").increment(1);
+                            counter!("mocra_error_task_lua_action_total", "action" => "retry_schedule_error").increment(1);
                             warn!(
                                 "[ThresholdDecisionService] etm_retry_schedule failed: task_id={} module_id={} error={}",
                                 task_id, module_id, err
@@ -268,20 +268,20 @@ impl ThresholdDecisionService for StatusTrackerThresholdDecisionService {
                         .await
                     {
                         Ok((0, _, _)) => {
-                            counter!("error_task_lua_action_total", "action" => "terminate_module_marked").increment(1);
+                            counter!("mocra_error_task_lua_action_total", "action" => "terminate_module_marked").increment(1);
                         }
                         Ok((1, _, _)) => {
-                            counter!("error_task_lua_action_total", "action" => "terminate_module_already_marked").increment(1);
+                            counter!("mocra_error_task_lua_action_total", "action" => "terminate_module_already_marked").increment(1);
                         }
                         Ok((code, _, _)) => {
-                            counter!("error_task_lua_action_total", "action" => "terminate_module_unknown").increment(1);
+                            counter!("mocra_error_task_lua_action_total", "action" => "terminate_module_unknown").increment(1);
                             warn!(
                                 "[ThresholdDecisionService] etm_terminate_mark(module) unexpected code={} task_id={} module_id={}",
                                 code, task_id, module_id
                             );
                         }
                         Err(err) => {
-                            counter!("error_task_lua_action_total", "action" => "terminate_module_error").increment(1);
+                            counter!("mocra_error_task_lua_action_total", "action" => "terminate_module_error").increment(1);
                             warn!(
                                 "[ThresholdDecisionService] etm_terminate_mark(module) failed: task_id={} module_id={} error={}",
                                 task_id, module_id, err
@@ -309,20 +309,20 @@ impl ThresholdDecisionService for StatusTrackerThresholdDecisionService {
                         .await
                     {
                         Ok((0, _, _)) => {
-                            counter!("error_task_lua_action_total", "action" => "terminate_task_marked").increment(1);
+                            counter!("mocra_error_task_lua_action_total", "action" => "terminate_task_marked").increment(1);
                         }
                         Ok((1, _, _)) => {
-                            counter!("error_task_lua_action_total", "action" => "terminate_task_already_marked").increment(1);
+                            counter!("mocra_error_task_lua_action_total", "action" => "terminate_task_already_marked").increment(1);
                         }
                         Ok((code, _, _)) => {
-                            counter!("error_task_lua_action_total", "action" => "terminate_task_unknown").increment(1);
+                            counter!("mocra_error_task_lua_action_total", "action" => "terminate_task_unknown").increment(1);
                             warn!(
                                 "[ThresholdDecisionService] etm_terminate_mark(task) unexpected code={} task_id={}",
                                 code, task_id
                             );
                         }
                         Err(err) => {
-                            counter!("error_task_lua_action_total", "action" => "terminate_task_error").increment(1);
+                            counter!("mocra_error_task_lua_action_total", "action" => "terminate_task_error").increment(1);
                             warn!(
                                 "[ThresholdDecisionService] etm_terminate_mark(task) failed: task_id={} error={}",
                                 task_id, err
@@ -933,7 +933,7 @@ impl ProcessorTrait<TaskErrorEvent, Task> for TaskModelProcessor {
         );
         match self.error_task_decide(&input).await {
             ChainDecision::Continue => {
-                counter!("error_task_threshold_decision_total", "decision" => "continue").increment(1);
+                counter!("mocra_error_task_threshold_decision_total", "decision" => "continue").increment(1);
                 debug!(
                     "[TaskModelProcessor<ErrorTaskModel>] task can continue: task_id={}",
                     task_id
@@ -943,7 +943,7 @@ impl ProcessorTrait<TaskErrorEvent, Task> for TaskModelProcessor {
                 delay,
                 action_applied,
             } => {
-                counter!("error_task_threshold_decision_total", "decision" => "retry_after").increment(1);
+                counter!("mocra_error_task_threshold_decision_total", "decision" => "retry_after").increment(1);
                 if !(ChainDecision::RetryAfter {
                     delay,
                     action_applied,
@@ -961,7 +961,7 @@ impl ProcessorTrait<TaskErrorEvent, Task> for TaskModelProcessor {
                 reason,
                 action_applied,
             } => {
-                counter!("error_task_threshold_decision_total", "decision" => "terminate_module").increment(1);
+                counter!("mocra_error_task_threshold_decision_total", "decision" => "terminate_module").increment(1);
                 let module_id = input
                     .context
                     .module_id
@@ -1008,7 +1008,7 @@ impl ProcessorTrait<TaskErrorEvent, Task> for TaskModelProcessor {
                 reason,
                 action_applied,
             } => {
-                counter!("error_task_threshold_decision_total", "decision" => "terminate_task").increment(1);
+                counter!("mocra_error_task_threshold_decision_total", "decision" => "terminate_task").increment(1);
                 if !(ChainDecision::TerminateTask {
                     reason: reason.clone(),
                     action_applied,
@@ -1612,7 +1612,7 @@ impl ProcessorTrait<Request, ()> for RequestPublish {
         match send_with_backpressure(&tx, QueuedItem::new(input)).await {
             Ok(BackpressureSendState::Direct) => {}
             Ok(BackpressureSendState::RecoveredFromFull) => {
-                counter!("request_publish_backpressure_total", "reason" => "queue_full").increment(1);
+                counter!("mocra_request_publish_backpressure_total", "reason" => "queue_full").increment(1);
                 warn!(
                     "[RequestPublish] queue full, falling back to awaited send: request_id={} module_id={} remaining_capacity={}",
                     request_id,
@@ -1622,7 +1622,7 @@ impl ProcessorTrait<Request, ()> for RequestPublish {
             }
             Err(err) => {
                 if err.after_full {
-                    counter!("request_publish_backpressure_total", "reason" => "queue_full").increment(1);
+                    counter!("mocra_request_publish_backpressure_total", "reason" => "queue_full").increment(1);
                     warn!(
                         "[RequestPublish] queue full before close: request_id={} module_id={} remaining_capacity={}",
                         request_id,
@@ -1630,7 +1630,7 @@ impl ProcessorTrait<Request, ()> for RequestPublish {
                         tx.capacity()
                     );
                 }
-                counter!("request_publish_backpressure_total", "reason" => "queue_closed").increment(1);
+                counter!("mocra_request_publish_backpressure_total", "reason" => "queue_closed").increment(1);
                 let retry_reason = format!(
                     "request queue closed: request_id={} module_id={}",
                     err.item.inner.id,

@@ -125,7 +125,7 @@ impl DagNodeDispatcher for RedisRemoteDispatcher {
             NodePlacement::Remote { worker_group } => {
                 let dispatch_started = Instant::now();
                 counter!(
-                    "dag_remote_dispatch_total",
+                    "mocra_dag_remote_dispatch_total",
                     "worker_group" => worker_group.clone(),
                     "result" => "started".to_string()
                 )
@@ -177,19 +177,19 @@ impl DagNodeDispatcher for RedisRemoteDispatcher {
                 loop {
                     if started.elapsed() >= timeout {
                         counter!(
-                            "dag_remote_dispatch_total",
+                            "mocra_dag_remote_dispatch_total",
                             "worker_group" => worker_group.clone(),
                             "result" => "timeout".to_string()
                         )
                         .increment(1);
                         histogram!(
-                            "dag_remote_dispatch_latency_seconds",
+                            "mocra_dag_remote_dispatch_latency_seconds",
                             "worker_group" => worker_group.clone(),
                             "result" => "timeout".to_string()
                         )
                         .record(dispatch_started.elapsed().as_secs_f64());
                         counter!(
-                            "dag_alert_event_total",
+                            "mocra_dag_alert_event_total",
                             "source" => "dag_remote_dispatcher".to_string(),
                             "severity" => "warning".to_string(),
                             "event" => "timeout".to_string(),
@@ -230,7 +230,7 @@ impl DagNodeDispatcher for RedisRemoteDispatcher {
                         }
                         Err(e) => {
                             counter!(
-                                "dag_remote_dispatch_total",
+                                "mocra_dag_remote_dispatch_total",
                                 "worker_group" => worker_group.clone(),
                                 "result" => "poll_error".to_string()
                             )
@@ -264,13 +264,13 @@ impl DagNodeDispatcher for RedisRemoteDispatcher {
                                 }
                             })?;
                             counter!(
-                                "dag_remote_dispatch_total",
+                                "mocra_dag_remote_dispatch_total",
                                 "worker_group" => worker_group.clone(),
                                 "result" => "success".to_string()
                             )
                             .increment(1);
                             histogram!(
-                                "dag_remote_dispatch_latency_seconds",
+                                "mocra_dag_remote_dispatch_latency_seconds",
                                 "worker_group" => worker_group.clone(),
                                 "result" => "success".to_string()
                             )
@@ -279,19 +279,19 @@ impl DagNodeDispatcher for RedisRemoteDispatcher {
                         }
 
                         counter!(
-                            "dag_remote_dispatch_total",
+                            "mocra_dag_remote_dispatch_total",
                             "worker_group" => worker_group.clone(),
                             "result" => "failed".to_string()
                         )
                         .increment(1);
                         histogram!(
-                            "dag_remote_dispatch_latency_seconds",
+                            "mocra_dag_remote_dispatch_latency_seconds",
                             "worker_group" => worker_group.clone(),
                             "result" => "failed".to_string()
                         )
                         .record(dispatch_started.elapsed().as_secs_f64());
                         counter!(
-                            "dag_alert_event_total",
+                            "mocra_dag_alert_event_total",
                             "source" => "dag_remote_dispatcher".to_string(),
                             "severity" => "warning".to_string(),
                             "event" => "remote_execute_failed".to_string(),
@@ -503,7 +503,7 @@ impl RedisDagWorker {
             )
             .await;
         counter!(
-            "dag_remote_worker_heartbeat_total",
+            "mocra_dag_remote_worker_heartbeat_total",
             "worker_group" => self.worker_group.clone(),
             "worker_id" => self.worker_id.clone()
         )
@@ -523,7 +523,7 @@ impl RedisDagWorker {
             .flatten();
         if moved.is_some() {
             counter!(
-                "dag_remote_worker_pop_total",
+                "mocra_dag_remote_worker_pop_total",
                 "worker_group" => self.worker_group.clone(),
                 "worker_id" => self.worker_id.clone(),
                 "result" => "hit".to_string()
@@ -588,7 +588,7 @@ impl RedisDagWorker {
                     break;
                 }
                 counter!(
-                    "dag_remote_worker_reclaim_total",
+                    "mocra_dag_remote_worker_reclaim_total",
                     "worker_group" => self.worker_group.clone(),
                     "worker_id" => self.worker_id.clone()
                 )
@@ -628,7 +628,7 @@ impl RedisDagWorker {
                 Ok(v) => v,
                 Err(_) => {
                     counter!(
-                        "dag_remote_worker_dlq_total",
+                        "mocra_dag_remote_worker_dlq_total",
                         "worker_group" => self.worker_group.clone(),
                         "worker_id" => self.worker_id.clone(),
                         "reason" => "invalid_json".to_string()
@@ -655,7 +655,7 @@ impl RedisDagWorker {
             let canceled_before_execute = self.cache.get(&cancel_key).await.ok().flatten().is_some();
             if canceled_before_execute {
                 counter!(
-                    "dag_remote_worker_cancel_total",
+                    "mocra_dag_remote_worker_cancel_total",
                     "worker_group" => self.worker_group.clone(),
                     "worker_id" => self.worker_id.clone(),
                     "stage" => "before_execute".to_string()
@@ -689,14 +689,14 @@ impl RedisDagWorker {
                         .await;
                 }
                 counter!(
-                    "dag_remote_worker_dlq_total",
+                    "mocra_dag_remote_worker_dlq_total",
                     "worker_group" => self.worker_group.clone(),
                     "worker_id" => self.worker_id.clone(),
                     "reason" => "delivery_exhausted".to_string()
                 )
                 .increment(1);
                 counter!(
-                    "dag_alert_event_total",
+                    "mocra_dag_alert_event_total",
                     "source" => "dag_remote_worker".to_string(),
                     "severity" => "warning".to_string(),
                     "event" => "delivery_exhausted".to_string(),
@@ -714,7 +714,7 @@ impl RedisDagWorker {
             let canceled = self.cache.get(&cancel_key).await.ok().flatten().is_some();
             if canceled {
                 counter!(
-                    "dag_remote_worker_cancel_total",
+                    "mocra_dag_remote_worker_cancel_total",
                     "worker_group" => self.worker_group.clone(),
                     "worker_id" => self.worker_id.clone(),
                     "stage" => "after_execute".to_string()
@@ -738,7 +738,7 @@ impl RedisDagWorker {
 
             let exec_result = if response.ok { "success" } else { "failed" };
             counter!(
-                "dag_remote_worker_execute_total",
+                "mocra_dag_remote_worker_execute_total",
                 "worker_group" => self.worker_group.clone(),
                 "worker_id" => self.worker_id.clone(),
                 "result" => exec_result.to_string()
@@ -746,7 +746,7 @@ impl RedisDagWorker {
             .increment(1);
             if !response.ok {
                 counter!(
-                    "dag_alert_event_total",
+                    "mocra_dag_alert_event_total",
                     "source" => "dag_remote_worker".to_string(),
                     "severity" => "warning".to_string(),
                     "event" => "handler_failed".to_string(),
@@ -756,7 +756,7 @@ impl RedisDagWorker {
                 .increment(1);
             }
             histogram!(
-                "dag_remote_worker_execute_latency_seconds",
+                "mocra_dag_remote_worker_execute_latency_seconds",
                 "worker_group" => self.worker_group.clone(),
                 "worker_id" => self.worker_id.clone(),
                 "result" => exec_result.to_string()

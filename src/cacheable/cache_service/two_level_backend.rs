@@ -52,7 +52,7 @@ impl TwoLevelCacheBackend {
                     current_size,
                     self.l1_cache.store.len()
                 );
-                counter!("cache_l1_evictions").increment(count as u64);
+                counter!("mocra_cache_l1_evictions").increment(count as u64);
             }
         }
     }
@@ -64,13 +64,13 @@ impl CacheBackend for TwoLevelCacheBackend {
         let start = Instant::now();
 
         if let Some(value) = self.l1_cache.get(key).await? {
-            histogram!("cache_get_latency_us", "level" => "l1", "result" => "hit")
+            histogram!("mocra_cache_get_latency_us", "level" => "l1", "result" => "hit")
                 .record(start.elapsed().as_micros() as f64);
-            counter!("cache_hits", "level" => "l1").increment(1);
+            counter!("mocra_cache_hits", "level" => "l1").increment(1);
             return Ok(Some(value));
         }
 
-        counter!("cache_misses", "level" => "l1").increment(1);
+        counter!("mocra_cache_misses", "level" => "l1").increment(1);
 
         if let Some(value) = self.l2_cache.get(key).await? {
             let value_clone = value.clone();
@@ -84,14 +84,14 @@ impl CacheBackend for TwoLevelCacheBackend {
                 }
             });
 
-            histogram!("cache_get_latency_us", "level" => "l2", "result" => "hit")
+            histogram!("mocra_cache_get_latency_us", "level" => "l2", "result" => "hit")
                 .record(start.elapsed().as_micros() as f64);
-            counter!("cache_hits", "level" => "l2").increment(1);
+            counter!("mocra_cache_hits", "level" => "l2").increment(1);
             return Ok(Some(value));
         }
 
-        counter!("cache_misses", "level" => "l2").increment(1);
-        histogram!("cache_get_latency_us", "level" => "l2", "result" => "miss")
+        counter!("mocra_cache_misses", "level" => "l2").increment(1);
+        histogram!("mocra_cache_get_latency_us", "level" => "l2", "result" => "miss")
             .record(start.elapsed().as_micros() as f64);
         Ok(None)
     }
@@ -106,7 +106,7 @@ impl CacheBackend for TwoLevelCacheBackend {
 
         self.maybe_evict_l1().await;
 
-        histogram!("cache_set_latency_us").record(start.elapsed().as_micros() as f64);
+        histogram!("mocra_cache_set_latency_us").record(start.elapsed().as_micros() as f64);
         Ok(())
     }
 
@@ -164,11 +164,11 @@ impl CacheBackend for TwoLevelCacheBackend {
         for (i, key) in keys.iter().enumerate() {
             if let Some(value) = self.l1_cache.get(key).await? {
                 results[i] = Some(value);
-                counter!("cache_hits", "level" => "l1", "op" => "mget").increment(1);
+                counter!("mocra_cache_hits", "level" => "l1", "op" => "mget").increment(1);
             } else {
                 l2_keys_indices.push(i);
                 l2_keys.push(*key);
-                counter!("cache_misses", "level" => "l1", "op" => "mget").increment(1);
+                counter!("mocra_cache_misses", "level" => "l1", "op" => "mget").increment(1);
             }
         }
 
@@ -179,7 +179,7 @@ impl CacheBackend for TwoLevelCacheBackend {
                 let original_idx = l2_keys_indices[idx];
                 if let Some(value) = value_opt {
                     results[original_idx] = Some(value.clone());
-                    counter!("cache_hits", "level" => "l2", "op" => "mget").increment(1);
+                    counter!("mocra_cache_hits", "level" => "l2", "op" => "mget").increment(1);
 
                     let key_str = l2_keys[idx].to_string();
                     let l1_cache = self.l1_cache.clone();
@@ -188,7 +188,7 @@ impl CacheBackend for TwoLevelCacheBackend {
                         let _ = l1_cache.set(&key_str, &value, Some(l1_ttl)).await;
                     });
                 } else {
-                    counter!("cache_misses", "level" => "l2", "op" => "mget").increment(1);
+                    counter!("mocra_cache_misses", "level" => "l2", "op" => "mget").increment(1);
                 }
             }
         }

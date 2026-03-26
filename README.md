@@ -6,7 +6,13 @@ A distributed, event-driven crawling and data collection framework for Rust.
 
 
 ## Documentation
-- version 0.2.0
+- version 0.2.1
+
+- Major updates (v0.2.1):
+	- Rebuilt a unified node-level metrics system with canonical `mocra_*` metric families.
+	- Integrated key runtime paths (engine, downloader, queue, DAG scheduler, monitor, runner) into unified throughput/latency/error/backlog/inflight reporting.
+	- Prometheus endpoint is available at `GET /metrics`, and local Prometheus + Grafana stack is ready via `docker-compose.monitoring.yml`.
+	- Added real-request benchmark entry in tests: `httpbin_prometheus_benchmark` (default 1000 requests, 1 second interval) for observable metrics validation.
 
 - Major updates (v0.2.0):
 	- Distributed DAG execution is now a first-class runtime capability.
@@ -51,10 +57,36 @@ A distributed, event-driven crawling and data collection framework for Rust.
 		- Recommended check for "has next task": use `!parser_task.is_empty()`.
     
 - Project docs: `docs/README.md`
+- Unified metrics docs: `docs/unified_metrics.md`
 - DAG docs index: `docs/dag/DAG_GUIDE.md`
 - DAG API reference: `docs/dag/DAG_API_REFERENCE.md`
 - DAG runbook: `docs/dag/DAG_RUNBOOK.md`
 - API docs (after publish): <https://docs.rs/mocra>
+
+## Monitoring Quick Start
+
+1. Start Prometheus and Grafana:
+
+```powershell
+docker compose -f docker-compose.monitoring.yml up -d
+```
+
+2. Run real HTTP benchmark to generate enough events:
+
+```powershell
+$env:BENCH_TOTAL_REQUESTS='1000'
+$env:BENCH_INTERVAL_SECS='1'
+$env:BENCH_HOLD_SECS='600'
+cargo run --manifest-path tests/Cargo.toml --bin httpbin_prometheus_benchmark
+```
+
+3. Verify scraping:
+
+```text
+http://localhost:8905/metrics
+http://localhost:9090
+http://localhost:3000
+```
 
 ## License
 

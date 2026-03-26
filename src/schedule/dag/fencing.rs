@@ -74,7 +74,7 @@ impl DagFencingStore for RedisDagFencingStore {
 
         if accepted == 1 || accepted == 2 {
             counter!(
-                "dag_fencing_commit_total",
+                "mocra_dag_fencing_commit_total",
                 "resource" => resource.to_string(),
                 "result" => "accepted".to_string()
             )
@@ -89,7 +89,7 @@ impl DagFencingStore for RedisDagFencingStore {
                 .await
                 .ok();
             counter!(
-                "dag_fencing_commit_total",
+                "mocra_dag_fencing_commit_total",
                 "resource" => resource.to_string(),
                 "result" => "rejected_invalid_latest".to_string()
             )
@@ -111,7 +111,7 @@ impl DagFencingStore for RedisDagFencingStore {
             .ok();
 
         counter!(
-            "dag_fencing_commit_total",
+            "mocra_dag_fencing_commit_total",
             "resource" => resource.to_string(),
             "result" => "rejected_stale".to_string()
         )

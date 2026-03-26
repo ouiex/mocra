@@ -97,7 +97,7 @@ impl Deduplicator {
                             bloom_guard.clear();
                             LAST_RESET = now;
                             info!("Reset Bloom Filter to prevent saturation");
-                            counter!("dedup_bloom_resets").increment(1);
+                            counter!("mocra_dedup_bloom_resets").increment(1);
                         }
                     }
                 }
@@ -127,10 +127,10 @@ impl Deduplicator {
         
         if bloom_says_exists {
             // Might exist, continue to L1/L2 verification.
-            counter!("dedup_bloom_hits", "result" => "maybe_exists").increment(1);
+            counter!("mocra_dedup_bloom_hits", "result" => "maybe_exists").increment(1);
         } else {
             // Definitely new under Bloom semantics; still persist in Redis.
-            counter!("dedup_bloom_hits", "result" => "definitely_new").increment(1);
+            counter!("mocra_dedup_bloom_hits", "result" => "definitely_new").increment(1);
             
             {
                 let mut bloom_guard = self.bloom.write().await;
@@ -160,15 +160,15 @@ impl Deduplicator {
             
             self.local_cache.insert(hash_owned.clone(), now + self.ttl as i64);
             
-            histogram!("dedup_check_latency_us", "path" => "bloom_new").record(start.elapsed().as_micros() as f64);
+            histogram!("mocra_dedup_check_latency_us", "path" => "bloom_new").record(start.elapsed().as_micros() as f64);
             return Ok(true);
         }
         
         // L1: Check local cache.
         if let Some(expire_at) = self.local_cache.get(&hash_owned) {
             if *expire_at > now {
-                histogram!("dedup_check_latency_us", "path" => "l1_hit").record(start.elapsed().as_micros() as f64);
-                counter!("dedup_l1_hits").increment(1);
+                histogram!("mocra_dedup_check_latency_us", "path" => "l1_hit").record(start.elapsed().as_micros() as f64);
+                counter!("mocra_dedup_l1_hits").increment(1);
                 return Ok(false);
             } else {
                 drop(expire_at);
@@ -202,13 +202,13 @@ impl Deduplicator {
         
         if !is_new {
             self.local_cache.insert(hash_owned.clone(), now + self.ttl as i64);
-            counter!("dedup_l2_hits").increment(1);
+            counter!("mocra_dedup_l2_hits").increment(1);
         } else {
             self.local_cache.insert(hash_owned.clone(), now + self.ttl as i64);
-            counter!("dedup_l2_new").increment(1);
+            counter!("mocra_dedup_l2_new").increment(1);
         }
 
-        histogram!("dedup_check_latency_us", "path" => "redis").record(start.elapsed().as_micros() as f64);
+        histogram!("mocra_dedup_check_latency_us", "path" => "redis").record(start.elapsed().as_micros() as f64);
         Ok(is_new)
     }
 
@@ -246,7 +246,7 @@ impl Deduplicator {
             for &idx in &definitely_new_indices {
                 bloom_guard.set(&hashes[idx]);
             }
-            counter!("dedup_bloom_batch_new").increment(definitely_new_indices.len() as u64);
+            counter!("mocra_dedup_bloom_batch_new").increment(definitely_new_indices.len() as u64);
         }
 
         // L1: Check local cache for items Bloom says "might exist"
@@ -258,7 +258,7 @@ impl Deduplicator {
             if let Some(expire_at) = self.local_cache.get(hash) {
                 if *expire_at > now {
                     results[i] = false; // Duplicate
-                    counter!("dedup_l1_batch_hits").increment(1);
+                    counter!("mocra_dedup_l1_batch_hits").increment(1);
                     continue;
                 }
             }
@@ -268,7 +268,7 @@ impl Deduplicator {
 
         if indices_to_check.is_empty() {
             // All requests were handled by Bloom + L1
-            histogram!("dedup_batch_latency_us", "path" => "bloom_l1").record(start.elapsed().as_micros() as f64);
+            histogram!("mocra_dedup_batch_latency_us", "path" => "bloom_l1").record(start.elapsed().as_micros() as f64);
             
             // Still need to set the definitely_new ones in Redis
             if !definitely_new_indices.is_empty() {
@@ -318,13 +318,13 @@ impl Deduplicator {
             self.local_cache.insert(hashes[original_idx].clone(), now + self.ttl as i64);
             
             if is_new {
-                counter!("dedup_l2_batch_new").increment(1);
+                counter!("mocra_dedup_l2_batch_new").increment(1);
             } else {
-                counter!("dedup_l2_batch_hits").increment(1);
+                counter!("mocra_dedup_l2_batch_hits").increment(1);
             }
         }
 
-        histogram!("dedup_batch_latency_us", "path" => "full").record(start.elapsed().as_micros() as f64);
+        histogram!("mocra_dedup_batch_latency_us", "path" => "full").record(start.elapsed().as_micros() as f64);
         Ok(results)
     }
     

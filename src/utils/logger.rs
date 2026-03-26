@@ -178,7 +178,7 @@ impl LogDispatcher {
                 continue;
             }
             if sink.emit(&record).is_err() {
-                metrics::counter!("log_sink_errors_total", "sink" => sink.name()).increment(1);
+                metrics::counter!("mocra_log_sink_errors_total", "sink" => sink.name()).increment(1);
             }
         }
     }
@@ -259,7 +259,7 @@ impl LogSink for ConsoleSink {
             use std::io::Write;
             writeln!(writer, "{}", line)?;
         }
-        metrics::counter!("log_events_total", "sink" => self.name(), "level" => record.level.as_str()).increment(1);
+        metrics::counter!("mocra_log_events_total", "sink" => self.name(), "level" => record.level.as_str()).increment(1);
         Ok(())
     }
 }
@@ -305,7 +305,7 @@ impl LogSink for FileSink {
             use std::io::Write;
             writeln!(writer, "{}", line)?;
         }
-        metrics::counter!("log_events_total", "sink" => self.name(), "level" => record.level.as_str()).increment(1);
+        metrics::counter!("mocra_log_events_total", "sink" => self.name(), "level" => record.level.as_str()).increment(1);
         Ok(())
     }
 }
@@ -334,7 +334,7 @@ impl LogSink for DynamicMqSink {
             g.as_ref()
                 .map(|d| (d.sender.clone(), d.queue_level, d.capacity))
         }) else {
-            metrics::counter!("log_dropped_total", "sink" => self.name(), "reason" => "sender_unset").increment(1);
+            metrics::counter!("mocra_log_dropped_total", "sink" => self.name(), "reason" => "sender_unset").increment(1);
             return Ok(());
         };
 
@@ -361,16 +361,16 @@ impl LogSink for DynamicMqSink {
         };
 
         if dynamic.0.try_send(log_model).is_err() {
-            metrics::counter!("log_dropped_total", "sink" => self.name(), "reason" => "channel_full").increment(1);
+            metrics::counter!("mocra_log_dropped_total", "sink" => self.name(), "reason" => "channel_full").increment(1);
         } else {
-            metrics::counter!("log_events_total", "sink" => self.name(), "level" => record.level.as_str()).increment(1);
-            metrics::gauge!("log_batch_size", "sink" => self.name()).set(1.0);
+            metrics::counter!("mocra_log_events_total", "sink" => self.name(), "level" => record.level.as_str()).increment(1);
+            metrics::gauge!("mocra_log_batch_size", "sink" => self.name()).set(1.0);
         }
 
         if let Some(capacity) = dynamic.2 {
             let remaining = dynamic.0.capacity();
             let lag = capacity.saturating_sub(remaining) as f64;
-            metrics::gauge!("log_queue_lag", "sink" => self.name()).set(lag);
+            metrics::gauge!("mocra_log_queue_lag", "sink" => self.name()).set(lag);
         }
         Ok(())
     }
@@ -396,7 +396,7 @@ impl LogSink for PrometheusSink {
     }
 
     fn emit(&self, record: &LogRecord) -> Result<(), LogError> {
-        metrics::counter!("log_events_total", "sink" => self.name(), "level" => record.level.as_str()).increment(1);
+        metrics::counter!("mocra_log_events_total", "sink" => self.name(), "level" => record.level.as_str()).increment(1);
         Ok(())
     }
 }

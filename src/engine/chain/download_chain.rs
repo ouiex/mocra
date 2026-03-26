@@ -437,7 +437,7 @@ impl ProcessorTrait<Option<Response>, ()> for ResponsePublishProcessor {
                 Ok(())
             }
             Err(tokio::sync::mpsc::error::TrySendError::Full(returned_item)) => {
-                counter!("download_response_backpressure_total", "queue" => "local_response", "reason" => "queue_full").increment(1);
+                counter!("mocra_download_response_backpressure_total", "queue" => "local_response", "reason" => "queue_full").increment(1);
                 warn!(
                     "[ResponsePublish] local response queue full, fallback to backend channel: request_id={}",
                     id
@@ -446,7 +446,7 @@ impl ProcessorTrait<Option<Response>, ()> for ResponsePublishProcessor {
                 match send_with_backpressure(&tx, returned_item).await {
                     Ok(BackpressureSendState::Direct) => Ok(()),
                     Ok(BackpressureSendState::RecoveredFromFull) => {
-                        counter!("download_response_backpressure_total", "queue" => "response", "reason" => "queue_full").increment(1);
+                        counter!("mocra_download_response_backpressure_total", "queue" => "response", "reason" => "queue_full").increment(1);
                         warn!(
                             "[ResponsePublish] backend response queue full, waiting send: request_id={} remaining_capacity={}",
                             id,
@@ -456,20 +456,20 @@ impl ProcessorTrait<Option<Response>, ()> for ResponsePublishProcessor {
                     }
                     Err(err) => {
                         if err.after_full {
-                            counter!("download_response_backpressure_total", "queue" => "response", "reason" => "queue_full").increment(1);
+                            counter!("mocra_download_response_backpressure_total", "queue" => "response", "reason" => "queue_full").increment(1);
                             warn!(
                                 "[ResponsePublish] backend response queue full before close: request_id={} remaining_capacity={}",
                                 id,
                                 tx.capacity()
                             );
                         }
-                        counter!("download_response_backpressure_total", "queue" => "response", "reason" => "queue_closed").increment(1);
+                        counter!("mocra_download_response_backpressure_total", "queue" => "response", "reason" => "queue_closed").increment(1);
                         Err("response queue closed".to_string())
                     }
                 }
             }
             Err(tokio::sync::mpsc::error::TrySendError::Closed(returned_item)) => {
-                counter!("download_response_backpressure_total", "queue" => "local_response", "reason" => "queue_closed").increment(1);
+                counter!("mocra_download_response_backpressure_total", "queue" => "local_response", "reason" => "queue_closed").increment(1);
                 warn!(
                     "[ResponsePublish] local response queue closed, fallback to backend channel: request_id={}",
                     id

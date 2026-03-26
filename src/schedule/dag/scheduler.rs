@@ -2,7 +2,6 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use futures::FutureExt;
-use metrics::{counter, histogram};
 use uuid::Uuid;
 
 use crate::sync::SyncService;
@@ -380,26 +379,22 @@ impl DagScheduler {
 
     fn record_run_guard_latency(stage: &str, ok: bool, elapsed: Duration) {
         let result = if ok { "ok" } else { "err" };
-        histogram!(
-            "dag_run_guard_latency_seconds",
-            "stage" => stage.to_string(),
-            "result" => result.to_string()
-        )
-        .record(elapsed.as_secs_f64());
+        crate::common::metrics::observe_latency("dag", "run_guard", stage, result, elapsed.as_secs_f64());
     }
 
     fn record_run_guard_counter(metric: &'static str, result: &str) {
-        counter!(metric, "result" => result.to_string()).increment(1);
-        if metric == "dag_run_guard_renew_total"
+        let operation = if metric.contains("acquire") {
+            "acquire"
+        } else if metric.contains("release") {
+            "release"
+        } else {
+            "renew"
+        };
+        crate::common::metrics::inc_throughput("dag", "run_guard", operation, result, 1);
+        if metric == "mocra_dag_run_guard_renew_total"
             && (result == "lost" || result == "error" || result == "failed_final")
         {
-            counter!(
-                "dag_alert_event_total",
-                "source" => "dag_run_guard".to_string(),
-                "severity" => "critical".to_string(),
-                "event" => result.to_string()
-            )
-            .increment(1);
+            crate::common::metrics::inc_error("dag", "run_guard", "critical", result, 1);
         }
     }
 
@@ -438,76 +433,35 @@ impl DagScheduler {
         }
     }
 
-    fn top_level_error_severity(error: &DagError) -> &'static str {
-        match error {
-            DagError::RunGuardRenewFailed { .. }
-            | DagError::RunGuardAcquireFailed { .. }
-            | DagError::RunGuardReleaseFailed { .. }
-            | DagError::MissingRunFencingToken { .. }
-            | DagError::FencingTokenRejected { .. } => "critical",
-            DagError::ExecutionTimeout { .. }
-            | DagError::RetryExhausted { .. }
-            | DagError::NodeTimeout { .. }
-            | DagError::NodeExecutionFailed { .. }
-            | DagError::TaskJoinFailed { .. } => "warning",
-            _ => "info",
-        }
-    }
-
     fn record_execute_metrics(
         result: &Result<DagExecutionReport, DagError>,
         elapsed: Duration,
         run_guard_enabled: bool,
     ) {
-        let run_guard = if run_guard_enabled { "on" } else { "off" };
+        let _run_guard = if run_guard_enabled { "on" } else { "off" };
         match result {
             Ok(_) => {
-                counter!(
-                    "dag_execute_total",
-                    "result" => "success".to_string(),
-                    "run_guard" => run_guard.to_string()
-                )
-                .increment(1);
-                histogram!(
-                    "dag_execute_latency_seconds",
-                    "result" => "success".to_string(),
-                    "run_guard" => run_guard.to_string()
-                )
-                .record(elapsed.as_secs_f64());
+                crate::common::metrics::inc_throughput("dag", "scheduler", "execute", "success", 1);
+                crate::common::metrics::observe_latency(
+                    "dag",
+                    "scheduler",
+                    "execute",
+                    "success",
+                    elapsed.as_secs_f64(),
+                );
             }
             Err(err) => {
                 let code = format!("{:?}", Self::error_code(err));
                 let class = format!("{:?}", Self::top_level_error_class(err));
-                let severity = Self::top_level_error_severity(err).to_string();
-                counter!(
-                    "dag_execute_total",
-                    "result" => "error".to_string(),
-                    "run_guard" => run_guard.to_string(),
-                    "error_code" => code.clone()
-                )
-                .increment(1);
-                histogram!(
-                    "dag_execute_latency_seconds",
-                    "result" => "error".to_string(),
-                    "run_guard" => run_guard.to_string(),
-                    "error_code" => code
-                )
-                .record(elapsed.as_secs_f64());
-                counter!(
-                    "dag_execute_error_total",
-                    "run_guard" => run_guard.to_string(),
-                    "error_code" => format!("{:?}", Self::error_code(err)),
-                    "error_class" => class.clone()
-                )
-                .increment(1);
-                counter!(
-                    "dag_alert_event_total",
-                    "source" => "dag_scheduler".to_string(),
-                    "severity" => severity,
-                    "event" => format!("{:?}", Self::error_code(err)),
-                    "error_class" => class
-                )
-                .increment(1);
+                crate::common::metrics::inc_throughput("dag", "scheduler", "execute", "error", 1);
+                crate::common::metrics::observe_latency(
+                    "dag",
+                    "scheduler",
+                    "execute",
+                    "error",
+                    elapsed.as_secs_f64(),
+                );
+                crate::common::metrics::inc_error("dag", "scheduler", &class, &code, 1);
             }
         }
     }
@@ -943,14 +897,7 @@ impl DagScheduler {
         }
 
         if attempt <= policy.max_retries && allow_retry {
-            counter!(
-                "dag_node_failure_total",
-                "stage" => "retry_scheduled".to_string(),
-                "error_code" => failure_code_tag.clone(),
-                "error_class" => failure_class_tag_str.clone(),
-                "placement" => placement_tag.clone()
-            )
-            .increment(1);
+            crate::common::metrics::inc_error("dag", "node", &failure_class_tag_str, &failure_code_tag, 1);
             if let Some(node) = state.runtime.nodes.get_mut(&node_id) {
                 node.error = Some(error.to_string());
             }
@@ -987,14 +934,10 @@ impl DagScheduler {
         if let Some(node) = state.runtime.nodes.get_mut(&node_id) {
             node.error = Some(error.to_string());
         }
-        counter!(
-            "dag_node_failure_total",
-            "stage" => "final".to_string(),
-            "error_code" => failure_code_tag,
-            "error_class" => failure_class_tag_str,
-            "placement" => placement_tag
-        )
-        .increment(1);
+        crate::common::metrics::inc_error("dag", "node", &failure_class_tag_str, &failure_code_tag, 1);
+        let _ = failure_code_tag;
+        let _ = failure_class_tag_str;
+        let _ = placement_tag;
         let dispatch_latency_ms = state
             .dispatch_started_ms
             .remove(&node_id)
@@ -1298,20 +1241,10 @@ impl DagScheduler {
         let snapshot = state.snapshot();
         match cfg.store.save(&cfg.run_key, &snapshot).await {
             Ok(()) => {
-                counter!(
-                    "dag_run_state_store_total",
-                    "stage" => stage.to_string(),
-                    "result" => "saved".to_string()
-                )
-                .increment(1);
+                crate::common::metrics::inc_throughput("dag", "run_state", stage, "saved", 1);
             }
             Err(e) => {
-                counter!(
-                    "dag_run_state_store_total",
-                    "stage" => stage.to_string(),
-                    "result" => "save_error".to_string()
-                )
-                .increment(1);
+                crate::common::metrics::inc_error("dag", "run_state", "store", "save_error", 1);
                 eprintln!(
                     "DAG run state snapshot save failed before error return: stage={} run_key={} error={}",
                     stage,
@@ -1324,12 +1257,7 @@ impl DagScheduler {
 
     pub async fn execute_parallel(&self) -> Result<DagExecutionReport, DagError> {
         let run_started = Instant::now();
-        counter!(
-            "dag_execute_total",
-            "result" => "started".to_string(),
-            "run_guard" => if self.run_guard.is_some() { "on".to_string() } else { "off".to_string() }
-        )
-        .increment(1);
+        crate::common::metrics::inc_throughput("dag", "scheduler", "execute", "started", 1);
 
         if let Err(e) = self.validate() {
             let result = Err(e);
@@ -1348,7 +1276,7 @@ impl DagScheduler {
                 Ok(outcome) => outcome,
                 Err(e) => {
                     Self::record_run_guard_latency("acquire", false, acquire_started.elapsed());
-                    Self::record_run_guard_counter("dag_run_guard_acquire_total", "error");
+                    Self::record_run_guard_counter("mocra_dag_run_guard_acquire_total", "error");
                     let result = Err(DagError::RunGuardAcquireFailed {
                         lock_key: cfg.lock_key.clone(),
                         reason: e.to_string(),
@@ -1363,14 +1291,14 @@ impl DagScheduler {
             };
             Self::record_run_guard_latency("acquire", true, acquire_started.elapsed());
             if !acquire_outcome.acquired {
-                Self::record_run_guard_counter("dag_run_guard_acquire_total", "contention");
+                Self::record_run_guard_counter("mocra_dag_run_guard_acquire_total", "contention");
                 let result = Err(DagError::RunAlreadyInProgress {
                     lock_key: cfg.lock_key.clone(),
                 });
                 Self::record_execute_metrics(&result, run_started.elapsed(), self.run_guard.is_some());
                 return result;
             }
-            Self::record_run_guard_counter("dag_run_guard_acquire_total", "success");
+            Self::record_run_guard_counter("mocra_dag_run_guard_acquire_total", "success");
             Some((cfg.clone(), owner, acquire_outcome.fencing_token))
         } else {
             None
@@ -1416,7 +1344,7 @@ impl DagScheduler {
                                     Ok(true) => {}
                                     Ok(false) => {
                                         Self::record_run_guard_latency("renew", false, renew_started.elapsed());
-                                        Self::record_run_guard_counter("dag_run_guard_renew_total", "lost");
+                                        Self::record_run_guard_counter("mocra_dag_run_guard_renew_total", "lost");
                                         if let Ok(mut slot) = failed.lock() {
                                             *slot = Some("run guard lock ownership lost during renew".to_string());
                                         }
@@ -1424,7 +1352,7 @@ impl DagScheduler {
                                     }
                                     Err(e) => {
                                         Self::record_run_guard_latency("renew", false, renew_started.elapsed());
-                                        Self::record_run_guard_counter("dag_run_guard_renew_total", "error");
+                                        Self::record_run_guard_counter("mocra_dag_run_guard_renew_total", "error");
                                         if let Ok(mut slot) = failed.lock() {
                                             *slot = Some(e.to_string());
                                         }
@@ -1432,7 +1360,7 @@ impl DagScheduler {
                                     }
                                 }
                                 Self::record_run_guard_latency("renew", true, renew_started.elapsed());
-                                Self::record_run_guard_counter("dag_run_guard_renew_total", "success");
+                                Self::record_run_guard_counter("mocra_dag_run_guard_renew_total", "success");
                             }
                         }
                     }
@@ -1576,7 +1504,7 @@ impl DagScheduler {
             match cfg.guard.release(&cfg.lock_key, &owner).await {
                 Err(e) => {
                     Self::record_run_guard_latency("release", false, release_started.elapsed());
-                    Self::record_run_guard_counter("dag_run_guard_release_total", "error");
+                    Self::record_run_guard_counter("mocra_dag_run_guard_release_total", "error");
                     if execute_result.is_ok() {
                         let result = Err(DagError::RunGuardReleaseFailed {
                             lock_key: cfg.lock_key,
@@ -1592,12 +1520,12 @@ impl DagScheduler {
                 }
                 Ok(()) => {
                     Self::record_run_guard_latency("release", true, release_started.elapsed());
-                    Self::record_run_guard_counter("dag_run_guard_release_total", "success");
+                    Self::record_run_guard_counter("mocra_dag_run_guard_release_total", "success");
                 }
             }
             if execute_result.is_ok() {
                 if let Some(reason) = renew_failed {
-                    Self::record_run_guard_counter("dag_run_guard_renew_total", "failed_final");
+                    Self::record_run_guard_counter("mocra_dag_run_guard_renew_total", "failed_final");
                     let result = Err(DagError::RunGuardRenewFailed {
                         lock_key: cfg.lock_key,
                         reason,

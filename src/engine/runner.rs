@@ -2,7 +2,6 @@ use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc, watch, Mutex, Semaphore};
 use log::{info, debug};
 use crate::queue::Identifiable;
-use metrics::gauge;
 use tracing::Instrument;
 
 /// Generic concurrent runner for queue-driven processors.
@@ -124,10 +123,10 @@ impl ProcessorRunner {
                                 let span_name = format!("{}_processor", metric_label);
 
                                 tokio::spawn(async move {
-                                    gauge!("engine_active_tasks", "processor" => metric_label.clone()).increment(1.0);
+                                    crate::common::metrics::inc_inflight("engine", &metric_label, 1.0);
                                     let _permit = permit;
                                     execute_fn(item).await;
-                                    gauge!("engine_active_tasks", "processor" => metric_label).decrement(1.0);
+                                    crate::common::metrics::dec_inflight("engine", &metric_label, 1.0);
                                 }.instrument(tracing::info_span!("processor_execution", processor_type = %span_name, item_id = %task_id)));
                             }
                         }

@@ -8,7 +8,6 @@ use deadpool_redis::redis::{AsyncCommands, FromRedisValue};
 use deadpool_redis::redis;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc;
-use metrics::{counter, gauge};
 use std::collections::HashMap;
 use tokio::sync::RwLock;
 use std::sync::Arc;
@@ -204,7 +203,7 @@ impl RedisQueue {
                                                     ack_tx: ack_tx.clone(),
                                                 };
                                                 
-                                                counter!("queue_consume_total", "topic" => s_key.clone(), "listener" => listener_index.to_string()).increment(1);
+                                                crate::common::metrics::inc_throughput("queue", "consumer", "consume", "success", 1);
 
                                                 if sender.send(msg).await.is_err() {
                                                     warn!("Subscriber for {} dropped", s_key);
@@ -263,15 +262,7 @@ impl RedisQueue {
                                     NackDisposition::Retry { .. } => "retry",
                                     NackDisposition::Dlq => "dlq",
                                 };
-                                counter!(
-                                    "policy_decisions_total",
-                                    "domain" => "queue",
-                                    "event_type" => "nack",
-                                    "phase" => "failed",
-                                    "kind" => "queue",
-                                    "action" => action_label
-                                )
-                                .increment(1);
+                                crate::common::metrics::inc_throughput("queue", "ack_processor", "nack_policy", action_label, 1);
 
                                 if let Ok(mut ack_conn) = pool.get().await {
                                     if let NackDisposition::Retry { next_attempt } = disposition {
@@ -301,7 +292,7 @@ impl RedisQueue {
                                             .query_async(&mut ack_conn)
                                             .await;
 
-                                        counter!("queue_retry_total", "topic" => stream_key.clone()).increment(1);
+                                        crate::common::metrics::inc_throughput("queue", "ack_processor", "retry", "success", 1);
                                     } else {
                                         let dlq_key = format!("{}:dlq", stream_key);
                                         let script = redis::Script::new(r"
@@ -322,7 +313,7 @@ impl RedisQueue {
                                             .map_err(|e| error!("Failed to atomic NACK: {}", e))
                                             .unwrap_or(());
 
-                                        counter!("queue_dlq_total", "topic" => stream_key.clone()).increment(1);
+                                        crate::common::metrics::inc_throughput("queue", "ack_processor", "dlq", "success", 1);
                                     }
                                 }
                             }
@@ -365,8 +356,8 @@ impl RedisQueue {
                 
                 match result {
                     Ok(_) => {
-                        for (k, v) in count_map {
-                            counter!("queue_ack_total", "topic" => k).increment(v as u64);
+                        for (_k, v) in count_map {
+                            crate::common::metrics::inc_throughput("queue", "ack_processor", "ack", "success", v as u64);
                         }
                         batches.clear();
                         true
@@ -417,7 +408,7 @@ impl RedisQueue {
                     }
 
                     for (topic_label, total_len) in totals {
-                        gauge!("queue_len", "topic" => topic_label.clone()).set(total_len as f64);
+                        crate::common::metrics::set_backlog("queue", &topic_label, total_len as f64);
                         if total_len > 1000 {
                             warn!("High queue depth for {}: {}", topic_label, total_len);
                         } else if total_len > 0 {
@@ -484,7 +475,7 @@ impl RedisQueue {
                                 let is_empty = messages.is_empty();
                                 if !is_empty {
                                     info!("Claimed {} stuck messages from topic {}", messages.len(), topic_claim);
-                                    counter!("queue_claim_total", "topic" => topic_claim.clone()).increment(messages.len() as u64);
+                                    crate::common::metrics::inc_throughput("queue", "claimer", "claim", "success", messages.len() as u64);
                                     for (id, fields) in messages {
                                         if let Some(msg) = Self::parse_message(&topic_claim, id, fields, ack_tx.clone()) {
                                             if let Err(e) = sender.send(msg).await {
@@ -617,7 +608,7 @@ impl MqBackend for RedisQueue {
             .await
             .map_err(|e| QueueError::PushFailed(Box::new(e)))?;
         
-        counter!("queue_publish_total", "topic" => topic.to_string(), "status" => "success").increment(1);
+        crate::common::metrics::inc_throughput("queue", "producer", "publish", "success", 1);
         Ok(())
     }
 
@@ -662,7 +653,7 @@ impl MqBackend for RedisQueue {
             
             match result {
                 Ok(_) => {
-                    counter!("queue_publish_batch_total", "topic" => topic.to_string(), "status" => "success").increment(items.len() as u64);
+                    crate::common::metrics::inc_throughput("queue", "producer", "publish_batch", "success", items.len() as u64);
                     return Ok(());
                 },
                 Err(e) => {
@@ -743,7 +734,7 @@ impl MqBackend for RedisQueue {
             
             match result {
                 Ok(_) => {
-                    counter!("queue_publish_batch_total", "topic" => topic.to_string(), "status" => "success").increment(items.len() as u64);
+                    crate::common::metrics::inc_throughput("queue", "producer", "publish_batch", "success", items.len() as u64);
                     return Ok(());
                 },
                 Err(e) => {
@@ -906,7 +897,7 @@ impl MqBackend for RedisQueue {
              .await
              .map_err(|e| QueueError::PushFailed(Box::new(e)))?;
              
-         counter!("queue_dlq_total", "topic" => topic.to_string()).increment(1);
+            crate::common::metrics::inc_throughput("queue", "producer", "send_dlq", "success", 1);
          Ok(())
     }
 

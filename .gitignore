@@ -11,3 +11,6 @@ data/
 .github/
 .DS_Store
 .cargo/
+scripts/__pycache__/
+tests/tmp/
+monitoring/tmp/
