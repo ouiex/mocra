@@ -14,6 +14,33 @@ use tokio::sync::RwLock;
 use crate::utils::distributed_rate_limit::{DistributedSlidingWindowRateLimiter, RateLimitConfig};
 use crate::utils::redis_lock::DistributedLockManager;
 use deadpool_redis::Pool;
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub enum StateInitError {
+    #[error("load config failed: {0}")]
+    LoadConfig(String),
+    #[error("database connection failed (url={url:?}, schema={schema:?}, pool_size={pool_size:?}, tls={tls:?})")]
+    DatabaseConnect {
+        url: Option<String>,
+        schema: Option<String>,
+        pool_size: Option<u32>,
+        tls: Option<bool>,
+    },
+    #[error("redis pool creation failed ({name}): host={host}, port={port}, db={db}, tls={tls}, pool_size={pool_size:?}")]
+    RedisPoolCreate {
+        name: &'static str,
+        host: String,
+        port: u16,
+        db: u16,
+        tls: bool,
+        pool_size: Option<usize>,
+    },
+    #[error("redis ping failed (cache): {0}")]
+    CachePing(String),
+    #[error("redis connection borrow failed (cache): {0}")]
+    CacheConn(String),
+}
 
 /// Global application state shared across the system.
 ///
@@ -42,8 +69,19 @@ pub struct State {
 impl State {
     /// Creates a new State instance using a file-based configuration.
     pub async fn new(path: &str) -> Self {
+        match Self::try_new(path).await {
+            Ok(state) => state,
+            Err(e) => {
+                error!("State initialization failed: {}", e);
+                std::process::exit(1);
+            }
+        }
+    }
+
+    /// Creates a new State instance with detailed error propagation.
+    pub async fn try_new(path: &str) -> Result<Self, StateInitError> {
         let provider = FileConfigProvider::new(path);
-        Self::new_with_provider(Box::new(provider)).await
+        Self::try_new_with_provider(Box::new(provider)).await
     }
 
     /// Creates a new State instance with a custom configuration provider.
@@ -51,7 +89,23 @@ impl State {
     /// Initializes all connections (DB, Redis) and services (Lock, Limit, Tracker).
     /// Starts a background task to watch for configuration changes.
     pub async fn new_with_provider(provider: Box<dyn ConfigProvider>) -> Self {
-        let config = provider.load_config().await.expect("failed to load config");
+        match Self::try_new_with_provider(provider).await {
+            Ok(state) => state,
+            Err(e) => {
+                error!("State initialization failed: {}", e);
+                std::process::exit(1);
+            }
+        }
+    }
+
+    /// Creates a new State instance and returns explicit initialization failures.
+    pub async fn try_new_with_provider(
+        provider: Box<dyn ConfigProvider>,
+    ) -> Result<Self, StateInitError> {
+        let config = provider
+            .load_config()
+            .await
+            .map_err(|e| StateInitError::LoadConfig(e.to_string()))?;
         let single_node_mode = config.is_single_node_mode();
         info!(
             "Runtime mode initialized: {}",
@@ -68,50 +122,80 @@ impl State {
                 config.db.tls,
             )
             .await
-            .expect("Failed to connect to database"),
+            .ok_or_else(|| StateInitError::DatabaseConnect {
+                url: config.db.url.clone(),
+                schema: config.db.database_schema.clone(),
+                pool_size: config.db.pool_size,
+                tls: config.db.tls,
+            })?,
         );
         info!("Database connected successfully");
         let cache_pool = if single_node_mode {
             None
         } else {
-            config.cache.redis.as_ref().map(|redis| {
-            create_redis_pool(
-                &redis.redis_host,
-                redis.redis_port,
-                redis.redis_db,
-                &redis.redis_username,
-                &redis.redis_password,
-                redis.pool_size,
-                redis.tls.unwrap_or(false),
-            )
-            .expect("Failed to connect cache")
-            })
+            match config.cache.redis.as_ref() {
+                Some(redis) => {
+                    let pool = create_redis_pool(
+                        &redis.redis_host,
+                        redis.redis_port,
+                        redis.redis_db,
+                        &redis.redis_username,
+                        &redis.redis_password,
+                        redis.pool_size,
+                        redis.tls.unwrap_or(false),
+                    )
+                    .ok_or_else(|| StateInitError::RedisPoolCreate {
+                        name: "cache",
+                        host: redis.redis_host.clone(),
+                        port: redis.redis_port,
+                        db: redis.redis_db,
+                        tls: redis.tls.unwrap_or(false),
+                        pool_size: redis.pool_size,
+                    })?;
+                    Some(pool)
+                }
+                None => None,
+            }
         };
         {
             if let Some(pool) = cache_pool.as_ref() {
-                let mut cnn = pool.get().await.expect("Failed to get cache connection");
+                let mut cnn = pool
+                    .get()
+                    .await
+                    .map_err(|e| StateInitError::CacheConn(e.to_string()))?;
                 let _pong: String = deadpool_redis::redis::cmd("PING")
                     .query_async(&mut *cnn)
                     .await
-                    .expect("Failed to ping");
+                    .map_err(|e| StateInitError::CachePing(e.to_string()))?;
             }
         }
         info!("cache pool connect successfully");
         let cookie_pool = if single_node_mode {
             None
         } else {
-            config.cookie.as_ref().map(|redis| {
-            create_redis_pool(
-                &redis.redis_host,
-                redis.redis_port,
-                redis.redis_db,
-                &redis.redis_username,
-                &redis.redis_password,
-                redis.pool_size,
-                redis.tls.unwrap_or(false),
-            )
-                .expect("Failed to connect cache")
-            })
+            match config.cookie.as_ref() {
+                Some(redis) => {
+                    let pool = create_redis_pool(
+                        &redis.redis_host,
+                        redis.redis_port,
+                        redis.redis_db,
+                        &redis.redis_username,
+                        &redis.redis_password,
+                        redis.pool_size,
+                        redis.tls.unwrap_or(false),
+                    )
+                    .ok_or_else(|| StateInitError::RedisPoolCreate {
+                        name: "cookie",
+                        host: redis.redis_host.clone(),
+                        port: redis.redis_port,
+                        db: redis.redis_db,
+                        tls: redis.tls.unwrap_or(false),
+                        pool_size: redis.pool_size,
+                    })?;
+                    Some(pool)
+                }
+                None => None,
+            }
         };
         info!("cookie pool connect successfully");
 
@@ -242,7 +326,7 @@ impl State {
               error!("Failed to start config watcher: {}", e);
         }
 
-        State {
+        Ok(State {
             db,
             config: config_arc,
             cache_service,
@@ -252,6 +336,6 @@ impl State {
             api_limiter,
             status_tracker: error_tracker,
             redis: cache_pool,
-        }
+        })
     }
 }

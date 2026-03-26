@@ -237,6 +237,10 @@ For performance and optimization recommendations, see:
 ## 9. Document Index (Retained)
 
 New detailed implementation plans:
+- `docs/dag/DAG_GUIDE.md`
+- `docs/dag/DAG_API_REFERENCE.md`
+- `docs/dag/DAG_RUNBOOK.md`
+- `docs/design/module_trait_dag_execution_refactor_plan.md`
 - `docs/design/task_model_chain_unification_plan.md`
 - `docs/contract_test_coverage.md`
 - `docs/alerts/backpressure_runbook.md`

@@ -55,6 +55,12 @@ pub mod queue {
     pub use crate::queue::RedisCompensator;
     pub use crate::queue::RedisQueue;
 }
+pub mod schedule {
+    pub use crate::schedule::Dag;
+    pub use crate::schedule::DagError;
+    pub use crate::schedule::DagScheduler;
+    pub use crate::schedule::TaskPayload;
+}
 pub mod sync {
     pub use crate::sync::DistributedSync;
     pub use crate::sync::KafkaBackend;

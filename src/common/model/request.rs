@@ -13,6 +13,7 @@ use once_cell::sync::OnceCell;
 use crate::common::interface::storage::{Offloadable, BlobStorage};
 use std::sync::Arc;
 use async_trait::async_trait;
+use log::warn;
 
 pub enum RequestMethod {
     Post,
@@ -200,7 +201,14 @@ impl Request {
         self
     }
     pub fn with_json<T: Serialize + ?Sized>(mut self, json: &T) -> Self {
-        self.json = Some(serde_json::to_value(json).unwrap());
+        match serde_json::to_value(json) {
+            Ok(value) => {
+                self.json = Some(value);
+            }
+            Err(e) => {
+                warn!("Request::with_json serialization failed: {}", e);
+            }
+        }
         self
     }
     pub fn with_body(mut self, body: Vec<u8>) -> Self {
@@ -208,7 +216,14 @@ impl Request {
         self
     }
     pub fn with_form<T: Serialize + ?Sized>(mut self, form: &T) -> Self {
-        self.form = Some(serde_json::to_value(form).unwrap());
+        match serde_json::to_value(form) {
+            Ok(value) => {
+                self.form = Some(value);
+            }
+            Err(e) => {
+                warn!("Request::with_form serialization failed: {}", e);
+            }
+        }
         self
     }
     pub fn with_meta<T>(mut self, meta: T) -> Self
@@ -285,16 +300,6 @@ impl Request {
     }
     pub fn enable_response_cache(mut self, enable: bool) -> Self {
         self.enable_response_cache = enable;
-        self
-    }
-    pub fn enable_session_with<T>(mut self, hash_able: &T) -> Self
-    where
-        T: Serialize,
-    {
-        if let Ok(hash_str) = serde_json::to_string(hash_able) {
-            self.enable_session = true;
-            self.hash_str = Some(md5(hash_str.as_bytes()));
-        }
         self
     }
     pub fn enable_response_cache_with<T>(mut self, hash_able: &T) -> Self

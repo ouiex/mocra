@@ -17,6 +17,8 @@ pub mod errors;
 pub mod proxy;
 #[path = "queue/lib.rs"]
 pub mod queue;
+#[path = "schedule/lib.rs"]
+pub mod schedule;
 #[path = "sync/lib.rs"]
 pub mod sync;
 #[path = "utils/lib.rs"]

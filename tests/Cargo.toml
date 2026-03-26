@@ -47,6 +47,10 @@ path = "src/log_stress.rs"
 name = "session_e2e"
 path = "src/session_e2e.rs"
 
+[[bin]]
+name = "dag_module_trait_e2e"
+path = "src/dag_module_trait_e2e.rs"
+
 
 
 

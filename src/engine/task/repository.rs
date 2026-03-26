@@ -3,7 +3,8 @@ use crate::common::model::entity::*;
 use crate::errors::{ Result};
 use crate::utils::txn::begin_read;
 use sea_orm::{
-    ColumnTrait, DatabaseConnection, DbBackend, EntityTrait, QueryFilter, Statement, Value,
+    ColumnTrait, ConnectionTrait, DatabaseConnection, DbBackend, EntityTrait, QueryFilter,
+    Statement, TryGetable, Value,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -26,12 +27,48 @@ impl TaskRepository {
             .await
             .map_err(|e| OrmError::ConnectionError(e.to_string().into()))?;
 
+        if self.db.get_database_backend() == DbBackend::Sqlite {
+            let account_escaped = account_name.replace('\'', "''");
+            let sql = format!(
+                "select id from base.account where name = '{account_escaped}' and enabled = true limit 1"
+            );
+            let row = txn
+                .query_one(Statement::from_string(DbBackend::Sqlite, sql))
+                .await
+                .map_err(|e| {
+                    OrmError::QueryExecutionError(
+                        format!("load_account(sqlite raw) failed: {e}").into(),
+                    )
+                })?
+                .ok_or_else(|| OrmError::NotFound)?;
+
+            let id: i32 = row
+                .try_get("", "id")
+                .map_err(|e| OrmError::QueryExecutionError(format!("load_account(sqlite id decode) failed: {e}").into()))?;
+            let now = chrono::Utc::now().naive_utc();
+            let account = AccountModel {
+                id,
+                name: account_name.to_string(),
+                modules: vec![],
+                enabled: true,
+                config: serde_json::json!({}),
+                priority: 1,
+                created_at: now,
+                updated_at: now,
+            };
+            return Ok(account);
+        }
+
         let account = AccountEntity::find()
             .filter(AccountColumn::Name.eq(account_name))
             .filter(AccountColumn::Enabled.eq(true))
             .one(&txn)
             .await
-            .map_err(|e| OrmError::QueryExecutionError(e.to_string().into()))?
+            .map_err(|e| {
+                OrmError::QueryExecutionError(
+                    format!("load_account(filter) failed: {e}").into(),
+                )
+            })?
             .ok_or_else(|| OrmError::NotFound)?;
 
         Ok(account)
@@ -43,12 +80,48 @@ impl TaskRepository {
             .await
             .map_err(|e| OrmError::ConnectionError(e.to_string().into()))?;
 
+        if self.db.get_database_backend() == DbBackend::Sqlite {
+            let platform_escaped = platform_name.replace('\'', "''");
+            let sql = format!(
+                "select id from base.platform where name = '{platform_escaped}' and enabled = true limit 1"
+            );
+            let row = txn
+                .query_one(Statement::from_string(DbBackend::Sqlite, sql))
+                .await
+                .map_err(|e| {
+                    OrmError::QueryExecutionError(
+                        format!("load_platform(sqlite raw) failed: {e}").into(),
+                    )
+                })?
+                .ok_or_else(|| OrmError::NotFound)?;
+
+            let id: i32 = row
+                .try_get("", "id")
+                .map_err(|e| OrmError::QueryExecutionError(format!("load_platform(sqlite id decode) failed: {e}").into()))?;
+            let now = chrono::Utc::now().naive_utc();
+            let platform = PlatformModel {
+                id,
+                name: platform_name.to_string(),
+                description: None,
+                base_url: None,
+                enabled: true,
+                config: serde_json::json!({}),
+                created_at: now,
+                updated_at: now,
+            };
+            return Ok(platform);
+        }
+
         let platform = PlatformEntity::find()
             .filter(PlatformColumn::Name.eq(platform_name))
             .filter(PlatformColumn::Enabled.eq(true))
             .one(&txn)
             .await
-            .map_err(|e| OrmError::QueryExecutionError(e.to_string().into()))?
+            .map_err(|e| {
+                OrmError::QueryExecutionError(
+                    format!("load_platform(filter) failed: {e}").into(),
+                )
+            })?
             .ok_or_else(|| OrmError::NotFound)?;
 
         Ok(platform)
@@ -86,7 +159,58 @@ impl TaskRepository {
             .await
             .map_err(|e| OrmError::ConnectionError(e.to_string().into()))?;
 
-        let module_sql = r#"
+        let db_backend = self.db.get_database_backend();
+        if db_backend == DbBackend::Sqlite {
+            let platform_escaped = platform_name.replace('"', "\"").replace('\'', "''");
+            let account_escaped = account_name.replace('"', "\"").replace('\'', "''");
+            let sql = format!(
+                r#"
+        select a.* from base.module as a
+        left join base.rel_module_platform rmp on a.id = rmp.module_id
+        left join base.rel_module_account rma on a.id = rma.module_id
+        left join base.rel_account_platform rap on rma.account_id = rap.account_id and rmp.platform_id = rap.platform_id
+        left join base.platform as p on rmp.platform_id = p.id
+        left join base.account as acc on rma.account_id = acc.id
+        where a.enabled = true
+        and rmp.enabled = true
+        and rma.enabled = true
+        and rap.enabled = true
+        and p.enabled = true
+        and acc.enabled = true
+        and p.name = '{platform_escaped}'
+        and acc.name = '{account_escaped}'"#
+            );
+
+            let modules = ModuleEntity::find()
+                .from_raw_sql(Statement::from_string(db_backend, sql))
+                .all(&txn)
+                .await
+                .map_err(|e| {
+                    OrmError::QueryExecutionError(
+                        format!("load_modules_by_account_platform(sqlite raw) failed: {e}").into(),
+                    )
+                })?;
+            return Ok(modules);
+        }
+
+        let module_sql = if db_backend == DbBackend::Sqlite {
+            r#"
+        select a.* from base.module as a
+        left join base.rel_module_platform rmp on a.id = rmp.module_id
+        left join base.rel_module_account rma on a.id = rma.module_id
+        left join base.rel_account_platform rap on rma.account_id = rap.account_id and rmp.platform_id = rap.platform_id
+        left join base.platform as p on rmp.platform_id = p.id
+        left join base.account as acc on rma.account_id = acc.id
+        where a.enabled = true
+        and rmp.enabled = true
+        and rma.enabled = true
+        and rap.enabled = true
+        and p.enabled = true
+        and acc.enabled = true
+        and p.name = ?
+        and acc.name = ?"#
+        } else {
+            r#"
         select a.* from base.module as a
         left join base.rel_module_platform rmp on a.id = rmp.module_id
         left join base.rel_module_account rma on a.id = rma.module_id
@@ -100,11 +224,12 @@ impl TaskRepository {
         and p.enabled = true
         and acc.enabled = true
         and p.name = $1
-        and acc.name = $2"#;
+        and acc.name = $2"#
+        };
 
         let modules = ModuleEntity::find()
             .from_raw_sql(Statement::from_sql_and_values(
-                DbBackend::Postgres,
+                db_backend,
                 module_sql,
                 vec![
                     Value::from(platform_name.to_string()),
@@ -129,13 +254,74 @@ impl TaskRepository {
             .await
             .map_err(|e| OrmError::ConnectionError(e.to_string().into()))?;
 
+        let db_backend = self.db.get_database_backend();
+        if db_backend == DbBackend::Sqlite {
+            let platform_escaped = platform_name.replace('"', "\"").replace('\'', "''");
+            let account_escaped = account_name.replace('"', "\"").replace('\'', "''");
+            let module_list = module_name
+                .iter()
+                .map(|name| format!("'{}'", name.replace('"', "\"").replace('\'', "''")))
+                .collect::<Vec<_>>()
+                .join(", ");
+
+            let sql = format!(
+                r#"
+        select a.* from base.module as a
+        left join base.rel_module_platform rmp on a.id = rmp.module_id
+        left join base.rel_module_account rma on a.id = rma.module_id
+        left join base.rel_account_platform rap on rma.account_id = rap.account_id and rmp.platform_id = rap.platform_id
+        left join base.platform as p on rmp.platform_id = p.id
+        left join base.account as acc on rma.account_id = acc.id
+        where a.enabled = true
+        and rmp.enabled = true
+        and rma.enabled = true
+        and rap.enabled = true
+        and p.enabled = true
+        and acc.enabled = true
+        and a.name IN ({module_list})
+        and p.name = '{platform_escaped}'
+        and acc.name = '{account_escaped}'"#
+            );
+
+            let module = ModuleEntity::find()
+                .from_raw_sql(Statement::from_string(db_backend, sql))
+                .all(&txn)
+                .await
+                .map_err(|e| OrmError::QueryExecutionError(e.to_string().into()))?;
+            return Ok(module);
+        }
+
         // Build dynamic placeholders for IN clause.
-        let placeholders: Vec<String> =
-            (1..=module_name.len()).map(|i| format!("${i}")).collect();
+        let placeholders: Vec<String> = if db_backend == DbBackend::Sqlite {
+            (0..module_name.len()).map(|_| "?".to_string()).collect()
+        } else {
+            (1..=module_name.len()).map(|i| format!("${i}")).collect()
+        };
         let in_clause = placeholders.join(", ");
 
-        let module_sql = format!(
-            r#"  
+        let module_sql = if db_backend == DbBackend::Sqlite {
+            format!(
+                r#"  
+        select a.* from base.module as a  
+        left join base.rel_module_platform rmp on a.id = rmp.module_id  
+        left join base.rel_module_account rma on a.id = rma.module_id  
+        left join base.rel_account_platform rap on rma.account_id = rap.account_id and rmp.platform_id = rap.platform_id  
+        left join base.platform as p on rmp.platform_id = p.id  
+        left join base.account as acc on rma.account_id = acc.id  
+        where a.enabled = true  
+        and rmp.enabled = true  
+        and rma.enabled = true  
+        and rap.enabled = true  
+        and p.enabled = true  
+        and acc.enabled = true  
+        and a.name IN ({})  
+        and p.name = ?  
+        and acc.name = ?"#,
+                in_clause,
+            )
+        } else {
+            format!(
+                r#"  
         select a.* from base.module as a  
         left join base.rel_module_platform rmp on a.id = rmp.module_id  
         left join base.rel_module_account rma on a.id = rma.module_id  
@@ -151,10 +337,11 @@ impl TaskRepository {
         and a.name IN ({})  
         and p.name = ${}  
         and acc.name = ${}"#,
-            in_clause,
-            module_name.len() + 1,
-            module_name.len() + 2
-        );
+                in_clause,
+                module_name.len() + 1,
+                module_name.len() + 2
+            )
+        };
 
         // Build SQL bind values in placeholder order.
         let mut values: Vec<Value> = module_name
@@ -166,7 +353,7 @@ impl TaskRepository {
 
         let module = ModuleEntity::find()
             .from_raw_sql(Statement::from_sql_and_values(
-                DbBackend::Postgres,
+                db_backend,
                 module_sql,
                 values,
             ))

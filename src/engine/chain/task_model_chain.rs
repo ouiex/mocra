@@ -1201,6 +1201,7 @@ impl EventProcessorTrait<Task, Vec<Module>> for TaskModuleProcessor {
 }
 
 pub struct TaskProcessor {
+    task_manager: Arc<TaskManager>,
 }
 #[async_trait]
 impl ProcessorTrait<Module, SyncBoxStream<'static, Request>> for TaskProcessor {
@@ -1220,6 +1221,258 @@ impl ProcessorTrait<Module, SyncBoxStream<'static, Request>> for TaskProcessor {
         );
 
         let (meta, login_info) = input.runtime_task_context();
+        let dag_flags = input.dag_runtime_flags();
+        if dag_flags.dry_run {
+            match input.run_dag_preflight_dry_run().await {
+                Ok(_) => {
+                    counter!(
+                        "module_dag_preflight_total",
+                        "result" => "ok".to_string(),
+                        "module" => input.module.name()
+                    )
+                    .increment(1);
+                }
+                Err(err) => {
+                    warn!(
+                        "[TaskProcessor] module dag dry-run preflight failed: module={} err={}",
+                        input.module.name(),
+                        err
+                    );
+                    counter!(
+                        "module_dag_preflight_total",
+                        "result" => "err".to_string(),
+                        "module" => input.module.name()
+                    )
+                    .increment(1);
+                }
+            }
+        }
+
+        let cutover_require_shadow_match = input
+            .config
+            .get_config_value("module_dag_cutover_require_shadow_match")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+        let cutover_require_warmup = input
+            .config
+            .get_config_value("module_dag_cutover_require_warmup")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+        let cutover_min_shadow_matches = input
+            .config
+            .get_config_value("module_dag_cutover_min_shadow_matches")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(3) as usize;
+        let cutover_min_observation_window_secs = input
+            .config
+            .get_config_value("module_dag_cutover_min_observation_window_secs")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(600);
+        let cutover_scope = TaskManager::module_cutover_scope(&input);
+        let mut shadow_compare_gate_passed = true;
+
+        if dag_flags.shadow_execute {
+            let expected_steps = input.processor.get_total_steps().await;
+            match self
+                .task_manager
+                .execute_module_dag_linear_compat_with_compare(
+                    input.module.name().as_str(),
+                    expected_steps,
+                )
+                .await
+            {
+                Ok(compare) => {
+                    counter!(
+                        "module_dag_shadow_execute_total",
+                        "result" => "ok".to_string(),
+                        "module" => input.module.name()
+                    )
+                    .increment(1);
+                    counter!(
+                        "module_dag_shadow_compare_total",
+                        "result" => compare.compare_result.to_string(),
+                        "module" => input.module.name()
+                    )
+                    .increment(1);
+                    debug!(
+                        "[TaskProcessor] module dag shadow execute succeeded: module={} outputs={} node_results={} expected_steps={} shadow_steps={} compare={}",
+                        input.module.name(),
+                        compare.report.outputs.len(),
+                        compare.report.node_results.len(),
+                        compare.expected_steps,
+                        compare.shadow_step_outputs,
+                        compare.compare_result
+                    );
+                    self.task_manager
+                        .record_module_dag_shadow_compare_result(
+                            cutover_scope.as_str(),
+                            compare.compare_result,
+                        );
+                    if cutover_require_shadow_match && compare.compare_result != "match" {
+                        shadow_compare_gate_passed = false;
+                    }
+                }
+                Err(err) => {
+                    counter!(
+                        "module_dag_shadow_execute_total",
+                        "result" => "err".to_string(),
+                        "module" => input.module.name()
+                    )
+                    .increment(1);
+                    counter!(
+                        "module_dag_shadow_compare_total",
+                        "result" => "error".to_string(),
+                        "module" => input.module.name()
+                    )
+                    .increment(1);
+                    warn!(
+                        "[TaskProcessor] module dag shadow execute failed: module={} err={}",
+                        input.module.name(),
+                        err
+                    );
+                    self.task_manager
+                        .record_module_dag_shadow_compare_result(
+                            cutover_scope.as_str(),
+                            "error",
+                        );
+                    if cutover_require_shadow_match {
+                        shadow_compare_gate_passed = false;
+                    }
+                }
+            }
+        }
+
+        if dag_flags.primary_preview {
+            if dag_flags.cutover_requested && !dag_flags.cutover_supported {
+                counter!(
+                    "module_dag_cutover_total",
+                    "result" => "blocked_not_supported".to_string(),
+                    "module" => input.module.name()
+                )
+                .increment(1);
+                warn!(
+                    "[TaskProcessor] module dag cutover requested but module not in cutover whitelist: module={} (fallback to preview/legacy)",
+                    input.module.name()
+                );
+            }
+
+            let cutover_threshold = input
+                .config
+                .get_config_value("module_dag_cutover_fail_threshold")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(3) as usize;
+            let cutover_recovery_window_secs = input
+                .config
+                .get_config_value("module_dag_cutover_recovery_window_secs")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(300);
+            let cutover_shadow_gate_allowed = !cutover_require_shadow_match
+                || !dag_flags.shadow_execute
+                || shadow_compare_gate_passed;
+            let cutover_warmup_gate_allowed = !cutover_require_warmup
+                || (dag_flags.shadow_execute
+                    && self
+                        .task_manager
+                        .should_allow_module_dag_cutover_warmup(
+                            cutover_scope.as_str(),
+                            cutover_min_shadow_matches,
+                            cutover_min_observation_window_secs,
+                        ));
+            let cutover_allowed = !dag_flags.primary_cutover
+                || (cutover_shadow_gate_allowed
+                    && cutover_warmup_gate_allowed
+                    && self
+                        .task_manager
+                        .should_allow_module_dag_cutover(
+                            cutover_scope.as_str(),
+                            cutover_threshold,
+                            cutover_recovery_window_secs,
+                        ));
+
+            if dag_flags.primary_cutover && !cutover_allowed {
+                let result = if !cutover_shadow_gate_allowed {
+                    "blocked_shadow_compare"
+                } else if !cutover_warmup_gate_allowed {
+                    "blocked_warmup"
+                } else {
+                    "auto_downgraded"
+                };
+                counter!(
+                    "module_dag_cutover_total",
+                    "result" => result.to_string(),
+                    "module" => input.module.name()
+                )
+                .increment(1);
+                warn!(
+                    "[TaskProcessor] module dag cutover blocked: module={} threshold={} recovery_window_secs={} shadow_gate_allowed={} warmup_gate_allowed={} min_shadow_matches={} min_observation_window_secs={} (fallback to legacy generate)",
+                    input.module.name(),
+                    cutover_threshold,
+                    cutover_recovery_window_secs,
+                    cutover_shadow_gate_allowed,
+                    cutover_warmup_gate_allowed,
+                    cutover_min_shadow_matches,
+                    cutover_min_observation_window_secs
+                );
+            }
+
+            match self
+                .task_manager
+                .execute_module_dag_linear_compat(input.module.name().as_str())
+                .await
+            {
+                Ok(report) => {
+                    counter!(
+                        "module_dag_primary_execute_total",
+                        "result" => "ok".to_string(),
+                        "module" => input.module.name()
+                    )
+                    .increment(1);
+                    if dag_flags.primary_cutover {
+                        if cutover_allowed {
+                            counter!(
+                                "module_dag_cutover_total",
+                                "result" => "preview_ok".to_string(),
+                                "module" => input.module.name()
+                            )
+                            .increment(1);
+                            self.task_manager
+                                .record_module_dag_cutover_success(cutover_scope.as_str());
+                        }
+                    }
+                    debug!(
+                        "[TaskProcessor] module dag primary preview succeeded: module={} outputs={} node_results={} (legacy generate kept for compatibility)",
+                        input.module.name(),
+                        report.outputs.len(),
+                        report.node_results.len()
+                    );
+                }
+                Err(err) => {
+                    counter!(
+                        "module_dag_primary_execute_total",
+                        "result" => "err".to_string(),
+                        "module" => input.module.name()
+                    )
+                    .increment(1);
+                    if dag_flags.primary_cutover {
+                        if cutover_allowed {
+                            counter!(
+                                "module_dag_cutover_total",
+                                "result" => "fallback_on_error".to_string(),
+                                "module" => input.module.name()
+                            )
+                            .increment(1);
+                            self.task_manager
+                                .record_module_dag_cutover_failure(cutover_scope.as_str());
+                        }
+                    }
+                    warn!(
+                        "[TaskProcessor] module dag primary preview failed, fallback to legacy generate: module={} err={}",
+                        input.module.name(),
+                        err
+                    );
+                }
+            }
+        }
         // Context propagation path:
         // `ParserTaskModel.meta -> Task.metadata -> Module.bind_task_context -> Module.generate`.
         let requests: SyncBoxStream<'static, Request> = match input.generate(meta, login_info).await {
@@ -1851,7 +2104,9 @@ pub async fn create_unified_task_ingress_chain(
             })
             .then(VecToStreamProcessor::new())
             .then_map_stream_in_with_strategy::<SyncBoxStream<'static, Request>, _>(
-                TaskProcessor {},
+                TaskProcessor {
+                    task_manager: task_manager.clone(),
+                },
                 task_concurrency,
                 ErrorStrategy::Skip,
             )
@@ -1891,7 +2146,9 @@ pub async fn create_unified_task_ingress_chain(
             })
             .then(VecToStreamProcessor::new())
             .then_map_stream_in_with_strategy::<SyncBoxStream<'static, Request>, _>(
-                TaskProcessor {},
+                TaskProcessor {
+                    task_manager: task_manager.clone(),
+                },
                 parser_concurrency,
                 ErrorStrategy::Skip,
             )
@@ -1911,7 +2168,7 @@ pub async fn create_unified_task_ingress_chain(
     let error_chain = Arc::new(
         EventAwareTypedChain::<TaskErrorEvent, TaskErrorEvent>::new(event_bus)
             .then::<Task, _>(TaskModelProcessor {
-                task_manager,
+                task_manager: task_manager.clone(),
                 state: state.clone(),
                 queue_manager: queue_manager.clone(),
                 event_bus: None,
@@ -1925,7 +2182,9 @@ pub async fn create_unified_task_ingress_chain(
             })
             .then(VecToStreamProcessor::new())
             .then_map_stream_in_with_strategy::<SyncBoxStream<'static, Request>, _>(
-                TaskProcessor {},
+                TaskProcessor {
+                    task_manager: task_manager.clone(),
+                },
                 error_task_concurrency,
                 ErrorStrategy::Skip,
             )

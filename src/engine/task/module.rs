@@ -7,14 +7,27 @@ use std::sync::Arc;
 use uuid::Uuid;
 use futures::StreamExt;
 use crate::common::interface::{
-    DataMiddlewareHandle, DataStoreMiddlewareHandle, ModuleTrait, SyncBoxStream,
+    DataMiddlewareHandle, DataStoreMiddlewareHandle, ModuleNodeTrait, ModuleTrait, SyncBoxStream,
 };
 use crate::common::model::entity::{AccountModel, PlatformModel};
 use crate::common::model::login_info::LoginInfo;
 use crate::common::model::{Cookies, Headers, ModuleConfig, Response,Request};
 use crate::common::model::message::TaskOutputEvent;
 use crate::errors::RequestError;
+use crate::engine::task::module_dag_compiler::{ModuleDagCompiler, ModuleDagDefinition};
 use crate::engine::task::module_processor_with_chain::ModuleProcessorWithChain;
+use crate::schedule::dag::{Dag, DagError};
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ModuleDagRuntimeFlags {
+    pub enabled: bool,
+    pub dry_run: bool,
+    pub shadow_execute: bool,
+    pub primary_preview: bool,
+    pub cutover_requested: bool,
+    pub cutover_supported: bool,
+    pub primary_cutover: bool,
+}
 
 /// Runtime module instance bound to account/platform context.
 ///
@@ -56,6 +69,158 @@ pub struct Module {
     pub bound_login_info: Option<LoginInfo>,
 }
 impl Module {
+    fn module_dag_enabled(&self) -> bool {
+        self.config
+            .get_config_value("module_dag_enabled")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+    }
+
+    fn module_dag_whitelist_match(&self) -> bool {
+        let module_name = self.module.name();
+        let Some(value) = self.config.get_config_value("module_dag_whitelist") else {
+            return true;
+        };
+
+        if let Some(list) = value.as_array() {
+            return list
+                .iter()
+                .filter_map(|v| v.as_str())
+                .any(|name| name == module_name);
+        }
+
+        if let Some(csv) = value.as_str() {
+            return csv
+                .split(',')
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .any(|name| name == module_name);
+        }
+
+        true
+    }
+
+    fn module_dag_cutover_whitelist_match(&self) -> bool {
+        let module_name = self.module.name();
+        let Some(value) = self
+            .config
+            .get_config_value("module_dag_cutover_whitelist")
+        else {
+            // Cutover must be explicitly allowlisted for production safety.
+            return false;
+        };
+
+        if let Some(list) = value.as_array() {
+            return list
+                .iter()
+                .filter_map(|v| v.as_str())
+                .any(|name| name == module_name);
+        }
+
+        if let Some(csv) = value.as_str() {
+            return csv
+                .split(',')
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .any(|name| name == module_name);
+        }
+
+        false
+    }
+
+    fn module_dag_force_linear_compat(&self) -> bool {
+        self.config
+            .get_config_value("module_dag_force_linear_compat")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true)
+    }
+
+    fn should_validate_linear_dag_compat(&self) -> bool {
+        self.module_dag_enabled()
+            && self.module_dag_force_linear_compat()
+            && self.module_dag_whitelist_match()
+    }
+
+    pub fn module_dag_dry_run(&self) -> bool {
+        self.config
+            .get_config_value("module_dag_dry_run")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+    }
+
+    pub fn should_run_dag_dry_run(&self) -> bool {
+        self.module_dag_enabled()
+            && self.module_dag_dry_run()
+            && self.module_dag_force_linear_compat()
+            && self.module_dag_whitelist_match()
+    }
+
+    pub fn dag_runtime_flags(&self) -> ModuleDagRuntimeFlags {
+        let enabled = self.module_dag_enabled()
+            && self.module_dag_force_linear_compat()
+            && self.module_dag_whitelist_match();
+        let dry_run = enabled && self.module_dag_dry_run();
+        let shadow_execute = dry_run && self.module_dag_shadow_execute();
+        let primary_preview = enabled && self.module_dag_execute_primary();
+        let cutover_requested = primary_preview && self.module_dag_execute_primary_cutover();
+        let cutover_supported = cutover_requested && self.module_dag_cutover_whitelist_match();
+        let primary_cutover = cutover_supported;
+
+        ModuleDagRuntimeFlags {
+            enabled,
+            dry_run,
+            shadow_execute,
+            primary_preview,
+            cutover_requested,
+            cutover_supported,
+            primary_cutover,
+        }
+    }
+
+    pub fn module_dag_shadow_execute(&self) -> bool {
+        self.config
+            .get_config_value("module_dag_shadow_execute")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+    }
+
+    pub fn should_run_dag_shadow_execute(&self) -> bool {
+        self.dag_runtime_flags().shadow_execute
+    }
+
+    pub fn module_dag_execute_primary(&self) -> bool {
+        self.config
+            .get_config_value("module_dag_execute_primary")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+    }
+
+    pub fn module_dag_execute_primary_cutover(&self) -> bool {
+        self.config
+            .get_config_value("module_dag_execute_primary_cutover")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+    }
+
+    pub fn should_run_dag_execute_primary(&self) -> bool {
+        self.dag_runtime_flags().primary_preview
+    }
+
+    fn validate_linear_dag_from_nodes(&self, nodes: &[Arc<dyn ModuleNodeTrait>]) {
+        if !self.should_validate_linear_dag_compat() {
+            return;
+        }
+
+        let definition = ModuleDagDefinition::from_linear_steps(nodes.to_vec());
+        if let Err(err) = ModuleDagCompiler::compile(definition) {
+            warn!(
+                "module dag compile validation failed, fallback to chain mode: module={} err={}",
+                self.module.name(),
+                err
+            );
+        }
+    }
+
     /// Binds task metadata and optional login context.
     pub fn bind_task_context(
         &mut self,
@@ -197,10 +362,36 @@ impl Module {
                 e
             );
         }
-        let node = self.module.add_step().await;
-        for n in node {
+        let nodes = self.module.add_step().await;
+
+        self.validate_linear_dag_from_nodes(&nodes);
+
+        for n in nodes {
             self.processor.add_step_node(n).await;
         }
+    }
+
+    /// Builds a linear-compatible DAG definition from module steps.
+    pub async fn build_dag_definition_linear_compat(&self) -> ModuleDagDefinition {
+        let steps = self.module.add_step().await;
+        ModuleDagDefinition::from_linear_steps(steps)
+    }
+
+    /// Builds a DAG graph from module steps in compatibility mode.
+    pub async fn prepare_execution_graph(&self) -> std::result::Result<Dag, DagError> {
+        let definition = self.build_dag_definition_linear_compat().await;
+        ModuleDagCompiler::compile(definition)
+    }
+
+    /// Runs DAG preflight validation in dry-run mode.
+    ///
+    /// Returns `Ok(())` when dry-run is disabled, so callers can invoke it safely
+    /// without duplicating config checks.
+    pub async fn run_dag_preflight_dry_run(&self) -> std::result::Result<(), DagError> {
+        if !self.should_run_dag_dry_run() {
+            return Ok(());
+        }
+        self.prepare_execution_graph().await.map(|_| ())
     }
     
     /// Parses response at the routed step and handles terminal lifecycle hook.
@@ -307,11 +498,37 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use crate::cacheable::CacheService;
-    use crate::common::interface::ModuleTrait;
+    use crate::common::interface::{ModuleNodeTrait, ModuleTrait, SyncBoxStream, ToSyncBoxStream};
     use crate::common::model::entity::{AccountModel, PlatformModel};
+    use crate::common::model::message::TaskOutputEvent;
+    use crate::common::model::{Request, Response};
     use crate::engine::task::module_processor_with_chain::ModuleProcessorWithChain;
 
     struct LoginRequiredTestModule;
+
+    struct DummyNode;
+
+    #[async_trait]
+    impl ModuleNodeTrait for DummyNode {
+        async fn generate(
+            &self,
+            _config: Arc<ModuleConfig>,
+            _params: Map<String, serde_json::Value>,
+            _login_info: Option<LoginInfo>,
+        ) -> Result<SyncBoxStream<'static, Request>> {
+            Ok(Vec::<Request>::new().to_stream())
+        }
+
+        async fn parser(
+            &self,
+            _response: Response,
+            _config: Option<Arc<ModuleConfig>>,
+        ) -> Result<TaskOutputEvent> {
+            Ok(TaskOutputEvent::default())
+        }
+    }
+
+    struct DryRunModuleWithStep;
 
     #[async_trait]
     impl ModuleTrait for LoginRequiredTestModule {
@@ -332,6 +549,32 @@ mod tests {
             Self: Sized,
         {
             Arc::new(Self)
+        }
+    }
+
+    #[async_trait]
+    impl ModuleTrait for DryRunModuleWithStep {
+        fn should_login(&self) -> bool {
+            false
+        }
+
+        fn name(&self) -> String {
+            "dry_run_with_step".to_string()
+        }
+
+        fn version(&self) -> i32 {
+            1
+        }
+
+        fn default_arc() -> Arc<dyn ModuleTrait>
+        where
+            Self: Sized,
+        {
+            Arc::new(Self)
+        }
+
+        async fn add_step(&self) -> Vec<Arc<dyn ModuleNodeTrait>> {
+            vec![Arc::new(DummyNode)]
         }
     }
 
@@ -403,5 +646,103 @@ mod tests {
                 assert!(msg.contains("module need login"), "unexpected error message: {msg}");
             }
         }
+    }
+
+    #[tokio::test]
+    async fn dag_dry_run_disabled_returns_ok() {
+        let module = build_test_module(Arc::new(LoginRequiredTestModule));
+        let result = module.run_dag_preflight_dry_run().await;
+        assert!(result.is_ok());
+        assert!(!module.should_run_dag_dry_run());
+    }
+
+    #[tokio::test]
+    async fn dag_dry_run_enabled_with_empty_steps_returns_error() {
+        let mut module = build_test_module(Arc::new(LoginRequiredTestModule));
+        let mut cfg = (*module.config).clone();
+        cfg.module_config = serde_json::json!({
+            "module_dag_enabled": true,
+            "module_dag_dry_run": true,
+            "module_dag_force_linear_compat": true
+        });
+        module.config = Arc::new(cfg);
+
+        assert!(module.should_run_dag_dry_run());
+        let result = module.run_dag_preflight_dry_run().await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn dag_dry_run_enabled_with_steps_returns_ok() {
+        let mut module = build_test_module(Arc::new(DryRunModuleWithStep));
+        let mut cfg = (*module.config).clone();
+        cfg.module_config = serde_json::json!({
+            "module_dag_enabled": true,
+            "module_dag_dry_run": true,
+            "module_dag_force_linear_compat": true
+        });
+        module.config = Arc::new(cfg);
+
+        assert!(module.should_run_dag_dry_run());
+        let result = module.run_dag_preflight_dry_run().await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn dag_dry_run_enabled_but_not_in_whitelist_returns_ok_without_running() {
+        let mut module = build_test_module(Arc::new(DryRunModuleWithStep));
+        let mut cfg = (*module.config).clone();
+        cfg.module_config = serde_json::json!({
+            "module_dag_enabled": true,
+            "module_dag_dry_run": true,
+            "module_dag_force_linear_compat": true,
+            "module_dag_whitelist": ["other_module"]
+        });
+        module.config = Arc::new(cfg);
+
+        assert!(!module.should_run_dag_dry_run());
+        let result = module.run_dag_preflight_dry_run().await;
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn dag_cutover_requested_without_cutover_whitelist_is_not_supported() {
+        let mut module = build_test_module(Arc::new(DryRunModuleWithStep));
+        let mut cfg = (*module.config).clone();
+        cfg.module_config = serde_json::json!({
+            "module_dag_enabled": true,
+            "module_dag_force_linear_compat": true,
+            "module_dag_whitelist": ["dry_run_with_step"],
+            "module_dag_execute_primary": true,
+            "module_dag_execute_primary_cutover": true
+        });
+        module.config = Arc::new(cfg);
+
+        let flags = module.dag_runtime_flags();
+        assert!(flags.primary_preview);
+        assert!(flags.cutover_requested);
+        assert!(!flags.cutover_supported);
+        assert!(!flags.primary_cutover);
+    }
+
+    #[test]
+    fn dag_cutover_whitelist_enables_supported_module_cutover() {
+        let mut module = build_test_module(Arc::new(DryRunModuleWithStep));
+        let mut cfg = (*module.config).clone();
+        cfg.module_config = serde_json::json!({
+            "module_dag_enabled": true,
+            "module_dag_force_linear_compat": true,
+            "module_dag_whitelist": ["dry_run_with_step"],
+            "module_dag_execute_primary": true,
+            "module_dag_execute_primary_cutover": true,
+            "module_dag_cutover_whitelist": ["dry_run_with_step"]
+        });
+        module.config = Arc::new(cfg);
+
+        let flags = module.dag_runtime_flags();
+        assert!(flags.primary_preview);
+        assert!(flags.cutover_requested);
+        assert!(flags.cutover_supported);
+        assert!(flags.primary_cutover);
     }
 }

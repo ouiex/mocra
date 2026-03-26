@@ -278,7 +278,7 @@ impl Engine {
                 }
                 Err(e) => {
                     error!("Failed to bind to address {:?}", e);
-                    std::process::exit(1);
+                    return;
                 }
             };
             match axum::serve(listener, app.into_make_service()).await {
@@ -287,7 +287,7 @@ impl Engine {
                 }
                 Err(e) => {
                     error!("API server error: {:?}", e);
-                    std::process::exit(1);
+                    return;
                 }
             }
         });

@@ -143,21 +143,40 @@ impl QueueManager {
 
         let mut queue_manager = if let Some(redis_config) = &channel_config.redis {
             let batch_size = channel_config.batch_concurrency.unwrap_or(500);
-            let redis_queue = RedisQueue::new(
+            match RedisQueue::new(
                 redis_config,
                 channel_config.minid_time,
                 namespace,
                 batch_size,
                 nack_policy,
-            )
-                .expect("Failed to create RedisQueue");
-            info!("RedisQueue initialized successfully with batch_size: {}", batch_size);
-            QueueManager::new(Some(Arc::new(redis_queue)), channel_config.capacity)
+            ) {
+                Ok(redis_queue) => {
+                    info!("RedisQueue initialized successfully with batch_size: {}", batch_size);
+                    QueueManager::new(Some(Arc::new(redis_queue)), channel_config.capacity)
+                }
+                Err(e) => {
+                    error!(
+                        "RedisQueue init failed, fallback to in-memory queue: {}",
+                        e
+                    );
+                    QueueManager::new(None, channel_config.capacity)
+                }
+            }
         } else if let Some(kafka_config) = &channel_config.kafka {
-            let kafka_queue = KafkaQueue::new(kafka_config, channel_config.minid_time, namespace, nack_policy)
-                .expect("Failed to create KafkaQueue");
-            info!("KafkaQueue initialized successfully");
-            QueueManager::new(Some(Arc::new(kafka_queue)), channel_config.capacity)
+            match KafkaQueue::new(kafka_config, channel_config.minid_time, namespace, nack_policy)
+            {
+                Ok(kafka_queue) => {
+                    info!("KafkaQueue initialized successfully");
+                    QueueManager::new(Some(Arc::new(kafka_queue)), channel_config.capacity)
+                }
+                Err(e) => {
+                    error!(
+                        "KafkaQueue init failed, fallback to in-memory queue: {}",
+                        e
+                    );
+                    QueueManager::new(None, channel_config.capacity)
+                }
+            }
         } else {
             info!("In-Memory Queue initialized (Single Node Mode)");
             QueueManager::new(None, 10000)
@@ -186,11 +205,17 @@ impl QueueManager {
 
         // Initialize compensator
         if let Some(redis_config) = &channel_config.compensator {
-            let compensator = Arc::new(
-                RedisCompensator::new(redis_config, namespace)
-                    .expect("Failed to create RedisCompensator"),
-            );
-            queue_manager.with_compensator(compensator);
+            match RedisCompensator::new(redis_config, namespace) {
+                Ok(compensator) => {
+                    queue_manager.with_compensator(Arc::new(compensator));
+                }
+                Err(e) => {
+                    error!(
+                        "RedisCompensator init failed, continue without compensator: {}",
+                        e
+                    );
+                }
+            }
         }
 
         queue_manager.subscribe();

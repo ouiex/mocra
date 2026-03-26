@@ -61,3 +61,50 @@ groups:
         annotations:
           summary: "Queue closed detected in pipeline"
           description: "queue_closed backpressure counters observed continuously for 2m"
+
+  - name: dag_runtime_alerts
+    rules:
+      - alert: DagCriticalEventDetected
+        expr: sum by (source, event) (rate(dag_alert_event_total{severity="critical"}[5m])) > 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "DAG critical event detected"
+          description: "dag_alert_event_total critical event observed: source={{ $labels.source }} event={{ $labels.event }}"
+
+      - alert: DagWarningEventSustained
+        expr: sum by (source, event) (rate(dag_alert_event_total{severity="warning"}[5m])) > 0.5
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "DAG warning events sustained"
+          description: "dag_alert_event_total warning rate > 0.5/s for 10m: source={{ $labels.source }} event={{ $labels.event }}"
+
+      - alert: DagExecuteErrorNonRetryableHigh
+        expr: sum(rate(dag_execute_error_total{error_class="NonRetryable"}[5m])) > 0.2
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "DAG non-retryable execute error high"
+          description: "dag_execute_error_total NonRetryable > 0.2/s for 10m"
+
+      - alert: DagExecuteErrorRetryableStorm
+        expr: sum(rate(dag_execute_error_total{error_class="Retryable"}[5m])) > 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "DAG retryable error storm"
+          description: "dag_execute_error_total Retryable > 1/s for 5m"
+
+      - alert: DagRunStateSnapshotSaveError
+        expr: sum(rate(dag_run_state_store_total{result="save_error"}[5m])) > 0
+        for: 3m
+        labels:
+          severity: warning
+        annotations:
+          summary: "DAG run-state snapshot save errors"
+          description: "dag_run_state_store_total{result=save_error} observed continuously for 3m"
