@@ -13,7 +13,6 @@ use mocra::engine::engine::Engine;
 use mocra::engine::task::module_dag_compiler::{
     ModuleDagDefinition, ModuleDagEdgeDef, ModuleDagNodeDef,
 };
-use mocra::engine::task::module_dag_orchestrator::ModuleDagOrchestrator;
 use mocra::errors::Result;
 
 struct StartNode;
@@ -157,8 +156,14 @@ impl ModuleTrait for DemoDagModule {
         Arc::new(Self)
     }
 
+    /// 自定义多链路 DAG：start -> branch_a/branch_b -> merge。
+    async fn dag_definition(&self) -> Option<ModuleDagDefinition> {
+        Some(build_multi_route_definition())
+    }
+
+    /// 线性步骤：step_0(StartNode) -> step_1(FollowNode)。
+    /// 当 dag_definition 同时存在时，调度器会自动把两者合并为一个多链路 DAG。
     async fn add_step(&self) -> Vec<Arc<dyn ModuleNodeTrait>> {
-        // 这里的顺序就是线性 DAG 的步骤顺序：step_0 -> step_1。
         vec![Arc::new(StartNode), Arc::new(FollowNode)]
     }
 }
@@ -223,26 +228,18 @@ fn build_multi_route_definition() -> ModuleDagDefinition {
 #[tokio::main]
 async fn main() {
     // 1) 初始化 State + Engine。
-    // 请替换为你的配置文件。
     let state = Arc::new(State::new("tests/config.mock.pure.engine.toml").await);
     let engine = Engine::new(state, None).await;
 
-    // 2) 注册模块到引擎，后续任务运行时将按 add_step 的 DAG 兼容路径执行。
+    // 2) 注册模块到引擎（自动编译 DAG）。
     let module: Arc<dyn ModuleTrait> = Arc::new(DemoDagModule);
     engine.register_module(module.clone()).await;
 
-    // 3) 可选：编译线性兼容 DAG，确认节点注册正确。
-    let orchestrator = ModuleDagOrchestrator::default();
-    let dag = orchestrator
-        .compile_linear_compat(module)
-        .await
-        .expect("compile linear-compatible DAG");
-
-    println!("Linear DAG node count: {}", dag.node_ptrs().len());
-
-    // 4) 显式构建多链路 DAG：start -> branch_a/branch_b -> merge。
-    let multi_route_dag = orchestrator
-        .compile_definition(build_multi_route_definition())
-        .expect("compile multi-route DAG");
-    println!("Multi-route DAG node count: {}", multi_route_dag.node_ptrs().len());
+    // 3) 直接从引擎获取已编译的 DAG，无需手动编译。
+    let dag = engine
+        .get_module_dag("demo_dag_module")
+        .expect("module DAG should be pre-compiled on registration");
+    println!("DAG node count: {}", dag.node_ptrs().len());
+    let topo = dag.topological_sort().expect("topological sort");
+    println!("DAG topological order: {:?}", topo);
 }

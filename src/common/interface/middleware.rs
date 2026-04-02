@@ -13,10 +13,10 @@ pub type DataStoreMiddlewareHandle = Arc<Mutex<Box<dyn DataStoreMiddleware>>>;
 /// Middleware for intercepting download requests and responses.
 pub trait DownloadMiddleware: Send + Sync {
     /// Returns the unique name of the middleware instance.
-    fn name(&mut self) -> String;
+    fn name(&self) -> String;
     
-    /// Returns the execution priority weight. Higher weights may execute earlier/later depending on implementation.
-    fn weight(&mut self) -> u32 {
+    /// Returns the execution priority weight. Lower weights execute earlier.
+    fn weight(&self) -> u32 {
         0
     }
     
@@ -46,10 +46,10 @@ pub trait DownloadMiddleware: Send + Sync {
 /// Middleware for processing extracted data.
 pub trait DataMiddleware: Send + Sync {
     /// Returns the unique name of the middleware instance.
-    fn name(&mut self) -> String;
+    fn name(&self) -> String;
     
     /// Returns the execution priority weight.
-    fn weight(&mut self) -> u32 {
+    fn weight(&self) -> u32 {
         0
     }
     

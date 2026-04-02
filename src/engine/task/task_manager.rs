@@ -32,6 +32,7 @@ pub struct TaskManager {
     factory: TaskFactory,
     pub cache_service: Arc<CacheService>,
     module_assembler: Arc<RwLock<ModuleAssembler>>,
+    compiled_dags: Arc<DashMap<String, Dag>>,
     dag_cutover_tracker: DagCutoverStateTracker,
 }
 
@@ -194,33 +195,63 @@ impl TaskManager {
             factory,
             cache_service: Arc::clone(&state.cache_service),
             module_assembler,
+            compiled_dags: Arc::new(DashMap::new()),
             dag_cutover_tracker: DagCutoverStateTracker::default(),
         }
     }
     
 
-    /// Registers one module implementation.
+    /// Registers one module implementation and pre-compiles its DAG.
     pub async fn add_module(&self, work: Arc<dyn ModuleTrait>) {
-        let mut assembler = self.module_assembler.write().await;
-        assembler.register_module(work);
+        let name = work.name();
+        {
+            let mut assembler = self.module_assembler.write().await;
+            assembler.register_module(work.clone());
+        }
+        self.precompile_module_dag(&name, work).await;
     }
 
-    /// Registers multiple module implementations.
+    /// Registers multiple module implementations and pre-compiles their DAGs.
     pub async fn add_modules(&self, works: Vec<Arc<dyn ModuleTrait>>) {
-        let mut assembler = self.module_assembler.write().await;
-        for work in works {
-            assembler.register_module(work);
+        {
+            let mut assembler = self.module_assembler.write().await;
+            for work in &works {
+                assembler.register_module(work.clone());
+            }
         }
+        for work in works {
+            let name = work.name();
+            self.precompile_module_dag(&name, work).await;
+        }
+    }
+
+    /// Pre-compiles and caches a module DAG via `compile_module`.
+    async fn precompile_module_dag(&self, name: &str, module: Arc<dyn ModuleTrait>) {
+        match self.dag_orchestrator().compile_module(module).await {
+            Ok(dag) => {
+                self.compiled_dags.insert(name.to_string(), dag);
+            }
+            Err(err) => {
+                log::warn!("[TaskManager] module DAG pre-compile failed: module={} err={}", name, err);
+            }
+        }
+    }
+
+    /// Returns the pre-compiled DAG for a registered module, if available.
+    pub fn get_module_dag(&self, module_name: &str) -> Option<Dag> {
+        self.compiled_dags.get(module_name).map(|v| v.clone())
     }
     /// Returns true when module name is registered.
     pub async fn exists_module(&self, name: &str) -> bool {
         let assembler = self.module_assembler.read().await;
         assembler.get_module(name).is_some()
     }
-    /// Unregisters module by name.
+    /// Unregisters module by name and removes its cached DAG.
     pub async fn remove_work(&self, name: &str) {
         let mut assembler = self.module_assembler.write().await;
         assembler.remove_module(name);
+        drop(assembler);
+        self.compiled_dags.remove(name);
     }
     /// Removes all modules loaded from a given origin path.
     pub async fn remove_by_origin(&self, origin: &std::path::Path) {
@@ -295,6 +326,24 @@ impl TaskManager {
         drop(assembler);
 
         self.dag_orchestrator().compile_linear_compat(module).await
+    }
+
+    /// Compiles a module DAG by module name using the unified `compile_module` strategy.
+    ///
+    /// - custom `dag_definition()` only → compile custom DAG.
+    /// - `add_step()` only → compile linear-compat DAG.
+    /// - both present → merge into one multi-route DAG.
+    pub async fn compile_module_dag(
+        &self,
+        module_name: &str,
+    ) -> std::result::Result<Dag, DagError> {
+        let assembler = self.module_assembler.read().await;
+        let module = assembler
+            .get_module(module_name)
+            .ok_or_else(|| DagError::NodeNotFound(module_name.to_string()))?;
+        drop(assembler);
+
+        self.dag_orchestrator().compile_module(module).await
     }
 
     /// Compiles and executes a module DAG in linear-compat mode by module name.

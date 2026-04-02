@@ -50,10 +50,6 @@ fn msgpack_decode<T: serde::de::DeserializeOwned>(
     serde_path_to_error::deserialize(&mut deserializer)
 }
 
-fn msgpack_encoded_size<T: serde::Serialize>(value: &T) -> Result<usize, rmps::encode::Error> {
-    msgpack_encode(value).map(|bytes| bytes.len())
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum QueueCodec {
     Json,
@@ -697,106 +693,17 @@ impl QueueManager {
     ) where
         T: serde::Serialize + Identifiable + Send + Sync + 'static,
     {
-        let mut use_blocking = items.len() >= 32;
-        if !use_blocking {
-            let mut estimated_total_bytes = 0usize;
-            for item in &items {
-                match queue_codec() {
-                    QueueCodec::Json => match serde_json::to_vec(&item.inner) {
-                        Ok(bytes) => {
-                            estimated_total_bytes += bytes.len();
-                            if estimated_total_bytes >= BLOCKING_PAYLOAD_BYTES {
-                                use_blocking = true;
-                                break;
-                            }
-                        }
-                        Err(e) => error!("Failed to estimate payload size: {}", e),
-                    },
-                    QueueCodec::Msgpack => match msgpack_encoded_size(&item.inner) {
-                        Ok(size) => {
-                            estimated_total_bytes += size;
-                            if estimated_total_bytes >= BLOCKING_PAYLOAD_BYTES {
-                                use_blocking = true;
-                                break;
-                            }
-                        }
-                        Err(e) => error!("Failed to estimate payload size: {}", e),
-                    },
-                }
-            }
-        }
-        let payloads_result = if use_blocking {
-            // Offload serialization and compression to a blocking thread to avoid blocking the async runtime
-            tokio::task::spawn_blocking(move || {
-            let mut payloads: Vec<(Option<String>, Vec<u8>, HashMap<String, String>)> = Vec::with_capacity(items.len());
-                
-                // Only collect IDs if debug logging is enabled to avoid unnecessary allocation
-                let mut ids = if log::log_enabled!(log::Level::Debug) {
-                    Some(Vec::with_capacity(items.len()))
-                } else {
-                    None
-                };
+        // Serialize all items once. Decide blocking vs inline based on item count alone
+        // to avoid the previous double-serialization (once to estimate size, once to encode).
+        let use_blocking = items.len() >= 32;
 
-                for item in &items {
-                    let id = item.get_id();
-                    if let Some(id_list) = ids.as_mut() {
-                        id_list.push(id.clone());
-                    }
-                    let encoded = match queue_codec() {
-                        QueueCodec::Json => serde_json::to_vec(&item.inner)
-                            .map_err(|e| crate::errors::Error::new(crate::errors::ErrorKind::Queue, Some(e))),
-                        QueueCodec::Msgpack => msgpack_encode(&item.inner)
-                            .map_err(|e| crate::errors::Error::new(crate::errors::ErrorKind::Queue, Some(e))),
-                    };
-                    match encoded {
-                        Ok(p) => {
-                            // Compression Logic (Threshold 1KB, Zstd)
-                            let final_payload = compress_payload_owned(p, compression_threshold);
-                            let headers = default_headers();
-                            payloads.push((Some(id), final_payload, headers));
-                        }
-                        Err(e) => {
-                            error!("Failed to serialize item: {}", e);
-                        }
-                    }
-                }
-                (payloads, ids, items.len())
+        let payloads_result = if use_blocking {
+            tokio::task::spawn_blocking(move || {
+                Self::encode_items(&items, compression_threshold)
             })
             .await
         } else {
-            let mut payloads: Vec<(Option<String>, Vec<u8>, HashMap<String, String>)> = Vec::with_capacity(items.len());
-            
-            // Only collect IDs if debug logging is enabled to avoid unnecessary allocation
-            let mut ids = if log::log_enabled!(log::Level::Debug) {
-                Some(Vec::with_capacity(items.len()))
-            } else {
-                None
-            };
-
-            for item in &items {
-                let id = item.get_id();
-                if let Some(id_list) = ids.as_mut() {
-                    id_list.push(id.clone());
-                }
-                let encoded = match queue_codec() {
-                    QueueCodec::Json => serde_json::to_vec(&item.inner)
-                        .map_err(|e| crate::errors::Error::new(crate::errors::ErrorKind::Queue, Some(e))),
-                    QueueCodec::Msgpack => msgpack_encode(&item.inner)
-                        .map_err(|e| crate::errors::Error::new(crate::errors::ErrorKind::Queue, Some(e))),
-                };
-                match encoded {
-                    Ok(p) => {
-                        // Compression Logic (Threshold 1KB, Zstd)
-                        let final_payload = compress_payload_owned(p, compression_threshold);
-                        let headers = default_headers();
-                        payloads.push((Some(id), final_payload, headers));
-                    }
-                    Err(e) => {
-                        error!("Failed to serialize item: {}", e);
-                    }
-                }
-            }
-            Ok((payloads, ids, items.len()))
+            Ok(Self::encode_items(&items, compression_threshold))
         };
 
         match payloads_result {
@@ -831,6 +738,46 @@ impl QueueManager {
             backend.clean_storage().await?;
         }
         Ok(())
+    }
+
+    /// Encode items into publish-ready payloads (serialize once + compress).
+    fn encode_items<T>(
+        items: &[QueuedItem<T>],
+        compression_threshold: usize,
+    ) -> (Vec<(Option<String>, Vec<u8>, HashMap<String, String>)>, Option<Vec<String>>, usize)
+    where
+        T: serde::Serialize + Identifiable,
+    {
+        let mut payloads: Vec<(Option<String>, Vec<u8>, HashMap<String, String>)> = Vec::with_capacity(items.len());
+        let mut ids = if log::log_enabled!(log::Level::Debug) {
+            Some(Vec::with_capacity(items.len()))
+        } else {
+            None
+        };
+
+        for item in items {
+            let id = item.get_id();
+            if let Some(id_list) = ids.as_mut() {
+                id_list.push(id.clone());
+            }
+            let encoded = match queue_codec() {
+                QueueCodec::Json => serde_json::to_vec(&item.inner)
+                    .map_err(|e| crate::errors::Error::new(crate::errors::ErrorKind::Queue, Some(e))),
+                QueueCodec::Msgpack => msgpack_encode(&item.inner)
+                    .map_err(|e| crate::errors::Error::new(crate::errors::ErrorKind::Queue, Some(e))),
+            };
+            match encoded {
+                Ok(p) => {
+                    let final_payload = compress_payload_owned(p, compression_threshold);
+                    let headers = default_headers();
+                    payloads.push((Some(id), final_payload, headers));
+                }
+                Err(e) => {
+                    error!("Failed to serialize item: {}", e);
+                }
+            }
+        }
+        (payloads, ids, items.len())
     }
 
     /// Send a message to the Dead Letter Queue (DLQ) manually.

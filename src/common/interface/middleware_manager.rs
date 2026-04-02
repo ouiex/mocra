@@ -29,59 +29,90 @@ use tokio::sync::RwLock;
 ///
 pub struct MiddlewareManager {
     pub download_middleware: Arc<RwLock<Vec<DownloadMiddlewareHandle>>>,
+    /// Name → index into download_middleware vec for O(1) lookup.
+    download_index: Arc<RwLock<HashMap<String, usize>>>,
     pub data_middleware: Arc<RwLock<Vec<DataMiddlewareHandle>>>,
+    data_index: Arc<RwLock<HashMap<String, usize>>>,
     pub store_middleware: Arc<RwLock<Vec<DataStoreMiddlewareHandle>>>,
+    store_index: Arc<RwLock<HashMap<String, usize>>>,
     pub state: Arc<State>,
 }
 impl MiddlewareManager {
     pub fn new(state: Arc<State>) -> Self {
         MiddlewareManager {
             download_middleware: Default::default(),
+            download_index: Default::default(),
             data_middleware: Default::default(),
+            data_index: Default::default(),
             store_middleware: Default::default(),
+            store_index: Default::default(),
             state,
         }
     }
     pub async fn register_download_middleware(&self, middleware: DownloadMiddlewareHandle) {
         let mut middlewares = self.download_middleware.write().await;
+        let mut index = self.download_index.write().await;
+        let name = middleware.lock().await.name();
+        let pos = middlewares.len();
         middlewares.push(middleware);
+        index.insert(name, pos);
     }
 
     pub async fn register_download_middleware_from_vec(
         &self,
         middlewares: Vec<DownloadMiddlewareHandle>,
     ) {
-        let mut existing_middlewares = self.download_middleware.write().await;
+        let mut existing = self.download_middleware.write().await;
+        let mut index = self.download_index.write().await;
         for middleware in middlewares {
-            existing_middlewares.push(middleware);
+            let name = middleware.lock().await.name();
+            let pos = existing.len();
+            existing.push(middleware);
+            index.insert(name, pos);
         }
     }
 
     pub async fn register_data_middleware(&self, middleware: DataMiddlewareHandle) {
         let mut middlewares = self.data_middleware.write().await;
+        let mut index = self.data_index.write().await;
+        let name = middleware.lock().await.name();
+        let pos = middlewares.len();
         middlewares.push(middleware);
+        index.insert(name, pos);
     }
     pub async fn register_data_middleware_from_vec(
         &self,
         middlewares: Vec<DataMiddlewareHandle>,
     ) {
-        let mut existing_middlewares = self.data_middleware.write().await;
+        let mut existing = self.data_middleware.write().await;
+        let mut index = self.data_index.write().await;
         for middleware in middlewares {
-            existing_middlewares.push(middleware);
+            let name = middleware.lock().await.name();
+            let pos = existing.len();
+            existing.push(middleware);
+            index.insert(name, pos);
         }
     }
 
     pub async fn register_store_middleware(&self, middleware: DataStoreMiddlewareHandle) {
         let mut middlewares = self.store_middleware.write().await;
+        let mut index = self.store_index.write().await;
+        let name = middleware.lock().await.name();
+        let pos = middlewares.len();
         middlewares.push(middleware);
+        index.insert(name, pos);
     }
     pub async fn register_store_middleware_from_vec(
         &self,
         middlewares: Vec<DataStoreMiddlewareHandle>,
     ) {
-        let mut existing_middlewares = self.store_middleware.write().await;
+        let mut existing = self.store_middleware.write().await;
+        let mut index = self.store_index.write().await;
         for middleware in middlewares {
-            existing_middlewares.push(middleware);
+            let name = middleware.lock().await.name();
+            let pos = existing.len();
+            existing.push(middleware);
+            index.insert(name, pos);
         }
     }
 
@@ -90,17 +121,19 @@ impl MiddlewareManager {
         middleware_name: &[String],
         config: &Option<ModuleConfig>,
     ) -> Vec<(DownloadMiddlewareHandle, u32)> {
-        let middlewares = self.download_middleware.read().await.clone();
-        let mut out = Vec::new();
-        for middleware in middlewares {
-            let mut middleware_guard = middleware.lock().await;
-            let middleware_actual_name = middleware_guard.name();
-            if middleware_name.contains(&middleware_actual_name) {
-                let middleware_weight = config
-                    .as_ref()
-                    .and_then(|m| m.get_middleware_weight(&middleware_actual_name))
-                    .unwrap_or_else(|| middleware_guard.weight());
-                out.push((middleware.clone(), middleware_weight));
+        let middlewares = self.download_middleware.read().await;
+        let index = self.download_index.read().await;
+        let mut out = Vec::with_capacity(middleware_name.len());
+        for name in middleware_name {
+            if let Some(&pos) = index.get(name) {
+                if let Some(handle) = middlewares.get(pos) {
+                    let middleware_guard = handle.lock().await;
+                    let middleware_weight = config
+                        .as_ref()
+                        .and_then(|m| m.get_middleware_weight(name))
+                        .unwrap_or_else(|| middleware_guard.weight());
+                    out.push((handle.clone(), middleware_weight));
+                }
             }
         }
         out
@@ -110,17 +143,19 @@ impl MiddlewareManager {
         middleware_name: &[String],
         config: &Option<ModuleConfig>,
     ) -> Vec<(DataMiddlewareHandle, u32)> {
-        let middlewares = self.data_middleware.read().await.clone();
-        let mut out = Vec::new();
-        for middleware in middlewares {
-            let mut middleware_guard = middleware.lock().await;
-            let middleware_actual_name = middleware_guard.name();
-            if middleware_name.contains(&middleware_actual_name) {
-                let middleware_weight = config
-                    .as_ref()
-                    .and_then(|m| m.get_middleware_weight(&middleware_actual_name))
-                    .unwrap_or_else(|| middleware_guard.weight());
-                out.push((middleware.clone(), middleware_weight));
+        let middlewares = self.data_middleware.read().await;
+        let index = self.data_index.read().await;
+        let mut out = Vec::with_capacity(middleware_name.len());
+        for name in middleware_name {
+            if let Some(&pos) = index.get(name) {
+                if let Some(handle) = middlewares.get(pos) {
+                    let middleware_guard = handle.lock().await;
+                    let middleware_weight = config
+                        .as_ref()
+                        .and_then(|m| m.get_middleware_weight(name))
+                        .unwrap_or_else(|| middleware_guard.weight());
+                    out.push((handle.clone(), middleware_weight));
+                }
             }
         }
         out
@@ -130,13 +165,14 @@ impl MiddlewareManager {
         &self,
         middleware_name: &[String],
     ) -> Vec<DataStoreMiddlewareHandle> {
-        let middlewares = self.store_middleware.read().await.clone();
-        let mut out = Vec::new();
-        for middleware in middlewares {
-            let mut middleware_guard = middleware.lock().await;
-            let middleware_actual_name = middleware_guard.name();
-            if middleware_name.contains(&middleware_actual_name) {
-                out.push(middleware.clone());
+        let middlewares = self.store_middleware.read().await;
+        let index = self.store_index.read().await;
+        let mut out = Vec::with_capacity(middleware_name.len());
+        for name in middleware_name {
+            if let Some(&pos) = index.get(name) {
+                if let Some(handle) = middlewares.get(pos) {
+                    out.push(handle.clone());
+                }
             }
         }
         out

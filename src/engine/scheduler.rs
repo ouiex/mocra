@@ -277,34 +277,8 @@ impl CronScheduler {
                 for key in stale_keys {
                     self.schedule_cache.remove(&key);
                 }
-                let stale_cron_keys: Vec<String> = self
-                    .cron_config_cache
-                    .iter()
-                    .filter_map(|entry| {
-                        if module_set.contains(entry.key()) {
-                            None
-                        } else {
-                            Some(entry.key().clone())
-                        }
-                    })
-                    .collect();
-                for key in stale_cron_keys {
-                    self.cron_config_cache.remove(&key);
-                }
-                let stale_right_now_keys: Vec<String> = self
-                    .right_now_context_hash
-                    .iter()
-                    .filter_map(|entry| {
-                        if module_set.contains(entry.key()) {
-                            None
-                        } else {
-                            Some(entry.key().clone())
-                        }
-                    })
-                    .collect();
-                for key in stale_right_now_keys {
-                    self.right_now_context_hash.remove(&key);
-                }
+                Self::remove_stale_keys(&self.cron_config_cache, &module_set);
+                Self::remove_stale_keys(&self.right_now_context_hash, &module_set);
                 
                 // Persist refresh markers only after a successful pass.
                 if remote_version > 0 {
@@ -345,6 +319,23 @@ impl CronScheduler {
             platform.hash(&mut hasher);
         }
         hasher.finish()
+    }
+
+    /// Remove entries from a DashMap whose keys are not in the allowed set.
+    fn remove_stale_keys<V>(map: &DashMap<String, V>, allowed: &HashSet<String>) {
+        let stale: Vec<String> = map
+            .iter()
+            .filter_map(|entry| {
+                if allowed.contains(entry.key()) {
+                    None
+                } else {
+                    Some(entry.key().clone())
+                }
+            })
+            .collect();
+        for key in stale {
+            map.remove(&key);
+        }
     }
 
     /// Main loop that evaluates one scheduler tick per second.
@@ -499,9 +490,8 @@ impl CronScheduler {
                     Ok(results) => {
                         let lock_duration = lock_start.elapsed().as_secs_f64();
                         histogram!("mocra_scheduler_lock_acquisition_seconds").record(lock_duration);
-                        for (i, success) in results.into_iter().enumerate() {
+                        for (success, (account, platform)) in results.into_iter().zip(batch_items.iter()) {
                             if success {
-                                let (account, platform) = batch_items[i];
                                 info!(
                                     "Triggering cron task for module: {} [{}@{}] at {}",
                                     module_name, account, platform, current_tick
@@ -540,8 +530,23 @@ impl CronScheduler {
         };
         
         let sender = self.queue_manager.get_task_push_channel();
-        if let Err(e) = sender.send(QueuedItem::new(task)).await {
-             error!("Failed to push cron task to queue for module {} [{}@{}]: {}", module_name, account, platform, e);
+        match sender.try_send(QueuedItem::new(task.clone())) {
+            Ok(()) => {}
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                counter!("mocra_scheduler_task_drops_total", "module" => module_name.to_string(), "reason" => "channel_full").increment(1);
+                warn!(
+                    "Task queue full, blocking send for module {} [{}@{}]",
+                    module_name, account, platform
+                );
+                if let Err(e) = sender.send(QueuedItem::new(task)).await {
+                    counter!("mocra_scheduler_task_drops_total", "module" => module_name.to_string(), "reason" => "send_failed").increment(1);
+                    error!("Failed to push cron task to queue for module {} [{}@{}]: {}", module_name, account, platform, e);
+                }
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                counter!("mocra_scheduler_task_drops_total", "module" => module_name.to_string(), "reason" => "channel_closed").increment(1);
+                error!("Task queue channel closed for module {} [{}@{}]", module_name, account, platform);
+            }
         }
     }
 

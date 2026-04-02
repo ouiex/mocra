@@ -1,5 +1,6 @@
 use crate::common::model::login_info::LoginInfo;
 use crate::common::model::{Cookies, CronConfig, Headers, ModuleConfig, Request, Response};
+use crate::engine::task::module_dag_compiler::ModuleDagDefinition;
 // use crate::common::parser::ParserTrait;
 use crate::common::model::message::TaskOutputEvent;
 use async_trait::async_trait;
@@ -30,6 +31,13 @@ pub trait ModuleTrait: Send + Sync {
     fn default_arc() -> Arc<dyn ModuleTrait>
     where
         Self: Sized;
+    /// Optional custom DAG definition built from ModuleNodeTrait nodes.
+    ///
+    /// - `Some(definition)`: use custom DAG path.
+    /// - `None`: fallback to legacy `add_step` linear-compat DAG.
+    async fn dag_definition(&self) -> Option<ModuleDagDefinition> {
+        None
+    }
     async fn add_step(&self)->Vec<Arc<dyn ModuleNodeTrait>> {
         vec![]
     }

@@ -149,7 +149,7 @@ struct CounterDownloadMiddleware {
 
 #[async_trait::async_trait]
 impl DownloadMiddleware for CounterDownloadMiddleware {
-    fn name(&mut self) -> String {
+    fn name(&self) -> String {
         "counter_download_middleware".to_string()
     }
 

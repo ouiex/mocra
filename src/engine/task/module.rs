@@ -377,10 +377,13 @@ impl Module {
         ModuleDagDefinition::from_linear_steps(steps)
     }
 
-    /// Builds a DAG graph from module steps in compatibility mode.
+    /// Builds a DAG graph from module hooks using `ModuleDagOrchestrator::compile_module`.
+    ///
+    /// Respects the priority: custom `dag_definition()` + `add_step()` merge > either alone.
     pub async fn prepare_execution_graph(&self) -> std::result::Result<Dag, DagError> {
-        let definition = self.build_dag_definition_linear_compat().await;
-        ModuleDagCompiler::compile(definition)
+        use crate::engine::task::module_dag_orchestrator::ModuleDagOrchestrator;
+        let orchestrator = ModuleDagOrchestrator::default();
+        orchestrator.compile_module(self.module.clone()).await
     }
 
     /// Runs DAG preflight validation in dry-run mode.

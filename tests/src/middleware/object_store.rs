@@ -12,7 +12,7 @@ pub struct ObjectStoreMiddleware;
 
 #[async_trait]
 impl DataMiddleware for ObjectStoreMiddleware {
-    fn name(&mut self) -> String {
+    fn name(&self) -> String {
         "object_store".to_string()
     }
 
