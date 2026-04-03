@@ -11,7 +11,7 @@ use crate::common::model::{ModuleConfig, Response};
 use crate::common::state::State;
 use crate::cacheable::{CacheAble, CacheService};
 use crate::engine::task::module::Module;
-use crate::engine::task::module_processor_with_chain::ModuleProcessorWithChain;
+use crate::engine::task::module_dag_processor::ModuleDagProcessor;
 use dashmap::DashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -292,7 +292,7 @@ impl TaskFactory {
                 module: module_assembler,
                 locker,
                 locker_ttl: 0,
-                processor: ModuleProcessorWithChain::new(
+                processor: ModuleDagProcessor::new(
                     format!("{}-{}-{}", account.name, platform.name, module.name),
                     self.state.cache_service.clone(),
                     run_id,

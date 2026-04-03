@@ -1,6 +1,6 @@
 [package]
 name = "mocra"
-version = "0.2.2"
+version = "0.2.3"
 edition = "2024"
 description = "A distributed, event-driven crawling and data collection framework"
 license = "MIT OR Apache-2.0"
@@ -83,6 +83,7 @@ sysinfo = "0.38"
 bloomfilter = "3"
 siphasher = "1"
 tempfile = "3"
+indexmap = { version = "2", features = ["serde"] }
 
 [profile.release]
 lto = true

@@ -2,36 +2,36 @@
 
 # mocra
 
-**A distributed, event-driven crawling and data collection framework for Rust.**
+**面向 Rust 的分布式、事件驱动爬取与数据采集框架**
 
 [![Crates.io](https://img.shields.io/crates/v/mocra.svg)](https://crates.io/crates/mocra)
 [![docs.rs](https://docs.rs/mocra/badge.svg)](https://docs.rs/mocra)
 [![License](https://img.shields.io/crates/l/mocra.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](https://www.rust-lang.org)
 
-English | [中文](README.zh.md)
+[English](README.md) | 中文
 
 </div>
 
 ---
 
-mocra is a Rust framework for building scalable data collection pipelines. It models crawling as **queue-driven processing stages** orchestrated by a **DAG execution engine**, with automatic scaling from single-process to distributed clusters.
+mocra 是一个 Rust 框架，用于构建可扩展的数据采集流水线。它将爬取建模为**队列驱动的处理阶段**，由 **DAG 执行引擎**编排，能自动从单进程扩展到分布式集群。
 
-## Features
+## 特性
 
-- **DAG-based module system** — define linear chains or custom fan-out/fan-in graphs
-- **Queue-driven pipeline** — task → request → download → parse → store, fully decoupled
-- **Auto-scaling runtime** — single-node (in-memory) or distributed (Redis/Kafka) with zero code changes
-- **Bounded concurrency** — semaphore-controlled worker pools with pause/resume/shutdown
-- **Middleware pipeline** — download, data transformation, and storage middleware with weight-based ordering
-- **Built-in control plane** — HTTP API for health, metrics, pause/resume, task injection, and DLQ inspection
-- **Prometheus metrics** — unified `mocra_*` metric families for throughput, latency, errors, and backlog
-- **Cron scheduling** — periodic task execution with cron expressions
-- **Error recovery** — policy-driven retry, fallback gates, circuit breakers, and dead-letter queues
+- **基于 DAG 的模块系统** — 定义线性链或自定义扇出/汇合图
+- **队列驱动的流水线** — 任务 → 请求 → 下载 → 解析 → 存储，完全解耦
+- **自动扩展运行时** — 单节点（内存）或分布式（Redis/Kafka），零代码改动
+- **有界并发** — 信号量控制的工作池，支持暂停/恢复/关闭
+- **中间件管道** — 下载、数据转换和存储中间件，按权重排序
+- **内置控制面板** — HTTP API，支持健康检查、指标、暂停/恢复、任务注入和 DLQ 查看
+- **Prometheus 指标** — 统一的 `mocra_*` 指标族，覆盖吞吐量、延迟、错误和积压
+- **Cron 调度** — 使用 cron 表达式周期性执行任务
+- **错误恢复** — 策略驱动的重试、回退门控、熔断器和死信队列
 
-## Quick Start
+## 快速开始
 
-Add to your `Cargo.toml`:
+在 `Cargo.toml` 中添加：
 
 ```toml
 [dependencies]
@@ -42,7 +42,7 @@ serde_json = "1"
 futures = "0.3"
 ```
 
-Write a module:
+编写模块：
 
 ```rust
 use std::sync::Arc;
@@ -71,7 +71,7 @@ impl ModuleNodeTrait for FetchNode {
     async fn parser(
         &self, response: Response, _config: Option<Arc<ModuleConfig>>,
     ) -> Result<TaskOutputEvent> {
-        println!("Status: {}, Body: {} bytes", response.status, response.body.len());
+        println!("状态码: {}, 响应体: {} 字节", response.status, response.body.len());
         Ok(TaskOutputEvent::default())
     }
 }
@@ -99,7 +99,7 @@ async fn main() {
 }
 ```
 
-Create `config.toml`:
+创建 `config.toml`：
 
 ```toml
 name = "my_crawler"
@@ -121,34 +121,34 @@ request_max_retries = 3
 capacity = 5000
 ```
 
-Run:
+运行：
 
 ```bash
 cargo run
 ```
 
-## Architecture
+## 架构
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│                         Engine                          │
+│                          引擎                           │
 │                                                         │
 │  TaskEvent ──▶ generate() ──▶ download() ──▶ parser()  │
 │      │              │              │              │      │
-│  [Task Q]     [Request Q]   [Response Q]   [Parser Q]  │
+│  [任务队列]    [请求队列]    [响应队列]    [解析队列]    │
 │                                                  │      │
 │                              ┌────────────┬──────┘      │
 │                              ▼            ▼             │
-│                         [Data Store]  [Next Node]       │
-│                                       [Error Q → DLQ]  │
+│                         [数据存储]    [下一节点]         │
+│                                      [错误队列 → DLQ]   │
 └─────────────────────────────────────────────────────────┘
 ```
 
-Each stage is decoupled by a message queue. Queues are local Tokio channels in single-node mode, or Redis Streams / Kafka in distributed mode — **same code, zero changes**.
+每个阶段通过消息队列解耦。单节点模式使用本地 Tokio 通道，分布式模式使用 Redis Streams 或 Kafka — **同一代码，零改动**。
 
-## DAG Execution
+## DAG 执行
 
-Define complex pipelines with fan-out and fan-in:
+定义复杂的流水线，支持扇出和汇合：
 
 ```rust
 async fn dag_definition(&self) -> Option<ModuleDagDefinition> {
@@ -177,59 +177,57 @@ start ─┤               ├── merge
        └── branch_b ──┘
 ```
 
-## Single-Node vs Distributed
+## 单节点 vs 分布式
 
-| | Single-Node | Distributed |
+| | 单节点 | 分布式 |
 |---|---|---|
-| **Config** | No `cache.redis` | Add `cache.redis` |
-| **Queues** | Tokio mpsc (in-memory) | Redis Streams or Kafka |
-| **Cache** | In-memory | Redis |
-| **Locks** | Local mutex | Redis distributed locks |
-| **Workers** | 1 process | N processes, same binary |
-| **Code changes** | None | None |
+| **配置** | 不配置 `cache.redis` | 添加 `cache.redis` |
+| **队列** | Tokio mpsc（内存） | Redis Streams 或 Kafka |
+| **缓存** | 内存 | Redis |
+| **锁** | 本地 mutex | Redis 分布式锁 |
+| **Worker** | 1 个进程 | N 个进程，相同二进制 |
+| **代码改动** | 无 | 无 |
 
-Switch to distributed by adding Redis to your config:
+只需添加 Redis 即可切换到分布式：
 
 ```toml
 [cache.redis]
 url = "redis://localhost:6379"
 ```
 
-## Documentation
+## 文档
 
-| Document | Description |
+| 文档 | 说明 |
 |---|---|
-| [Getting Started](docs/getting-started.md) | Installation and first module |
-| [Architecture](docs/architecture.md) | System design and pipeline internals |
-| [Module Development](docs/module-development.md) | ModuleTrait, ModuleNodeTrait, data passing |
-| [DAG Guide](docs/dag-guide.md) | DAG definition, fan-out/fan-in, advance gates |
-| [Middleware](docs/middleware-guide.md) | Download, data, and storage middleware |
-| [Configuration](docs/configuration.md) | Full TOML configuration reference |
-| [API Reference](docs/api-reference.md) | HTTP control plane endpoints |
-| [Deployment](docs/deployment.md) | Single-node, distributed, monitoring |
+| [快速上手](docs/zh/getting-started.md) | 安装与第一个模块 |
+| [系统架构](docs/zh/architecture.md) | 系统设计与流水线内部原理 |
+| [模块开发](docs/zh/module-development.md) | ModuleTrait、ModuleNodeTrait、数据传递 |
+| [DAG 指南](docs/zh/dag-guide.md) | DAG 定义、扇出/汇合、推进门控 |
+| [中间件](docs/zh/middleware-guide.md) | 下载、数据、存储中间件 |
+| [配置参考](docs/zh/configuration.md) | TOML 完整配置参考 |
+| [API 参考](docs/zh/api-reference.md) | HTTP 控制面板端点 |
+| [部署指南](docs/zh/deployment.md) | 单节点、分布式、监控 |
 
-## Examples
+## 示例
 
-See the [`simple/`](simple/) directory for runnable examples:
+参见 [`simple/`](simple/) 目录：
 
-- [`simple/module_node_trait_dag.rs`](simple/module_node_trait_dag.rs) — Fan-out/fan-in DAG module
+- [`simple/module_node_trait_dag.rs`](simple/module_node_trait_dag.rs) — 扇出/汇合 DAG 模块
 
-## Monitoring
+## 监控
 
 ```bash
-# Start Prometheus + Grafana
+# 启动 Prometheus + Grafana
 docker compose -f docker-compose.monitoring.yml up -d
 
 # Prometheus: http://localhost:9090
 # Grafana:    http://localhost:3000
-# Metrics:    http://localhost:8080/metrics
+# 指标:      http://localhost:8080/metrics
 ```
 
-## License
+## 许可证
 
-Licensed under either of:
+双许可，任选其一：
 
-- MIT license
-- Apache License, Version 2.0
-
-at your option.
+- MIT 许可证
+- Apache 许可证 2.0

@@ -1,40 +1,43 @@
-# simple: Engine + ModuleNodeTrait + DAG registration
+# Examples
 
-这个目录给出一个最小可读示例，展示三件事：
+This directory contains runnable examples for mocra.
 
-1. 如何初始化 `Engine`
-2. 如何实现 `ModuleNodeTrait`
-3. 如何通过 `ModuleTrait::add_step` 注册到 DAG（线性兼容 DAG）
-4. 如何定义多条链路 DAG（分叉 + 汇合）
+## Files
 
-## 文件说明
+| File | Description |
+|---|---|
+| `simple.rs` | Basic linear module — single node, fetch and parse |
+| `module_node_trait_dag.rs` | DAG module — fan-out/fan-in with multiple branches |
 
-- `module_node_trait_dag.rs`：完整示例代码（包含线性 DAG 和多链路 DAG）
+## module_node_trait_dag.rs
 
-## 关键流程
+Demonstrates:
 
-1. 使用配置文件初始化 `State`
-2. 构建 `Engine`
-3. 实现一个或多个 `ModuleNodeTrait` 节点
-4. 在 `ModuleTrait::add_step` 中返回节点顺序（引擎会按 DAG 线性兼容路径处理）
-5. `engine.register_module(...)` 完成模块注册
-6. （可选）用 `ModuleDagOrchestrator::compile_linear_compat(...)` 验证线性 DAG 节点生成
-7. （可选）用 `ModuleDagOrchestrator::compile_definition(...)` 编译显式多链路 DAG
+1. **Linear pipeline** via `add_step()` — `step_0(StartNode) → step_1(FollowNode)`
+2. **Custom DAG** via `dag_definition()` — fan-out and merge:
 
-## 多链路 DAG 结构
+```
+       ┌── branch_a ──┐
+start ─┤               ├── merge
+       └── branch_b ──┘
+```
 
-示例中的显式 DAG 结构如下：
+3. **Mixed mode** — when both are present, the engine merges them into a single DAG
 
-`start -> branch_a`
+## Running
 
-`start -> branch_b`
+```bash
+# DAG example (uses tests/config.mock.pure.engine.toml)
+cargo run --example module_node_trait_dag
 
-`branch_a -> merge`
+# Or directly
+cargo run --bin module_node_trait_dag
+```
 
-`branch_b -> merge`
+> **Note:** Examples use a test config file. For production, replace with your own `config.toml`.
 
-## 运行提示
+## Learn More
 
-- 示例默认读取 `tests/config.mock.pure.engine.toml`，仅用于演示。
-- 生产使用请替换为你自己的配置文件路径。
-- 若你只想快速验证编译逻辑，可先运行到 `compile_linear_compat`，无需启动完整处理循环。
+- [Getting Started](../docs/getting-started.md) — Installation and first module
+- [Module Development](../docs/module-development.md) — Full ModuleTrait and ModuleNodeTrait guide
+- [DAG Guide](../docs/dag-guide.md) — DAG definition, fan-out/fan-in, routing

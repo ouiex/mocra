@@ -107,6 +107,31 @@ impl ModuleDagOrchestrator {
         }
     }
 
+    /// Builds a merged `ModuleDagDefinition` from a module's hooks without compiling.
+    ///
+    /// Same merge semantics as `compile_module`, but returns the definition so it can be
+    /// fed directly into `ModuleDagProcessor::init_from_definition`.
+    pub async fn build_definition(&self, module: Arc<dyn ModuleTrait>) -> ModuleDagDefinition {
+        let custom_definition = module.dag_definition().await;
+        let linear_definition = ModuleDagDefinition::from_linear_steps(module.add_step().await);
+
+        let has_custom = custom_definition
+            .as_ref()
+            .map(|d| !d.nodes.is_empty())
+            .unwrap_or(false);
+        let has_linear = !linear_definition.nodes.is_empty();
+
+        match (has_custom, has_linear) {
+            (true, true) => {
+                let custom = custom_definition.expect("checked custom definition exists");
+                Self::merge_definitions(custom, linear_definition)
+            }
+            (true, false) => custom_definition.expect("checked custom definition exists"),
+            (false, true) => linear_definition,
+            (false, false) => ModuleDagDefinition::default(),
+        }
+    }
+
     /// Executes a precompiled DAG with DagScheduler defaults from orchestrator options.
     pub async fn execute_dag(&self, dag: Dag) -> Result<DagExecutionReport, DagError> {
         DagScheduler::new(dag)

@@ -108,6 +108,25 @@ pub fn error_retry_schedule_key(task_id: &str) -> String {
     format!("chain:retry:error_task:{}", task_id)
 }
 
+// --- DAG engine gate keys (queue-backed DAG processor) ---
+
+/// One-shot advance gate per (run, module, from_node, to_node).
+/// Prevents n concurrent parsers from each synthesizing a placeholder to the same successor.
+pub fn dag_node_advance_gate_key(run_id: Uuid, module_id: &str, node_id: &str, successor_id: &str) -> String {
+    format!("dag:gate:advance:{}:{}:{}:{}", run_id, module_id, node_id, successor_id)
+}
+
+/// One-shot fallback gate per (run, module, node, prefix_request).
+/// Prevents infinite fallback loops when generate() fails on a non-entry node.
+pub fn dag_node_fallback_gate_key(run_id: Uuid, module_id: &str, node_id: &str, prefix: Uuid) -> String {
+    format!("dag:gate:fallback:{}:{}:{}:{}", run_id, module_id, node_id, prefix)
+}
+
+/// Distributed stop signal key for a DAG processor run.
+pub fn dag_stop_key(run_id: Uuid, module_id: &str) -> String {
+    format!("dag:exec:stop:{}:{}", run_id, module_id)
+}
+
 pub fn parser_processed_key(namespace: &str, id: &str) -> String {
     format!("{}:processed:parser:{}", namespace, id)
 }
