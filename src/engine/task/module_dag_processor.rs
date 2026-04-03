@@ -477,8 +477,12 @@ impl ModuleDagProcessor {
                                 continue;
                             }
 
-                            if next_ctx.node_id.is_none() {
-                                // Parser didn't specify a target: auto-route to successors.
+                            if next_ctx.node_id.is_none()
+                                || next_ctx.node_id.as_deref() == Some(node_id.as_str())
+                            {
+                                // Parser didn't specify a different target (node_id is
+                                // absent or still points at the current node): auto-route
+                                // to successors.
                                 if node_successors.is_empty() {
                                     // Leaf node — DAG execution complete for this path.
                                     debug!(
@@ -541,10 +545,7 @@ impl ModuleDagProcessor {
             Err(e) => {
                 // Parser failure: emit error for same-node retry.
                 let step_idx_u32 = response.context.step_idx.unwrap_or(0);
-                let meta = match serde_json::to_value(&response.metadata) {
-                    Ok(serde_json::Value::Object(map)) => map,
-                    _ => serde_json::Map::new(),
-                };
+                let meta = response.metadata.task.as_object().cloned().unwrap_or_default();
                 let error_task = TaskErrorEvent {
                     id: response.id,
                     account_task: TaskEvent {
@@ -703,5 +704,270 @@ mod tests {
         let mut succ = proc.get_successors("node_a").await;
         succ.sort();
         assert_eq!(succ, vec!["node_b", "node_c"]);
+    }
+
+    // ── Metadata propagation tests ──────────────────────────────────────
+
+    use std::sync::Mutex as StdMutex;
+    use crate::common::model::meta::MetaData;
+
+    /// Node that captures the params it receives in generate() and returns
+    /// a configurable parser output.
+    struct CapturingNode {
+        captured_params: Arc<StdMutex<Vec<Map<String, serde_json::Value>>>>,
+        parser_output: StdMutex<TaskOutputEvent>,
+    }
+
+    impl CapturingNode {
+        fn new(parser_output: TaskOutputEvent) -> Self {
+            CapturingNode {
+                captured_params: Arc::new(StdMutex::new(Vec::new())),
+                parser_output: StdMutex::new(parser_output),
+            }
+        }
+        fn captured(&self) -> Vec<Map<String, serde_json::Value>> {
+            self.captured_params.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl ModuleNodeTrait for CapturingNode {
+        async fn generate(
+            &self,
+            _config: Arc<ModuleConfig>,
+            params: Map<String, serde_json::Value>,
+            _login_info: Option<LoginInfo>,
+        ) -> CResult<SyncBoxStream<'static, Request>> {
+            self.captured_params.lock().unwrap().push(params);
+            Ok(Vec::<Request>::new().to_stream())
+        }
+
+        async fn parser(
+            &self,
+            _response: Response,
+            _config: Option<Arc<ModuleConfig>>,
+        ) -> CResult<TaskOutputEvent> {
+            Ok(self.parser_output.lock().unwrap().clone())
+        }
+    }
+
+    fn make_response(node_id: &str, task_meta: serde_json::Map<String, serde_json::Value>) -> Response {
+        Response {
+            id: Uuid::now_v7(),
+            platform: "pf".to_string(),
+            account: "acc".to_string(),
+            module: "mod".to_string(),
+            status_code: 200,
+            cookies: Default::default(),
+            content: vec![],
+            storage_path: None,
+            headers: vec![],
+            task_retry_times: 0,
+            metadata: MetaData::default().add_task_config(task_meta),
+            download_middleware: vec![],
+            data_middleware: vec![],
+            task_finished: false,
+            context: ExecutionMark::default()
+                .with_node_id(node_id)
+                .with_module_id("mod"),
+            run_id: Uuid::now_v7(),
+            prefix_request: Uuid::now_v7(),
+            request_hash: None,
+            priority: Default::default(),
+        }
+    }
+
+    /// Explicit parser_task: metadata set via add_meta() should be preserved
+    /// through routing and available for the next node's generate.
+    #[tokio::test]
+    async fn explicit_parser_task_metadata_preserved_through_routing() {
+        let mut meta = Map::new();
+        meta.insert("user_id".into(), serde_json::Value::String("abc".into()));
+        let task = TaskParserEvent::from(&make_response("node_a", Map::new()))
+            .add_meta("user_id", "abc")
+            .add_meta("page", 42);
+
+        // node_a parser returns a task with metadata
+        let node_a = Arc::new(CapturingNode::new(
+            TaskOutputEvent::default().with_task(task),
+        ));
+        let node_b = Arc::new(CapturingNode::new(TaskOutputEvent::default()));
+
+        let def = ModuleDagDefinition {
+            nodes: vec![
+                ModuleDagNodeDef { node_id: "node_a".into(), node: node_a.clone(), placement_override: None, policy_override: None, tags: vec![] },
+                ModuleDagNodeDef { node_id: "node_b".into(), node: node_b.clone(), placement_override: None, policy_override: None, tags: vec![] },
+            ],
+            edges: vec![ModuleDagEdgeDef { from: "node_a".into(), to: "node_b".into() }],
+            entry_nodes: vec!["node_a".into()],
+            default_policy: None,
+            metadata: Default::default(),
+        };
+
+        let proc = ModuleDagProcessor::new("mod".into(), make_cache(), Uuid::now_v7(), 60);
+        proc.init_from_definition(&def).await;
+
+        let response = make_response("node_a", Map::new());
+        let result = proc.execute_parse(response, None).await.unwrap();
+
+        // The routed task should have metadata preserved and be targeted at node_b
+        assert_eq!(result.parser_task.len(), 1);
+        let routed = &result.parser_task[0];
+        assert_eq!(routed.context.node_id.as_deref(), Some("node_b"));
+        assert_eq!(routed.metadata.get("user_id").and_then(|v| v.as_str()), Some("abc"));
+        assert_eq!(routed.metadata.get("page").and_then(|v| v.as_i64()), Some(42));
+
+        // Now feed metadata into execute_generate to verify it reaches node_b
+        let ctx = Some(routed.context.clone());
+        let _ = proc.execute_generate(
+            Arc::new(ModuleConfig::default()),
+            routed.metadata.clone(),
+            None,
+            ctx,
+            None,
+        ).await.unwrap();
+
+        let captured = node_b.captured();
+        assert_eq!(captured.len(), 1);
+        assert_eq!(captured[0].get("user_id").and_then(|v| v.as_str()), Some("abc"));
+        assert_eq!(captured[0].get("page").and_then(|v| v.as_i64()), Some(42));
+    }
+
+    /// Advance-gate path: when parser returns empty parser_task, synthesized
+    /// tasks should carry forward the response's task metadata.
+    #[tokio::test]
+    async fn advance_gate_forwards_response_task_metadata() {
+        // node_a parser returns empty parser_task (advance gate triggers)
+        let node_a = Arc::new(CapturingNode::new(TaskOutputEvent::default()));
+        let node_b = Arc::new(CapturingNode::new(TaskOutputEvent::default()));
+
+        let def = ModuleDagDefinition {
+            nodes: vec![
+                ModuleDagNodeDef { node_id: "node_a".into(), node: node_a.clone(), placement_override: None, policy_override: None, tags: vec![] },
+                ModuleDagNodeDef { node_id: "node_b".into(), node: node_b.clone(), placement_override: None, policy_override: None, tags: vec![] },
+            ],
+            edges: vec![ModuleDagEdgeDef { from: "node_a".into(), to: "node_b".into() }],
+            entry_nodes: vec!["node_a".into()],
+            default_policy: None,
+            metadata: Default::default(),
+        };
+
+        let proc = ModuleDagProcessor::new("mod".into(), make_cache(), Uuid::now_v7(), 60);
+        proc.init_from_definition(&def).await;
+
+        // Response carries task metadata from node_a's generate
+        let mut task_meta = Map::new();
+        task_meta.insert("session_id".into(), serde_json::Value::String("s1".into()));
+        let response = make_response("node_a", task_meta);
+
+        let result = proc.execute_parse(response, None).await.unwrap();
+
+        // Advance gate should synthesize a task with the forwarded metadata
+        assert_eq!(result.parser_task.len(), 1);
+        let synthesized = &result.parser_task[0];
+        assert_eq!(synthesized.context.node_id.as_deref(), Some("node_b"));
+        assert_eq!(
+            synthesized.metadata.get("session_id").and_then(|v| v.as_str()),
+            Some("s1"),
+            "advance-gate synthesized task should carry response.metadata.task"
+        );
+
+        // Verify it reaches node_b's generate
+        let _ = proc.execute_generate(
+            Arc::new(ModuleConfig::default()),
+            synthesized.metadata.clone(),
+            None,
+            Some(synthesized.context.clone()),
+            None,
+        ).await.unwrap();
+
+        let captured = node_b.captured();
+        assert_eq!(captured.len(), 1);
+        assert_eq!(captured[0].get("session_id").and_then(|v| v.as_str()), Some("s1"));
+    }
+
+    /// Fan-out: metadata should be replicated to each successor.
+    #[tokio::test]
+    async fn fanout_replicates_metadata_to_all_successors() {
+        let task = TaskParserEvent::from(&make_response("node_a", Map::new()))
+            .add_meta("key", "shared_value");
+
+        let node_a = Arc::new(CapturingNode::new(
+            TaskOutputEvent::default().with_task(task),
+        ));
+        let node_b = Arc::new(CapturingNode::new(TaskOutputEvent::default()));
+        let node_c = Arc::new(CapturingNode::new(TaskOutputEvent::default()));
+
+        let def = ModuleDagDefinition {
+            nodes: vec![
+                ModuleDagNodeDef { node_id: "node_a".into(), node: node_a.clone(), placement_override: None, policy_override: None, tags: vec![] },
+                ModuleDagNodeDef { node_id: "node_b".into(), node: node_b.clone(), placement_override: None, policy_override: None, tags: vec![] },
+                ModuleDagNodeDef { node_id: "node_c".into(), node: node_c.clone(), placement_override: None, policy_override: None, tags: vec![] },
+            ],
+            edges: vec![
+                ModuleDagEdgeDef { from: "node_a".into(), to: "node_b".into() },
+                ModuleDagEdgeDef { from: "node_a".into(), to: "node_c".into() },
+            ],
+            entry_nodes: vec!["node_a".into()],
+            default_policy: None,
+            metadata: Default::default(),
+        };
+
+        let proc = ModuleDagProcessor::new("mod".into(), make_cache(), Uuid::now_v7(), 60);
+        proc.init_from_definition(&def).await;
+
+        let response = make_response("node_a", Map::new());
+        let result = proc.execute_parse(response, None).await.unwrap();
+
+        // Fan-out should produce 2 tasks, each with the same metadata
+        assert_eq!(result.parser_task.len(), 2);
+        for task in &result.parser_task {
+            assert_eq!(task.metadata.get("key").and_then(|v| v.as_str()), Some("shared_value"));
+        }
+        let mut targets: Vec<_> = result.parser_task.iter()
+            .map(|t| t.context.node_id.clone().unwrap())
+            .collect();
+        targets.sort();
+        assert_eq!(targets, vec!["node_b", "node_c"]);
+    }
+
+    /// with_meta replaces all metadata; add_meta appends.
+    #[tokio::test]
+    async fn add_meta_appends_with_meta_replaces() {
+        let response = make_response("node_a", Map::new());
+        let task = TaskParserEvent::from(&response)
+            .add_meta("a", 1)
+            .add_meta("b", 2);
+        assert_eq!(task.metadata.len(), 2);
+
+        let mut new_map = Map::new();
+        new_map.insert("c".into(), serde_json::Value::from(3));
+        let task2 = task.with_meta(new_map);
+        assert_eq!(task2.metadata.len(), 1);
+        assert_eq!(task2.metadata.get("c").and_then(|v| v.as_i64()), Some(3));
+    }
+
+    /// From<&Response> for TaskParserEvent forwards task metadata from
+    /// the response's MetaData.task slot.
+    #[tokio::test]
+    async fn from_response_forwards_task_metadata() {
+        let mut task_meta = Map::new();
+        task_meta.insert("forwarded".into(), serde_json::Value::Bool(true));
+        let response = make_response("node_a", task_meta);
+
+        let parsed: TaskParserEvent = (&response).into();
+        assert_eq!(
+            parsed.metadata.get("forwarded").and_then(|v| v.as_bool()),
+            Some(true),
+            "From<&Response> should forward metadata.task into TaskParserEvent.metadata"
+        );
+    }
+
+    /// From<&Response> with empty metadata still produces empty map.
+    #[tokio::test]
+    async fn from_response_empty_metadata_stays_empty() {
+        let response = make_response("node_a", Map::new());
+        let parsed: TaskParserEvent = (&response).into();
+        assert!(parsed.metadata.is_empty());
     }
 }

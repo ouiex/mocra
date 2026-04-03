@@ -330,6 +330,15 @@ impl crate::common::model::priority::Prioritizable for TaskErrorEvent {
 
 impl From<&Response> for TaskParserEvent {
     fn from(value: &Response) -> Self {
+        // Forward task metadata from the response so downstream nodes receive
+        // the same params that were used to generate the request.
+        let metadata = value
+            .metadata
+            .task
+            .as_object()
+            .cloned()
+            .unwrap_or_default();
+
         TaskParserEvent {
             id: Uuid::now_v7(),
             account_task: TaskEvent {
@@ -340,7 +349,7 @@ impl From<&Response> for TaskParserEvent {
                 run_id: value.run_id,
             },
             timestamp: chrono::Utc::now().timestamp() as u64,
-            metadata: serde_json::Map::new(),
+            metadata,
             context: value.context.clone(),
             run_id: value.run_id,
             prefix_request: value.prefix_request,
@@ -350,10 +359,15 @@ impl From<&Response> for TaskParserEvent {
 
 impl From<&Response> for TaskErrorEvent {
     fn from(value: &Response) -> Self {
-        let metadata = match serde_json::to_value(value.metadata.clone()) {
-            Ok(Value::Object(map)) => map,
-            _ => serde_json::Map::new(),
-        };
+        // Forward only the task metadata slot as a flat map, consistent with
+        // TaskParserEvent so downstream generate() receives the same shape.
+        let metadata = value
+            .metadata
+            .task
+            .as_object()
+            .cloned()
+            .unwrap_or_default();
+
         TaskErrorEvent {
             id: Uuid::now_v7(),
             account_task: TaskEvent {
@@ -381,7 +395,7 @@ fn default_run_id() -> Uuid {
 /// Parser output envelope.
 ///
 /// Contains parsed data, next task, error task, and control flags.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct TaskOutputEvent {
     /// Parsed data list.
     pub data: Vec<DataEvent>,

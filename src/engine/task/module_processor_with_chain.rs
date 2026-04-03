@@ -787,10 +787,7 @@ impl ModuleProcessorWithChain {
                 // Parser failure: emit ErrorTaskModel for precise same-step retry.
                 let step_idx_u32 = response.context.step_idx.unwrap_or(0);
                 // Preserve metadata as-is; avoid retry-step metadata pollution.
-                let meta = match serde_json::to_value(&response.metadata) {
-                    Ok(serde_json::Value::Object(map)) => map,
-                    _ => serde_json::Map::new(),
-                };
+                let meta = response.metadata.task.as_object().cloned().unwrap_or_default();
                 let error_task =TaskErrorEvent {
                     id: response.id,
                     account_task: TaskEvent {

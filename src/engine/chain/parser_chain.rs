@@ -683,10 +683,7 @@ impl ProcessorTrait<(Response, Arc<Module>, Arc<ModuleConfig>, Option<LoginInfo>
                 0
             }
         };
-        let error_metadata = match serde_json::to_value(input.0.metadata.clone()) {
-            Ok(serde_json::Value::Object(map)) => map,
-            _ => serde_json::Map::new(),
-        };
+        let error_metadata = input.0.metadata.task.as_object().cloned().unwrap_or_default();
         let error_task = TaskErrorEvent {
             id: input.0.id,
             account_task: TaskEvent {
