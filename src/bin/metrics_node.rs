@@ -15,7 +15,13 @@ async fn main() {
             std::process::exit(1);
         }
     };
-    let engine = Engine::new(Arc::clone(&state), None).await;
+    let engine = match Engine::new(Arc::clone(&state), None).await {
+        Ok(e) => e,
+        Err(e) => {
+            eprintln!("metrics_node failed to initialize engine: {e}");
+            std::process::exit(1);
+        }
+    };
 
     let start_fut = engine.start();
     tokio::pin!(start_fut);

@@ -18,24 +18,19 @@ pub struct KafkaBackend {
 }
 
 impl KafkaBackend {
-    pub fn new(brokers: &str, redis_backend: Arc<RedisBackend>) -> Self {
+    pub fn new(brokers: &str, redis_backend: Arc<RedisBackend>) -> std::result::Result<Self, String> {
         let mut config = ClientConfig::new();
         config.set("bootstrap.servers", brokers);
         config.set("message.timeout.ms", "5000");
 
-        let producer: FutureProducer = config.create().expect("Producer creation error");
+        let producer: FutureProducer = config.create()
+            .map_err(|e| format!("Failed to create Kafka producer: {}", e))?;
 
-        // let producer: FutureProducer = ClientConfig::new()
-        //     .set("bootstrap.servers", brokers)
-        //     .set("message.timeout.ms", "5000")
-        //     .create()
-        //     .expect("Producer creation error");
-
-        Self {
+        Ok(Self {
             producer,
             redis_backend,
             brokers: brokers.to_string(),
-        }
+        })
     }
 }
 

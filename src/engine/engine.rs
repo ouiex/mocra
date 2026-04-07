@@ -417,7 +417,7 @@ impl Engine {
     ///
     /// # Arguments
     /// * `state` - Shared application state.
-    pub async fn new(state: Arc<State>, queue_manager: Option<Arc<QueueManager>>) -> Self {
+    pub async fn new(state: Arc<State>, queue_manager: Option<Arc<QueueManager>>) -> crate::errors::Result<Self> {
         // Initialize Prometheus recorder
         let builder = PrometheusBuilder::new();
         // Ignore error if recorder is already installed (e.g. in tests)
@@ -540,7 +540,10 @@ impl Engine {
             Some(Arc::new(
                 ProxyManager::from_proxy_config(&proxy_config)
                     .await
-                    .expect("Failed to create ProxyManager"),
+                    .map_err(|e| crate::errors::Error::new(
+                        crate::errors::ErrorKind::Service,
+                        Some(format!("Failed to create ProxyManager: {}", e)),
+                    ))?,
             ))
         } else {
             None
@@ -586,7 +589,7 @@ impl Engine {
 
         let lua_registry = Arc::new(LuaScriptRegistry::new_default());
 
-        Self {
+        Ok(Self {
             queue_manager,
             downloader_manager: Arc::new(downloader_manager),
             task_manager,
@@ -600,7 +603,7 @@ impl Engine {
             node_registry,
             cron_scheduler,
             lua_registry,
-        }
+        })
     }
     /// Register a download middleware.
     ///

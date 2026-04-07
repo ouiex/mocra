@@ -7,8 +7,9 @@ use crate::common::model::{
 };
 use crate::errors::Result;
 use crate::errors::error::QueueError;
-use log::error;
+use log::{error, warn};
 use tokio::sync::mpsc;
+use tokio::time::Duration;
 use crate::utils::logger::LogModel;
 use deadpool_redis::redis;
 
@@ -109,7 +110,8 @@ impl RedisCompensator {
             };
 
             let mut batch: Vec<CompensationMessage> = Vec::with_capacity(100);
-            
+            const MAX_BATCH_BACKLOG: usize = 10_000;
+
             while let Some(msg) = rx.recv().await {
                  batch.push(msg);
                  // Try to drain more if available, up to limit
@@ -120,22 +122,54 @@ impl RedisCompensator {
                       }
                  }
 
+                 // Cap batch size to prevent unbounded growth during prolonged outages.
+                 if batch.len() > MAX_BATCH_BACKLOG {
+                     let dropped = batch.len() - MAX_BATCH_BACKLOG;
+                     batch.drain(..dropped);
+                     warn!(
+                         "Compensator batch exceeded {} limit, dropped {} oldest messages",
+                         MAX_BATCH_BACKLOG, dropped
+                     );
+                 }
+
                  // Reconnect if connection is lost
                  if conn.is_none() {
-                     match client.get_multiplexed_async_connection().await {
-                        Ok(c) => conn = Some(c),
-                        Err(e) => {
-                             error!("Failed to reconnect to Redis in compensator: {}", e);
-                             batch.clear(); // Drop messages to avoid blocking indefinitely
-                             continue;
-                        }
+                     let mut reconnect_attempts = 0u32;
+                     loop {
+                         match client.get_multiplexed_async_connection().await {
+                            Ok(c) => {
+                                conn = Some(c);
+                                break;
+                            }
+                            Err(e) => {
+                                reconnect_attempts += 1;
+                                if reconnect_attempts >= 5 {
+                                    error!(
+                                        "Compensator failed to reconnect after {} attempts: {}. \
+                                         Keeping {} messages for next cycle.",
+                                        reconnect_attempts, e, batch.len()
+                                    );
+                                    break;
+                                }
+                                let backoff = Duration::from_millis(500 * (1u64 << reconnect_attempts.min(4)));
+                                error!(
+                                    "Failed to reconnect to Redis in compensator (attempt {}): {}. Retrying in {:?}...",
+                                    reconnect_attempts, e, backoff
+                                );
+                                tokio::time::sleep(backoff).await;
+                            }
+                         }
+                     }
+                     if conn.is_none() {
+                         // Keep batch for next recv cycle instead of dropping
+                         continue;
                      }
                  }
 
                  let active_conn = match conn.as_mut() {
                      Some(c) => c,
                      None => {
-                        batch.clear();
+                        // Keep batch for next cycle instead of dropping
                         continue;
                      }, 
                  };

@@ -2,7 +2,7 @@ use super::EventEnvelope;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::sync::RwLock;
-use log::{error, info};
+use log::{error, info, warn};
 use dashmap::DashMap;
 
 /// In-process event bus for fan-out delivery to typed subscribers.
@@ -55,7 +55,9 @@ impl EventBus {
     }
 
     /// Starts the dedicated dispatch loop that forwards events to subscribers.
-    pub async fn start(&self) {
+    ///
+    /// Returns `true` if the event bus was started successfully, `false` if it was already running.
+    pub async fn start(&self) -> bool {
         let receiver = {
             let mut receiver_guard = self._receiver.write().await;
             receiver_guard.take()
@@ -101,8 +103,10 @@ impl EventBus {
                     });
                 })
                 .expect("Failed to spawn event bus thread");
+            true
         } else {
-             error!("EventBus already started or receiver missing");
+             warn!("EventBus.start() called but already running — ignoring duplicate start");
+             false
         }
     }
 

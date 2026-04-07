@@ -3,6 +3,7 @@ use deadpool_redis::{redis::{AsyncCommands, SetOptions, ExistenceCheck, SetExpir
 use log::{error, info};
 use dashmap::DashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, Ordering};
 use tokio::time::{self, Duration};
 use tokio::sync::RwLock;
 use chrono::Utc;
@@ -86,16 +87,14 @@ impl Deduplicator {
                 };
                 
                 if bloom_size > 0 {
-                    // Simple time-based reset heuristic.
-                    static mut LAST_RESET: i64 = 0;
-                    unsafe {
-                        if LAST_RESET == 0 {
-                            LAST_RESET = now;
-                        }
-                        if now - LAST_RESET > 600 { // 10 minutes
+                    static LAST_RESET: AtomicI64 = AtomicI64::new(0);
+                    let last = LAST_RESET.load(Ordering::Relaxed);
+                    if last == 0 {
+                        let _ = LAST_RESET.compare_exchange(0, now, Ordering::Relaxed, Ordering::Relaxed);
+                    } else if now - last > 600 { // 10 minutes
+                        if LAST_RESET.compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed).is_ok() {
                             let mut bloom_guard = bloom_clone.write().await;
                             bloom_guard.clear();
-                            LAST_RESET = now;
                             info!("Reset Bloom Filter to prevent saturation");
                             counter!("mocra_dedup_bloom_resets").increment(1);
                         }

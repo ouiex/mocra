@@ -370,7 +370,8 @@ impl SyncService {
             let options = self.options;
             let mut last_version: u64 = 0;
             let initial_value = {
-                let lock = local_state.value.read().unwrap();
+                let lock = local_state.value.read()
+                    .unwrap_or_else(|e| e.into_inner());
                 if let Some(bytes) = &*lock {
                     match Self::decode_value::<T>(options, bytes) {
                         Ok((v, version)) => {
@@ -436,7 +437,8 @@ impl SyncService {
         } else {
             let local_state = self.get_local_state(&topic);
             {
-                let mut lock = local_state.value.write().unwrap();
+                let mut lock = local_state.value.write()
+                    .unwrap_or_else(|e| e.into_inner());
                 *lock = Some(bytes.clone());
             }
             let _ = local_state.tx.send(bytes);
@@ -456,6 +458,7 @@ impl SyncService {
             let kv_key = self.kv_key_for(&topic);
             let stream_topic = self.stream_topic_for(&topic);
             let mut attempts: u32 = 0;
+            const MAX_CAS_ATTEMPTS: u32 = 16;
 
             loop {
                 let old_bytes_opt = backend.get(&kv_key).await?;
@@ -477,6 +480,12 @@ impl SyncService {
                 }
 
                 attempts = attempts.saturating_add(1);
+                if attempts >= MAX_CAS_ATTEMPTS {
+                    return Err(format!(
+                        "optimistic_update failed after {} CAS attempts for topic '{}'",
+                        attempts, topic
+                    ));
+                }
                 let backoff = 10u64.saturating_mul(1u64 << attempts.min(4));
                 let jitter = Self::jitter_ms(25);
                 tokio::time::sleep(Duration::from_millis(backoff + jitter)).await;
@@ -485,8 +494,8 @@ impl SyncService {
             // Local Mode: Just lock and update
             let local_state = self.get_local_state(&topic);
 
-            // We need to hold the write lock throughout the read-modify-write process to ensure atomicity
-            let mut lock = local_state.value.write().unwrap();
+            let mut lock = local_state.value.write()
+                .unwrap_or_else(|e| e.into_inner());
 
             let mut state = if let Some(ref bytes) = *lock {
                 Self::decode_value::<T>(self.options, bytes).map(|(v, _)| v)?
@@ -524,7 +533,8 @@ impl SyncService {
             }
         } else {
             let local_state = self.get_local_state(&topic);
-            let lock = local_state.value.read().unwrap();
+            let lock = local_state.value.read()
+                .unwrap_or_else(|e| e.into_inner());
             if let Some(bytes) = &*lock {
                 Self::decode_value::<T>(self.options, bytes)
                     .map(|(v, _)| Some(v))

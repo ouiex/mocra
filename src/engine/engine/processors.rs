@@ -409,10 +409,11 @@ impl Engine {
                                     }
                                     Ok((1, msg, _)) => {
                                         counter!("mocra_ptm_commit_total", "result" => "fencing_reject").increment(1);
-                                        let retry_policy = RetryPolicy::default().with_reason(format!(
-                                            "ptm_commit_success fencing reject: {}",
-                                            msg
-                                        ));
+                                        let retry_policy = RetryPolicy::default()
+                                            .with_reason(format!(
+                                                "ptm_commit_success fencing reject: {}",
+                                                msg
+                                            ));
                                         Self::handle_policy_retry(
                                             &policy_resolver,
                                             &queue_manager,

@@ -29,7 +29,7 @@ async fn main() {
 
     // 1. Reset State
     {
-        let kafka_backend = crate::sync::KafkaBackend::new("localhost:9095", backend.clone());
+        let kafka_backend = crate::sync::KafkaBackend::new("localhost:9095", backend.clone()).unwrap();
         let config = crate::common::model::config::SyncConfig::default();
         let sync_service = crate::sync::SyncService::from_config(Some(std::sync::Arc::new(kafka_backend)), "bench".to_string(), &config);
         let initial_state = BenchState { counter: 0 };
@@ -43,7 +43,7 @@ async fn main() {
     for _i in 0..CONCURRENCY {
         let backend = backend.clone();
         let handle = tokio::spawn(async move {
-            let kafka_backend = crate::sync::KafkaBackend::new("localhost:9095", backend);
+            let kafka_backend = crate::sync::KafkaBackend::new("localhost:9095", backend).unwrap();
             let config = crate::common::model::config::SyncConfig::default();
             let sync_service = crate::sync::SyncService::from_config(Some(Arc::new(kafka_backend)), "bench".to_string(), &config);
             
@@ -68,7 +68,7 @@ async fn main() {
 
     // 4. Verify Result
     {
-        let kafka_backend = crate::sync::KafkaBackend::new("localhost:9095", backend.clone());
+        let kafka_backend = crate::sync::KafkaBackend::new("localhost:9095", backend.clone()).unwrap();
         let config = crate::common::model::config::SyncConfig::default();
         let sync_service = crate::sync::SyncService::from_config(Some(std::sync::Arc::new(kafka_backend)), "bench".to_string(), &config);
         let final_state = sync_service.fetch_latest::<BenchState>().await.unwrap().unwrap();

@@ -72,6 +72,11 @@ impl RetryPolicy {
         self.reason = Some(reason);
         self
     }
+    /// Sets the base retry delay in milliseconds.
+    pub fn with_delay(mut self, delay_ms: u64) -> Self {
+        self.retry_delay = delay_ms;
+        self
+    }
 }
 
 /// Processor execution result.

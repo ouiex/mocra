@@ -15,6 +15,7 @@ use crate::common::interface::storage::{BlobStorage, Offloadable};
 use crate::errors::ErrorKind;
 use crate::utils::storage::FileSystemBlobStorage;
 use log::{error, info};
+use metrics::counter;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{Mutex, Semaphore};
@@ -773,7 +774,8 @@ impl QueueManager {
                     payloads.push((Some(id), final_payload, headers));
                 }
                 Err(e) => {
-                    error!("Failed to serialize item: {}", e);
+                    error!("Failed to serialize item id={}: {}. Item will be skipped (unrecoverable).", id, e);
+                    counter!("mocra_queue_encode_errors_total").increment(1);
                 }
             }
         }

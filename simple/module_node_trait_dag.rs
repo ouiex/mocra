@@ -229,7 +229,7 @@ fn build_multi_route_definition() -> ModuleDagDefinition {
 async fn main() {
     // 1) 初始化 State + Engine。
     let state = Arc::new(State::new("tests/config.mock.pure.engine.toml").await);
-    let engine = Engine::new(state, None).await;
+    let engine = Engine::new(state, None).await.expect("Failed to initialize engine");
 
     // 2) 注册模块到引擎（自动编译 DAG）。
     let module: Arc<dyn ModuleTrait> = Arc::new(DemoDagModule);

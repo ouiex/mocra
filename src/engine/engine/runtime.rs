@@ -108,8 +108,9 @@ impl Engine {
         });
 
         let state_for_zombie = self.state.clone();
+        let compensator_for_zombie = self.queue_manager.compensator.clone();
         tokio::spawn(async move {
-            zombie::start_zombie_cleaner(state_for_zombie, 600).await;
+            zombie::start_zombie_cleaner(state_for_zombie, 600, compensator_for_zombie).await;
         });
 
         let state_for_monitor = self.state.clone();
@@ -184,9 +185,43 @@ impl Engine {
         macro_rules! run_processor {
             ($name:expr, $fut:expr) => {
                 async {
+                    let mut consecutive_panics: u32 = 0;
+                    let mut last_panic_at = tokio::time::Instant::now();
+                    const MAX_CONSECUTIVE_PANICS: u32 = 5;
+                    const CIRCUIT_BREAKER_COOLDOWN_SECS: u64 = 30;
+                    const PANIC_WINDOW_SECS: u64 = 120;
+
                     while let Err(e) = std::panic::AssertUnwindSafe($fut).catch_unwind().await {
-                        error!("{} panicked: {:?}. Restarting...", $name, e);
-                        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                        let now = tokio::time::Instant::now();
+                        if now.duration_since(last_panic_at).as_secs() > PANIC_WINDOW_SECS {
+                            consecutive_panics = 0;
+                        }
+                        last_panic_at = now;
+                        consecutive_panics += 1;
+
+                        error!(
+                            "{} panicked ({}/{}): {:?}. Restarting...",
+                            $name, consecutive_panics, MAX_CONSECUTIVE_PANICS, e
+                        );
+                        counter!("mocra_processor_panics_total", "processor" => $name).increment(1);
+
+                        if consecutive_panics >= MAX_CONSECUTIVE_PANICS {
+                            error!(
+                                "{} hit circuit breaker after {} consecutive panics. \
+                                 Cooling down for {}s before retry.",
+                                $name, consecutive_panics, CIRCUIT_BREAKER_COOLDOWN_SECS
+                            );
+                            tokio::time::sleep(tokio::time::Duration::from_secs(
+                                CIRCUIT_BREAKER_COOLDOWN_SECS,
+                            ))
+                            .await;
+                            consecutive_panics = 0;
+                        } else {
+                            tokio::time::sleep(tokio::time::Duration::from_secs(
+                                1u64 << consecutive_panics.min(3),
+                            ))
+                            .await;
+                        }
                     }
                 }
             };

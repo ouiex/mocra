@@ -15,11 +15,27 @@ pub struct ModuleDagNodeDef {
     pub policy_override: Option<DagNodeExecutionPolicy>,
     pub tags: Vec<String>,
 }
+impl ModuleDagNodeDef{
+    pub fn new(node: Arc<dyn ModuleNodeTrait>) -> Self {
+        Self {
+            node_id: uuid::Uuid::now_v7().to_string(),
+            node,
+            placement_override: None,
+            policy_override: None,
+            tags: Vec::new(),
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct ModuleDagEdgeDef {
     pub from: String,
     pub to: String,
+}
+impl ModuleDagEdgeDef{
+    pub fn new(from: &ModuleDagNodeDef, to: &ModuleDagNodeDef) -> Self {
+        Self { from: from.node_id.clone(), to: to.node_id.clone() }
+    }
 }
 
 #[derive(Clone, Default)]
@@ -36,28 +52,14 @@ impl ModuleDagDefinition {
         let mut nodes = Vec::with_capacity(steps.len());
         let mut edges = Vec::with_capacity(steps.len().saturating_sub(1));
 
-        for (idx, step) in steps.into_iter().enumerate() {
-            let node_id = format!("step_{idx}");
-            if idx > 0 {
-                edges.push(ModuleDagEdgeDef {
-                    from: format!("step_{}", idx - 1),
-                    to: node_id.clone(),
-                });
-            }
-            nodes.push(ModuleDagNodeDef {
-                node_id,
-                node: step,
-                placement_override: None,
-                policy_override: None,
-                tags: Vec::new(),
-            });
+        for step in steps {
+            nodes.push(ModuleDagNodeDef::new(step));
+        }
+        for idx in 1..nodes.len() {
+            edges.push(ModuleDagEdgeDef::new(&nodes[idx - 1], &nodes[idx]));
         }
 
-        let entry_nodes = if nodes.is_empty() {
-            Vec::new()
-        } else {
-            vec!["step_0".to_string()]
-        };
+        let entry_nodes = nodes.first().map(|n| vec![n.node_id.clone()]).unwrap_or_default();
 
         Self {
             nodes,
@@ -246,22 +248,23 @@ mod tests {
 
         assert_eq!(definition.nodes.len(), 3);
         assert_eq!(definition.edges.len(), 2);
-        assert_eq!(definition.entry_nodes, vec!["step_0".to_string()]);
-        assert_eq!(definition.edges[0].from, "step_0");
-        assert_eq!(definition.edges[0].to, "step_1");
-        assert_eq!(definition.edges[1].from, "step_1");
-        assert_eq!(definition.edges[1].to, "step_2");
+        assert_eq!(definition.entry_nodes, vec![definition.nodes[0].node_id.clone()]);
+        assert_eq!(definition.edges[0].from, definition.nodes[0].node_id);
+        assert_eq!(definition.edges[0].to, definition.nodes[1].node_id);
+        assert_eq!(definition.edges[1].from, definition.nodes[1].node_id);
+        assert_eq!(definition.edges[1].to, definition.nodes[2].node_id);
     }
 
     #[test]
     fn compile_linear_definition_succeeds() {
         let def = ModuleDagDefinition::from_linear_steps(vec![dummy_node(), dummy_node()]);
+        let node_ids: Vec<String> = def.nodes.iter().map(|n| n.node_id.clone()).collect();
         let dag = ModuleDagCompiler::compile(def).expect("linear dag should compile");
 
         assert_eq!(dag.node_ptrs().len(), 2);
         let topo = dag.topological_sort().expect("topo sort should succeed");
-        assert!(topo.iter().any(|id| id == "step_0"));
-        assert!(topo.iter().any(|id| id == "step_1"));
+        assert!(topo.iter().any(|id| id == &node_ids[0]));
+        assert!(topo.iter().any(|id| id == &node_ids[1]));
     }
 
     #[test]

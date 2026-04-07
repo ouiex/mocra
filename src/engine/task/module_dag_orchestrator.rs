@@ -333,7 +333,7 @@ mod tests {
             .await
             .expect("execution should succeed");
 
-        assert!(report.outputs.contains_key("step_0"));
+        assert!(!report.outputs.is_empty());
     }
 
     #[tokio::test]
@@ -363,7 +363,7 @@ mod tests {
 
         let topo = dag.topological_sort().expect("topological sort should succeed");
         assert!(topo.iter().any(|id| id == "custom_root"));
-        assert!(topo.iter().any(|id| id == "legacy_step_0"));
-        assert!(topo.iter().any(|id| id == "legacy_step_1"));
+        // linear nodes are now UUID-based, prefixed with "legacy_" during merge
+        assert!(topo.iter().filter(|id| id.starts_with("legacy_")).count() == 2);
     }
 }
