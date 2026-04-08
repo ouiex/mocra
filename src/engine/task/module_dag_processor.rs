@@ -189,7 +189,10 @@ impl ModuleDagProcessor {
             return Ok(false);
         }
         let gate = DagNodeAdvanceGate(true);
-        gate.send_nx(&key, &self.cache, Some(std::time::Duration::from_secs(self.ttl)))
+        // No TTL — the advance gate is a permanent per-run fact (keyed by UUID run_id).
+        // Using a short TTL (e.g. cache.ttl=60s) would allow the gate to expire mid-run,
+        // letting a pending login retry re-win the gate and restart the entire DAG fan-out.
+        gate.send_nx(&key, &self.cache, None)
             .await
             .map_err(Into::into)
     }
@@ -203,6 +206,45 @@ impl ModuleDagProcessor {
             .send_with_ttl(&key, &self.cache, std::time::Duration::from_secs(self.ttl))
             .await
             .ok();
+
+        // Clean up all advance gate keys for this run.
+        // Successors are already in memory — enumerate every edge and delete its gate key
+        // without needing a Redis SCAN.
+        let gate_keys: Vec<String> = {
+            let succ = self.successors.read().await;
+            succ.iter()
+                .flat_map(|(from, tos)| {
+                    tos.iter().map(move |to| {
+                        chain_key::dag_node_advance_gate_key(
+                            self.run_id,
+                            &self.module_id,
+                            from,
+                            to,
+                        )
+                    })
+                })
+                .collect()
+        };
+        if !gate_keys.is_empty() {
+            let refs: Vec<&str> = gate_keys.iter().map(String::as_str).collect();
+            if let Err(e) = self.cache.del_batch(&refs).await {
+                debug!(
+                    "[dag] module={} run={} set_stopped: failed to delete {} gate keys: {}",
+                    self.module_id,
+                    self.run_id,
+                    refs.len(),
+                    e
+                );
+            } else {
+                debug!(
+                    "[dag] module={} run={} set_stopped: deleted {} advance gate keys",
+                    self.module_id,
+                    self.run_id,
+                    refs.len()
+                );
+            }
+        }
+
         Ok(())
     }
 
