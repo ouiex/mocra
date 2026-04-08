@@ -202,8 +202,12 @@ impl ModuleDagProcessor {
         *stop = true;
         let key = chain_key::dag_stop_key(self.run_id, &self.module_id);
         let signal = DagStopSignal(true);
+        // Use send_persistent (no TTL) so the stop signal outlives cache.ttl.
+        // The gate-key cleanup below deletes all gate keys; if the stop signal
+        // were to expire (e.g. TTL=60s), queued error tasks could re-win the
+        // already-deleted gate and restart the entire DAG fan-out.
         signal
-            .send_with_ttl(&key, &self.cache, std::time::Duration::from_secs(self.ttl))
+            .send_persistent(&key, &self.cache)
             .await
             .ok();
 
@@ -324,6 +328,18 @@ impl ModuleDagProcessor {
         prefix_request: Option<Uuid>,
     ) -> Result<SyncBoxStream<'static, Request>> {
         let prefix = prefix_request.unwrap_or_default();
+
+        // Guard: if this run has already been stopped, skip generation entirely.
+        // This prevents queued error tasks from restarting a completed run even
+        // when no pending_ctx carries an explicit node_id (they would default to
+        // the entry node and re-trigger the full DAG fan-out).
+        if self.check_stop().await? {
+            debug!(
+                "[dag] module={} run={} execute_generate: run is stopped, skipping",
+                self.module_id, self.run_id
+            );
+            return Ok(Box::pin(futures::stream::empty()));
+        }
 
         let Some(node_id) = self.resolve_node_id(&ctx).await else {
             debug!("[dag] module={} run={} execute_generate: no nodes registered", self.module_id, self.run_id);
