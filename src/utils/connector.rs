@@ -31,7 +31,7 @@ pub fn create_redis_pool(
                 db: db as i64,
                 username: username.clone(),
                 password: password.clone(),
-                protocol: deadpool_redis::ProtocolVersion::RESP3,
+                protocol: deadpool_redis::ProtocolVersion::RESP2,
             },
         }),
         pool: Some(deadpool_redis::PoolConfig {
