@@ -159,7 +159,8 @@ impl Module {
                 } else {
                     request.downloader = "request_downloader".to_string();
                 }
-                log::debug!("[Module] request prepared: request_id={}", request.id);
+                log::debug!("[Module] request prepared: account={} platform={} module={} url={} request_id={}",
+                    request.account, request.platform, request.module, request.url, request.id);
                 request
             });
         Ok(Box::pin(stream))
@@ -171,7 +172,8 @@ impl Module {
     /// are provided, following `ModuleDagOrchestrator::compile_module` priority rules.
     pub async fn add_step(&self) {
         if let Err(e) = self.module.pre_process(Some(self.config.clone())).await {
-            warn!("module pre_process failed for {}: {}", self.module.name(), e);
+            warn!("module pre_process failed: account={} platform={} module={} error={}",
+                self.account.name, self.platform.name, self.module.name(), e);
         }
 
         use crate::engine::task::module_dag_orchestrator::ModuleDagOrchestrator;
@@ -202,6 +204,16 @@ impl Module {
         if no_next_task {
             self.module.post_process(cfg_for_post).await?;
         }
+
+        // When the DAG signals an explicit stop, clean up the session using Module.run_id
+        // (the correctly-patched run_id from the task event).
+        // NOTE: ModuleDagProcessor.run_id may be stale when loaded from the factory cache
+        // since factory.load_parser_model / load_error_model update m.run_id but not
+        // m.processor.run_id. Using self.run_id here ensures the correct session key.
+        if data.stop.unwrap_or(false) {
+            self.processor.delete_session_for_run(self.run_id).await;
+        }
+
         Ok(data)
     }
 

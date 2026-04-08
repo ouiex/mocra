@@ -55,9 +55,12 @@ for DownloadProcessor
             None => return ProcessorResult::Success((None, input.1)),
         };
         debug!(
-            "[DownloadProcessor] begin process: request_id={} module_id={} task_id={} retry_count={}",
+            "[DownloadProcessor] begin process: account={} platform={} module={} url={} request_id={} task_id={} retry_count={}",
+            request.account,
+            request.platform,
+            request.module,
+            request.url,
             request.id,
-            request.module_id(),
             request.task_id(),
             context.retry_policy.as_ref().map(|r| r.current_retry).unwrap_or(0)
         );
@@ -186,11 +189,15 @@ for DownloadProcessor
             .downloader_manager
             .get_downloader(&request, download_config)
             .await;
-        debug!("[DownloadProcessor] acquired downloader, start download: request_id={}", request.id);
+        debug!("[DownloadProcessor] acquired downloader, start download: account={} platform={} module={} url={} request_id={}",
+            request.account, request.platform, request.module, request.url, request.id);
 
         let module_id = request.module_id();
         let task_id = request.task_id();
         let request_id = request.id;
+        let url = request.url.clone();
+        let account = request.account.clone();
+        let platform = request.platform.clone();
 
         match downloader.download(request).await {
             Ok(response) => {
@@ -203,11 +210,14 @@ for DownloadProcessor
                 // );
                 let content_len = response.content.len();
                 debug!(
-                    "[DownloadProcessor] download finished: request_id={} status={} len={} module_id={}",
+                    "[DownloadProcessor] download finished: account={} platform={} module={} url={} request_id={} status={} len={}",
+                    account,
+                    platform,
+                    module_id,
+                    url,
                     request_id,
                     response.status_code,
-                    content_len,
-                    module_id
+                    content_len
                 );
 
                 // Record request-local success.
@@ -228,8 +238,8 @@ for DownloadProcessor
                 let retry_policy = context.retry_policy.clone().unwrap_or_default();
                 if retry_policy.should_retry() {
                     debug!(
-                        "[DownloadProcessor] download failed, will retry locally: request_id={} retry={}/{} reason={}",
-                        request_id, retry_policy.current_retry, retry_policy.max_retries, e
+                        "[DownloadProcessor] download failed, will retry locally: account={} platform={} module={} url={} request_id={} retry={}/{} reason={}",
+                        account, platform, module_id, url, request_id, retry_policy.current_retry, retry_policy.max_retries, e
                     );
                     return ProcessorResult::RetryableFailure(
                         retry_policy.with_reason(e.to_string())
@@ -237,8 +247,11 @@ for DownloadProcessor
                 }
 
                 warn!(
-                    "[DownloadProcessor] download failed after max retries: module_id={} request_id={} reason={}",
+                    "[DownloadProcessor] download failed after max retries: account={} platform={} module={} url={} request_id={} reason={}",
+                    account,
+                    platform,
                     module_id,
+                    url,
                     request_id,
                     e
                 );
@@ -250,7 +263,8 @@ for DownloadProcessor
                     .await
                 {
                     Ok(ErrorDecision::Terminate(reason)) => {
-                        error!("[DownloadProcessor] terminate: {}", reason);
+                        error!("[DownloadProcessor] terminate: account={} platform={} module={} url={} request_id={} reason={}",
+                            account, platform, module_id, url, request_id, reason);
                         ProcessorResult::FatalFailure(
                             ModuleError::ModuleMaxError(reason.into()).into()
                         )
@@ -281,9 +295,12 @@ for DownloadProcessor
         };
 
         error!(
-            "[DownloadProcessor] handle_error: request_id={} module_id={} error={}",
-            request.id,
+            "[DownloadProcessor] handle_error: account={} platform={} module={} url={} request_id={} error={}",
+            request.account,
+            request.platform,
             request.module_id(),
+            request.url,
+            request.id,
             _error
         );
 

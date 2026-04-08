@@ -43,15 +43,6 @@ impl CacheAble for DagNodeAdvanceGate {
 }
 
 #[derive(Serialize, Deserialize)]
-pub struct DagNodeFallbackGate(pub bool);
-
-impl CacheAble for DagNodeFallbackGate {
-    fn field() -> impl AsRef<str> {
-        "dag_fallback"
-    }
-}
-
-#[derive(Serialize, Deserialize)]
 pub struct DagStopSignal(pub bool);
 
 impl CacheAble for DagStopSignal {
@@ -192,25 +183,6 @@ impl ModuleDagProcessor {
         succ.get(node_id).cloned().unwrap_or_default()
     }
 
-    async fn load_request(&self, id: &Uuid) -> Result<Option<Request>> {
-        let id_str = id.to_string();
-        if let Ok(Some(req)) = Request::sync(&id_str, &self.cache).await {
-            return Ok(Some(req));
-        }
-        Ok(None)
-    }
-
-    async fn try_allow_fallback_once(&self, node_id: &str, prefix: &Uuid) -> Result<bool> {
-        let key = chain_key::dag_node_fallback_gate_key(self.run_id, &self.module_id, node_id, *prefix);
-        if DagNodeFallbackGate::sync(&key, &self.cache).await.map_err(Into::<crate::errors::Error>::into)?.is_some() {
-            return Ok(false);
-        }
-        let gate = DagNodeFallbackGate(true);
-        gate.send_nx(&key, &self.cache, Some(std::time::Duration::from_secs(self.ttl)))
-            .await
-            .map_err(Into::into)
-    }
-
     async fn try_mark_node_advanced_once(&self, node_id: &str, successor_id: &str) -> Result<bool> {
         let key = chain_key::dag_node_advance_gate_key(self.run_id, &self.module_id, node_id, successor_id);
         if DagNodeAdvanceGate::sync(&key, &self.cache).await.map_err(Into::<crate::errors::Error>::into)?.is_some() {
@@ -231,20 +203,23 @@ impl ModuleDagProcessor {
             .send_with_ttl(&key, &self.cache, std::time::Duration::from_secs(self.ttl))
             .await
             .ok();
+        Ok(())
+    }
 
-        // Clean up the persistent session state now that the DAG run is finished.
+    /// Deletes the persistent session state for the given run.
+    /// Called by Module::parser() with the correctly-patched Module.run_id,
+    /// since self.run_id (processor) may be stale when the task was loaded from factory cache.
+    pub async fn delete_session_for_run(&self, run_id: Uuid) {
         // Key format mirrors CacheAble::cache_id: "{namespace}:session_state:{module_id}:{run_id}"
         let session_key = format!(
             "{}:session_state:{}:{}",
             self.cache.namespace(),
             self.module_id,
-            self.run_id
+            run_id
         );
         if let Err(e) = self.cache.del(&session_key).await {
-            warn!("Failed to delete session state for run {}: {:?}", self.run_id, e);
+            warn!("Failed to delete session state: module={} run={} error={:?}", self.module_id, run_id, e);
         }
-
-        Ok(())
     }
 
     /// Rate-limited stop signal check (at most once per second).
@@ -296,8 +271,8 @@ impl ModuleDagProcessor {
 
     /// Generates a request stream for the resolved DAG node.
     ///
-    /// On generate failure, attempts a one-shot fallback to the previous request
-    /// identified by `prefix_request` (backed by Redis).
+    /// On generate failure the error is returned directly so the caller's retry
+    /// policy can re-schedule the same node.
     pub async fn execute_generate(
         &self,
         config: Arc<ModuleConfig>,
@@ -336,7 +311,6 @@ impl ModuleDagProcessor {
             Ok(stream) => {
                 let run_id = self.run_id;
                 let module_id = self.module_id.clone();
-                let cache = self.cache.clone();
                 let gen_ctx_clone = gen_ctx.clone();
 
                 let stream = stream.map(move |mut req| {
@@ -347,24 +321,9 @@ impl ModuleDagProcessor {
                         req.id = Uuid::now_v7();
                     }
 
-                    // Background request persistence for fallback recovery.
-                    let req_save = req.clone();
-                    let req_save_id = req_save.id;
-                    let cache_save = cache.clone();
-                    tokio::spawn(async move {
-                        if let Ok(Ok(bytes)) = tokio::task::spawn_blocking(move || {
-                            serde_json::to_vec(&req_save)
-                        })
-                        .await
-                        {
-                            let key = Request::cache_id(&req_save_id.to_string(), &cache_save);
-                            let _ = cache_save.set(&key, &bytes, cache_save.default_ttl()).await;
-                        }
-                    });
-
                     info!(
-                        "[dag] module={} run={} execute_generate: produced request id={} node={}",
-                        module_id, run_id, req.id, req.context.node_id.as_deref().unwrap_or("?")
+                        "[dag] module={} run={} execute_generate: produced request id={} node={} url={}",
+                        module_id, run_id, req.id, req.context.node_id.as_deref().unwrap_or("?"), req.url
                     );
                     req
                 });
@@ -372,39 +331,10 @@ impl ModuleDagProcessor {
                 Ok(Box::pin(stream))
             }
             Err(e) => {
-                // Entry node has no fallback target.
-                if prefix.is_nil() {
-                    warn!(
-                        "[dag] module={} run={} execute_generate: generate error at entry node '{}', no prefix: {}",
-                        self.module_id, self.run_id, node_id, e
-                    );
-                    return Err(e);
-                }
-
-                // Non-entry node: one-shot fallback to previous request.
-                if self.try_allow_fallback_once(&node_id, &prefix).await? {
-                    match self.load_request(&prefix).await? {
-                        Some(prev) => {
-                            debug!(
-                                "[dag] module={} run={} execute_generate: fallback allowed for node '{}' -> prev request id={}",
-                                self.module_id, self.run_id, node_id, prefix
-                            );
-                            return Ok(Box::pin(futures::stream::once(async move { prev })));
-                        }
-                        None => {
-                            debug!(
-                                "[dag] module={} run={} execute_generate: fallback allowed but prev request not found",
-                                self.module_id, self.run_id
-                            );
-                        }
-                    }
-                } else {
-                    warn!(
-                        "[dag] module={} run={} execute_generate: fallback gate consumed for node '{}', err={}",
-                        self.module_id, self.run_id, node_id, e
-                    );
-                }
-
+                warn!(
+                    "[dag] module={} run={} execute_generate: generate error at node '{}', will retry current node: {}",
+                    self.module_id, self.run_id, node_id, e
+                );
                 Err(e)
             }
         }
@@ -594,6 +524,11 @@ impl ModuleDagProcessor {
                 // Use `node_idx` (the node's current position in this processor's IndexMap)
                 // so that on the next retry the index-based fallback routes correctly even
                 // if the DAG is rebuilt and the UUID changes.
+                warn!(
+                    "[dag] module={} run={} execute_parse: parser error at node='{}' account={} platform={} request_id={} error={}",
+                    self.module_id, self.run_id, node_id,
+                    response.account, response.platform, response.id, e
+                );
                 let step_idx_u32 = node_idx as u32;
                 let meta = response.metadata.task.as_object().cloned().unwrap_or_default();
                 let error_task = TaskErrorEvent {

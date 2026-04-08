@@ -109,7 +109,7 @@ impl TaskFactory {
         if let Some(cached) = self.get_from_cache(&cache_key).await {
             return Ok(cached);
         }
-        log::warn!("create_task_with_modules: cache miss for {}, loading from DB", cache_key);
+        log::debug!("create_task_with_modules: cache miss for {}, loading from DB", cache_key);
 
         // Load all modules available under account-platform relation.
         let modules = self
@@ -324,7 +324,7 @@ impl TaskFactory {
         let task = Arc::new(task);
         // Cache task by account-platform key.
         self.put_task_aliases(task.clone()).await;
-        log::warn!("create_task_with_modules: loaded from DB for {}, took {:?}", cache_key, start.elapsed());
+        log::debug!("create_task_with_modules: loaded from DB for {}, took {:?}", cache_key, start.elapsed());
         Ok(task)
     }
 
@@ -470,7 +470,12 @@ impl TaskFactory {
     pub async fn load_module_with_response(&self, response: &Response) -> Result<(Arc<Module>, Option<LoginInfo>)> {
         let task = self.create_task_with_modules(&response.platform, &response.account, response.run_id).await?;
         if let Some(module) = task.modules.iter().find(|m| m.module.name() == response.module) {
-            Ok((Arc::new(module.clone()), task.login_info.clone()))
+            let mut module = module.clone();
+            // The factory cache may have returned a task built for a different run.
+            // Patch run_id from the response (source of truth) so that execute_parse
+            // uses the correct stop-signal key and session cleanup touches the right key.
+            module.run_id = response.run_id;
+            Ok((Arc::new(module), task.login_info.clone()))
         } else {
             Err(ModuleNotFound(format!("Module {} not found in task", response.module).into()).into())
         }

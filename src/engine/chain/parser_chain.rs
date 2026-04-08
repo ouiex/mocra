@@ -173,7 +173,8 @@ impl ProcessorTrait<Response, (Response, Arc<Module>, Arc<ModuleConfig>, Option<
                 ProcessorResult::Success((input, module, config, login_info))
             }
             Err(e) => {
-                warn!("[ResponseModuleProcessor] load_with_response failed, will retry: err={e}");
+                warn!("[ResponseModuleProcessor] load_with_response failed, will retry: account={} platform={} request_id={} err={e}",
+                    input.account, input.platform, input.id);
                 ProcessorResult::RetryableFailure(
                     context
                         .retry_policy
@@ -319,7 +320,10 @@ impl ProcessorTrait<(Response, Arc<Module>, Arc<ModuleConfig>, Option<LoginInfo>
         context: ProcessorContext,
     ) -> ProcessorResult<Vec<DataEvent>> {
         info!(
-            "[ResponseParserProcessor] start parse: request_id={} module_id={}",
+            "[ResponseParserProcessor] start parse: account={} platform={} module={} request_id={} module_id={}",
+            input.0.account,
+            input.0.platform,
+            input.0.module,
             input.0.id,
             input.0.module_id()
         );
@@ -351,6 +355,9 @@ impl ProcessorTrait<(Response, Arc<Module>, Arc<ModuleConfig>, Option<LoginInfo>
         let task_id = input.0.task_id();
         let module_id = input.0.module_id();
         let request_id = input.0.id.to_string();
+        let account = input.0.account.clone();
+        let platform = input.0.platform.clone();
+        let module_name = input.0.module.clone();
 
         let data = module.parser(input.0.clone(), Some(config)).await;
         let mut data = match data {
@@ -375,7 +382,8 @@ impl ProcessorTrait<(Response, Arc<Module>, Arc<ModuleConfig>, Option<LoginInfo>
                 d
             }
             Err(e) => {
-                warn!("[ResponseParserProcessor] parser error: err={e}");
+                warn!("[ResponseParserProcessor] parser error: account={} platform={} module={} request_id={} error={e}",
+                    account, platform, module_name, request_id);
 
                 // Record parser error and retrieve threshold decision.
                 match self

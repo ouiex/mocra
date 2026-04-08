@@ -671,8 +671,10 @@ impl ProcessorTrait<TaskEvent, Task> for TaskModelProcessor {
                 ProcessorResult::Success(task)
             }
             Err(e) => {
-                debug!("[TaskModelProcessor] load_with_model failed: {e}");
-                warn!("[TaskModelProcessor<TaskModel>] load_with_model failed, will retry: {e}");
+                debug!("[TaskModelProcessor] load_with_model failed: account={} platform={} run_id={} error={e}",
+                    input.account, input.platform, input.run_id);
+                warn!("[TaskModelProcessor<TaskModel>] load_with_model failed, will retry: account={} platform={} run_id={} error={e}",
+                    input.account, input.platform, input.run_id);
                 ProcessorResult::RetryableFailure(
                     context
                         .retry_policy
@@ -813,7 +815,8 @@ impl ProcessorTrait<TaskParserEvent, Task> for TaskModelProcessor {
                 ProcessorResult::Success(task)
             }
             Err(e) => {
-                warn!("[TaskModelProcessor<ParserTaskModel>] load_parser failed, will retry: {e}");
+                warn!("[TaskModelProcessor<ParserTaskModel>] load_parser failed, will retry: account={} platform={} run_id={} error={e}",
+                    input.account_task.account, input.account_task.platform, input.run_id);
                 ProcessorResult::RetryableFailure(
                     context
                         .retry_policy
@@ -1039,7 +1042,8 @@ impl ProcessorTrait<TaskErrorEvent, Task> for TaskModelProcessor {
                 ProcessorResult::Success(task)
             }
             Err(e) => {
-                warn!("[TaskModelProcessor<ErrorTaskModel>] load_error failed, will retry: {e}");
+                warn!("[TaskModelProcessor<ErrorTaskModel>] load_error failed, will retry: account={} platform={} run_id={} error={e}",
+                    input.account_task.account, input.account_task.platform, input.run_id);
                 ProcessorResult::RetryableFailure(
                     context
                         .retry_policy

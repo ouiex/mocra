@@ -141,7 +141,10 @@ impl RequestDownloader {
         let session_state = match SessionState::sync(&session_key, &self.cache_service).await {
             Ok(v) => v,
             Err(err) => {
-                warn!("Session load failed for {}, proceeding without session: {:?}", session_key, err);
+                warn!(
+                    "Session load failed: session={} account={} platform={} url={} error={:?}",
+                    session_key, request.account, request.platform, request.url, err
+                );
                 None
             }
         };
@@ -165,7 +168,6 @@ impl RequestDownloader {
         response: &Response,
         existing_session: Option<SessionState>,
     ) {
-        let is_fresh = existing_session.is_none();
         let mut session_state = existing_session.unwrap_or_else(|| SessionState {
             session_id: session_key.to_string(),
             module_id,
@@ -277,8 +279,8 @@ impl RequestDownloader {
         session_state.version = session_state.version.saturating_add(1);
         if let Err(err) = session_state.send_persistent(session_key, &self.cache_service).await {
             warn!(
-                "Failed to cache session state for {}: {:?}",
-                session_key, err
+                "Failed to cache session state: session={} account={} platform={} url={} error={:?}",
+                session_key, request.account, request.platform, request.url, err
             );
         }
     }
@@ -596,7 +598,7 @@ impl Downloader for RequestDownloader {
         };
         if let Some(hash) = request_hash.as_ref()
             && let Ok(Some(response)) = Response::sync(hash, &self.cache_service).await {
-                info!("Cache hit for request: {}", request.id);
+                info!("Cache hit: request_id={} account={} platform={} url={}", request.id, request.account, request.platform, request.url);
                 if session_enabled {
                     let session_key = self.session_scope_key(&request);
                     let module_id = request.module_id();
@@ -604,7 +606,8 @@ impl Downloader for RequestDownloader {
                     let existing_session = match SessionState::sync(&session_key, &self.cache_service).await {
                         Ok(v) => v,
                         Err(err) => {
-                            warn!("Session load failed for {} (cache hit path): {:?}", session_key, err);
+                            warn!("Session load failed (cache hit path): session={} account={} platform={} url={} error={:?}",
+                                session_key, request.account, request.platform, request.url, err);
                             None
                         }
                     };
@@ -660,8 +663,8 @@ impl Downloader for RequestDownloader {
                 Err(_) => {
                     // Lock acquisition failed (timeout/contention), proceed without lock to avoid starvation
                     warn!(
-                        "Failed to acquire download lock for task: {}, proceeding without lock",
-                        request.task_id()
+                        "Failed to acquire download lock: task_id={} account={} platform={} url={}, proceeding without lock",
+                        request.task_id(), request.account, request.platform, request.url
                     );
                     self.do_download(request, request_hash.clone()).await
                 }
