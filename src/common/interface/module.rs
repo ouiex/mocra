@@ -77,6 +77,19 @@ pub trait ModuleNodeTrait: Send + Sync {
     fn retryable(&self) -> bool{
         true
     }
+    /// Returns a stable, unique string key for this node type within the DAG.
+    ///
+    /// When non-empty, `ModuleDagNodeDef` uses this value directly as the node ID
+    /// instead of a randomly generated UUID. This ensures node IDs remain consistent
+    /// across DAG rebuilds (e.g. after error-task retries cause the factory to
+    /// reconstruct the module instance), so error retry routing works correctly.
+    ///
+    /// Override this and return a short constant string that is unique among all
+    /// nodes in the same module's DAG. Default is `""` (random UUID, existing
+    /// behavior preserved for backward compatibility).
+    fn stable_node_key(&self) -> &'static str {
+        ""
+    }
 }
 
 pub trait ToSyncBoxStream<T> {

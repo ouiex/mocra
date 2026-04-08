@@ -3,9 +3,28 @@ use calamine::{Data, HeaderRow, Range, Reader, Xls, XlsOptions, Xlsx};
 use polars::prelude::*;
 use std::io::Cursor;
 
+fn resolve_sheet_name(
+    sheet_names: &[String],
+    sheet_name: Option<&str>,
+) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    match sheet_name {
+        Some(name) => {
+            if sheet_names.iter().any(|sheet| sheet == name) {
+                Ok(name.to_string())
+            } else {
+                Err(format!("Sheet '{name}' not found in the workbook").into())
+            }
+        }
+        None => sheet_names
+            .first()
+            .cloned()
+            .ok_or_else(|| "No sheets found in the workbook".into()),
+    }
+}
+
 pub fn xlsx_dataframe(
     data: &[u8],
-    sheet_name: &str,
+    sheet_name: Option<&str>,
     skip_rows: usize,
     first_row_as_title: bool,
 ) -> Result<DataFrame, Box<dyn std::error::Error + Send + Sync>> {
@@ -13,18 +32,16 @@ pub fn xlsx_dataframe(
 
     let mut workbook: Xlsx<_> = calamine::open_workbook_from_rs(cursor)?;
     let sheet_names = workbook.sheet_names();
-    if !sheet_names.contains(&sheet_name.to_string()) {
-        return Err(format!("Sheet '{sheet_name}' not found in the workbook").into());
-    }
+    let sheet_name = resolve_sheet_name(&sheet_names, sheet_name)?;
     let sheet = workbook
         .with_header_row(HeaderRow::Row(skip_rows as u32))
-        .worksheet_range(sheet_name)?;
+        .worksheet_range(&sheet_name)?;
     sheet_dataframe(sheet, first_row_as_title)
 }
 
 pub fn xls_dataframe(
     data: &[u8],
-    sheet_name: &str,
+    sheet_name: Option<&str>,
     skip_rows: usize,
     first_row_as_title: bool,
 ) -> Result<DataFrame, Box<dyn std::error::Error + Send + Sync>> {
@@ -34,10 +51,8 @@ pub fn xls_dataframe(
     options.header_row = HeaderRow::Row(skip_rows as u32);
     let mut workbook: calamine::Xls<_> = Xls::new_with_options(cursor, options)?;
     let sheet_names = workbook.sheet_names();
-    if !sheet_names.contains(&sheet_name.to_string()) {
-        return Err(format!("Sheet '{sheet_name}' not found in the workbook").into());
-    }
-    let sheet = workbook.worksheet_range(sheet_name)?;
+    let sheet_name = resolve_sheet_name(&sheet_names, sheet_name)?;
+    let sheet = workbook.worksheet_range(&sheet_name)?;
     sheet_dataframe(sheet, first_row_as_title)
 }
 

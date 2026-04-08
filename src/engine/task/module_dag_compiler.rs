@@ -17,13 +17,29 @@ pub struct ModuleDagNodeDef {
 }
 impl ModuleDagNodeDef{
     pub fn new(node: Arc<dyn ModuleNodeTrait>) -> Self {
+        let key = node.stable_node_key();
+        let node_id = if key.is_empty() {
+            uuid::Uuid::now_v7().to_string()
+        } else {
+            key.to_string()
+        };
         Self {
-            node_id: uuid::Uuid::now_v7().to_string(),
+            node_id,
             node,
             placement_override: None,
             policy_override: None,
             tags: Vec::new(),
         }
+    }
+
+    /// Overrides the auto-generated node ID with an explicit stable identifier.
+    ///
+    /// Use this when you need multiple instances of the same node type in one DAG, or
+    /// when you cannot implement `stable_node_key()` on the node struct directly.
+    /// The ID must be unique within the DAG.
+    pub fn with_id(mut self, id: impl Into<String>) -> Self {
+        self.node_id = id.into();
+        self
     }
 }
 
