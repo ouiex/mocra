@@ -127,62 +127,87 @@ impl RequestDownloader {
         }
     }
 
-    async fn process_request(&self, request: Request) -> Result<Request> {
+    /// Load session state and apply it to the request.
+    /// Returns the (modified request, loaded session) so callers can reuse the session
+    /// in `save_session_state` without a second Redis round-trip.
+    /// On cache read failure the error is logged and degraded to no-session rather than
+    /// propagating, so a transient Redis hiccup does not abort the download.
+    async fn process_request(&self, request: Request) -> (Request, Option<SessionState>) {
         if !self.is_session_enabled(&request) {
-            return Ok(request);
+            return (request, None);
         }
 
         let session_key = self.session_scope_key(&request);
-        let mut modified_request = request;
+        let session_state = match SessionState::sync(&session_key, &self.cache_service).await {
+            Ok(v) => v,
+            Err(err) => {
+                warn!("Session load failed for {}, proceeding without session: {:?}", session_key, err);
+                None
+            }
+        };
 
-        if let Some(session_state) = self.load_session_state(&session_key).await? {
-            modified_request.headers.merge_if_absent(&session_state.headers);
-            modified_request.cookies.merge_if_absent(&session_state.cookies);
+        let mut modified_request = request;
+        if let Some(ref state) = session_state {
+            modified_request.headers.merge_if_absent(&state.headers);
+            modified_request.cookies.merge_if_absent(&state.cookies);
         }
 
-        Ok(modified_request)
+        (modified_request, session_state)
     }
 
-    async fn load_session_state(&self, session_key: &str) -> Result<Option<SessionState>> {
-        Ok(SessionState::sync(session_key, &self.cache_service).await?)
-    }
-
+    // Pass the already-loaded session from `process_request` to avoid a second Redis round-trip.
+    // `None` means the session did not exist before this request (fresh start).
     async fn save_session_state(
         &self,
         session_key: &str,
         module_id: String,
         request: &Request,
         response: &Response,
+        existing_session: Option<SessionState>,
     ) {
-        let mut session_state = match self.load_session_state(session_key).await {
-            Ok(Some(v)) => v,
-            Ok(None) => SessionState {
-                session_id: session_key.to_string(),
-                module_id,
-                headers: Headers::default(),
-                cookies: Cookies::default(),
-                version: 0,
-            },
-            Err(err) => {
-                warn!(
-                    "Failed to load session state for {}: {:?}",
-                    session_key, err
-                );
-                SessionState {
-                    session_id: session_key.to_string(),
-                    module_id,
-                    headers: Headers::default(),
-                    cookies: Cookies::default(),
-                    version: 0,
+        let is_fresh = existing_session.is_none();
+        let mut session_state = existing_session.unwrap_or_else(|| SessionState {
+            session_id: session_key.to_string(),
+            module_id,
+            headers: Headers::default(),
+            cookies: Cookies::default(),
+            version: 0,
+        });
+
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        // Purge expired or deleted cookies from the carried-over session before merging.
+        // max_age == 0 is the server's explicit deletion signal (RFC 6265 §4.1.2.2).
+        // expires < now means the cookie has naturally expired.
+        let before_len = session_state.cookies.cookies.len();
+        session_state.cookies.cookies.retain(|c| {
+            if c.max_age == Some(0) {
+                return false;
+            }
+            if let Some(exp) = c.expires {
+                if exp > 0 && exp < now_secs {
+                    return false;
                 }
             }
-        };
+            true
+        });
+        let mut dirty = session_state.cookies.cookies.len() < before_len;
 
         let request_host = Url::parse(&request.url)
             .ok()
             .and_then(|u| u.host_str().map(|h| h.to_ascii_lowercase()));
 
+        // Merge request cookies that are not already in the session.
+        let cookies_before = session_state.cookies.cookies.len();
         session_state.cookies.merge_if_absent(&request.cookies);
+        if session_state.cookies.cookies.len() != cookies_before {
+            dirty = true;
+        }
+
+        // Upsert cookies from the response, normalising missing domains.
         for item in &response.cookies.cookies {
             let mut normalized_item = item.clone();
             if normalized_item.domain.trim().is_empty()
@@ -197,9 +222,16 @@ impl RequestDownloader {
                 .iter_mut()
                 .find(|c| c.name == normalized_item.name && c.domain == normalized_item.domain)
             {
-                *existing = normalized_item;
+                if existing.value != normalized_item.value
+                    || existing.expires != normalized_item.expires
+                    || existing.max_age != normalized_item.max_age
+                {
+                    *existing = normalized_item;
+                    dirty = true;
+                }
             } else {
                 session_state.cookies.cookies.push(normalized_item);
+                dirty = true;
             }
         }
 
@@ -222,18 +254,28 @@ impl RequestDownloader {
                     .iter_mut()
                     .find(|h| h.key.eq_ignore_ascii_case(name))
                 {
-                    existing.value = value.clone();
+                    if existing.value != *value {
+                        existing.value = value.clone();
+                        dirty = true;
+                    }
                 } else {
                     session_state.headers.headers.push(HeaderItem {
                         key: name.clone(),
                         value: value.clone(),
                     });
+                    dirty = true;
                 }
             }
         }
 
+        // For a brand-new session with no collected state, skip the Redis write entirely.
+        // For an existing session, only write back when something actually changed.
+        if !dirty {
+            return;
+        }
+
         session_state.version = session_state.version.saturating_add(1);
-        if let Err(err) = session_state.send(session_key, &self.cache_service).await {
+        if let Err(err) = session_state.send_persistent(session_key, &self.cache_service).await {
             warn!(
                 "Failed to cache session state for {}: {:?}",
                 session_key, err
@@ -391,7 +433,7 @@ impl RequestDownloader {
             }
         }
 
-        let mut request = self.process_request(request).await?;
+        let (mut request, loaded_session) = self.process_request(request).await;
 
         // Get pooled client
         let proxy_url = request.proxy.as_ref().map(|p| p.to_string());
@@ -490,29 +532,22 @@ impl RequestDownloader {
         crate::common::metrics::observe_latency("engine", "downloader", "http_request", "success", duration);
         crate::common::metrics::inc_throughput("engine", "downloader", "http_request", "success", 1);
 
-        let session_key_for_state_cache = if session_enabled {
-            Some(self.session_scope_key(&request))
-        } else {
-            None
-        };
-        let request_for_state_cache = if session_enabled {
-            Some(request.clone())
-        } else {
-            None
-        };
-        let module_id_for_state_cache = if session_enabled {
-            Some(request.module_id())
+        let session_info = if session_enabled {
+            Some((
+                self.session_scope_key(&request),
+                request.module_id(),
+                request.clone(),
+                loaded_session,
+            ))
         } else {
             None
         };
 
         let response_processed = self.process_response(request, response, pre_calculated_hash.clone()).await?;
 
-        if let (Some(session_key), Some(module_id), Some(request_for_cache)) =
-            (session_key_for_state_cache, module_id_for_state_cache, request_for_state_cache)
-        {
+        if let Some((session_key, module_id, request_for_cache, existing_session)) = session_info {
             self
-                .save_session_state(&session_key, module_id, &request_for_cache, &response_processed)
+                .save_session_state(&session_key, module_id, &request_for_cache, &response_processed, existing_session)
                 .await;
         }
 
@@ -565,8 +600,16 @@ impl Downloader for RequestDownloader {
                 if session_enabled {
                     let session_key = self.session_scope_key(&request);
                     let module_id = request.module_id();
+                    // Response cache hit: load existing session first so we merge rather than overwrite.
+                    let existing_session = match SessionState::sync(&session_key, &self.cache_service).await {
+                        Ok(v) => v,
+                        Err(err) => {
+                            warn!("Session load failed for {} (cache hit path): {:?}", session_key, err);
+                            None
+                        }
+                    };
                     self
-                        .save_session_state(&session_key, module_id, &request, &response)
+                        .save_session_state(&session_key, module_id, &request, &response, existing_session)
                         .await;
                 }
                 return Ok(Response {

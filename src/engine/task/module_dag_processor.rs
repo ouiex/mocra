@@ -231,6 +231,19 @@ impl ModuleDagProcessor {
             .send_with_ttl(&key, &self.cache, std::time::Duration::from_secs(self.ttl))
             .await
             .ok();
+
+        // Clean up the persistent session state now that the DAG run is finished.
+        // Key format mirrors CacheAble::cache_id: "{namespace}:session_state:{module_id}:{run_id}"
+        let session_key = format!(
+            "{}:session_state:{}:{}",
+            self.cache.namespace(),
+            self.module_id,
+            self.run_id
+        );
+        if let Err(e) = self.cache.del(&session_key).await {
+            warn!("Failed to delete session state for run {}: {:?}", self.run_id, e);
+        }
+
         Ok(())
     }
 

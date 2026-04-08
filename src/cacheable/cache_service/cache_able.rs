@@ -40,6 +40,27 @@ where
         Ok(())
     }
 
+    /// Store this value in the cache with no TTL (persistent until explicitly deleted).
+    async fn send_persistent(&self, id: &str, sync: &CacheService) -> Result<(), CacheError> {
+        let key = Self::cache_id(id, sync);
+        let content = if self
+            .serialized_size_hint()
+            .map_or(false, |size| size >= sync.serialize_blocking_threshold)
+        {
+            if let Some(data) = self.clone_for_serialize() {
+                tokio::task::spawn_blocking(move || serde_json::to_vec(&data))
+                    .await
+                    .map_err(|e| CacheError::Pool(e.to_string()))??
+            } else {
+                serde_json::to_vec(self)?
+            }
+        } else {
+            serde_json::to_vec(self)?
+        };
+        sync.backend.set(&key, &content, None).await?;
+        Ok(())
+    }
+
     async fn send_with_ttl(&self, id: &str, sync: &CacheService, ttl: Duration) -> Result<(), CacheError> {
         let key = Self::cache_id(id, sync);
         let content = if self
