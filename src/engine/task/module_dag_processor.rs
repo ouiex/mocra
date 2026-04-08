@@ -407,14 +407,47 @@ impl ModuleDagProcessor {
         response: Response,
         config: Option<Arc<ModuleConfig>>,
     ) -> Result<TaskOutputEvent> {
-        // Resolve node_id: prefer node_id, fall back to step_idx for backward compat.
-        let node_id = match response.context.node_id.as_deref() {
-            Some(id) if !id.is_empty() => id.to_string(),
+        // Resolve node_id + its current index in the processor's IndexMap.
+        //
+        // Priority:
+        //   1. response.context.node_id  (exact string lookup)
+        //   2. If (1) misses (stale UUID after DAG rebuild), try step_idx from context
+        //   3. step_idx-only path (no node_id set)
+        //
+        // `node_idx` is also captured so error tasks carry the CORRECT step_idx for
+        // reliable index-based fallback on the next retry, regardless of UUID staleness.
+        let (node_id, node_idx) = match response.context.node_id.as_deref() {
+            Some(id) if !id.is_empty() => {
+                let nodes = self.nodes.read().await;
+                if let Some(idx) = nodes.get_index_of(id) {
+                    (id.to_string(), idx)
+                } else {
+                    // Node id not found — likely a stale UUID from a prior DAG build.
+                    // Fall back to step_idx carried in the context.
+                    let fallback_idx = response.context.step_idx.unwrap_or(0) as usize;
+                    match nodes.get_index(fallback_idx) {
+                        Some((fallback_id, _)) => {
+                            warn!(
+                                "[dag] module={} run={} execute_parse: node '{}' stale, falling back to index {} ('{}')",
+                                self.module_id, self.run_id, id, fallback_idx, fallback_id
+                            );
+                            (fallback_id.clone(), fallback_idx)
+                        }
+                        None => {
+                            warn!(
+                                "[dag] module={} run={} execute_parse: node '{}' not found and step_idx {} out of range, returning empty",
+                                self.module_id, self.run_id, id, fallback_idx
+                            );
+                            return Ok(TaskOutputEvent::default());
+                        }
+                    }
+                }
+            }
             _ => {
                 let idx = response.context.step_idx.unwrap_or(0) as usize;
                 let nodes = self.nodes.read().await;
                 match nodes.get_index(idx) {
-                    Some((id, _)) => id.clone(),
+                    Some((id, _)) => (id.clone(), idx),
                     None => {
                         debug!(
                             "[dag] module={} run={} execute_parse: no node at index {}, returning empty",
@@ -427,8 +460,8 @@ impl ModuleDagProcessor {
         };
 
         debug!(
-            "[dag] module={} run={} execute_parse: node={} prefix={}",
-            self.module_id, self.run_id, node_id, response.prefix_request
+            "[dag] module={} run={} execute_parse: node={} idx={} prefix={}",
+            self.module_id, self.run_id, node_id, node_idx, response.prefix_request
         );
 
         if self.check_stop().await? {
@@ -436,7 +469,8 @@ impl ModuleDagProcessor {
         }
 
         let Some(node) = self.get_node(&node_id).await else {
-            warn!("[dag] module={} run={} execute_parse: node '{}' not found", self.module_id, self.run_id, node_id);
+            // Unreachable: node existence was verified during resolution above.
+            warn!("[dag] module={} run={} execute_parse: node '{}' not found (guard)", self.module_id, self.run_id, node_id);
             return Ok(TaskOutputEvent::default());
         };
 
@@ -544,7 +578,10 @@ impl ModuleDagProcessor {
             }
             Err(e) => {
                 // Parser failure: emit error for same-node retry.
-                let step_idx_u32 = response.context.step_idx.unwrap_or(0);
+                // Use `node_idx` (the node's current position in this processor's IndexMap)
+                // so that on the next retry the index-based fallback routes correctly even
+                // if the DAG is rebuilt and the UUID changes.
+                let step_idx_u32 = node_idx as u32;
                 let meta = response.metadata.task.as_object().cloned().unwrap_or_default();
                 let error_task = TaskErrorEvent {
                     id: response.id,

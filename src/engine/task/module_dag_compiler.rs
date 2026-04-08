@@ -1,5 +1,6 @@
 use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::sync::Arc;
+use indexmap::IndexMap;
 
 use crate::common::interface::ModuleNodeTrait;
 use crate::engine::task::module_node_dag_adapter::ModuleNodeDagAdapter;
@@ -64,6 +65,26 @@ pub struct ModuleDagDefinition {
 }
 
 impl ModuleDagDefinition {
+    /// Returns a fluent builder.
+    ///
+    /// ```
+    /// let dag = ModuleDagDefinition::builder()
+    ///     .edge(&login_node, &cate_list_node)
+    ///     .edge(&cate_list_node, &brand_rank_downloader)
+    ///     .edge(&cate_list_node, &goods_cate_downloader)
+    ///     .edge(&brand_rank_downloader, &download_url_node)
+    ///     .edge(&goods_cate_downloader, &download_url_node)
+    ///     .edge(&download_url_node, &download_file_node)
+    ///     .build();
+    /// ```
+    ///
+    /// Nodes are collected automatically from edges in first-seen order.
+    /// Entry nodes (those with no incoming edges) are derived automatically.
+    /// Isolated nodes (no edges at all) can be added with `.node()`.
+    pub fn builder() -> ModuleDagBuilder {
+        ModuleDagBuilder::new()
+    }
+
     pub fn from_linear_steps(steps: Vec<Arc<dyn ModuleNodeTrait>>) -> Self {
         let mut nodes = Vec::with_capacity(steps.len());
         let mut edges = Vec::with_capacity(steps.len().saturating_sub(1));
@@ -86,6 +107,88 @@ impl ModuleDagDefinition {
         }
     }
 }
+
+// ── Builder ──────────────────────────────────────────────────────────────────
+
+/// Fluent builder for `ModuleDagDefinition`.
+///
+/// Collects nodes automatically from `.edge()` calls. Entry nodes and the
+/// `nodes` list are both derived automatically when `.build()` is called, so
+/// callers only need to describe the edges between node definitions.
+pub struct ModuleDagBuilder {
+    /// Nodes in insertion order, keyed by node_id to deduplicate.
+    nodes: IndexMap<String, ModuleDagNodeDef>,
+    edges: Vec<ModuleDagEdgeDef>,
+    default_policy: Option<DagNodeExecutionPolicy>,
+}
+
+impl ModuleDagBuilder {
+    pub fn new() -> Self {
+        Self {
+            nodes: IndexMap::new(),
+            edges: Vec::new(),
+            default_policy: None,
+        }
+    }
+
+    /// Registers a directed edge `from → to`.
+    ///
+    /// Both nodes are inserted into the node registry on first encounter
+    /// (subsequent calls with the same `node_id` are silently ignored so
+    /// the same `ModuleDagNodeDef` reference is safe to reuse across calls).
+    pub fn edge(mut self, from: &ModuleDagNodeDef, to: &ModuleDagNodeDef) -> Self {
+        self.nodes.entry(from.node_id.clone()).or_insert_with(|| from.clone());
+        self.nodes.entry(to.node_id.clone()).or_insert_with(|| to.clone());
+        self.edges.push(ModuleDagEdgeDef {
+            from: from.node_id.clone(),
+            to: to.node_id.clone(),
+        });
+        self
+    }
+
+    /// Registers an isolated node (no edges). Useful for single-node DAGs.
+    pub fn node(mut self, node: &ModuleDagNodeDef) -> Self {
+        self.nodes.entry(node.node_id.clone()).or_insert_with(|| node.clone());
+        self
+    }
+
+    /// Sets a default execution policy applied to every node.
+    pub fn default_policy(mut self, policy: DagNodeExecutionPolicy) -> Self {
+        self.default_policy = Some(policy);
+        self
+    }
+
+    /// Consumes the builder and produces a `ModuleDagDefinition`.
+    ///
+    /// Entry nodes are derived as any node that never appears as a `to` in an edge.
+    pub fn build(self) -> ModuleDagDefinition {
+        let to_set: std::collections::HashSet<&str> =
+            self.edges.iter().map(|e| e.to.as_str()).collect();
+
+        let entry_nodes: Vec<String> = self
+            .nodes
+            .keys()
+            .filter(|id| !to_set.contains(id.as_str()))
+            .cloned()
+            .collect();
+
+        ModuleDagDefinition {
+            nodes: self.nodes.into_values().collect(),
+            edges: self.edges,
+            entry_nodes,
+            default_policy: self.default_policy,
+            metadata: HashMap::new(),
+        }
+    }
+}
+
+impl Default for ModuleDagBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ── Compiler ─────────────────────────────────────────────────────────────────
 
 #[derive(Default)]
 pub struct ModuleDagCompiler;
