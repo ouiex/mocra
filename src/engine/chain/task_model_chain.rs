@@ -647,18 +647,18 @@ impl ProcessorTrait<TaskEvent, Task> for TaskModelProcessor {
                 }
                 if all_locked {
                     warn!(
-                        "[TaskModelProcessor<TaskModel>] all target modules locked, requeue TaskModel: account={} platform={}",
-                        input.account, input.platform
+                        "[TaskModelProcessor<TaskModel>] all target modules locked, defer via retry policy: account={} platform={} run_id={}",
+                        input.account, input.platform, input.run_id
                     );
-                    let sender = self.queue_manager.get_task_push_channel();
-                    if let Err(e) = sender.send(QueuedItem::new(input.clone())).await {
-                        warn!(
-                            "[TaskModelProcessor<TaskModel>] requeue TaskModel failed, will retry: {}",
-                            e
-                        );
-                    }
+                    // Avoid duplicate amplification: this branch used to both
+                    // push back into `task-normal` and return RetryableFailure,
+                    // which could multiply the same TaskModel exponentially.
+                    // Keep a single retry path (executor-managed retry only).
                     return ProcessorResult::RetryableFailure(
-                        context.retry_policy.unwrap_or_default(),
+                        context
+                            .retry_policy
+                            .unwrap_or_default()
+                            .with_reason("all target modules locked".to_string()),
                     );
                 }
 
