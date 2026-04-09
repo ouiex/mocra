@@ -129,6 +129,7 @@ impl Engine {
         if idle_stop_secs > 0 {
             let queue_manager = self.queue_manager.clone();
             let cron_scheduler = self.cron_scheduler.clone();
+            let inflight_counter = self.inflight_counter.clone();
             let shutdown_tx = self.shutdown_tx.clone();
             let mut shutdown_rx = self.shutdown_tx.subscribe();
             tokio::spawn(async move {
@@ -145,14 +146,29 @@ impl Engine {
                             let (task, download, response, parser, error, remote_task) =
                                 queue_manager.local_pending_breakdown().await;
                             let pending = task + download + response + parser + error + remote_task;
+                            let inflight = inflight_counter.load(std::sync::atomic::Ordering::Relaxed);
                             let has_running_cron_tasks = cron_scheduler.has_running_tasks();
 
-                            if pending > 0 || has_running_cron_tasks {
+                            // Always log state every 5 seconds for diagnostics
+                            static TICK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+                            let tick = TICK.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            if tick % 5 == 0 {
+                                info!("[IdleMonitor] tick={} pending=[t={} d={} r={} p={} e={} rt={}] inflight={} cron={}",
+                                    tick, task, download, response, parser, error, remote_task, inflight, has_running_cron_tasks);
+                            }
+
+                            if pending > 0 || inflight > 0 || has_running_cron_tasks {
                                 last_active = Instant::now();
                                 continue;
                             }
 
-                            if last_active.elapsed().as_secs() >= idle_stop_secs {
+                            let idle_elapsed = last_active.elapsed().as_secs();
+                            if idle_elapsed > 0 && idle_elapsed % 10 == 0 {
+                                info!("[IdleStop] idle for {}s / {}s (pending={} inflight={} cron={})",
+                                    idle_elapsed, idle_stop_secs, pending, inflight, has_running_cron_tasks);
+                            }
+
+                            if idle_elapsed >= idle_stop_secs {
                                 info!("No local queue data for {}s, initiating shutdown", idle_stop_secs);
                                 let _ = shutdown_tx.send(());
                                 break;

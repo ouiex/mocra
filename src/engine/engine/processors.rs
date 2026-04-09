@@ -44,6 +44,7 @@ impl Engine {
             self.shutdown_tx.subscribe(),
             self.pause_tx.subscribe(),
             concurrency,
+            self.inflight_counter.clone(),
         );
 
         runner.run(receiver, execute_fn).await;
@@ -172,12 +173,21 @@ impl Engine {
                     let (request, mut ack_fn, mut nack_fn) = request_item.into_parts();
                     let request_for_dlq = request.clone();
                     let id = request.get_id();
+                    info!("[DownloadExecuteFn] starting chain for request_id={} module={} url={}", id, request.module_id(), request.url);
 
+                    let chain_start = std::time::Instant::now();
                     let result = if request.downloader.eq_ignore_ascii_case("wss_downloader") {
                         wss_chain.execute(request, ProcessorContext::default()).await
                     } else {
                         download_chain.execute(request, ProcessorContext::default()).await
                     };
+                    let chain_elapsed = chain_start.elapsed();
+                    info!("[DownloadExecuteFn] chain returned for request_id={} elapsed={:?} result={}", id, chain_elapsed,
+                        match &result {
+                            crate::common::processors::processor::ProcessorResult::Success(_) => "Success",
+                            crate::common::processors::processor::ProcessorResult::RetryableFailure(_) => "RetryableFailure",
+                            crate::common::processors::processor::ProcessorResult::FatalFailure(_) => "FatalFailure",
+                        });
 
                     match result {
                         crate::common::processors::processor::ProcessorResult::Success(_) => {

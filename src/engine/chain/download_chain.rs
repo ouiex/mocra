@@ -13,7 +13,7 @@ use crate::common::model::ModuleConfig;
 use crate::common::model::download_config::DownloadConfig;
 use crate::common::model::{Request, Response};
 use crate::common::state::State;
-use log::{debug, warn, error};
+use log::{debug, info, warn, error};
 use metrics::counter;
 use crate::queue::QueueManager;
 use crate::common::processors::processor::{
@@ -54,14 +54,10 @@ for DownloadProcessor
             Some(request) => request,
             None => return ProcessorResult::Success((None, input.1)),
         };
-        debug!(
-            "[DownloadProcessor] begin process: account={} platform={} module={} url={} request_id={} task_id={} retry_count={}",
-            request.account,
-            request.platform,
-            request.module,
-            request.url,
+        let _req_id = request.id;
+        info!(
+            "[DownloadProcessor] begin process: request_id={} retry={}",
             request.id,
-            request.task_id(),
             context.retry_policy.as_ref().map(|r| r.current_retry).unwrap_or(0)
         );
 
@@ -183,14 +179,15 @@ for DownloadProcessor
             // [LOG_OPTIMIZATION] debug!("[DownloadProcessor] skipping task/module checks for retry: request_id={}", input.0.id);
         }
 
+        info!("[DownloadProcessor] loading config: request_id={}", _req_id);
         let download_config =
             DownloadConfig::load(&input.1, &self.state.config.read().await.download_config);
+        info!("[DownloadProcessor] getting downloader: request_id={}", _req_id);
         let downloader = self
             .downloader_manager
             .get_downloader(&request, download_config)
             .await;
-        debug!("[DownloadProcessor] acquired downloader, start download: account={} platform={} module={} url={} request_id={}",
-            request.account, request.platform, request.module, request.url, request.id);
+        info!("[DownloadProcessor] starting download: request_id={}", _req_id);
 
         let module_id = request.module_id();
         let task_id = request.task_id();

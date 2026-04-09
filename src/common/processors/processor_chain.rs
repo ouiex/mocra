@@ -115,10 +115,12 @@ where
         }
 
         // Run pre-process hook before the first attempt.
+        info!("[ChainStep] {} pre_process starting", self.processor.name());
         if let Err(e) = self.processor.pre_process(&input, &current_context).await {
             error!("Pre-processing failed for {}: {}", self.processor.name(), e);
             return ProcessorResult::FatalFailure(e);
         }
+        info!("[ChainStep] {} process loop starting", self.processor.name());
 
         loop {
             // Cancellation check.
@@ -1161,16 +1163,19 @@ impl ProcessorChain {
 
         // Execute each processor step by step: each `Any` output becomes next input.
         for (idx, step) in self.steps.iter().enumerate() {
-            debug!(
+            info!(
                 "Executing processor [{} / {}]: {}",
                 idx + 1,
                 self.steps.len(),
                 step.name
             );
+            let step_start = std::time::Instant::now();
 
             // Execute processor (retry behavior is handled inside `TypedProcessorExecutor`).
             match step.executor.execute(current_data, context.clone()).await {
                 ProcessorResult::Success(output) => {
+                    info!("Processor [{} / {}] {} completed in {:?}",
+                        idx + 1, self.steps.len(), step.name, step_start.elapsed());
                     current_data = output;
                 }
                 ProcessorResult::RetryableFailure(_retry_policy) => {

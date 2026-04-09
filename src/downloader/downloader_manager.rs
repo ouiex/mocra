@@ -67,8 +67,11 @@ impl DownloaderManager {
     ///
     /// This updates the rate limit configuration for an active downloader instance.
     pub async fn set_limit(&self, limit_id: &str, limit: f32) {
-        if let Some(downloader) = self.task_downloader.get(limit_id) {
-            downloader.set_limit(limit_id, limit).await;
+        let downloader = self.task_downloader.get(limit_id)
+            .map(|d| dyn_clone::clone_box(d.value().as_ref()));
+        // guard dropped here — never hold DashMap Ref across .await
+        if let Some(d) = downloader {
+            d.set_limit(limit_id, limit).await;
         }
     }
 
@@ -216,12 +219,13 @@ impl DownloaderManager {
         }
 
         // Get or insert configuration.
-        // Use entry API to only insert if needed, but we also want to return the config.
-        // If we just use get() then insert(), we reduce lock contention on write?
-        // DashMap entry() locks until released.
-        // Let's use get first.
-        let config = if let Some(existing) = self.config.get(&module_id) {
-            let cached = existing.clone();
+        // Extract the cached value and drop the DashMap guard BEFORE any
+        // potential .insert() on the same map — holding a Ref (read guard)
+        // while calling .insert() (write lock) on the same shard is a
+        // parking_lot self-deadlock.
+        let cached_config = self.config.get(&module_id).map(|existing| existing.clone());
+        // guard dropped here
+        let config = if let Some(cached) = cached_config {
             if cached != download_config {
                 self.config.insert(module_id.clone(), download_config.clone());
                 download_config.clone()
@@ -241,21 +245,13 @@ impl DownloaderManager {
         };
 
         // Get or create downloader.
-        if let Some(downloader) = self.task_downloader.get(&module_id) {
-             // Check if we really need to update config.
-             // We can optimistically skip calling set_config if we assume config in self.config hasn't changed 
-             // and set_config was called when it was inserted.
-             // However, `download_config` passed in `input` might be different from `self.config`?
-             // The logic above `entry().or_insert(download_config)` implies we trust the cached config over the input one?
-             // Or should we update `self.config` if input is different?
-             // The original code was: .entry(..).or_insert(download_config).clone() -> favoring cached one.
-             
-             // If we favor the cached one, and we assume the downloader already has it set (from creation or previous update),
-             // then we ONLY need to call set_config if the cached config changed (which it doesn't here).
-             // BUT `set_config` also sets limit on `request.limit_id`. If `limit_id` varies per request for the same module,
-             // we MUST call set_config (or set_limit) for that new limit_id.
-             
-              let d = dyn_clone::clone_box(downloader.value().as_ref());
+        // Clone the cached downloader and drop the DashMap guard before any .await.
+        // Holding a DashMap Ref across an await can deadlock the Tokio runtime
+        // (parking_lot RwLock blocks the OS thread).
+        let cached_downloader = self.task_downloader.get(&module_id)
+            .map(|d| dyn_clone::clone_box(d.value().as_ref()));
+        // guard dropped here
+        if let Some(d) = cached_downloader {
               d.set_config(&limit_id, config).await;
               return d;
         }

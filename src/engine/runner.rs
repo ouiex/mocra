@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::sync::{broadcast, mpsc, watch, Mutex, Semaphore};
 use log::{info, debug};
 use crate::queue::Identifiable;
@@ -13,6 +14,8 @@ pub struct ProcessorRunner {
     pub shutdown_rx: broadcast::Receiver<()>,
     pub pause_rx: watch::Receiver<bool>,
     pub concurrency: usize,
+    /// Shared counter tracking in-flight tasks across all processors.
+    pub inflight_counter: Arc<AtomicUsize>,
 }
 
 impl ProcessorRunner {
@@ -22,12 +25,14 @@ impl ProcessorRunner {
         shutdown_rx: broadcast::Receiver<()>,
         pause_rx: watch::Receiver<bool>,
         concurrency: usize,
+        inflight_counter: Arc<AtomicUsize>,
     ) -> Self {
         Self {
             name: name.to_string(),
             shutdown_rx,
             pause_rx,
             concurrency,
+            inflight_counter,
         }
     }
 
@@ -88,25 +93,47 @@ impl ProcessorRunner {
                             if loop_count % 1000 == 0 {
                                 debug!("Processor {}: processed {} items", self.name, loop_count);
                             }
+                            // Diagnostic: log each received item so we can verify delivery
+                            for item in &items {
+                                info!("[ProcessorRunner:{}] received item id={}", self.name, item.get_id());
+                            }
 
                             for item in items {
+                                let item_id = item.get_id();
+                                let avail = semaphore.available_permits();
+                                info!("[ProcessorRunner:{}] acquiring permit for id={} available_permits={}", self.name, item_id, avail);
                                 let permit = loop {
                                     // 1) Check pause state.
                                     if *self.pause_rx.borrow() {
                                          tokio::select! {
-                                             _ = self.shutdown_rx.recv() => break None,
+                                             _ = self.shutdown_rx.recv() => {
+                                                 info!("[ProcessorRunner:{}] shutdown while paused, dropping id={}", self.name, item_id);
+                                                 break None;
+                                             }
                                              _ = self.pause_rx.changed() => continue,
                                          }
                                     }
 
                                     // 2) Acquire permit or react to pause/shutdown.
                                     tokio::select! {
-                                        _ = self.shutdown_rx.recv() => break None,
-                                        _ = self.pause_rx.changed() => continue,
+                                        _ = self.shutdown_rx.recv() => {
+                                            info!("[ProcessorRunner:{}] shutdown while acquiring permit, dropping id={}", self.name, item_id);
+                                            break None;
+                                        }
+                                        _ = self.pause_rx.changed() => {
+                                            info!("[ProcessorRunner:{}] pause_rx changed while acquiring permit for id={}", self.name, item_id);
+                                            continue;
+                                        }
                                         res = semaphore.clone().acquire_owned() => {
                                             match res {
-                                                Ok(p) => break Some(p),
-                                                Err(_) => break None,
+                                                Ok(p) => {
+                                                    info!("[ProcessorRunner:{}] permit acquired for id={}", self.name, item_id);
+                                                    break Some(p);
+                                                }
+                                                Err(_) => {
+                                                    info!("[ProcessorRunner:{}] semaphore closed, dropping id={}", self.name, item_id);
+                                                    break None;
+                                                }
                                             }
                                         }
                                     }
@@ -121,12 +148,15 @@ impl ProcessorRunner {
                                 let task_id = item.get_id();
                                 let metric_label = metric_label.clone();
                                 let span_name = format!("{}_processor", metric_label);
+                                let inflight = self.inflight_counter.clone();
 
                                 tokio::spawn(async move {
+                                    inflight.fetch_add(1, Ordering::Relaxed);
                                     crate::common::metrics::inc_inflight("engine", &metric_label, 1.0);
                                     let _permit = permit;
                                     execute_fn(item).await;
                                     crate::common::metrics::dec_inflight("engine", &metric_label, 1.0);
+                                    inflight.fetch_sub(1, Ordering::Relaxed);
                                 }.instrument(tracing::info_span!("processor_execution", processor_type = %span_name, item_id = %task_id)));
                             }
                         }
@@ -171,7 +201,7 @@ mod tests {
         let (shutdown_tx, shutdown_rx) = broadcast::channel(1);
         let (pause_tx, pause_rx) = watch::channel(false);
 
-        let runner = ProcessorRunner::new("Test", shutdown_rx, pause_rx, 2);
+        let runner = ProcessorRunner::new("Test", shutdown_rx, pause_rx, 2, Arc::new(AtomicUsize::new(0)));
 
         let handle = tokio::spawn(async move {
             runner

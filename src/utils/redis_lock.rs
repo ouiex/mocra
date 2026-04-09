@@ -411,8 +411,28 @@ impl DistributedLockManager {
 
     // Checks whether lock is still valid.
     pub async fn is_lock_valid(&self, lock_name: &str) -> Result<bool, LockError> {
-        if let Some(lock) = self.locks.get(lock_name) {
-            lock.is_valid().await
+        // Extract only what we need for validation, then drop the DashMap guard.
+        // Holding a DashMap Ref across .await can deadlock the Tokio runtime
+        // (parking_lot RwLock blocks the OS thread).
+        let snapshot = self.locks.get(lock_name).map(|l| {
+            let lock = l.value();
+            (lock.pool.clone(), lock.local_map.clone(), lock.lock_info.clone())
+        });
+        // guard dropped here
+        if let Some((pool, local_map, lock_info)) = snapshot {
+            if let Some(pool) = &pool {
+                let mut conn = pool.get().await?;
+                let current_value: Option<String> = conn.get(&lock_info.key).await?;
+                Ok(current_value.as_ref() == Some(&lock_info.value))
+            } else if let Some(map) = &local_map {
+                if let Some(entry) = map.get(&lock_info.key) {
+                    Ok(entry.0 == lock_info.value && entry.1 > Instant::now())
+                } else {
+                    Ok(false)
+                }
+            } else {
+                Ok(false)
+            }
         } else {
             Ok(false)
         }

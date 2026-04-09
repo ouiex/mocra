@@ -1,0 +1,64 @@
+name = "dag_e2e_test"
+
+[db]
+url = "sqlite:tests/tmp/dag_e2e.sqlite?mode=rwc"
+database_schema = "base"
+pool_size = 1
+
+[download_config]
+downloader_expire = 3600
+timeout = 10
+rate_limit = 0
+enable_session = false
+enable_locker = false
+enable_rate_limit = false
+cache_ttl = 30
+wss_timeout = 30
+pool_size = 50
+max_response_size = 1048576
+
+[cache]
+ttl = 60
+
+[cache.redis]
+redis_host = "127.0.0.1"
+redis_port = 6379
+redis_db = 0
+pool_size = 10
+
+[sync]
+allow_rollback = true
+envelope_enabled = false
+
+[crawler]
+request_max_retries = 1
+task_max_errors = 50
+module_max_errors = 10
+module_locker_ttl = 1
+task_concurrency = 200
+publish_concurrency = 200
+dedup_ttl_secs = 0
+idle_stop_secs = 30
+
+[channel_config]
+minid_time = 12
+capacity = 20000
+compression_threshold = 1024
+
+[event_bus]
+capacity = 200000
+concurrency = 2000
+
+[logger]
+enabled = true
+level = "INFO"
+format = "text"
+buffer = 10000
+
+[[logger.outputs]]
+type = "console"
+
+[[logger.outputs]]
+type = "file"
+path = "logs/dag_e2e.log"
+rotation = "daily"

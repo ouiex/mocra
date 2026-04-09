@@ -1,7 +1,7 @@
 use crate::downloader::Downloader;
 use crate::errors::{DownloadError, RequestError, Result};
 use futures::StreamExt;
-use log::{info, warn};
+use log::{debug, info, warn};
 use reqwest::Client;
 use reqwest::Method;
 use reqwest::Proxy;
@@ -330,19 +330,34 @@ impl RequestDownloader {
             }
         }
 
-        // Stream the body to enforce size limit during download
-        let mut content = Vec::new();
-        let mut stream = response.bytes_stream();
+        // Stream the body to enforce size limit during download.
+        // reqwest's `.timeout()` only covers `send().await` (headers); the body
+        // stream has no built-in timeout.  Wrap the entire read in a deadline so
+        // that a stalled body transfer cannot block a download worker forever.
+        let body_timeout = Duration::from_secs(request.timeout.max(30));
         let limit = self.max_response_size;
+        let url_for_log = request.url.clone();
 
-        while let Some(item) = stream.next().await {
-            let chunk = item.map_err(|e: reqwest::Error| DownloadError::DownloadFailed(e.into()))?;
-            if content.len() + chunk.len() > limit {
-                 warn!("Response size exceeds limit {}, aborting download for {}", limit, request.url);
-                 return Err(DownloadError::DownloadFailed("Response too large".into()).into());
+        let content = tokio::time::timeout(body_timeout, async {
+            let mut buf = Vec::new();
+            let mut stream = response.bytes_stream();
+            while let Some(item) = stream.next().await {
+                let chunk = item.map_err(|e: reqwest::Error| DownloadError::DownloadFailed(e.into()))?;
+                if buf.len() + chunk.len() > limit {
+                    warn!("Response size exceeds limit {}, aborting download for {}", limit, url_for_log);
+                    return Err(DownloadError::DownloadFailed("Response too large".into()).into());
+                }
+                buf.extend_from_slice(&chunk);
             }
-            content.extend_from_slice(&chunk);
-        }
+            Ok::<Vec<u8>, crate::errors::Error>(buf)
+        })
+        .await
+        .map_err(|_| {
+            warn!("Body read timed out after {}s for {}", body_timeout.as_secs(), url_for_log);
+            crate::errors::Error::from(DownloadError::DownloadFailed(
+                format!("body read timed out after {}s", body_timeout.as_secs()).into(),
+            ))
+        })??;
 
         Ok(Response {
             id: request_id,
@@ -404,7 +419,9 @@ impl RequestDownloader {
         if let Some(seconds) = request.time_sleep_secs {
             tokio::time::sleep(Duration::from_secs(seconds)).await;
         }
-        if self.enable_rate_limit.load(Ordering::Relaxed) {
+        let rate_limit_enabled = self.enable_rate_limit.load(Ordering::Relaxed);
+        info!("[do_download] enable_rate_limit={} request_id={}", rate_limit_enabled, request.id);
+        if rate_limit_enabled {
              // Use module_id as default limit_id if not specified
             let limit_id = if request.limit_id.is_empty() {
                 request.module_id()
@@ -412,14 +429,22 @@ impl RequestDownloader {
                 request.limit_id.clone()
             };
 
+            let rate_limit_start = std::time::Instant::now();
+            // Use a total-time budget so slow rate limits (e.g., 0.2 req/s →
+            // 5 000 ms interval) don't trigger a premature abort.
+            let abort_budget_ms: u64 = request.timeout.max(30) * 1000;
             loop {
                 let res = self.limit.check_and_update(&limit_id).await;
                 match res {
                     Ok(u) => {
                         if u > 0 {
-                            if u > 5000 {
-                                warn!("Rate limit wait too long ({}ms) for {}, aborting request to yield resources", u, limit_id);
-                                return Err(crate::errors::Error::from(crate::errors::RateLimitError::WaitTimeTooLong(u)));
+                            let elapsed_ms = rate_limit_start.elapsed().as_millis() as u64;
+                            if elapsed_ms + u > abort_budget_ms {
+                                warn!(
+                                    "Rate limit wait budget exhausted (elapsed={}ms, next_wait={}ms, budget={}ms) for {}, aborting request to yield resources",
+                                    elapsed_ms, u, abort_budget_ms, limit_id
+                                );
+                                return Err(crate::errors::Error::from(crate::errors::RateLimitError::WaitTimeTooLong(elapsed_ms + u)));
                             }
                             // Rate limit exceeded, wait for the specified duration
                             tokio::time::sleep(Duration::from_millis(u)).await;
@@ -571,7 +596,11 @@ impl Downloader for RequestDownloader {
         if self.enable_locker.load(Ordering::Relaxed) != config.enable_locker {
             self.enable_locker.store(config.enable_locker, Ordering::Relaxed);
         }
+        info!("[set_config] id={} config.enable_rate_limit={} current={}", 
+            id, config.enable_rate_limit, self.enable_rate_limit.load(Ordering::Relaxed));
         if self.enable_rate_limit.load(Ordering::Relaxed) != config.enable_rate_limit {
+            info!("[set_config] changing enable_rate_limit from {} to {} for id={}", 
+                self.enable_rate_limit.load(Ordering::Relaxed), config.enable_rate_limit, id);
             self.enable_rate_limit.store(config.enable_rate_limit, Ordering::Relaxed);
         }
         self.limit.set_limit(id, config.rate_limit).await.ok();

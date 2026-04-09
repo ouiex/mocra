@@ -177,14 +177,23 @@ impl DistributedSlidingWindowRateLimiter {
 
     /// Checks whether identifier is currently suspended.
     async fn check_suspended(&self, identifier: &str) -> Result<Option<u64>> {
-        // Check short-lived cache first
-        if let Some(entry) = self.suspend_cache.get(identifier) {
-            let (checked_at, suspend_until_opt) = entry.value();
+        // Check short-lived cache first.
+        // IMPORTANT: Extract values immediately and drop the DashMap guard before
+        // any `.await` — holding a `parking_lot` read-lock across a yield point
+        // can deadlock the Tokio runtime when a writer on the same shard blocks
+        // an OS thread.
+        let cached = self.suspend_cache.get(identifier)
+            .map(|entry| {
+                let (checked_at, suspend_until_opt) = entry.value();
+                (*checked_at, *suspend_until_opt)
+            });
+        // guard dropped here
+        if let Some((checked_at, suspend_until_opt)) = cached {
             if checked_at.elapsed() < Duration::from_millis(500) {
                  let current_time = self.get_current_timestamp().await?;
                  if let Some(suspend_until) = suspend_until_opt {
-                     if *suspend_until > current_time {
-                         return Ok(Some(*suspend_until - current_time));
+                     if suspend_until > current_time {
+                         return Ok(Some(suspend_until - current_time));
                      }
                  } else {
                      return Ok(None);

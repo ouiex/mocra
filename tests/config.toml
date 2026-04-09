@@ -14,7 +14,7 @@ pool_size = 800
 downloader_expire = 3600
 timeout = 30
 rate_limit = 1
-enable_session = false
+enable_session = true
 enable_locker = false
 enable_rate_limit = false
 cache_ttl = 60
@@ -44,7 +44,7 @@ task_max_errors = 100
 module_max_errors = 10
 module_locker_ttl = 5
 task_concurrency = 32
-idle_stop_secs = 10
+idle_stop_secs = 120
 
 [scheduler]
 refresh_interval_secs = 60

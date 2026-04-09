@@ -95,6 +95,8 @@ pub struct Engine {
     pub cron_scheduler: Arc<CronScheduler>,
     /// Lua script registry used for atomic distributed coordination paths.
     pub lua_registry: Arc<LuaScriptRegistry>,
+    /// Shared counter tracking in-flight tasks across all processors.
+    pub inflight_counter: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl Engine {
@@ -603,6 +605,7 @@ impl Engine {
             node_registry,
             cron_scheduler,
             lua_registry,
+            inflight_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         })
     }
     /// Register a download middleware.
