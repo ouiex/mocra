@@ -429,35 +429,9 @@ impl RequestDownloader {
                 request.limit_id.clone()
             };
 
-            let rate_limit_start = std::time::Instant::now();
-            // Use a total-time budget so slow rate limits (e.g., 0.2 req/s →
-            // 5 000 ms interval) don't trigger a premature abort.
-            let abort_budget_ms: u64 = request.timeout.max(30) * 1000;
-            loop {
-                let res = self.limit.check_and_update(&limit_id).await;
-                match res {
-                    Ok(u) => {
-                        if u > 0 {
-                            let elapsed_ms = rate_limit_start.elapsed().as_millis() as u64;
-                            if elapsed_ms + u > abort_budget_ms {
-                                warn!(
-                                    "Rate limit wait budget exhausted (elapsed={}ms, next_wait={}ms, budget={}ms) for {}, aborting request to yield resources",
-                                    elapsed_ms, u, abort_budget_ms, limit_id
-                                );
-                                return Err(crate::errors::Error::from(crate::errors::RateLimitError::WaitTimeTooLong(elapsed_ms + u)));
-                            }
-                            // Rate limit exceeded, wait for the specified duration
-                            tokio::time::sleep(Duration::from_millis(u)).await;
-                        } else {
-                            break;
-                        }
-                    }
-                    Err(e) => {
-                        warn!("Rate limit verify error: {:?}", e);
-                        break;
-                    },
-                }
-            }
+            // Reserve a rate-limit time slot and wait. Each concurrent download
+            // gets a unique slot — one Redis call, no polling, no thundering herd.
+            self.limit.wait_for_permit(&limit_id).await?;
         }
 
         let (mut request, loaded_session) = self.process_request(request).await;

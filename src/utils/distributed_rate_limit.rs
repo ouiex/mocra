@@ -651,14 +651,15 @@ impl DistributedSlidingWindowRateLimiter {
         }
     }
 
-    /// Atomically checks and updates rate-limit state.
+    /// Atomically checks and updates rate-limit state (competitive model).
     ///
-    /// # Parameters
-    /// * `identifier` - Identifier.
+    /// Only ONE caller wins the permit per interval; others receive a wait
+    /// duration and must retry.  Prefer [`wait_for_permit`] for download
+    /// tasks — it uses a reservation model that eliminates retry loops.
     ///
     /// # Returns
     /// * `Ok(0)` - Permit acquired.
-    /// * `Ok(wait_ms)` - Must wait `wait_ms` milliseconds.
+    /// * `Ok(wait_ms)` - Must wait `wait_ms` milliseconds then retry.
     pub async fn check_and_update(&self, identifier: &str) -> Result<u64> {
         // Check suspension first
         if let Some(wait) = self.check_suspended(identifier).await? {
@@ -749,6 +750,120 @@ impl DistributedSlidingWindowRateLimiter {
                  }
              }
         }
+    }
+
+    /// Reserves a unique rate-limit time slot for the given identifier.
+    ///
+    /// Unlike [`check_and_update`] (competitive — one winner per call),
+    /// this method assigns each caller its own future slot atomically.
+    /// With N concurrent callers the slots are T, T+interval, T+2·interval, …
+    /// so every caller makes exactly **one** Redis round-trip.
+    ///
+    /// # Returns
+    /// * `Ok(0)` — Permit acquired immediately.
+    /// * `Ok(wait_ms)` — Slot reserved; caller should sleep then proceed.
+    async fn reserve_permit(&self, identifier: &str) -> Result<u64> {
+        let current_time = self.get_current_timestamp().await?;
+
+        let config = match self.get_key_config(identifier).await {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                error!("{e:?}");
+                self.default_config.clone()
+            }
+        };
+
+        let last_request_key = self.get_last_request_key(identifier);
+        let min_interval_millis =
+            (config.window_size_millis as f64 / config.max_requests_per_second as f64) as u64;
+        let base_ttl_seconds = (min_interval_millis * 2 / 1000).max(1);
+
+        if let Some(pool) = &self.pool {
+            let mut conn = pool
+                .get()
+                .await
+                .map_err(|e| RateLimitError::RedisError(e.into()))?;
+
+            // Reservation-based Lua script.
+            // Each caller atomically reads the last reserved time, computes the
+            // next available slot, writes it back, and returns the wait duration.
+            // Concurrent callers are serialised inside Redis so every caller
+            // receives a **distinct** future slot — no thundering-herd.
+            let script = r#"
+            local key          = KEYS[1]
+            local current_time = tonumber(ARGV[1])
+            local min_interval = tonumber(ARGV[2])
+            local base_ttl     = tonumber(ARGV[3])
+
+            local last_time = redis.call("GET", key)
+            local next_available
+            if last_time then
+                next_available = math.max(tonumber(last_time) + min_interval, current_time)
+            else
+                next_available = current_time
+            end
+
+            -- TTL must survive until the reserved slot expires
+            local wait = next_available - current_time
+            local ttl  = math.max(math.ceil((wait + min_interval * 2) / 1000), base_ttl)
+            redis.call("SETEX", key, ttl, next_available)
+            return wait
+            "#;
+
+            let wait_ms: u64 = deadpool_redis::redis::Script::new(script)
+                .key(&last_request_key)
+                .arg(current_time)
+                .arg(min_interval_millis)
+                .arg(base_ttl_seconds)
+                .invoke_async(&mut conn)
+                .await
+                .map_err(|e| RateLimitError::RedisError(e.into()))?;
+
+            Ok(wait_ms)
+        } else {
+            // Local mode: DashMap entry lock gives atomicity on one process.
+            let entry = self.local_last_request.entry(last_request_key);
+            match entry {
+                dashmap::mapref::entry::Entry::Occupied(mut occ) => {
+                    let last_time = *occ.get();
+                    let next_available = (last_time + min_interval_millis).max(current_time);
+                    let wait = next_available.saturating_sub(current_time);
+                    occ.insert(next_available);
+                    Ok(wait)
+                }
+                dashmap::mapref::entry::Entry::Vacant(vac) => {
+                    vac.insert(current_time);
+                    Ok(0)
+                }
+            }
+        }
+    }
+
+    /// Waits until a rate-limit permit is available, then returns.
+    ///
+    /// Recommended entry point for download tasks.  Handles:
+    /// 1. **Suspension** (circuit breaker / 429 backoff) — waits until cleared.
+    /// 2. **Slot reservation** — each caller gets a unique future time slot
+    ///    via a single atomic Redis call, then sleeps exactly the right amount.
+    ///
+    /// No polling loop, no thundering-herd, no request abandonment.
+    pub async fn wait_for_permit(&self, identifier: &str) -> Result<()> {
+        // Phase 1: wait for any active suspension to clear.
+        loop {
+            match self.check_suspended(identifier).await? {
+                Some(remaining_ms) => {
+                    tokio::time::sleep(Duration::from_millis(remaining_ms)).await;
+                }
+                None => break,
+            }
+        }
+
+        // Phase 2: reserve a slot in the rate-limit queue.
+        let wait_ms = self.reserve_permit(identifier).await?;
+        if wait_ms > 0 {
+            tokio::time::sleep(Duration::from_millis(wait_ms)).await;
+        }
+        Ok(())
     }
 
     /// Returns time until next request can proceed (milliseconds).
