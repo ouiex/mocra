@@ -183,6 +183,16 @@ impl Request {
     pub fn module_id(&self) -> String {
         format!("{}-{}-{}", self.account, self.platform, self.module)
     }
+    /// Run-scoped task identifier for error tracking. Includes `run_id` to isolate
+    /// error state across different DAG runs.
+    pub fn task_runtime_id(&self) -> String {
+        format!("{}:{}:{}", self.platform, self.account, self.run_id)
+    }
+    /// Run-scoped module identifier for error tracking. Includes `run_id` to isolate
+    /// error state across different DAG runs.
+    pub fn module_runtime_id(&self) -> String {
+        format!("{}-{}-{}-{}", self.account, self.platform, self.module, self.run_id)
+    }
     pub fn with_params(mut self, params: Vec<(impl AsRef<str>, impl AsRef<str>)>) -> Self {
         self.params = Some(
             params
@@ -277,7 +287,7 @@ impl Request {
             return cached.clone();
         }
         let canonical = format!(
-            "{},{},{},{},{},{},{},{:?},{}",
+            "{},{},{},{},{},{},{},{:?},{},{}",
             self.account,
             self.platform,
             self.module,
@@ -286,7 +296,8 @@ impl Request {
             serde_json::to_string(&self.params).unwrap_or_default(),
             self.json.as_ref().unwrap_or_default(),
             self.body.as_deref().unwrap_or(&[]),
-            self.form.as_ref().unwrap_or_default()
+            self.form.as_ref().unwrap_or_default(),
+            self.run_id
         );
 
         // MD5 hash in lowercase hex for stable, compact identity

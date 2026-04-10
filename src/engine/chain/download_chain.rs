@@ -67,7 +67,7 @@ for DownloadProcessor
             // Defensive checks in distributed mode: ingress and download may run on different nodes.
 
             // 1) Task-level threshold check with short local cache.
-            let task_id = request.task_id();
+            let task_id = request.task_runtime_id();
             // Try cached decision first.
             let cached_task_decision = {
                 if let Some(entry) = self.decision_cache.get(&task_id) {
@@ -119,7 +119,7 @@ for DownloadProcessor
             }
 
             // 2) Module-level threshold check with short local cache.
-            let module_id = request.module_id();
+            let module_id = request.module_runtime_id();
             // Try cached decision first.
             let cached_decision = {
                 if let Some(entry) = self.decision_cache.get(&module_id) {
@@ -154,13 +154,13 @@ for DownloadProcessor
                 Ok(ErrorDecision::Terminate(reason)) => {
                     error!(
                         "[DownloadProcessor] module terminated before download: module_id={} reason={}",
-                        request.module_id(),
+                        request.module_runtime_id(),
                         reason
                     );
                     // Module terminated: release lock and skip this request.
                     self.state
                         .status_tracker
-                        .release_module_locker(&request.module_id())
+                        .release_module_locker(&request.module_runtime_id())
                         .await;
 
                     // Return success with None to keep stream progressing.
@@ -169,7 +169,7 @@ for DownloadProcessor
                 Err(e) => {
                     warn!(
                         "[DownloadProcessor] module error check failed, continue anyway: module_id={} error={}",
-                        request.module_id(),
+                        request.module_runtime_id(),
                         e
                     );
                 }
@@ -189,8 +189,8 @@ for DownloadProcessor
             .await;
         info!("[DownloadProcessor] starting download: request_id={}", _req_id);
 
-        let module_id = request.module_id();
-        let task_id = request.task_id();
+        let module_id = request.module_runtime_id();
+        let task_id = request.task_runtime_id();
         let request_id = request.id;
         let url = request.url.clone();
         let account = request.account.clone();
@@ -308,7 +308,7 @@ for DownloadProcessor
         // Ensure we release the module lock to avoid stale locks.
         self.state
             .status_tracker
-            .release_module_locker(&request.module_id())
+            .release_module_locker(&request.module_runtime_id())
             .await;
         ProcessorResult::Success((None, _input.1.clone()))
     }
@@ -519,7 +519,7 @@ impl ProcessorTrait<Option<Response>, ()> for ResponsePublishProcessor {
             //     resp.module_id(),
             //     resp.id
             // );
-            self.state.status_tracker.lock_module(&resp.module_id()).await;
+            self.state.status_tracker.lock_module(&resp.module_runtime_id()).await;
             // [LOG_OPTIMIZATION]
             // debug!(
             //     "[ResponsePublish] lock module acquired: module_id={} request_id={}",
@@ -538,7 +538,7 @@ impl ProcessorTrait<Option<Response>, ()> for ResponsePublishProcessor {
         if let Some(resp) = input {
             // Ensure we release the lock if publishing the response ultimately fails
             self.state.status_tracker
-                .release_module_locker(&resp.module_id())
+                .release_module_locker(&resp.module_runtime_id())
                 .await;
 
             // Response publish failures are queue-transport issues,

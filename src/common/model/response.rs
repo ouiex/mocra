@@ -37,6 +37,14 @@ impl Response {
     pub fn module_id(&self) -> String {
         format!("{}-{}-{}", self.account, self.platform, self.module)
     }
+    /// Run-scoped task identifier for error tracking.
+    pub fn task_runtime_id(&self) -> String {
+        format!("{}:{}:{}", self.platform, self.account, self.run_id)
+    }
+    /// Run-scoped module identifier for error tracking.
+    pub fn module_runtime_id(&self) -> String {
+        format!("{}-{}-{}-{}", self.account, self.platform, self.module, self.run_id)
+    }
     pub fn get_meta<T>(&self, key: &str) -> Option<T>
     where
         T: for<'de> Deserialize<'de>,

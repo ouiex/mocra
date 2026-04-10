@@ -60,21 +60,21 @@ impl ProcessorTrait<Response, (Response, Arc<Module>, Arc<ModuleConfig>, Option<
         match self
             .state
             .status_tracker
-            .should_task_continue(&input.task_id())
+            .should_task_continue(&input.task_runtime_id())
             .await
         {
             Ok(ErrorDecision::Continue) => {
-                // [LOG_OPTIMIZATION] debug!("[ResponseModuleProcessor] task check passed: task_id={}", input.task_id());
+                // [LOG_OPTIMIZATION] debug!("[ResponseModuleProcessor] task check passed: task_id={}", input.task_runtime_id());
             }
             Ok(ErrorDecision::Terminate(reason)) => {
                 error!(
                     "[ResponseModuleProcessor] task terminated before parsing: task_id={} reason={}",
-                    input.task_id(),
+                    input.task_runtime_id(),
                     reason
                 );
                 // Release lock on task termination path.
                 self.state.status_tracker
-                    .release_module_locker(&input.module_id())
+                    .release_module_locker(&input.module_runtime_id())
                     .await;
                 return ProcessorResult::FatalFailure(
                     crate::errors::ModuleError::TaskMaxError(reason.into()).into(),
@@ -83,7 +83,7 @@ impl ProcessorTrait<Response, (Response, Arc<Module>, Arc<ModuleConfig>, Option<
             Err(e) => {
                 warn!(
                     "[ResponseModuleProcessor] task error check failed, continue anyway: task_id={} error={}",
-                    input.task_id(),
+                    input.task_runtime_id(),
                     e
                 );
             }
@@ -94,21 +94,21 @@ impl ProcessorTrait<Response, (Response, Arc<Module>, Arc<ModuleConfig>, Option<
         match self
             .state
             .status_tracker
-            .should_module_continue(&input.module_id())
+            .should_module_continue(&input.module_runtime_id())
             .await
         {
             Ok(ErrorDecision::Continue) => {
-                // [LOG_OPTIMIZATION] debug!("[ResponseModuleProcessor] module check passed: module_id={}", input.module_id());
+                // [LOG_OPTIMIZATION] debug!("[ResponseModuleProcessor] module check passed: module_id={}", input.module_runtime_id());
             }
             Ok(ErrorDecision::Terminate(reason)) => {
                 error!(
                     "[ResponseModuleProcessor] module terminated before parsing: module_id={} reason={}",
-                    input.module_id(),
+                    input.module_runtime_id(),
                     reason
                 );
                 // Release lock on module termination path.
                 self.state.status_tracker
-                    .release_module_locker(&input.module_id())
+                    .release_module_locker(&input.module_runtime_id())
                     .await;
                 return ProcessorResult::FatalFailure(
                     crate::errors::ModuleError::ModuleMaxError(reason.into()).into(),
@@ -117,7 +117,7 @@ impl ProcessorTrait<Response, (Response, Arc<Module>, Arc<ModuleConfig>, Option<
             Err(e) => {
                 warn!(
                     "[ResponseModuleProcessor] module error check failed, continue anyway: module_id={} error={}",
-                    input.module_id(),
+                    input.module_runtime_id(),
                     e
                 );
             }
@@ -187,9 +187,9 @@ impl ProcessorTrait<Response, (Response, Arc<Module>, Arc<ModuleConfig>, Option<
         if self.state.config.read().await.download_config.enable_locker {
             debug!(
                 "[ResponseModuleProcessor] lock module before parsing: module_id={}",
-                input.module_id()
+                input.module_runtime_id()
             );
-            self.state.status_tracker.lock_module(&input.module_id()).await;
+            self.state.status_tracker.lock_module(&input.module_runtime_id()).await;
         }
         Ok(())
     }
@@ -352,8 +352,8 @@ impl ProcessorTrait<(Response, Arc<Module>, Arc<ModuleConfig>, Option<LoginInfo>
         }
 
         // StateHandle has been removed; SyncService is used internally by ModuleProcessor.
-        let task_id = input.0.task_id();
-        let module_id = input.0.module_id();
+        let task_id = input.0.task_runtime_id();
+        let module_id = input.0.module_runtime_id();
         let request_id = input.0.id.to_string();
         let account = input.0.account.clone();
         let platform = input.0.platform.clone();
@@ -656,11 +656,11 @@ impl ProcessorTrait<(Response, Arc<Module>, Arc<ModuleConfig>, Option<LoginInfo>
 
         if config.download_config.enable_locker {
             self.state.status_tracker
-                .release_module_locker(&input.0.module_id())
+                .release_module_locker(&input.0.module_runtime_id())
                 .await;
             debug!(
                 "[ResponseParserProcessor] released module lock after parsing: module_id={}",
-                input.0.module_id()
+                input.0.module_runtime_id()
             );
         }
         Ok(())
@@ -725,7 +725,7 @@ impl ProcessorTrait<(Response, Arc<Module>, Arc<ModuleConfig>, Option<LoginInfo>
         if self.state.config.read().await.download_config.enable_locker {
            self.state
                .status_tracker
-               .release_module_locker(&input.0.module_id())
+               .release_module_locker(&input.0.module_runtime_id())
                .await;
         }
 

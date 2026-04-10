@@ -288,7 +288,7 @@ impl ThresholdDecisionService for StatusTrackerThresholdDecisionService {
                             );
                         }
                     }
-                    self.state.status_tracker.release_module_locker(&module_id).await;
+                    self.state.status_tracker.release_module_locker(&format!("{}-{}", module_id, input.run_id)).await;
                     return ChainDecision::TerminateModule {
                         reason: msg,
                         action_applied: true,
@@ -360,6 +360,8 @@ impl ThresholdDecisionService for StatusTrackerThresholdDecisionService {
                     &input.account_task.platform,
                     module_name,
                 );
+                // Run-scoped module ID for StatusTracker error isolation across runs
+                let module_id_scoped = format!("{}-{}", module_id, input.run_id);
 
                 if input.prefix_request != Uuid::nil() {
                     match self
@@ -367,7 +369,7 @@ impl ThresholdDecisionService for StatusTrackerThresholdDecisionService {
                         .status_tracker
                         .record_parse_error(
                             &task_id,
-                            &module_id,
+                            &module_id_scoped,
                             &input.prefix_request.to_string(),
                             &parse_error,
                         )
@@ -380,13 +382,13 @@ impl ThresholdDecisionService for StatusTrackerThresholdDecisionService {
                         Err(err) => {
                             warn!(
                                 "[ThresholdDecisionService] record_parse_error failed: task_id={} module_id={} error={}",
-                                task_id, module_id, err
+                                task_id, module_id_scoped, err
                             );
                         }
                     }
                 }
 
-                match self.state.status_tracker.should_module_continue(&module_id).await {
+                match self.state.status_tracker.should_module_continue(&module_id_scoped).await {
                     Ok(ErrorDecision::Terminate(reason)) => {
                         return ChainDecision::TerminateModule {
                             reason,
@@ -594,7 +596,7 @@ impl ProcessorTrait<TaskEvent, Task> for TaskModelProcessor {
                 .unwrap_or(0)
         );
 
-        let task_id = format!("{}-{}", input.account, input.platform);
+        let task_id = chain_key::task_runtime_id(&input.platform, &input.account, input.run_id);
         match self.task_precheck(&task_id).await {
             ChainDecision::Continue => {}
             ChainDecision::TerminateTask { reason, .. } => {
@@ -1409,7 +1411,7 @@ impl ProcessorTrait<Request, ()> for RequestPublish {
         // If we can't publish the request after retries, release the module lock
         // to avoid locking out future runs of this module.
         self.state.status_tracker
-            .release_module_locker(&input.module_id())
+            .release_module_locker(&input.module_runtime_id())
             .await;
         ProcessorResult::FatalFailure(error)
     }
@@ -1494,7 +1496,7 @@ impl ProcessorTrait<Request, (Request, Option<ModuleConfig>)> for ConfigProcesso
         }
     }
     async fn pre_process(&self, _input: &Request, _context: &ProcessorContext) -> Result<()> {
-        self.state.status_tracker.lock_module(&_input.module_id()).await;
+        self.state.status_tracker.lock_module(&_input.module_runtime_id()).await;
         Ok(())
     }
     async fn handle_error(
