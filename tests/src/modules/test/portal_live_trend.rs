@@ -1,11 +1,12 @@
 use async_trait::async_trait;
 use chrono::Local;
-use mocra::common::interface::{ModuleNodeTrait, ModuleTrait, SyncBoxStream};
-use mocra::common::model::data::Data;
-use mocra::common::model::login_info::LoginInfo;
-use mocra::common::model::message::ParserData;
+use mocra::common::interface::{
+    ModuleNodeTrait, ModuleTrait, NodeGenerateContext, NodeParseContext, StoreTrait,
+    SyncBoxStream, ToSyncBoxStream,
+};
+use mocra::common::model::data::DataEvent;
 use mocra::common::model::request::RequestMethod;
-use mocra::common::model::{Headers, ModuleConfig, Request, Response};
+use mocra::common::model::{Headers, NodeParseOutput, Request, Response};
 use mocra::errors::{ParserError, RequestError, Result};
 use polars::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -21,8 +22,8 @@ impl ModuleTrait for PortalLiveTrend {
         true
     }
 
-    fn name(&self) -> String {
-        "sycm_portal_live_trend".to_string()
+    fn name(&self) -> &'static str {
+        "sycm_portal_live_trend"
     }
     fn version(&self) -> i32 {
         1
@@ -89,12 +90,9 @@ impl Default for PortalLiveTrendNode {
 impl ModuleNodeTrait for PortalLiveTrendNode {
     async fn generate(
         &self,
-        _config: Arc<ModuleConfig>,
-        _params: Map<String, Value>,
-        login_info: Option<LoginInfo>,
+        ctx: NodeGenerateContext<'_>,
     ) -> Result<SyncBoxStream<'static, Request>> {
-        let mut requests = Vec::new();
-        let login_info = login_info.ok_or(RequestError::NotLogin("not login".into()))?;
+        let login_info = ctx.login_info.ok_or(RequestError::NotLogin("not login".into()))?;
         // extract token once
         let token: String = login_info
             .get_extra("token")
@@ -108,15 +106,14 @@ impl ModuleNodeTrait for PortalLiveTrendNode {
             token,
         };
         let request = Request::new(self.url.clone(), RequestMethod::Get).with_params(params.into());
-        requests.push(request);
-        Ok(Box::pin(futures::stream::iter(requests)))
+        vec![request].into_stream_ok()
     }
 
     async fn parser(
         &self,
         response: Response,
-        _config: Option<Arc<ModuleConfig>>,
-    ) -> Result<ParserData> {
+        _ctx: NodeParseContext<'_>,
+    ) -> Result<NodeParseOutput> {
         let shop_id = response
             .get_login_config::<i64>("shopid")
             .ok_or(ParserError::InvalidMetaData("shopid".into()))?;
@@ -157,16 +154,18 @@ impl ModuleNodeTrait for PortalLiveTrendNode {
             .lazy()
             .with_columns([lit(shop_id).alias("shop_id"), lit(date).alias("date")])
             .collect()?;
-        let yesterday_data = Data::from(&response)
+        let yesterday_data = DataEvent::from(&response)
             .with_df(yesterday_df)
             .with_schema("taobao_sycm")
             .with_table("portal_live_trend");
-        let today_data = Data::from(&response)
+        let today_data = DataEvent::from(&response)
             .with_df(today_df)
             .with_schema("taobao_sycm")
             .with_table("portal_live_trend");
 
-        Ok(ParserData::default().with_data(vec![yesterday_data, today_data]))
+        Ok(NodeParseOutput::default()
+            .with_data(yesterday_data.build())
+            .with_data(today_data.build()))
     }
 }
 fn decode_value(value: &Map<String, Value>) -> Result<DataFrame> {

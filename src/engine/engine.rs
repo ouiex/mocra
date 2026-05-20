@@ -1,51 +1,51 @@
 // #![allow(unused)]
-use crate::utils::device_info::get_primary_local_ip;
-use crate::engine::zombie;
-use crate::engine::monitor::SystemMonitor;
-use crate::engine::events::{
-    EventBus, RedisEventHandler,
-};
 use crate::downloader::DownloaderManager;
+use crate::engine::events::{EventBus, RedisEventHandler};
+use crate::engine::monitor::SystemMonitor;
+use crate::engine::zombie;
 use crate::queue::Identifiable;
+use crate::utils::device_info::get_primary_local_ip;
 
+use crate::common::policy::{DlqPolicy, PolicyResolver};
 use crate::engine::chain::{
-    create_download_chain, create_parser_chain, create_unified_task_ingress_chain,
-    UnifiedTaskIngressChain,
+    UnifiedTaskIngressChain, create_download_chain, create_parser_chain,
+    create_unified_task_ingress_chain,
 };
 use crate::engine::events::{EventEnvelope, EventPhase, EventType, HealthCheckEvent};
-use crate::common::policy::{DlqPolicy, PolicyResolver};
 use metrics::counter;
 
-use crate::engine::chain::stream_chain::create_wss_download_chain;
-use futures::{StreamExt, FutureExt};
 use crate::common::state::State;
-use log::{error, info, warn};
+use crate::engine::chain::stream_chain::create_wss_download_chain;
 use crate::queue::{QueueManager, QueuedItem};
+use futures::{FutureExt, StreamExt};
+use log::{error, info, warn};
 
-use crate::common::processors::processor::{ProcessorContext, RetryPolicy};
-use crate::common::model::message::UnifiedTaskInput;
-use crate::common::model::chain_key;
-use crate::proxy::ProxyManager;
-use std::path::PathBuf;
-use std::sync::Arc;
-use tokio::sync::{broadcast, watch};
 use crate::common::interface::{
     DataMiddlewareHandle, DataStoreMiddlewareHandle, DownloadMiddlewareHandle, MiddlewareManager,
     ModuleTrait,
 };
-use crate::common::registry::NodeRegistry;
-use crate::utils::connector::create_redis_pool;
-use crate::engine::task::TaskManager;
-use crate::schedule::dag::Dag;
-use crate::engine::runner::ProcessorRunner;
+use crate::common::model::chain_key;
+use crate::common::model::message::UnifiedTaskInput;
+use crate::common::processors::processor::{ProcessorContext, RetryPolicy};
 use crate::engine::lua::LuaScriptRegistry;
-use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
+use crate::engine::runner::ProcessorRunner;
 use crate::engine::scheduler::CronScheduler;
-use crate::sync::{LeaderElector, RedisBackend};
-use uuid::Uuid;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use crate::engine::task::TaskManager;
+use crate::proxy::ProxyManager;
+use crate::schedule::dag::Dag;
+use crate::sync::{LeadershipGate, build_leadership_gate};
+use crate::utils::connector::create_redis_pool;
 use crate::utils::logger as app_logger;
-use crate::utils::logger::{LogOutputConfig as AppLogOutputConfig, LoggerConfig as AppLoggerConfig, LogSender as AppLogSender, PrometheusConfig as AppPrometheusConfig};
+use crate::utils::logger::{
+    LogOutputConfig as AppLogOutputConfig, LogSender as AppLogSender,
+    LoggerConfig as AppLoggerConfig, PrometheusConfig as AppPrometheusConfig,
+};
+use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use tokio::sync::{broadcast, watch};
+use uuid::Uuid;
 
 mod processors;
 mod runtime;
@@ -89,8 +89,8 @@ pub struct Engine {
     pause_tx: watch::Sender<bool>,
     /// Optional Prometheus exporter handle exposed to API endpoints.
     pub prometheus_handle: Option<PrometheusHandle>,
-    /// Node registry used for heartbeats and cluster visibility.
-    pub node_registry: Arc<NodeRegistry>,
+    /// Stable runtime node identifier for cluster metadata and metrics.
+    pub node_id: String,
     /// Distributed cron scheduler.
     pub cron_scheduler: Arc<CronScheduler>,
     /// Lua script registry used for atomic distributed coordination paths.
@@ -102,15 +102,67 @@ pub struct Engine {
 impl Engine {
     /// Interval for node heartbeats.
     const NODE_HEARTBEAT_INTERVAL_SECS: u64 = 10;
-    /// TTL attached to heartbeat records.
-    const NODE_HEARTBEAT_TTL_SECS: u64 = Self::NODE_HEARTBEAT_INTERVAL_SECS * 3;
+    const LEADERSHIP_TTL_MS: u64 = 5000;
+
+    fn init_leadership_gate(state: &Arc<State>, namespace: &str) -> Arc<dyn LeadershipGate> {
+        build_leadership_gate(
+            state.raft_runtime.clone(),
+            state.redis.clone(),
+            namespace,
+            Self::LEADERSHIP_TTL_MS,
+        )
+    }
+
+    fn apply_pause_state_update(pause_tx: &watch::Sender<bool>, is_paused: bool) -> bool {
+        if *pause_tx.borrow() == is_paused {
+            return false;
+        }
+
+        let _ = pause_tx.send(is_paused);
+        true
+    }
+
+    fn spawn_pause_state_watcher(
+        profile_store: Arc<crate::engine::api::profile_store::ProfileControlPlaneStore>,
+        pause_tx: watch::Sender<bool>,
+        shutdown_tx: &broadcast::Sender<()>,
+    ) {
+        let mut shutdown_rx = shutdown_tx.subscribe();
+        let mut pause_state_rx = profile_store.subscribe_pause_state();
+
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    changed = pause_state_rx.changed() => {
+                        if changed.is_err() {
+                            info!("Engine pause watcher stopping because the control-plane pause channel closed");
+                            break;
+                        }
+
+                        let is_paused = *pause_state_rx.borrow_and_update();
+                        if Self::apply_pause_state_update(&pause_tx, is_paused) {
+                            if is_paused {
+                                info!("Engine paused by global signal");
+                            } else {
+                                info!("Engine resumed by global signal");
+                            }
+                        }
+                    }
+                    _ = shutdown_rx.recv() => {
+                        info!("Engine pause watcher shutting down");
+                        break;
+                    }
+                }
+            }
+        });
+    }
 
     /// Normalizes engine event labels for low-cardinality metrics dimensions.
     fn policy_event_label(event_type: &str) -> &'static str {
         match event_type {
             "task_model" => "task_model",
             "download" => "download",
-            "parser_task_model" => "parser_task_model",
+            "parser_dispatch" => "parser_dispatch",
             "system_error" => "system_error",
             "parser" => "parser",
             _ => "unknown",
@@ -157,12 +209,8 @@ impl Engine {
     ) where
         T: serde::Serialize + Identifiable + Send + Sync,
     {
-        let decision = policy_resolver.resolve_with_error(
-            "engine",
-            Some(event_type),
-            Some("failed"),
-            err,
-        );
+        let decision =
+            policy_resolver.resolve_with_error("engine", Some(event_type), Some("failed"), err);
         let action = if decision.policy.retryable {
             "retry"
         } else if decision.policy.dlq == DlqPolicy::Never {
@@ -228,15 +276,14 @@ impl Engine {
             .unwrap_or_else(|| "retryable failure".to_string());
         let err = crate::errors::Error::new(
             crate::errors::ErrorKind::ProcessorChain,
-            Some(std::io::Error::new(std::io::ErrorKind::Other, reason.clone())),
+            Some(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                reason.clone(),
+            )),
         );
 
-        let decision = policy_resolver.resolve_with_error(
-            "engine",
-            Some(event_type),
-            Some("retry"),
-            &err,
-        );
+        let decision =
+            policy_resolver.resolve_with_error("engine", Some(event_type), Some("retry"), &err);
         let action = if decision.policy.retryable {
             "retry"
         } else if decision.policy.dlq == DlqPolicy::Never {
@@ -292,13 +339,11 @@ impl Engine {
     fn first_mq_topic(
         logger: &crate::common::model::logger_config::LoggerConfig,
     ) -> Option<String> {
-        logger.outputs.iter().find_map(|output| {
-            match output {
-                crate::common::model::logger_config::LogOutputConfig::Mq { topic, .. } => {
-                    Some(topic.clone())
-                }
-                _ => None,
+        logger.outputs.iter().find_map(|output| match output {
+            crate::common::model::logger_config::LogOutputConfig::Mq { topic, .. } => {
+                Some(topic.clone())
             }
+            _ => None,
         })
     }
 
@@ -379,13 +424,11 @@ impl Engine {
         logger: &crate::common::model::logger_config::LoggerConfig,
         queue_manager: Arc<QueueManager>,
     ) -> Option<AppLogSender> {
-        let mq_output = logger.outputs.iter().find_map(|output| {
-            match output {
-                crate::common::model::logger_config::LogOutputConfig::Mq { buffer, .. } => {
-                    Some(*buffer)
-                }
-                _ => None,
+        let mq_output = logger.outputs.iter().find_map(|output| match output {
+            crate::common::model::logger_config::LogOutputConfig::Mq { buffer, .. } => {
+                Some(*buffer)
             }
+            _ => None,
         })?;
 
         let buffer = mq_output.or(logger.buffer).unwrap_or(10000);
@@ -419,7 +462,10 @@ impl Engine {
     ///
     /// # Arguments
     /// * `state` - Shared application state.
-    pub async fn new(state: Arc<State>, queue_manager: Option<Arc<QueueManager>>) -> crate::errors::Result<Self> {
+    pub async fn new(
+        state: Arc<State>,
+        queue_manager: Option<Arc<QueueManager>>,
+    ) -> crate::errors::Result<Self> {
         // Initialize Prometheus recorder
         let builder = PrometheusBuilder::new();
         // Ignore error if recorder is already installed (e.g. in tests)
@@ -433,51 +479,22 @@ impl Engine {
         };
         // Create global shutdown signal channel.
         let (shutdown_tx, _shutdown_rx) = broadcast::channel(1);
-        
-        let (pause_tx, _) = watch::channel(false);
-        // Pause Poller
-        let state_clone = Arc::clone(&state);
-        let pause_tx_clone = pause_tx.clone();
-        let mut shutdown_rx_poller = shutdown_tx.subscribe();
-        let pause_key = {
-            let ns = state_clone.cache_service.namespace();
-            if ns.is_empty() {
-                warn!("Cache namespace is empty; set config.name to avoid cross-app pause collisions");
-                "engine:pause".to_string()
-            } else {
-                format!("{ns}:engine:pause")
-            }
-        };
-        
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(5));
-            loop {
-                tokio::select! {
-                    _ = interval.tick() => {
-                        let is_paused = matches!(state_clone.cache_service.get(&pause_key).await, Ok(Some(_)));
-                        
-                        if *pause_tx_clone.borrow() != is_paused {
-                            let _ = pause_tx_clone.send(is_paused);
-                            if is_paused {
-                                 info!("Engine paused by global signal");
-                            } else {
-                                 info!("Engine resumed by global signal");
-                            }
-                        }
-                    }
-                    _ = shutdown_rx_poller.recv() => {
-                        info!("Engine pause poller shutting down");
-                        break;
-                    }
-                }
-            }
-        });
 
+        let (pause_tx, _) = watch::channel(state.profile_store.is_paused());
         let task_manager = Arc::new(TaskManager::new(Arc::clone(&state)));
         let cfg = state.config.read().await.clone();
         let _channel_config = cfg.channel_config.clone();
         let namespace = cfg.name.clone();
-        crate::common::metrics::init_metrics(&namespace);
+        let node_id = cfg
+            .crawler
+            .node_id
+            .clone()
+            .unwrap_or_else(|| Uuid::new_v4().to_string());
+        crate::common::metrics::init_metrics(crate::common::metrics::MetricsScope::new(
+            namespace.clone(),
+            node_id.clone(),
+            state.is_single_node_deployment(),
+        ));
         crate::common::metrics::set_node_up(true);
         crate::common::metrics::set_component_health("engine", true);
 
@@ -490,7 +507,8 @@ impl Engine {
         if let Some(logger_config) = &cfg.logger {
             if logger_config.enabled.unwrap_or(true) {
                 let app_config = Self::build_app_logger_config(logger_config, &namespace);
-                let log_sender = Self::setup_mq_log_sender(logger_config, queue_manager.clone()).await;
+                let log_sender =
+                    Self::setup_mq_log_sender(logger_config, queue_manager.clone()).await;
                 let _ = app_logger::init_logger(app_config).await;
                 if let Some(sender) = log_sender {
                     let _ = app_logger::set_log_sender(sender);
@@ -503,32 +521,37 @@ impl Engine {
             if log_config.enabled == Some(false) {
                 info!("Logger disabled; skipping EventBus log handlers");
             } else {
-            use crate::common::model::logger_config::LogOutputConfig;
-            use crate::engine::events::handlers::{queue_handler::QueueLogHandler, console_handler::ConsoleLogHandler};
+                use crate::common::model::logger_config::LogOutputConfig;
+                use crate::engine::events::handlers::{
+                    console_handler::ConsoleLogHandler, queue_handler::QueueLogHandler,
+                };
 
-            for output in &log_config.outputs {
-                match output {
-                    LogOutputConfig::Mq { .. } => {
-                        let rx = event_bus.subscribe("*".to_string()).await;
-                        QueueLogHandler::start(rx, queue_manager.clone(), "mq".to_string()).await;
-                        info!("Registered MQ Logger for EventBus");
-                    }
-                    LogOutputConfig::Console { .. } => {
-                        let rx = event_bus.subscribe("*".to_string()).await;
-                        let level = log_config
-                            .level
-                            .as_deref()
-                            .and_then(Self::base_level_from_filter)
-                            .unwrap_or("info")
-                            .to_string();
-                        ConsoleLogHandler::start(rx, level).await;
-                        info!("Registered Console Logger for EventBus");
-                    }
-                    LogOutputConfig::File { .. } => {
-                        info!("Registered File Logger for EventBus (Handled by Global Tracing)");
+                for output in &log_config.outputs {
+                    match output {
+                        LogOutputConfig::Mq { .. } => {
+                            let rx = event_bus.subscribe("*".to_string()).await;
+                            QueueLogHandler::start(rx, queue_manager.clone(), "mq".to_string())
+                                .await;
+                            info!("Registered MQ Logger for EventBus");
+                        }
+                        LogOutputConfig::Console { .. } => {
+                            let rx = event_bus.subscribe("*".to_string()).await;
+                            let level = log_config
+                                .level
+                                .as_deref()
+                                .and_then(Self::base_level_from_filter)
+                                .unwrap_or("info")
+                                .to_string();
+                            ConsoleLogHandler::start(rx, level).await;
+                            info!("Registered Console Logger for EventBus");
+                        }
+                        LogOutputConfig::File { .. } => {
+                            info!(
+                                "Registered File Logger for EventBus (Handled by Global Tracing)"
+                            );
+                        }
                     }
                 }
-            }
             }
         } else if cfg.logger.is_some() {
             info!("EventBus disabled; skipping logger EventBus handlers");
@@ -542,54 +565,34 @@ impl Engine {
             Some(Arc::new(
                 ProxyManager::from_proxy_config(&proxy_config)
                     .await
-                    .map_err(|e| crate::errors::Error::new(
-                        crate::errors::ErrorKind::Service,
-                        Some(format!("Failed to create ProxyManager: {}", e)),
-                    ))?,
+                    .map_err(|e| {
+                        crate::errors::Error::new(
+                            crate::errors::ErrorKind::Service,
+                            Some(format!("Failed to create ProxyManager: {}", e)),
+                        )
+                    })?,
             ))
         } else {
             None
         };
 
         let middleware_manager = MiddlewareManager::new(state.clone());
-        let node_id = state
-            .config
-            .read()
-            .await
-            .crawler
-            .node_id
-            .clone()
-            .unwrap_or_else(|| Uuid::new_v4().to_string());
-        let node_registry = Arc::new(NodeRegistry::new(
-            state.cache_service.clone(),
-            node_id,
-            Duration::from_secs(Self::NODE_HEARTBEAT_TTL_SECS),
-        ));
 
-        let redis_pool = state.redis.clone();
-        let leader_elector = if let Some(pool) = redis_pool {
-            let backend = Arc::new(RedisBackend::new(pool));
-            let (elector, _) = LeaderElector::new(
-                Some(backend),
-                format!("{}:leader:cron", namespace),
-                5000,
-            );
-            elector
-        } else {
-            // Single node mode or no redis - always leader
-            let (elector, _) = LeaderElector::new(None, "".to_string(), 5000);
-            elector
-        };
+        let leadership_gate = Self::init_leadership_gate(&state, &namespace);
 
-        let cron_scheduler = Arc::new(CronScheduler::new(
-            task_manager.clone(),
-            state.clone(),
-            queue_manager.clone(),
-            shutdown_tx.subscribe(),
-            leader_elector,
-        ).await);
+        let cron_scheduler = Arc::new(
+            CronScheduler::new(
+                task_manager.clone(),
+                state.clone(),
+                queue_manager.clone(),
+                shutdown_tx.subscribe(),
+                leadership_gate,
+            )
+            .await,
+        );
 
         let lua_registry = Arc::new(LuaScriptRegistry::new_default());
+        Self::spawn_pause_state_watcher(Arc::clone(&state.profile_store), pause_tx.clone(), &shutdown_tx);
 
         Ok(Self {
             queue_manager,
@@ -602,7 +605,7 @@ impl Engine {
             shutdown_tx,
             pause_tx,
             prometheus_handle,
-            node_registry,
+            node_id,
             cron_scheduler,
             lua_registry,
             inflight_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),

@@ -1,28 +1,29 @@
-use crate::engine::task::TaskManager;
-use chrono::{DateTime, TimeZone, Utc};
+use crate::common::model::CronConfig;
 use crate::common::model::entity::{
     account, module, platform, rel_account_platform, rel_module_account, rel_module_platform,
 };
 use crate::common::model::message::TaskEvent;
-use crate::common::model::CronConfig;
 use crate::common::state::State;
+use crate::engine::task::task_dispatch_adapter::build_task_dispatch;
+use crate::engine::task::TaskManager;
+use crate::queue::{QueueManager, QueuedItem};
+use chrono::{DateTime, TimeZone, Utc};
 use cron::Schedule;
-use log::{error, info, warn};
-use crate::queue::{QueuedItem, QueueManager};
-use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect, JoinType, RelationTrait};
-use sea_orm::prelude::Expr;
 use dashmap::DashMap;
+use futures::StreamExt;
+use log::{error, info, warn};
+use sea_orm::prelude::Expr;
+use sea_orm::{ColumnTrait, EntityTrait, JoinType, QueryFilter, QuerySelect, RelationTrait};
 use std::collections::{HashSet, hash_map::DefaultHasher};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use tokio::time::{Duration, sleep};
 use std::time::{SystemTime, UNIX_EPOCH};
-use futures::StreamExt;
+use tokio::time::{Duration, sleep};
 
-use crate::sync::LeaderElector;
-use tokio::sync::broadcast;
+use crate::sync::LeadershipGate;
 use metrics::{counter, histogram};
+use tokio::sync::broadcast;
 
 struct ActiveCronJobGuard<'a> {
     counter: &'a AtomicU64,
@@ -63,7 +64,7 @@ pub struct CronScheduler {
     last_module_hash: AtomicU64,
     last_refresh_at_ms: AtomicU64,
     active_context_jobs: AtomicU64,
-    leader_elector: Arc<LeaderElector>,
+    leadership_gate: Arc<dyn LeadershipGate>,
 }
 
 impl CronScheduler {
@@ -73,7 +74,7 @@ impl CronScheduler {
         state: Arc<State>,
         queue_manager: Arc<QueueManager>,
         shutdown_rx: broadcast::Receiver<()>,
-        leader_elector: Arc<LeaderElector>,
+        leadership_gate: Arc<dyn LeadershipGate>,
     ) -> Self {
         Self {
             task_manager,
@@ -87,7 +88,7 @@ impl CronScheduler {
             last_module_hash: AtomicU64::new(0),
             last_refresh_at_ms: AtomicU64::new(0),
             active_context_jobs: AtomicU64::new(0),
-            leader_elector,
+            leadership_gate,
         }
     }
 
@@ -98,7 +99,8 @@ impl CronScheduler {
 
     async fn get_misfire_tolerance(&self) -> i64 {
         let config = self.state.config.read().await;
-        config.scheduler
+        config
+            .scheduler
             .as_ref()
             .and_then(|s| s.misfire_tolerance_secs)
             .unwrap_or(300)
@@ -159,7 +161,10 @@ impl CronScheduler {
             .ok()
             .flatten();
         let remote_version: u64 = if let Some(bytes) = remote_version_bytes {
-            String::from_utf8(bytes).ok().and_then(|s| s.parse().ok()).unwrap_or(0)
+            String::from_utf8(bytes)
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0)
         } else {
             0
         };
@@ -168,7 +173,7 @@ impl CronScheduler {
         let modules = self.task_manager.get_all_modules().await;
         let module_signatures: Vec<(String, i32)> = modules
             .iter()
-            .map(|m| (m.name(), m.version()))
+            .map(|m| (m.name().to_string(), m.version()))
             .collect();
         let module_names: Vec<String> = module_signatures
             .iter()
@@ -191,11 +196,16 @@ impl CronScheduler {
             .as_ref()
             .and_then(|s| s.max_staleness_secs)
             .unwrap_or(120);
-        let staleness_exceeded = Self::staleness_exceeded(now_ms, last_refresh_at_ms, max_staleness_secs);
+        let staleness_exceeded =
+            Self::staleness_exceeded(now_ms, last_refresh_at_ms, max_staleness_secs);
 
-           // Skip refresh when both remote version and module signatures are unchanged.
-        if !staleness_exceeded && remote_version > 0 && remote_version == local_version && module_hash == local_module_hash {
-             return; 
+        // Skip refresh when both remote version and module signatures are unchanged.
+        if !staleness_exceeded
+            && remote_version > 0
+            && remote_version == local_version
+            && module_hash == local_module_hash
+        {
+            return;
         }
         if module_hash != local_module_hash {
             self.cron_config_cache.clear();
@@ -206,11 +216,12 @@ impl CronScheduler {
         match self.fetch_all_enabled_contexts().await {
             Ok(contexts) => {
                 let fetch_duration = start.elapsed();
-                
+
                 let context_count = contexts.len();
-                
+
                 // Group enabled contexts by module.
-                let mut context_map: std::collections::HashMap<String, Vec<(String, String)>> = std::collections::HashMap::new();
+                let mut context_map: std::collections::HashMap<String, Vec<(String, String)>> =
+                    std::collections::HashMap::new();
                 for (m, a, p) in contexts {
                     context_map.entry(m).or_default().push((a, p));
                 }
@@ -225,38 +236,43 @@ impl CronScheduler {
                     };
                     // Keep only modules with enabled cron configuration.
                     if let Some(cron_config) = cron_config {
-                         if !cron_config.enable {
-                              self.schedule_cache.remove(name);
-                              self.right_now_context_hash.remove(name);
-                              continue;
-                          }
-                          let contexts = context_map.remove(name).unwrap_or_default();
-                          if cron_config.right_now || cron_config.run_now_and_schedule {
-                               if contexts.is_empty() {
-                                    self.schedule_cache.remove(name);
-                                    self.right_now_context_hash.remove(name);
-                                    continue;
-                                }
-
-                                let context_hash = Self::hash_contexts(&contexts);
-                                let last_hash = self.right_now_context_hash.get(name).map(|entry| *entry.value());
-                                if last_hash != Some(context_hash) {
-                                    self.right_now_context_hash.insert(name.clone(), context_hash);
-                                    let now = Utc::now();
-                                    self.process_module_contexts(name, &contexts, now).await;
-                                }
-                                if cron_config.right_now {
-                                    self.schedule_cache.remove(name);
-                                    continue;
-                                }
-                            }
-                          if !contexts.is_empty() {
-                               let schedule = Arc::new(cron_config.schedule.clone());
-                               self.schedule_cache.insert(name.clone(), (schedule, Arc::new(contexts)));
-                          } else {
-                                // No active contexts; remove stale cache entry.
+                        if !cron_config.enable {
+                            self.schedule_cache.remove(name);
+                            self.right_now_context_hash.remove(name);
+                            continue;
+                        }
+                        let contexts = context_map.remove(name).unwrap_or_default();
+                        if cron_config.right_now || cron_config.run_now_and_schedule {
+                            if contexts.is_empty() {
                                 self.schedule_cache.remove(name);
-                          }
+                                self.right_now_context_hash.remove(name);
+                                continue;
+                            }
+
+                            let context_hash = Self::hash_contexts(&contexts);
+                            let last_hash = self
+                                .right_now_context_hash
+                                .get(name)
+                                .map(|entry| *entry.value());
+                            if last_hash != Some(context_hash) {
+                                self.right_now_context_hash
+                                    .insert(name.clone(), context_hash);
+                                let now = Utc::now();
+                                self.process_module_contexts(name, &contexts, now).await;
+                            }
+                            if cron_config.right_now {
+                                self.schedule_cache.remove(name);
+                                continue;
+                            }
+                        }
+                        if !contexts.is_empty() {
+                            let schedule = Arc::new(cron_config.schedule.clone());
+                            self.schedule_cache
+                                .insert(name.clone(), (schedule, Arc::new(contexts)));
+                        } else {
+                            // No active contexts; remove stale cache entry.
+                            self.schedule_cache.remove(name);
+                        }
                     } else {
                         // Module has no cron configuration.
                         self.schedule_cache.remove(name);
@@ -279,7 +295,7 @@ impl CronScheduler {
                 }
                 Self::remove_stale_keys(&self.cron_config_cache, &module_set);
                 Self::remove_stale_keys(&self.right_now_context_hash, &module_set);
-                
+
                 // Persist refresh markers only after a successful pass.
                 if remote_version > 0 {
                     self.last_version.store(remote_version, Ordering::Relaxed);
@@ -289,10 +305,14 @@ impl CronScheduler {
 
                 let process_duration = start.elapsed() - fetch_duration;
                 info!(
-                    "CronScheduler cache refreshed in {:?}. Fetch: {:?}, Process: {:?}. Total contexts: {}. Active scheduled modules: {}", 
-                    start.elapsed(), fetch_duration, process_duration, context_count, self.schedule_cache.len()
+                    "CronScheduler cache refreshed in {:?}. Fetch: {:?}, Process: {:?}. Total contexts: {}. Active scheduled modules: {}",
+                    start.elapsed(),
+                    fetch_duration,
+                    process_duration,
+                    context_count,
+                    self.schedule_cache.len()
                 );
-            },
+            }
             Err(e) => {
                 error!("Failed to refresh cron contexts: {}", e);
             }
@@ -342,9 +362,9 @@ impl CronScheduler {
     async fn run(self: Arc<Self>) {
         // Start leader election loop.
         {
-            let elector = self.leader_elector.clone();
+            let leadership_gate = self.leadership_gate.clone();
             tokio::spawn(async move {
-                elector.start().await;
+                leadership_gate.start().await;
             });
         }
 
@@ -357,37 +377,43 @@ impl CronScheduler {
 
             if let Some(current_second) = Utc.timestamp_opt(current_second_ts, 0).single() {
                 // Only leader nodes execute scheduling decisions.
-                if self.leader_elector.is_leader() {
+                if self.leadership_gate.is_leader() {
                     // Handle temporary pauses by optionally replaying missed ticks.
                     if let Some(last_run) = last_tick {
                         let diff = current_second.signed_duration_since(last_run).num_seconds();
-                        
+
                         if diff > 1 {
                             let misfire_tolerance = self.get_misfire_tolerance().await;
                             if diff <= misfire_tolerance {
-                                 info!("Detected missed ticks. Catching up from {} to {}", last_run, current_second);
-                                 let mut cursor = last_run + chrono::Duration::seconds(1);
-                                 while cursor <= current_second {
-                                     self.clone().process_tick(cursor).await;
-                                     cursor += chrono::Duration::seconds(1);
-                                 }
-                                 last_tick = Some(current_second);
-                               } else {
-                                 warn!("Missed ticks gap ({}) exceeds tolerance ({}). Skipping catch-up, setting last_tick to now.", diff, misfire_tolerance);
-                                 last_tick = Some(current_second);
-                                 self.clone().process_tick(current_second).await;
+                                info!(
+                                    "Detected missed ticks. Catching up from {} to {}",
+                                    last_run, current_second
+                                );
+                                let mut cursor = last_run + chrono::Duration::seconds(1);
+                                while cursor <= current_second {
+                                    self.clone().process_tick(cursor).await;
+                                    cursor += chrono::Duration::seconds(1);
+                                }
+                                last_tick = Some(current_second);
+                            } else {
+                                warn!(
+                                    "Missed ticks gap ({}) exceeds tolerance ({}). Skipping catch-up, setting last_tick to now.",
+                                    diff, misfire_tolerance
+                                );
+                                last_tick = Some(current_second);
+                                self.clone().process_tick(current_second).await;
                             }
                         } else if diff > 0 {
-                             last_tick = Some(current_second);
-                             self.clone().process_tick(current_second).await;
+                            last_tick = Some(current_second);
+                            self.clone().process_tick(current_second).await;
                         }
                     } else {
-                         last_tick = Some(current_second);
-                         self.clone().process_tick(current_second).await;
+                        last_tick = Some(current_second);
+                        self.clone().process_tick(current_second).await;
                     }
                 } else {
-                         // Keep cursor roughly in sync while follower nodes are idle.
-                     last_tick = Some(current_second);
+                    // Keep cursor roughly in sync while follower nodes are idle.
+                    last_tick = Some(current_second);
                 }
             }
 
@@ -396,7 +422,7 @@ impl CronScheduler {
             let next_second = now.timestamp() + 1;
             let sleep_secs = (next_second - now.timestamp()).max(0) as u64;
             let sleep_duration = std::time::Duration::from_secs(sleep_secs);
-            
+
             let mut shutdown = self.shutdown_rx.resubscribe();
             tokio::select! {
                 _ = shutdown.recv() => {
@@ -411,10 +437,10 @@ impl CronScheduler {
     async fn process_tick(self: Arc<Self>, current_tick: DateTime<Utc>) {
         // Gather matches for this tick from the schedule cache.
         let mut tasks = Vec::new();
-        
+
         for r in self.schedule_cache.iter() {
             let (module_name, (schedule, contexts)) = r.pair();
-            
+
             if Self::is_schedule_match(schedule, current_tick) {
                 tasks.push((module_name.clone(), contexts.clone()));
             }
@@ -423,26 +449,40 @@ impl CronScheduler {
         // Process matching modules asynchronously.
         let start = std::time::Instant::now();
         let mut total_triggered = 0;
-        
+
         for (module_name, contexts) in tasks {
             let this = self.clone();
             total_triggered += contexts.len();
             tokio::spawn(async move {
-                 this.process_module_contexts(&module_name, &contexts, current_tick).await;
+                this.process_module_contexts(&module_name, &contexts, current_tick)
+                    .await;
             });
         }
-        
+
         let duration = start.elapsed().as_secs_f64();
         histogram!("mocra_scheduler_tick_duration_seconds").record(duration);
         if total_triggered > 0 {
-            info!("Scheduler tick processed {} potential tasks in {:.4}s", total_triggered, duration);
+            info!(
+                "Scheduler tick processed {} potential tasks in {:.4}s",
+                total_triggered, duration
+            );
         }
     }
 
-    async fn process_module_contexts(&self, module_name: &str, contexts: &[(String, String)], current_tick: DateTime<Utc>) {
+    async fn process_module_contexts(
+        &self,
+        module_name: &str,
+        contexts: &[(String, String)],
+        current_tick: DateTime<Utc>,
+    ) {
         let _active_guard = ActiveCronJobGuard::new(&self.active_context_jobs);
         // Process context batches concurrently and lock each `(module, account, platform, tick)`.
-        let concurrency = self.state.config.read().await.scheduler
+        let concurrency = self
+            .state
+            .config
+            .read()
+            .await
+            .scheduler
             .as_ref()
             .and_then(|s| s.concurrency)
             .unwrap_or(100);
@@ -463,53 +503,63 @@ impl CronScheduler {
             .for_each_concurrent(Some((concurrency + batch_size - 1) / batch_size), |batch| {
                 let namespace_prefix = Arc::clone(&namespace_prefix);
                 async move {
-                let mut keys = Vec::with_capacity(batch.len());
-                // Keep references to map lock results to original contexts.
-                let mut batch_items = Vec::with_capacity(batch.len());
+                    let mut keys = Vec::with_capacity(batch.len());
+                    // Keep references to map lock results to original contexts.
+                    let mut batch_items = Vec::with_capacity(batch.len());
 
-                for (account, platform) in batch {
-                    let key = if let Some(prefix) = namespace_prefix.as_ref() {
-                        format!("{prefix}:cron:{}:{}:{}:{}", module_name, account, platform, timestamp)
-                    } else {
-                        format!("cron:{}:{}:{}:{}", module_name, account, platform, timestamp)
-                    };
-                    keys.push(key);
-                    batch_items.push((account, platform));
-                }
+                    for (account, platform) in batch {
+                        let key = if let Some(prefix) = namespace_prefix.as_ref() {
+                            format!(
+                                "{prefix}:cron:{}:{}:{}:{}",
+                                module_name, account, platform, timestamp
+                            )
+                        } else {
+                            format!(
+                                "cron:{}:{}:{}:{}",
+                                module_name, account, platform, timestamp
+                            )
+                        };
+                        keys.push(key);
+                        batch_items.push((account, platform));
+                    }
 
-                let key_refs: Vec<&str> = keys.iter().map(|s| s.as_str()).collect();
+                    let key_refs: Vec<&str> = keys.iter().map(|s| s.as_str()).collect();
 
-                let lock_start = std::time::Instant::now();
-                // Lock TTL: 10 minutes.
-                match self
-                    .state
-                    .cache_service
-                    .set_nx_batch(&key_refs, b"1", Some(Duration::from_secs(600)))
-                    .await
-                {
-                    Ok(results) => {
-                        let lock_duration = lock_start.elapsed().as_secs_f64();
-                        histogram!("mocra_scheduler_lock_acquisition_seconds").record(lock_duration);
-                        for (success, (account, platform)) in results.into_iter().zip(batch_items.iter()) {
-                            if success {
-                                info!(
-                                    "Triggering cron task for module: {} [{}@{}] at {}",
-                                    module_name, account, platform, current_tick
-                                );
-                                
-                                self.trigger_single_task(module_name, account, platform).await;
+                    let lock_start = std::time::Instant::now();
+                    // Lock TTL: 10 minutes.
+                    match self
+                        .state
+                        .cache_service
+                        .set_nx_batch(&key_refs, b"1", Some(Duration::from_secs(600)))
+                        .await
+                    {
+                        Ok(results) => {
+                            let lock_duration = lock_start.elapsed().as_secs_f64();
+                            histogram!("mocra_scheduler_lock_acquisition_seconds")
+                                .record(lock_duration);
+                            for (success, (account, platform)) in
+                                results.into_iter().zip(batch_items.iter())
+                            {
+                                if success {
+                                    info!(
+                                        "Triggering cron task for module: {} [{}@{}] at {}",
+                                        module_name, account, platform, current_tick
+                                    );
+
+                                    self.trigger_single_task(module_name, account, platform)
+                                        .await;
+                                }
                             }
                         }
-                    }
-                    Err(e) => {
-                        error!("Failed to acquire batch locks for cron task: {}", e);
+                        Err(e) => {
+                            error!("Failed to acquire batch locks for cron task: {}", e);
+                        }
                     }
                 }
-            }
             })
             .await;
     }
-    
+
     fn is_schedule_match(schedule: &Schedule, target: DateTime<Utc>) -> bool {
         // Match when the next occurrence after `target - 1s` equals `target`.
         let check_time = target - chrono::Duration::seconds(1);
@@ -528,9 +578,21 @@ impl CronScheduler {
             run_id: uuid::Uuid::now_v7(),
             priority: crate::common::model::Priority::Normal,
         };
-        
+
         let sender = self.queue_manager.get_task_push_channel();
-        match sender.try_send(QueuedItem::new(task.clone())) {
+        let dispatch = match build_task_dispatch(&task, self.queue_manager.namespace.clone()) {
+            Ok(dispatch) => dispatch,
+            Err(e) => {
+                counter!("mocra_scheduler_task_drops_total", "module" => module_name.to_string(), "reason" => "dispatch_encode_failed").increment(1);
+                error!(
+                    "Failed to build task dispatch for module {} [{}@{}]: {}",
+                    module_name, account, platform, e
+                );
+                return;
+            }
+        };
+
+        match sender.try_send(QueuedItem::new(dispatch.clone())) {
             Ok(()) => {}
             Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
                 counter!("mocra_scheduler_task_drops_total", "module" => module_name.to_string(), "reason" => "channel_full").increment(1);
@@ -538,14 +600,20 @@ impl CronScheduler {
                     "Task queue full, blocking send for module {} [{}@{}]",
                     module_name, account, platform
                 );
-                if let Err(e) = sender.send(QueuedItem::new(task)).await {
+                if let Err(e) = sender.send(QueuedItem::new(dispatch)).await {
                     counter!("mocra_scheduler_task_drops_total", "module" => module_name.to_string(), "reason" => "send_failed").increment(1);
-                    error!("Failed to push cron task to queue for module {} [{}@{}]: {}", module_name, account, platform, e);
+                    error!(
+                        "Failed to push cron task to queue for module {} [{}@{}]: {}",
+                        module_name, account, platform, e
+                    );
                 }
             }
             Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
                 counter!("mocra_scheduler_task_drops_total", "module" => module_name.to_string(), "reason" => "channel_closed").increment(1);
-                error!("Task queue channel closed for module {} [{}@{}]", module_name, account, platform);
+                error!(
+                    "Task queue channel closed for module {} [{}@{}]",
+                    module_name, account, platform
+                );
             }
         }
     }
@@ -555,14 +623,32 @@ impl CronScheduler {
     ) -> Result<Vec<(String, String, String)>, sea_orm::DbErr> {
         // Single query for all enabled scheduling contexts.
         let results: Vec<(String, String, String)> = module::Entity::find()
-            .join(JoinType::InnerJoin, module::Relation::RelModuleAccount.def())
-            .join(JoinType::InnerJoin, rel_module_account::Relation::Account.def())
-            .join(JoinType::InnerJoin, account::Relation::RelAccountPlatform.def())
-            .join(JoinType::InnerJoin, rel_account_platform::Relation::Platform.def())
-            .join(JoinType::InnerJoin, platform::Relation::RelModulePlatform.def())
+            .join(
+                JoinType::InnerJoin,
+                module::Relation::RelModuleAccount.def(),
+            )
+            .join(
+                JoinType::InnerJoin,
+                rel_module_account::Relation::Account.def(),
+            )
+            .join(
+                JoinType::InnerJoin,
+                account::Relation::RelAccountPlatform.def(),
+            )
+            .join(
+                JoinType::InnerJoin,
+                rel_account_platform::Relation::Platform.def(),
+            )
+            .join(
+                JoinType::InnerJoin,
+                platform::Relation::RelModulePlatform.def(),
+            )
             .filter(
-                Expr::col((rel_module_platform::Entity, rel_module_platform::Column::ModuleId))
-                    .eq(Expr::col((module::Entity, module::Column::Id)))
+                Expr::col((
+                    rel_module_platform::Entity,
+                    rel_module_platform::Column::ModuleId,
+                ))
+                .eq(Expr::col((module::Entity, module::Column::Id))),
             )
             .filter(rel_module_account::Column::Enabled.eq(true))
             .filter(rel_account_platform::Column::Enabled.eq(true))
@@ -603,14 +689,14 @@ mod staleness_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::str::FromStr;
     use chrono::TimeZone;
+    use std::str::FromStr;
 
     #[test]
     fn test_is_schedule_match() {
         // Every minute
         let schedule = Schedule::from_str("* * * * * *").unwrap();
-        
+
         let target = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
         assert!(CronScheduler::is_schedule_match(&schedule, target));
 
@@ -625,7 +711,7 @@ mod tests {
     fn test_specific_schedule_match() {
         // At 05 minutes past the hour
         let schedule = Schedule::from_str("0 5 * * * *").unwrap();
-        
+
         let match_time = Utc.with_ymd_and_hms(2024, 1, 1, 10, 5, 0).unwrap();
         assert!(CronScheduler::is_schedule_match(&schedule, match_time));
 

@@ -1,17 +1,10 @@
 use crate::common::model::ModuleConfig;
 use crate::common::model::login_info::LoginInfo;
 
-
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-#[derive(
-    Default,
-    Debug,
-    Clone,
-    Serialize,
-    Deserialize,
-)]
+#[derive(Default, Debug, Clone, Serialize, Deserialize)]
 pub struct MetaData {
     /// 任务元数据。来源链路：Task定义 → ParserModel/ErrorModel 处理 → TaskFactory合并 → Module.generate() → Request.meta
     /// 通过 `add_task_config()` 方法将任务配置序列化为 Value 存储
@@ -42,7 +35,12 @@ pub enum MetaSource {
 }
 
 impl MetaData {
-    pub fn add(mut self, key: impl AsRef<str>, value: serde_json::Value, source: MetaSource) -> Self {
+    pub fn add(
+        mut self,
+        key: impl AsRef<str>,
+        value: serde_json::Value,
+        source: MetaSource,
+    ) -> Self {
         let target = match source {
             MetaSource::Task => &mut self.task,
             MetaSource::LoginInfo => &mut self.login_info,
@@ -90,9 +88,9 @@ impl MetaData {
         }
 
         if let Some(map) = self.trait_meta.as_object_mut() {
-             if let Ok(value) = serde_json::to_value(value) {
+            if let Ok(value) = serde_json::to_value(value) {
                 map.insert(key.as_ref().into(), value);
-             }
+            }
         }
 
         self
@@ -101,25 +99,37 @@ impl MetaData {
     where
         T: for<'de> Deserialize<'de>,
     {
-        self.trait_meta.get(key).cloned().and_then(|v| serde_json::from_value(v).ok())
+        self.trait_meta
+            .get(key)
+            .cloned()
+            .and_then(|v| serde_json::from_value(v).ok())
     }
     pub fn get_login_config<T>(&self, key: &str) -> Option<T>
     where
         T: for<'de> Deserialize<'de>,
     {
-        self.login_info.get(key).cloned().and_then(|v| serde_json::from_value(v).ok())
+        self.login_info
+            .get(key)
+            .cloned()
+            .and_then(|v| serde_json::from_value(v).ok())
     }
     pub fn get_module_config<T>(&self, key: &str) -> Option<T>
     where
         T: for<'de> Deserialize<'de>,
     {
-        self.module_config.get(key).cloned().and_then(|v| serde_json::from_value(v).ok())
+        self.module_config
+            .get(key)
+            .cloned()
+            .and_then(|v| serde_json::from_value(v).ok())
     }
     pub fn get_task_config<T>(&self, key: &str) -> Option<T>
     where
         T: for<'de> Deserialize<'de>,
     {
-        self.task.get(key).cloned().and_then(|v| serde_json::from_value(v).ok())
+        self.task
+            .get(key)
+            .cloned()
+            .and_then(|v| serde_json::from_value(v).ok())
     }
 }
 

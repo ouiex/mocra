@@ -1,17 +1,23 @@
 use super::{
     assembler::{ConfigAssembler, ModuleAssembler},
+    profile_loader::{LoadedProfile, ProfileLoader},
     repository::TaskRepository,
     task::Task,
 };
-use crate::errors::{ModuleError::ModuleNotFound, Result};
+use crate::errors::{ModuleError, ModuleError::ModuleNotFound, Result};
 
-use crate::common::model::login_info::LoginInfo;
-use crate::common::model::message::{TaskErrorEvent, TaskParserEvent, TaskEvent};
-use crate::common::model::{ModuleConfig, Response};
-use crate::common::state::State;
 use crate::cacheable::{CacheAble, CacheService};
+use crate::common::model::login_info::LoginInfo;
+use crate::common::model::message::TaskEvent;
+use crate::common::model::{ModuleConfig, NodeDispatchEnvelope, NodeErrorEnvelope, Response};
+use crate::common::state::State;
 use crate::engine::task::module::Module;
+use crate::schedule::dag::{RedisRemoteDispatcher, RedisRemoteDispatcherOptions};
 use crate::engine::task::module_dag_processor::ModuleDagProcessor;
+use crate::engine::task::parser_error_adapter::{
+    extract_error_envelope_seed, extract_parser_dispatch_seed, ErrorEnvelopeSeed,
+    ParserDispatchSeed,
+};
 use dashmap::DashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -23,6 +29,7 @@ pub struct TaskFactory {
     cache_service: Arc<CacheService>,
     cookie_service: Option<Arc<CacheService>>,
     module_assembler: Arc<tokio::sync::RwLock<ModuleAssembler>>,
+    profile_loader: ProfileLoader,
     // In-memory cache keyed by task id (account-platform).
     cache: Arc<DashMap<String, CacheEntry>>,
     state: Arc<State>,
@@ -49,6 +56,7 @@ impl TaskFactory {
             cache_service: sync_service,
             cookie_service: cookie_sync_service,
             module_assembler,
+            profile_loader: ProfileLoader::default(),
             cache: Arc::new(DashMap::new()),
             state,
         }
@@ -56,14 +64,14 @@ impl TaskFactory {
 
     /// Loads login info from cookie cache service if configured.
     pub async fn login_info(&self, id: &str) -> Option<LoginInfo> {
-        if let Some(sync) = self.cookie_service.as_ref(){
+        if let Some(sync) = self.cookie_service.as_ref() {
             let result = LoginInfo::sync(id, sync).await;
             match result {
                 Ok(None) => {
                     let key = <LoginInfo as CacheAble>::cache_id(id, sync);
                     log::warn!("cookie not found in redis: key={}", key);
                 }
-                Ok(Some(info))=>{
+                Ok(Some(info)) => {
                     return Some(info);
                 }
                 Err(err) => {
@@ -71,27 +79,108 @@ impl TaskFactory {
                 }
             }
         }
-        log::warn!("cookie service not configured; skip login_info lookup for id={}", id);
+        log::warn!(
+            "cookie service not configured; skip login_info lookup for id={}",
+            id
+        );
         None
-
     }
     /// Creates task from TaskModel and optionally filters requested modules.
     pub async fn create_task_from_model(&self, task_model: &TaskEvent) -> Result<Task> {
         let mut task = (*self
             .create_task_with_modules(&task_model.platform, &task_model.account, task_model.run_id)
-            .await?).clone();
+            .await?)
+            .clone();
         task.run_id = task_model.run_id;
         task.modules.iter_mut().for_each(|m| {
-            m.run_id = task_model.run_id;
+            Self::bind_module_execution(m, task_model.run_id);
         });
         if let Some(names) = &task_model.module
-            && !names.is_empty() {
-                let want: std::collections::HashSet<&str> =
-                    names.iter().map(|s| s.as_str()).collect();
-                task.modules
-                    .retain(|m| want.contains(m.module.name().as_str()));
-            }
+            && !names.is_empty()
+        {
+            let want: std::collections::HashSet<&str> = names.iter().map(|s| s.as_str()).collect();
+            task.modules.retain(|m| want.contains(m.module.name()));
+        }
         Ok(task)
+    }
+
+    async fn load_module_profile(
+        &self,
+        account_name: &str,
+        platform_name: &str,
+        module_name: &str,
+        module_impl: Arc<dyn crate::common::interface::ModuleTrait>,
+        module_config: &ModuleConfig,
+    ) -> Result<LoadedProfile> {
+        let namespace = self.state.config.read().await.name.clone();
+        self.profile_loader
+            .load(
+                &namespace,
+                account_name,
+                platform_name,
+                module_name,
+                "task_factory",
+                module_impl,
+                module_config,
+            )
+            .await
+            .map_err(|err| {
+                ModuleError::Model(
+                    std::io::Error::other(format!(
+                        "failed to load profile for {account_name}-{platform_name}-{module_name}: {err}"
+                    ))
+                    .into(),
+                )
+                .into()
+            })
+    }
+
+    fn module_profile_version(module: &Module) -> u64 {
+        module
+            .profile
+            .as_ref()
+            .map(|profile| profile.version)
+            .unwrap_or_default()
+    }
+
+    fn module_dag_version(module: &Module) -> String {
+        module
+            .workflow
+            .as_ref()
+            .and_then(|workflow| workflow.metadata.get("dag_version").cloned())
+            .unwrap_or_default()
+    }
+
+    fn bind_module_execution(module: &mut Module, run_id: Uuid) {
+        module.run_id = run_id;
+        module.processor.set_run_id(run_id);
+        module.processor.set_execution_binding(
+            Self::module_profile_version(module),
+            Self::module_dag_version(module),
+        );
+    }
+
+    async fn refresh_module_runtime_from_cache(
+        &self,
+        module: &mut Module,
+        run_id: Uuid,
+    ) -> Result<()> {
+        if let Ok(Some(config)) = ModuleConfig::sync(&module.id(), &self.cache_service).await {
+            let loaded_profile = self
+                .load_module_profile(
+                    &module.account.name,
+                    &module.platform.name,
+                    module.module.name(),
+                    module.module.clone(),
+                    &config,
+                )
+                .await?;
+            module.config = Arc::new(config);
+            module.profile = Some(Arc::new(loaded_profile.snapshot));
+            module.workflow = Some(Arc::new(loaded_profile.workflow));
+        }
+        Self::bind_module_execution(module, run_id);
+        Ok(())
     }
 
     // Cache key uses Task::id() => account-platform; value stores full task module set.
@@ -109,7 +198,10 @@ impl TaskFactory {
         if let Some(cached) = self.get_from_cache(&cache_key).await {
             return Ok(cached);
         }
-        log::debug!("create_task_with_modules: cache miss for {}, loading from DB", cache_key);
+        log::debug!(
+            "create_task_with_modules: cache miss for {}, loading from DB",
+            cache_key
+        );
 
         // Load all modules available under account-platform relation.
         let modules = self
@@ -142,7 +234,7 @@ impl TaskFactory {
             let task = Arc::new(task);
             // Cache empty-module task as well.
             self.put_task_aliases(task.clone()).await;
-            return Ok(task)
+            return Ok(task);
         }
 
         // Batch-load middleware relations.
@@ -216,8 +308,8 @@ impl TaskFactory {
             let rel_module_account = match rel_module_account_map.get(&module.id) {
                 Some(r) => r.clone(),
                 None => {
-                     log::warn!("Missing account relation for module {}", module.id);
-                     continue;
+                    log::warn!("Missing account relation for module {}", module.id);
+                    continue;
                 }
             };
 
@@ -275,13 +367,29 @@ impl TaskFactory {
                 continue;
             }
 
+            let loaded_profile = self
+                .load_module_profile(
+                    &account.name,
+                    &platform.name,
+                    module_assembler.name(),
+                    module_assembler.clone(),
+                    &module_config,
+                )
+                .await?;
+
             let app_config = self.state.config.read().await;
-            let locker = module_config
-                .get_config_value("module_locker")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(app_config.download_config.enable_locker);
+            let locker = if loaded_profile.snapshot.common.module_locker {
+                true
+            } else {
+                app_config.download_config.enable_locker
+            };
             let cache_ttl = app_config.cache.ttl;
-            let module_instance = Module {
+            let dag_dispatcher = Some(Arc::new(RedisRemoteDispatcher::new(
+                self.state.cache_service.clone(),
+                self.state.cache_service.namespace(),
+                RedisRemoteDispatcherOptions::default(),
+            )) as Arc<dyn crate::schedule::dag::DagNodeDispatcher>);
+            let mut module_instance = Module {
                 config: Arc::new(module_config),
                 account: account.clone(),
                 platform: platform.clone(),
@@ -296,15 +404,19 @@ impl TaskFactory {
                     format!("{}-{}-{}", account.name, platform.name, module.name),
                     self.state.cache_service.clone(),
                     run_id,
-                    cache_ttl
+                    cache_ttl,
                 ),
+                dag_dispatcher,
                 run_id,
                 prefix_request: Default::default(),
                 pending_ctx: None,
                 bound_task_meta: None,
                 bound_login_info: None,
+                profile: Some(Arc::new(loaded_profile.snapshot)),
+                workflow: Some(Arc::new(loaded_profile.workflow)),
             };
             module_instance.add_step().await;
+            Self::bind_module_execution(&mut module_instance, run_id);
 
             // StateTrait capability checks are no longer required at this layer.
 
@@ -324,7 +436,11 @@ impl TaskFactory {
         let task = Arc::new(task);
         // Cache task by account-platform key.
         self.put_task_aliases(task.clone()).await;
-        log::debug!("create_task_with_modules: loaded from DB for {}, took {:?}", cache_key, start.elapsed());
+        log::debug!(
+            "create_task_with_modules: loaded from DB for {}, took {:?}",
+            cache_key,
+            start.elapsed()
+        );
         Ok(task)
     }
 
@@ -367,57 +483,52 @@ impl TaskFactory {
                     "{}-{}-{:?} not found with error: {}",
                     task_model.platform, task_model.account, task_model.module, e
                 )
-                    .into(),
+                .into(),
             ))?,
         }
     }
 
-    /// Loads task from ParserTaskModel and restores parser-driven context.
-    pub async fn load_parser_model(&self, parser_model: &TaskParserEvent) -> Result<Task> {
+    async fn load_parser_seed(&self, seed: &ParserDispatchSeed) -> Result<Task> {
         let mut task = self
-            .create_task_from_model(&parser_model.account_task)
+            .create_task_from_model(&seed.task_model)
             .await?;
-        task.prefix_request = parser_model.prefix_request;
-        // Ensure run_id strictly inherits from the incoming ParserTaskModel (source of truth)
-        task.run_id = parser_model.run_id;
+        task.prefix_request = seed.prefix_request;
+        task.run_id = seed.run_id;
         task.modules
             .iter_mut()
-            .for_each(|m| m.run_id = parser_model.run_id);
+            .for_each(|m| Self::bind_module_execution(m, seed.run_id));
 
         // Restore historical metadata and parser progression context.
         // task.error_times = self.sync_service.load_task_status(&task.id()).await;
-        task.metadata = parser_model.metadata.clone();
+        task.metadata = seed.metadata.clone();
         for module in task.modules.iter_mut() {
             // let (error_times, _) = self.cache_service.load_module_status(&module.id()).await;
             // module.error_times = error_times;
-            module.prefix_request = parser_model.prefix_request;
-            // Prefer explicit context from parser_model if provided
-            module.pending_ctx = Some(parser_model.context.clone());
-            // Try to refresh module config from cache storage.
-            if let Ok(Some(config)) =
-                ModuleConfig::sync(&module.id(), &self.cache_service).await
-            {
-
-                module.config = Arc::new(config);
-            }
+            module.prefix_request = seed.prefix_request;
+            module.pending_ctx = Some(seed.context.clone());
+            self.refresh_module_runtime_from_cache(module, seed.run_id).await?;
         }
         Ok(task)
     }
 
-    /// Loads task from ErrorTaskModel and propagates retry context.
-    pub async fn load_error_model(&self, error_model: &TaskErrorEvent) -> Result<Task> {
-        let mut task = self
-            .create_task_from_model(&error_model.account_task)
-            .await?;
-        task.prefix_request = error_model.prefix_request;
-        // Ensure run_id strictly inherits from the incoming ErrorTaskModel
-        task.run_id = error_model.run_id;
+    /// Loads task from parser dispatch envelope.
+    pub async fn load_parser_dispatch(&self, dispatch: &NodeDispatchEnvelope) -> Result<Task> {
+        let seed = extract_parser_dispatch_seed(dispatch)?;
+        self.load_parser_seed(&seed).await
+    }
+
+    async fn load_error_seed(&self, seed: &ErrorEnvelopeSeed) -> Result<Task> {
+        let mut task = self.create_task_from_model(&seed.task_model).await?;
+        task.prefix_request = seed.prefix_request;
+        task.run_id = seed.run_id;
         task.modules.iter_mut().for_each(|m| {
-            m.run_id = error_model.run_id;
-            m.prefix_request = error_model.prefix_request;
-            // Drive precise retry via ExecutionMark from error context
-            m.pending_ctx = Some(error_model.context.clone());
+            Self::bind_module_execution(m, seed.run_id);
+            m.prefix_request = seed.prefix_request;
+            m.pending_ctx = Some(seed.context.clone());
         });
+        for module in task.modules.iter_mut() {
+            self.refresh_module_runtime_from_cache(module, seed.run_id).await?;
+        }
 
         // Task error accounting placeholder.
         // task.error_times = self.sync_service.load_task_status(&task.id()).await;
@@ -452,8 +563,14 @@ impl TaskFactory {
         // Module filtering by error threshold placeholder.
         // let max_errors = self.state.config.read().await.crawler.task_max_errors;
         // task.crawler.retain(|m| m.error_times < max_errors);
-        task.metadata = error_model.metadata.clone();
+        task.metadata = seed.metadata.clone();
         Ok(task)
+    }
+
+    /// Loads task from error envelope.
+    pub async fn load_error_envelope(&self, envelope: &NodeErrorEnvelope) -> Result<Task> {
+        let seed = extract_error_envelope_seed(envelope)?;
+        self.load_error_seed(&seed).await
     }
 
     pub async fn load_with_response(&self, response: &Response) -> Result<Task> {
@@ -467,17 +584,30 @@ impl TaskFactory {
             })
     }
 
-    pub async fn load_module_with_response(&self, response: &Response) -> Result<(Arc<Module>, Option<LoginInfo>)> {
-        let task = self.create_task_with_modules(&response.platform, &response.account, response.run_id).await?;
-        if let Some(module) = task.modules.iter().find(|m| m.module.name() == response.module) {
+    pub async fn load_module_with_response(
+        &self,
+        response: &Response,
+    ) -> Result<(Arc<Module>, Option<LoginInfo>)> {
+        let task = self
+            .create_task_with_modules(&response.platform, &response.account, response.run_id)
+            .await?;
+        if let Some(module) = task
+            .modules
+            .iter()
+            .find(|m| m.module.name() == response.module)
+        {
             let mut module = module.clone();
             // The factory cache may have returned a task built for a different run.
             // Patch run_id from the response (source of truth) so that execute_parse
             // uses the correct stop-signal key and session cleanup touches the right key.
-            module.run_id = response.run_id;
+            self.refresh_module_runtime_from_cache(&mut module, response.run_id)
+                .await?;
             Ok((Arc::new(module), task.login_info.clone()))
         } else {
-            Err(ModuleNotFound(format!("Module {} not found in task", response.module).into()).into())
+            Err(
+                ModuleNotFound(format!("Module {} not found in task", response.module).into())
+                    .into(),
+            )
         }
     }
 

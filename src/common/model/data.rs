@@ -61,7 +61,6 @@ impl StoreTrait for FileStore {
     }
 }
 
-
 impl From<FileStore> for DataEvent {
     fn from(value: FileStore) -> Self {
         let ctx_clone = value.ctx.clone();
@@ -179,8 +178,17 @@ impl From<DataFrameStore> for DataEvent {
     }
 }
 
-
 impl DataFrameStore {
+    /// Sets context information.
+    pub fn with_ctx(mut self, ctx: StoreContext) -> Self {
+        self.ctx = ctx;
+        self
+    }
+    /// Sets pre-serialized IPC bytes directly.
+    pub fn with_ipc_bytes(mut self, bytes: Vec<u8>) -> Self {
+        self.data = DataframeStoreData::Bytes(bytes);
+        self
+    }
     /// Sets DataFrame data and serializes to IPC format.
     pub fn with_data(mut self, data: DataFrame) -> Self {
         let mut buffer = Vec::new();
@@ -421,7 +429,7 @@ mod tests {
             .get("version")
             .and_then(|v| v.as_str())
             .unwrap_or("unknown");
-        
+
         assert!(is_success);
         assert_eq!(version, "1.0.0");
 
@@ -438,7 +446,7 @@ mod tests {
             "height" => [1.56, 1.77, 1.65, 1.75],  // (m)
         )
         .unwrap();
-        
+
         assert_eq!(df.height(), 4);
         assert_eq!(df.width(), 4);
     }

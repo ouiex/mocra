@@ -8,7 +8,9 @@ async fn fetch_text_proxies(config: &IpProvider) -> crate::errors::Result<Vec<Ip
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(config.timeout))
         .build()
-        .map_err(|e| crate::errors::Error::from(crate::errors::ProxyError::GetProxy(Box::new(e))))?;
+        .map_err(|e| {
+            crate::errors::Error::from(crate::errors::ProxyError::GetProxy(Box::new(e)))
+        })?;
 
     let resp = client
         .get(&config.url)
@@ -17,7 +19,9 @@ async fn fetch_text_proxies(config: &IpProvider) -> crate::errors::Result<Vec<Ip
         .map_err(|e| crate::errors::Error::from(crate::errors::ProxyError::GetProxy(Box::new(e))))?
         .text()
         .await
-        .map_err(|e| crate::errors::Error::from(crate::errors::ProxyError::GetProxy(Box::new(e))))?;
+        .map_err(|e| {
+            crate::errors::Error::from(crate::errors::ProxyError::GetProxy(Box::new(e)))
+        })?;
 
     let mut proxies = Vec::new();
     for line in resp.lines() {
@@ -163,10 +167,10 @@ async fn check_proxy_health(proxy: &IpProxy) -> bool {
             .proxy(p)
             .timeout(Duration::from_secs(5))
             .build()
-        {
-             // Use a lightweight check
-            return client.head("http://www.baidu.com").send().await.is_ok();
-        }
+    {
+        // Use a lightweight check
+        return client.head("http://www.baidu.com").send().await.is_ok();
+    }
     false
 }
 
@@ -187,7 +191,9 @@ mod tests {
             proxy_expire_time: 300,
             weight: Some(10),
         };
-        let loader = KuaiDaiLiLoader { config: config.clone() };
+        let loader = KuaiDaiLiLoader {
+            config: config.clone(),
+        };
         assert_eq!(loader.get_name(), "kuaidaili");
         assert_eq!(loader.get_weight(), 10);
         assert!(loader.is_retry_code(&429));

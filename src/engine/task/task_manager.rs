@@ -1,31 +1,31 @@
 #![allow(unused)]
 use super::{
-    assembler::ModuleAssembler, factory::TaskFactory, repository::TaskRepository, task::Task,
-    module::Module,
+    assembler::ModuleAssembler, factory::TaskFactory, module::Module, repository::TaskRepository,
+    task::Task,
 };
-use std::sync::Arc;
-use tokio::sync::RwLock;
-use dashmap::DashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
-use crate::common::model::{Request, Response};
-use crate::common::model::message::{TaskErrorEvent, TaskParserEvent, TaskEvent};
-use crate::common::state::State;
-use crate::errors::Result;
-use crate::cacheable::{CacheAble,CacheService};
+use crate::cacheable::{CacheAble, CacheService};
 use crate::common::interface::ModuleTrait;
 use crate::common::model::login_info::LoginInfo;
+use crate::common::model::message::TaskEvent;
+use crate::common::model::{NodeDispatchEnvelope, NodeErrorEnvelope, Request, Response};
+use crate::common::state::State;
 use crate::engine::task::module_dag_orchestrator::{
     ModuleDagOrchestrator, ModuleDagOrchestratorOptions,
 };
-use crate::schedule::dag::{Dag, DagError, DagExecutionReport};
+use crate::errors::Result;
+use crate::schedule::dag::{Dag, DagError};
+use dashmap::DashMap;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
+use tokio::sync::RwLock;
 
-#[derive(Debug, Clone)]
-pub struct ModuleDagCompareResult {
-    pub report: DagExecutionReport,
-    pub expected_steps: usize,
-    pub shadow_step_outputs: usize,
-    pub compare_result: &'static str,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModuleDagCutoverGateState {
+    pub module_name: String,
+    pub failure_streak: usize,
+    pub last_failure_ms: Option<u64>,
+    pub blocked: bool,
 }
 
 pub struct TaskManager {
@@ -169,6 +169,10 @@ impl DagCutoverStateTracker {
     fn record_cutover_success(&self, scope_key: &str) {
         self.failures.remove(scope_key);
     }
+
+    fn failure_state(&self, scope_key: &str) -> Option<DagCutoverFailureState> {
+        self.failures.get(scope_key).map(|entry| *entry)
+    }
 }
 
 impl Default for DagCutoverStateTracker {
@@ -199,7 +203,6 @@ impl TaskManager {
             dag_cutover_tracker: DagCutoverStateTracker::default(),
         }
     }
-    
 
     /// Registers one module implementation and pre-compiles its DAG.
     pub async fn add_module(&self, work: Arc<dyn ModuleTrait>) {
@@ -232,7 +235,11 @@ impl TaskManager {
                 self.compiled_dags.insert(name.to_string(), dag);
             }
             Err(err) => {
-                log::warn!("[TaskManager] module DAG pre-compile failed: module={} err={}", name, err);
+                log::warn!(
+                    "[TaskManager] module DAG pre-compile failed: module={} err={}",
+                    name,
+                    err
+                );
             }
         }
     }
@@ -240,6 +247,11 @@ impl TaskManager {
     /// Returns the pre-compiled DAG for a registered module, if available.
     pub fn get_module_dag(&self, module_name: &str) -> Option<Dag> {
         self.compiled_dags.get(module_name).map(|v| v.clone())
+    }
+    /// Returns a registered module trait by name, if present.
+    pub async fn get_module(&self, name: &str) -> Option<Arc<dyn ModuleTrait>> {
+        let assembler = self.module_assembler.read().await;
+        assembler.get_module(name)
     }
     /// Returns true when module name is registered.
     pub async fn exists_module(&self, name: &str) -> bool {
@@ -273,14 +285,14 @@ impl TaskManager {
         self.factory.load_with_model(task_model).await
     }
 
-    /// Loads task from ParserTaskModel with historical state restoration.
-    pub async fn load_parser(&self, parser_model: &TaskParserEvent) -> Result<Task> {
-        self.factory.load_parser_model(parser_model).await
+    /// Loads task from parser dispatch envelope with historical state restoration.
+    pub async fn load_parser_dispatch(&self, dispatch: &NodeDispatchEnvelope) -> Result<Task> {
+        self.factory.load_parser_dispatch(dispatch).await
     }
 
-    /// Loads task from ErrorTaskModel and applies error accounting.
-    pub async fn load_error(&self, error_model: &TaskErrorEvent) -> Result<Task> {
-        self.factory.load_error_model(error_model).await
+    /// Loads task from error envelope and applies error accounting.
+    pub async fn load_error_envelope(&self, envelope: &NodeErrorEnvelope) -> Result<Task> {
+        self.factory.load_error_envelope(envelope).await
     }
 
     /// Loads task context from response metadata.
@@ -289,7 +301,10 @@ impl TaskManager {
     }
 
     /// Loads resolved module and optional login info for parser flow.
-    pub async fn load_module_with_response(&self, response: &Response) -> Result<(Arc<Module>, Option<LoginInfo>)> {
+    pub async fn load_module_with_response(
+        &self,
+        response: &Response,
+    ) -> Result<(Arc<Module>, Option<LoginInfo>)> {
         self.factory.load_module_with_response(response).await
     }
 
@@ -297,7 +312,7 @@ impl TaskManager {
     pub async fn clear_factory_cache(&self) {
         self.factory.clear_cache().await;
     }
-    
+
     /// Returns all registered module implementations.
     pub async fn get_all_modules(&self) -> Vec<Arc<dyn ModuleTrait>> {
         let assembler = self.module_assembler.read().await;
@@ -312,20 +327,6 @@ impl TaskManager {
     /// Builds the canonical cutover scope key for one module runtime.
     pub fn module_cutover_scope(module: &Module) -> String {
         module.id()
-    }
-
-    /// Compiles a module DAG in linear-compat mode by module name.
-    pub async fn compile_module_dag_linear_compat(
-        &self,
-        module_name: &str,
-    ) -> std::result::Result<Dag, DagError> {
-        let assembler = self.module_assembler.read().await;
-        let module = assembler
-            .get_module(module_name)
-            .ok_or_else(|| DagError::NodeNotFound(module_name.to_string()))?;
-        drop(assembler);
-
-        self.dag_orchestrator().compile_linear_compat(module).await
     }
 
     /// Compiles a module DAG by module name using the unified `compile_module` strategy.
@@ -346,41 +347,6 @@ impl TaskManager {
         self.dag_orchestrator().compile_module(module).await
     }
 
-    /// Compiles and executes a module DAG in linear-compat mode by module name.
-    pub async fn execute_module_dag_linear_compat(
-        &self,
-        module_name: &str,
-    ) -> std::result::Result<DagExecutionReport, DagError> {
-        let dag = self.compile_module_dag_linear_compat(module_name).await?;
-        self.dag_orchestrator().execute_dag(dag).await
-    }
-
-    /// Executes linear-compat DAG and compares output step count with expected step count.
-    pub async fn execute_module_dag_linear_compat_with_compare(
-        &self,
-        module_name: &str,
-        expected_steps: usize,
-    ) -> std::result::Result<ModuleDagCompareResult, DagError> {
-        let report = self.execute_module_dag_linear_compat(module_name).await?;
-        let shadow_step_outputs = report
-            .outputs
-            .keys()
-            .filter(|id| id.starts_with("step_"))
-            .count();
-        let compare_result = if shadow_step_outputs == expected_steps {
-            "match"
-        } else {
-            "mismatch"
-        };
-
-        Ok(ModuleDagCompareResult {
-            report,
-            expected_steps,
-            shadow_step_outputs,
-            compare_result,
-        })
-    }
-
     /// Returns whether cutover is allowed under current failure streak.
     pub fn should_allow_module_dag_cutover(
         &self,
@@ -388,8 +354,11 @@ impl TaskManager {
         failure_threshold: usize,
         recovery_window_secs: u64,
     ) -> bool {
-        self.dag_cutover_tracker
-            .should_allow_cutover(module_name, failure_threshold, recovery_window_secs)
+        self.dag_cutover_tracker.should_allow_cutover(
+            module_name,
+            failure_threshold,
+            recovery_window_secs,
+        )
     }
 
     /// Records one cutover failure for module.
@@ -422,11 +391,32 @@ impl TaskManager {
         self.dag_cutover_tracker.record_cutover_success(module_name);
     }
 
+    /// Returns cutover gate state snapshot for observability and control-plane diagnostics.
+    pub fn module_dag_cutover_gate_state(
+        &self,
+        module_name: &str,
+        failure_threshold: usize,
+        recovery_window_secs: u64,
+    ) -> ModuleDagCutoverGateState {
+        let failure_state = self.dag_cutover_tracker.failure_state(module_name);
+        let blocked = !self.should_allow_module_dag_cutover(
+            module_name,
+            failure_threshold,
+            recovery_window_secs,
+        );
+
+        ModuleDagCutoverGateState {
+            module_name: module_name.to_string(),
+            failure_streak: failure_state.map(|state| state.streak).unwrap_or(0),
+            last_failure_ms: failure_state.map(|state| state.last_failure_ms),
+            blocked,
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::DagCutoverStateTracker;
+    use super::{DagCutoverStateTracker, ModuleDagCutoverGateState};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -495,5 +485,30 @@ mod tests {
 
         now.store(13_000, Ordering::SeqCst);
         assert!(tracker.should_allow_cutover_warmup(scope, 2, 3));
+    }
+
+    #[test]
+    fn cutover_gate_state_reports_streak_and_blocked_status() {
+        let now = Arc::new(AtomicU64::new(100));
+        let tracker = tracker_with_time(now.clone());
+        let scope = "acc-pf-mod";
+
+        tracker.record_cutover_failure(scope);
+        tracker.record_cutover_failure(scope);
+
+        let failure_state = tracker.failure_state(scope).expect("failure state should exist");
+        assert_eq!(failure_state.streak, 2);
+        assert_eq!(failure_state.last_failure_ms, 100);
+
+        let snapshot = ModuleDagCutoverGateState {
+            module_name: scope.to_string(),
+            failure_streak: failure_state.streak,
+            last_failure_ms: Some(failure_state.last_failure_ms),
+            blocked: !tracker.should_allow_cutover(scope, 2, 60),
+        };
+
+        assert_eq!(snapshot.module_name, scope);
+        assert_eq!(snapshot.failure_streak, 2);
+        assert!(snapshot.blocked);
     }
 }

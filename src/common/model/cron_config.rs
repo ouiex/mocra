@@ -86,20 +86,20 @@ impl CronBuilder {
         self.hour = hour;
         self
     }
-    
+
     /// Sets minute (`0-59`).
     pub fn at_minute(mut self, minute: u32) -> Self {
         self.minute = minute;
         self
     }
-    
+
     /// Combined time setter: `.at(10, 30)` -> `10:30`.
     pub fn at(mut self, hour: u32, minute: u32) -> Self {
         self.hour = hour;
         self.minute = minute;
         self
     }
-    
+
     /// Sets day of month (`1-31`) for monthly schedules.
     pub fn on_day(mut self, day: u32) -> Self {
         self.day_of_month = Some(day);
@@ -129,7 +129,10 @@ impl CronBuilder {
                 let days_str = if days.is_empty() {
                     "*".to_string()
                 } else {
-                    days.iter().map(|d| d.to_string()).collect::<Vec<_>>().join(",")
+                    days.iter()
+                        .map(|d| d.to_string())
+                        .collect::<Vec<_>>()
+                        .join(",")
                 };
                 format!("0 {} {} * * {}", self.minute, self.hour, days_str)
             }

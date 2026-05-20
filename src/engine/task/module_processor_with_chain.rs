@@ -5,25 +5,36 @@
 // - Fallback traces prior request via prefix_request; requests are persisted by request.id.
 // - Generation failure allows at most one fallback per (step, prefix) gate.
 // - Parser failure emits ErrorTaskModel tagged with current step context.
-// - If parser succeeds but yields no ParserTaskModel while next step exists,
+// - If parser succeeds but yields no parser-dispatch output while next step exists,
 //   a one-shot advance gate can synthesize a placeholder task.
 
+use crate::cacheable::{CacheAble, CacheService};
+use crate::common::interface::module::{ModuleNodeTrait, SyncBoxStream};
 use crate::common::model::ExecutionMark;
 use crate::common::model::chain_key;
-use crate::common::interface::module::{ModuleNodeTrait, SyncBoxStream};
-use crate::common::model::{ ModuleConfig, Request, Response};
+use crate::common::model::login_info::LoginInfo;
+use crate::common::model::message::TaskEvent;
+use crate::common::model::{
+    ModuleConfig, NodeDispatch, NodeInput, NodeParseOutput, PayloadCodec, Request,
+    ResolvedCommonConfig, Response, TypedEnvelope,
+};
+use crate::common::response_cache::apply_request_response_cache_policy;
+use crate::engine::task::node_context_adapter::{
+    build_legacy_generate_context_with_common, build_legacy_parse_context_with_common,
+};
+use crate::engine::task::parser_error_adapter::{
+    ErrorEnvelopeSeed, ParserDispatchSeed, TypedParserOutput,
+};
 use crate::errors::{RequestError, Result};
+use futures::StreamExt;
 use log::{debug, info, warn};
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock;
 use uuid::Uuid;
-use futures::StreamExt;
-use crate::cacheable::{CacheAble, CacheService};
-use crate::common::model::login_info::LoginInfo;
-use crate::common::model::message::{TaskErrorEvent, TaskOutputEvent, TaskParserEvent, TaskEvent};
 // distributed atomic gating only; no in-memory state needed
 
 // --- Sync State Structs ---
@@ -35,6 +46,100 @@ impl CacheAble for AdvanceGate {
     fn field() -> impl AsRef<str> {
         "chain_advance"
     }
+}
+
+fn parse_legacy_step_target(target: &str) -> Option<u32> {
+    target
+        .strip_prefix("step_")
+        .and_then(|value| value.parse::<u32>().ok())
+}
+
+fn typed_output_from_node_parse_output<F>(
+    response: &Response,
+    output: NodeParseOutput,
+    mut context_for_target: F,
+) -> TypedParserOutput
+where
+    F: FnMut(&str) -> ExecutionMark,
+{
+    let metadata_fallback = response
+        .metadata
+        .task
+        .as_object()
+        .cloned()
+        .unwrap_or_default();
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let next_dispatches = output
+        .next
+        .into_iter()
+        .map(|dispatch| {
+            let target_node = normalize_dispatch_target(&dispatch);
+            ParserDispatchSeed {
+                request_id: Uuid::now_v7(),
+                task_model: TaskEvent {
+                    account: response.account.clone(),
+                    platform: response.platform.clone(),
+                    module: Some(vec![response.module.clone()]),
+                    priority: response.priority,
+                    run_id: response.run_id,
+                },
+                timestamp,
+                metadata: decode_payload_to_metadata(&dispatch.input.payload, metadata_fallback.clone()),
+                context: context_for_target(&target_node),
+                run_id: response.run_id,
+                prefix_request: response.prefix_request,
+                dispatch: Some(dispatch),
+            }
+        })
+        .collect();
+
+    TypedParserOutput {
+        data: output.data,
+        next_dispatches,
+        error: None,
+        stop: output.finished,
+    }
+}
+
+fn placeholder_dispatch(target_node: impl Into<String>, metadata: &Map<String, Value>) -> NodeDispatch {
+    let target_node = target_node.into();
+    let payload = TypedEnvelope::new(
+        "mocra.node_input.v1",
+        1,
+        PayloadCodec::Json,
+        serde_json::to_vec(&Value::Object(metadata.clone())).unwrap_or_default(),
+    );
+    NodeDispatch::new(target_node.clone(), NodeInput::new(target_node, payload))
+}
+
+fn retarget_dispatch(seed: &mut ParserDispatchSeed, target_node: &str) {
+    seed.context.node_id = Some(target_node.to_string());
+    if let Some(dispatch) = seed.dispatch.as_mut() {
+        dispatch.target_node = target_node.to_string();
+        dispatch.input.target_node = target_node.to_string();
+    }
+}
+
+fn decode_payload_to_metadata(
+    envelope: &TypedEnvelope,
+    fallback: Map<String, Value>,
+) -> Map<String, Value> {
+    if envelope.codec == PayloadCodec::Json
+        && let Ok(Value::Object(map)) = serde_json::from_slice::<Value>(&envelope.bytes)
+    {
+        return map;
+    }
+    fallback
+}
+
+fn normalize_dispatch_target(dispatch: &crate::common::model::NodeDispatch) -> String {
+    if !dispatch.target_node.is_empty() {
+        return dispatch.target_node.clone();
+    }
+    dispatch.input.target_node.clone()
 }
 
 #[derive(Serialize, Deserialize)]
@@ -146,14 +251,10 @@ impl ModuleProcessorWithChain {
         chain_key::execution_state_key(self.run_id, &self.module_id)
     }
 
-    fn advance_key_legacy(&self) -> String {
-        chain_key::legacy_execution_state_key(self.run_id, &self.module_id)
-    }
-
     /// Persists request by request.id for fallback/recovery lookup.
     async fn save_request(&self, req: &Request) -> Result<()> {
         let id = req.id.to_string();
-        req.send(&id,&self.cache).await.ok();
+        req.send(&id, &self.cache).await.ok();
 
         debug!(
             "[chain] module={} run={} save_request: id={} step={} prefix={}",
@@ -168,19 +269,21 @@ impl ModuleProcessorWithChain {
 
     // One-shot advance marker used when synthesizing placeholder task progression.
     async fn try_mark_step_advanced_once(&self, step_idx: usize) -> Result<bool> {
-        let id_str = chain_key::module_step_advance_once_key(self.run_id, &self.module_id, step_idx);
-        let legacy_id_str =
-            chain_key::legacy_module_step_advance_once_key(self.run_id, &self.module_id, step_idx);
-
-        if AdvanceGate::sync(&id_str, &self.cache).await?.is_some()
-            || AdvanceGate::sync(&legacy_id_str, &self.cache).await?.is_some()
-        {
+        let id_str =
+            chain_key::module_step_advance_once_key(self.run_id, &self.module_id, step_idx);
+        if AdvanceGate::sync(&id_str, &self.cache).await?.is_some() {
             return Ok(false);
         }
-        
+
         let gate = AdvanceGate(true);
         // Use send_nx for atomic check-and-set with explicit TTL
-        let won = gate.send_nx(&id_str, &self.cache, Some(std::time::Duration::from_secs(self.ttl))).await?;
+        let won = gate
+            .send_nx(
+                &id_str,
+                &self.cache,
+                Some(std::time::Duration::from_secs(self.ttl)),
+            )
+            .await?;
 
         debug!(
             "[chain] module={} run={} try_mark_step_advanced_once result: step_idx={} won={}",
@@ -191,24 +294,25 @@ impl ModuleProcessorWithChain {
 
     // One-shot fallback marker to prevent infinite fallback loops.
     async fn try_allow_fallback_once(&self, step_idx: usize, prefix: &Uuid) -> Result<bool> {
-        let id_str =
-            chain_key::module_step_fallback_once_key(self.run_id, &self.module_id, step_idx, *prefix);
-        let legacy_id_str = chain_key::legacy_module_step_fallback_once_key(
+        let id_str = chain_key::module_step_fallback_once_key(
             self.run_id,
             &self.module_id,
             step_idx,
             *prefix,
         );
-
-        if FallbackGate::sync(&id_str, &self.cache).await?.is_some()
-            || FallbackGate::sync(&legacy_id_str, &self.cache).await?.is_some()
-        {
+        if FallbackGate::sync(&id_str, &self.cache).await?.is_some() {
             return Ok(false);
         }
-        
+
         let gate = FallbackGate(true);
         // Use send_nx for atomic check-and-set
-        let won = gate.send_nx(&id_str, &self.cache, Some(std::time::Duration::from_secs(self.ttl))).await?;
+        let won = gate
+            .send_nx(
+                &id_str,
+                &self.cache,
+                Some(std::time::Duration::from_secs(self.ttl)),
+            )
+            .await?;
 
         debug!(
             "[chain] module={} run={} try_allow_fallback_once result: step_idx={} prefix={} allowed={}",
@@ -219,7 +323,7 @@ impl ModuleProcessorWithChain {
 
     async fn load_request(&self, id: &Uuid) -> Result<Option<Request>> {
         let id_str = id.to_string();
-        if let Ok(Some(req)) = Request::sync(&id_str,&self.cache).await{
+        if let Ok(Some(req)) = Request::sync(&id_str, &self.cache).await {
             return Ok(Some(req));
         }
         debug!(
@@ -284,19 +388,20 @@ impl ModuleProcessorWithChain {
         if let Ok(adv_keys) = AdvanceGate::scan(&format!("{}*", id_base), &self.cache).await {
             let adv_field = AdvanceGate::field();
             let adv_prefix = format!("{}:{}:", ns, adv_field.as_ref());
-    
+
             for key in adv_keys {
                 if let Some(id) = key.strip_prefix(&adv_prefix)
                     && let Some(pos) = id.rfind(":step:")
-                        && let Ok(step_idx) = id[pos+6..].parse::<usize>() {
-                            // OPTIMIZATION: Assume existence means true, skip individual GETs
-                            gates.push(GateInfo {
-                                gate_type: "advance".to_string(),
-                                step_idx: Some(step_idx),
-                                field_name: adv_field.as_ref().to_string(),
-                                value: serde_json::Value::Bool(true),
-                            });
-                        }
+                    && let Ok(step_idx) = id[pos + 6..].parse::<usize>()
+                {
+                    // OPTIMIZATION: Assume existence means true, skip individual GETs
+                    gates.push(GateInfo {
+                        gate_type: "advance".to_string(),
+                        step_idx: Some(step_idx),
+                        field_name: adv_field.as_ref().to_string(),
+                        value: serde_json::Value::Bool(true),
+                    });
+                }
             }
         }
 
@@ -304,30 +409,33 @@ impl ModuleProcessorWithChain {
         if let Ok(fb_keys) = FallbackGate::scan(&format!("{}*", id_base), &self.cache).await {
             let fb_field = FallbackGate::field();
             let fb_prefix = format!("{}:{}:", ns, fb_field.as_ref());
-    
+
             for key in fb_keys {
                 if let Some(id) = key.strip_prefix(&fb_prefix)
-                     && let Some(step_pos) = id.find(":step:") {
-                        let rest = &id[step_pos+6..];
-                        if let Some(prefix_pos) = rest.find(":prefix:") {
-                            let step_str = &rest[..prefix_pos];
-                            if let Ok(step_idx) = step_str.parse::<usize>() {
-                                // OPTIMIZATION: Assume existence means true
-                                gates.push(GateInfo {
-                                    gate_type: "fallback".to_string(),
-                                    step_idx: Some(step_idx),
-                                    field_name: fb_field.as_ref().to_string(),
-                                    value: serde_json::Value::Bool(true),
-                                });
-                            }
+                    && let Some(step_pos) = id.find(":step:")
+                {
+                    let rest = &id[step_pos + 6..];
+                    if let Some(prefix_pos) = rest.find(":prefix:") {
+                        let step_str = &rest[..prefix_pos];
+                        if let Ok(step_idx) = step_str.parse::<usize>() {
+                            // OPTIMIZATION: Assume existence means true
+                            gates.push(GateInfo {
+                                gate_type: "fallback".to_string(),
+                                step_idx: Some(step_idx),
+                                field_name: fb_field.as_ref().to_string(),
+                                value: serde_json::Value::Bool(true),
+                            });
                         }
                     }
+                }
             }
         }
 
         debug!(
             "[chain] module={} run={} query_active_gates: found {} gates",
-            self.module_id, self.run_id, gates.len()
+            self.module_id,
+            self.run_id,
+            gates.len()
         );
         Ok(gates)
     }
@@ -338,8 +446,9 @@ impl ModuleProcessorWithChain {
 
         if step_idx >= steps_count {
             return Err(RequestError::BuildFailed(
-                format!("Step {} exceeds total steps {}", step_idx, steps_count).into()
-            ).into());
+                format!("Step {} exceeds total steps {}", step_idx, steps_count).into(),
+            )
+            .into());
         }
 
         Ok(StepStats {
@@ -353,11 +462,7 @@ impl ModuleProcessorWithChain {
     // Removed legacy steps_len traversal path; chain progression is context-driven.
 
     /// Returns whether a parser task targets current module.
-    fn is_task_for_current_module(
-        &self,
-        ctx: &ExecutionMark,
-        task_modules: &[String],
-    ) -> bool {
+    fn is_task_for_current_module(&self, ctx: &ExecutionMark, task_modules: &[String]) -> bool {
         if let Some(mid) = &ctx.module_id {
             return mid == &self.module_id;
         }
@@ -393,7 +498,11 @@ impl ModuleProcessorWithChain {
         // Case 1: infer next step from prefix request when allowed.
         let should_infer_from_prefix = if let Some(ref existing_ctx) = ctx {
             // Infer only when module matches and step is absent.
-            existing_ctx.module_id.as_ref().map(|m| m == &self.module_id).unwrap_or(false)
+            existing_ctx
+                .module_id
+                .as_ref()
+                .map(|m| m == &self.module_id)
+                .unwrap_or(false)
                 && existing_ctx.step_idx.is_none()
                 && !prefix.is_nil()
         } else {
@@ -421,14 +530,19 @@ impl ModuleProcessorWithChain {
                 Ok((inferred_ctx, prefix))
             } else {
                 Err(RequestError::NotFound.into())
-            }
+            };
         }
 
         // Case 2: normalize provided context.
         let mut effective_ctx = match ctx {
             Some(ctx) => {
-            // Rebuild context when module_id mismatches current module.
-                if ctx.module_id.as_ref().map(|m| m == &self.module_id).unwrap_or(false) {
+                // Rebuild context when module_id mismatches current module.
+                if ctx
+                    .module_id
+                    .as_ref()
+                    .map(|m| m == &self.module_id)
+                    .unwrap_or(false)
+                {
                     ctx
                 } else {
                     debug!(
@@ -440,11 +554,9 @@ impl ModuleProcessorWithChain {
                         .with_step_idx(0)
                 }
             }
-            None => {
-                ExecutionMark::default()
-                    .with_module_id(self.module_id.clone())
-                    .with_step_idx(0)
-            }
+            None => ExecutionMark::default()
+                .with_module_id(self.module_id.clone())
+                .with_step_idx(0),
         };
 
         // Ensure module_id and step_idx are set.
@@ -476,9 +588,8 @@ impl ModuleProcessorWithChain {
             return Ok(empty);
         }
         // Resolve effective execution context.
-        let (effective_ctx, effective_prefix) = self
-            .resolve_execution_context(ctx, prefix_request)
-            .await?;
+        let (effective_ctx, effective_prefix) =
+            self.resolve_execution_context(ctx, prefix_request).await?;
 
         debug!(
             "[chain] module={} run={} execute_request: effective_step={} prefix={}",
@@ -528,24 +639,32 @@ impl ModuleProcessorWithChain {
             }
             mark
         };
-        match step_node
-            .generate(config.clone(), meta, login_info.clone())
-            .await
-        {
+        let node_ctx = build_legacy_generate_context_with_common(
+            &self.module_id,
+            self.run_id,
+            &format!("step_{step_idx}"),
+            ResolvedCommonConfig::default(),
+            config.as_ref(),
+            meta,
+            login_info,
+            (!prefix_request.is_nil()).then_some(prefix_request),
+        );
+        let response_cache_common = node_ctx.config.common.clone();
+        match step_node.generate(node_ctx.borrowed()).await {
             Ok(stream) => {
                 debug!(
                     "[chain] module={} run={} execute_request_impl: generated stream for step {}",
-                    self.module_id,
-                    self.run_id,
-                    step_idx
+                    self.module_id, self.run_id, step_idx
                 );
 
                 let gen_ctx = gen_ctx.clone();
                 let run_id = self.run_id;
                 let module_id = self.module_id.clone();
                 let cache = self.cache.clone();
+                let response_cache_common = response_cache_common.clone();
 
                 let stream = stream.map(move |mut req| {
+                    req = apply_request_response_cache_policy(req, &response_cache_common);
                     // tag independent context and run id
                     req.context = gen_ctx.clone();
                     req.run_id = run_id;
@@ -555,7 +674,7 @@ impl ModuleProcessorWithChain {
                     if req.id.is_nil() {
                         req.id = Uuid::now_v7();
                     }
-                    
+
                     // Background persistence for chain fallback support
                     // Optimized: perform serialization and cache set in background to avoid blocking main loop
                     let req_save = req.clone();
@@ -566,7 +685,7 @@ impl ModuleProcessorWithChain {
                          let res = tokio::task::spawn_blocking(move || {
                              serde_json::to_vec(&req_save)
                          }).await;
-                         
+
                          if let Ok(Ok(bytes)) = res {
                              // Use Request::cache_id to ensure consistent key generation
                              let key = Request::cache_id(&id_str, &cache_save);
@@ -642,7 +761,7 @@ impl ModuleProcessorWithChain {
         &self,
         response: Response,
         config: Option<Arc<ModuleConfig>>,
-    ) -> Result<TaskOutputEvent> {
+    ) -> Result<TypedParserOutput> {
         // Route strictly by the step_idx from response.context
         let step_idx = response.context.step_idx.unwrap_or(0) as usize;
         debug!(
@@ -652,34 +771,46 @@ impl ModuleProcessorWithChain {
         let step_node = {
             let steps = self.steps.read().await;
             if step_idx >= steps.len() {
-                return Ok(TaskOutputEvent::default());
+                return Ok(TypedParserOutput::default());
             }
             steps[step_idx].clone()
         };
-        match step_node.parser(response.clone(), config).await {
-            Ok(mut data) => {
-                if data.stop.unwrap_or(false) {
+        let parse_ctx = build_legacy_parse_context_with_common(
+            &self.module_id,
+            &format!("step_{step_idx}"),
+            ResolvedCommonConfig::default(),
+            config.as_deref(),
+            &response,
+        );
+        match step_node
+            .parser(response.clone(), parse_ctx.borrowed())
+            .await
+        {
+            Ok(parsed) => {
+                let mut data = typed_output_from_node_parse_output(&response, parsed, |target| {
+                    let desired_step = parse_legacy_step_target(target).unwrap_or(step_idx as u32);
+                    ExecutionMark::default()
+                        .with_module_id(self.module_id.clone())
+                        .with_step_idx(desired_step)
+                });
+                if data.stop {
                     self.set_stopped().await?;
                 }
                 // Ensure chain prefix points to the current request (request.id carried in response.prefix_request)
-                if !data.parser_task.is_empty() {
+                if !data.next_dispatches.is_empty() {
                     let total = {
                         let steps = self.steps.read().await;
                         steps.len()
                     };
-                    for task in &mut data.parser_task {
+                    for dispatch in &mut data.next_dispatches {
                         // 1) Bind fallback pointer to the current-step request id.
-                        task.prefix_request = response.prefix_request;
+                        dispatch.prefix_request = response.prefix_request;
 
                         // 2) Defensive step advancement:
                         //    - ensure module_id exists for same-module continuation,
                         //    - advance to next step when parser didn't explicitly advance.
-                        let mut next_ctx = task.context.clone();
-                        let task_modules = task
-                            .account_task
-                            .module
-                            .clone()
-                            .unwrap_or_default();
+                        let mut next_ctx = dispatch.context.clone();
+                        let task_modules = dispatch.task_model.module.clone().unwrap_or_default();
 
                         // Check whether task targets current module.
                         let same_module = self.is_task_for_current_module(&next_ctx, &task_modules);
@@ -718,14 +849,14 @@ impl ModuleProcessorWithChain {
                                     "[chain] module={} run={} execute_parser: last step {} reached, terminating to avoid infinite loop",
                                     self.module_id, self.run_id, step_idx
                                 );
-                                data.parser_task.clear();
+                                data.next_dispatches.clear();
                                 return Ok(data);
                             }
                         } else {
                             // Cross-module task: leave context untouched for upper-layer routing.
-                            task.context = next_ctx;
+                            dispatch.context = next_ctx;
                             debug!(
-                                "[chain] module={} run={} execute_parser: task targets other module -> pass-through",
+                                "[chain] module={} run={} execute_parser: dispatch targets other module -> pass-through",
                                 self.module_id, self.run_id
                             );
                             continue;
@@ -734,22 +865,24 @@ impl ModuleProcessorWithChain {
                         // Write context only when changed.
                         if next_ctx.step_idx.map(|s| s as usize) != Some(desired_step) {
                             next_ctx = next_ctx.with_step_idx(desired_step as u32);
-                            task.context = next_ctx;
+                            dispatch.context = next_ctx;
+                            retarget_dispatch(dispatch, &format!("step_{desired_step}"));
                             debug!(
-                                "[chain] module={} run={} execute_parser: task present, advance context to step {} (from resp step {})",
+                                "[chain] module={} run={} execute_parser: dispatch present, advance context to step {} (from resp step {})",
                                 self.module_id, self.run_id, desired_step, step_idx
                             );
                         } else {
                             // Keep module id consistent even without step movement.
-                            task.context = next_ctx;
+                            dispatch.context = next_ctx;
+                            retarget_dispatch(dispatch, &format!("step_{desired_step}"));
                             debug!(
-                                "[chain] module={} run={} execute_parser: task present, keep context at step {}",
+                                "[chain] module={} run={} execute_parser: dispatch present, keep context at step {}",
                                 self.module_id, self.run_id, desired_step
                             );
                         }
                     }
                 } else {
-                    // No ParserTaskModel: optionally synthesize placeholder task for next step.
+                    // No dispatch: optionally synthesize placeholder dispatch for next step.
                     let total = {
                         let steps = self.steps.read().await;
                         steps.len()
@@ -762,15 +895,40 @@ impl ModuleProcessorWithChain {
                         );
                         // Progression is gate-driven rather than prefix-driven.
                         if self.try_mark_step_advanced_once(step_idx).await? {
-                            let base: TaskParserEvent = (&response).into();
                             let next_ctx = ExecutionMark::default()
                                 .with_module_id(self.module_id.clone())
                                 .with_step_idx(next_idx as u32);
-                            let mut next_task = base.with_context(next_ctx);
-                            next_task.prefix_request = response.prefix_request;
-                            data = data.with_task(next_task);
+                            let task_metadata = response
+                                .metadata
+                                .task
+                                .as_object()
+                                .cloned()
+                                .unwrap_or_default();
+                            let next_dispatch = ParserDispatchSeed {
+                                request_id: Uuid::now_v7(),
+                                task_model: TaskEvent {
+                                    account: response.account.clone(),
+                                    platform: response.platform.clone(),
+                                    module: Some(vec![response.module.clone()]),
+                                    priority: response.priority,
+                                    run_id: response.run_id,
+                                },
+                                timestamp: SystemTime::now()
+                                    .duration_since(UNIX_EPOCH)
+                                    .unwrap_or_default()
+                                    .as_secs(),
+                                metadata: task_metadata.clone(),
+                                context: next_ctx,
+                                run_id: response.run_id,
+                                prefix_request: response.prefix_request,
+                                dispatch: Some(placeholder_dispatch(
+                                    format!("step_{next_idx}"),
+                                    &task_metadata,
+                                )),
+                            };
+                            data = data.with_next_dispatch(next_dispatch);
                             debug!(
-                                "[chain] module={} run={} execute_parser: advance gate won -> synthesize placeholder to step {}",
+                                "[chain] module={} run={} execute_parser: advance gate won -> synthesize placeholder dispatch to step {}",
                                 self.module_id, self.run_id, next_idx
                             );
                         } else {
@@ -787,17 +945,22 @@ impl ModuleProcessorWithChain {
                 // Parser failure: emit ErrorTaskModel for precise same-step retry.
                 let step_idx_u32 = response.context.step_idx.unwrap_or(0);
                 // Preserve metadata as-is; avoid retry-step metadata pollution.
-                let meta = response.metadata.task.as_object().cloned().unwrap_or_default();
-                let error_task =TaskErrorEvent {
-                    id: response.id,
-                    account_task: TaskEvent {
+                let meta = response
+                    .metadata
+                    .task
+                    .as_object()
+                    .cloned()
+                    .unwrap_or_default();
+                let error_seed = ErrorEnvelopeSeed {
+                    request_id: response.id,
+                    task_model: TaskEvent {
                         account: response.account.clone(),
                         platform: response.platform.clone(),
                         module: Some(vec![response.module.clone()]),
                         run_id: response.run_id,
                         priority: response.priority,
                     },
-                    error_msg: e.to_string(),
+                    error_message: e.to_string(),
                     timestamp: SystemTime::now()
                         .duration_since(UNIX_EPOCH)
                         .unwrap()
@@ -816,7 +979,7 @@ impl ModuleProcessorWithChain {
                     "[chain] module={} run={} execute_parser: parser error at step {} -> emit ErrorTaskModel",
                     self.module_id, self.run_id, step_idx_u32
                 );
-                Ok(TaskOutputEvent::default().with_error(error_task))
+                Ok(TypedParserOutput::default().with_error(error_seed))
             }
         }
     }
@@ -828,28 +991,26 @@ impl ModuleProcessorWithChain {
         }
 
         // Rate limit Redis checks (e.g., every 1 seconds) to avoid I/O in hot path
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
         let last_check = self.last_stop_check.load(Ordering::Relaxed);
-        
+
         if now < last_check + 1 {
             return Ok(false);
         }
 
         // Check distributed state
         let id_str = self.advance_key();
-        let legacy_id_str = self.advance_key_legacy();
         if let Ok(Some(signal)) = StopSignal::sync(&id_str, &self.cache).await
-            && signal.0 {
-                // Update local cache
-                *self.stop.write().await = true;
-                return Ok(true);
-            }
-        if let Ok(Some(signal)) = StopSignal::sync(&legacy_id_str, &self.cache).await
-            && signal.0 {
-                *self.stop.write().await = true;
-                return Ok(true);
+            && signal.0
+        {
+            // Update local cache
+            *self.stop.write().await = true;
+            return Ok(true);
         }
-        
+
         // Update last check time
         self.last_stop_check.store(now, Ordering::Relaxed);
         Ok(false)
@@ -861,9 +1022,7 @@ impl ModuleProcessorWithChain {
 
         // Update distributed state
         let id_str = self.advance_key();
-        let legacy_id_str = self.advance_key_legacy();
         StopSignal(true).send(&id_str, &self.cache).await?;
-        let _ = StopSignal(true).send(&legacy_id_str, &self.cache).await;
         debug!(
             "[chain] module={} run={} set_stopped: marked as stopped",
             self.module_id, self.run_id
@@ -875,13 +1034,37 @@ impl ModuleProcessorWithChain {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use async_trait::async_trait;
     use crate::cacheable::CacheAble;
     use crate::cacheable::CacheService;
-    use crate::common::interface::ModuleNodeTrait;
+    use crate::common::interface::{
+        ModuleNodeTrait, NodeGenerateContext, NodeParseContext, ToSyncBoxStream,
+    };
     use crate::common::model::meta::MetaData;
     use crate::common::model::request::RequestMethod;
+    use crate::common::model::{
+        NodeDispatch, NodeInput, NodeParseOutput, PayloadCodec, TypedEnvelope,
+    };
+    use crate::common::response_cache::{RESPONSE_CACHE_EXPIRES_AT_KEY, current_time_ms};
+    use async_trait::async_trait;
     use futures::StreamExt;
+
+    #[test]
+    fn decode_payload_to_metadata_prefers_json_envelope() {
+        let envelope = TypedEnvelope::new(
+            "mocra.node_input.v1",
+            1,
+            PayloadCodec::Json,
+            serde_json::to_vec(&serde_json::json!({"page": 3})).expect("json bytes"),
+        );
+        let fallback = Map::from_iter([("fallback".to_string(), serde_json::json!(true))]);
+
+        let decoded = decode_payload_to_metadata(&envelope, fallback);
+
+        assert_eq!(
+            decoded.get("page").and_then(|value| value.as_i64()),
+            Some(3)
+        );
+    }
 
     enum ParserBehavior {
         ReturnTask,
@@ -893,15 +1076,34 @@ mod tests {
         module_id: String,
     }
 
+    struct GenerateRequestNode;
+
     struct GenerateErrorNode;
+
+    #[async_trait]
+    impl ModuleNodeTrait for GenerateRequestNode {
+        async fn generate(
+            &self,
+            _ctx: NodeGenerateContext<'_>,
+        ) -> Result<SyncBoxStream<'static, Request>> {
+            Ok(vec![Request::new("https://example.local/generated", RequestMethod::Get.as_ref())]
+                .to_stream())
+        }
+
+        async fn parser(
+            &self,
+            _response: Response,
+            _ctx: NodeParseContext<'_>,
+        ) -> Result<NodeParseOutput> {
+            Ok(NodeParseOutput::default())
+        }
+    }
 
     #[async_trait]
     impl ModuleNodeTrait for GenerateErrorNode {
         async fn generate(
             &self,
-            _config: Arc<ModuleConfig>,
-            _params: serde_json::Map<String, serde_json::Value>,
-            _login_info: Option<LoginInfo>,
+            _ctx: NodeGenerateContext<'_>,
         ) -> Result<SyncBoxStream<'static, Request>> {
             Err(RequestError::BuildFailed("generate failed".into()).into())
         }
@@ -909,9 +1111,9 @@ mod tests {
         async fn parser(
             &self,
             _response: Response,
-            _config: Option<Arc<ModuleConfig>>,
-        ) -> Result<TaskOutputEvent> {
-            Ok(TaskOutputEvent::default())
+            _ctx: NodeParseContext<'_>,
+        ) -> Result<NodeParseOutput> {
+            Ok(NodeParseOutput::default())
         }
     }
 
@@ -919,9 +1121,7 @@ mod tests {
     impl ModuleNodeTrait for TestNode {
         async fn generate(
             &self,
-            _config: Arc<ModuleConfig>,
-            _params: serde_json::Map<String, serde_json::Value>,
-            _login_info: Option<LoginInfo>,
+            _ctx: NodeGenerateContext<'_>,
         ) -> Result<SyncBoxStream<'static, Request>> {
             Ok(Box::pin(futures::stream::empty()))
         }
@@ -929,13 +1129,27 @@ mod tests {
         async fn parser(
             &self,
             response: Response,
-            _config: Option<Arc<ModuleConfig>>,
-        ) -> Result<TaskOutputEvent> {
+            _ctx: NodeParseContext<'_>,
+        ) -> Result<NodeParseOutput> {
             match self.behavior {
                 ParserBehavior::ReturnTask => {
-                    let task = TaskParserEvent::from(&response)
-                        .with_context(response.context.clone().with_module_id(self.module_id.clone()));
-                    Ok(TaskOutputEvent::default().with_task(task))
+                    let current_step = response.context.step_idx.unwrap_or(0);
+                    let payload = serde_json::to_vec(&serde_json::Value::Object(
+                        response
+                            .metadata
+                            .task
+                            .as_object()
+                            .cloned()
+                            .unwrap_or_default(),
+                    ))
+                    .expect("json payload");
+                    Ok(NodeParseOutput::default().with_next(NodeDispatch::new(
+                        format!("step_{current_step}"),
+                        NodeInput::new(
+                            format!("step_{current_step}"),
+                            TypedEnvelope::new("legacy.node_input", 1, PayloadCodec::Json, payload),
+                        ),
+                    )))
                 }
                 ParserBehavior::ReturnError => {
                     Err(RequestError::BuildFailed("parser failed".into()).into())
@@ -993,12 +1207,15 @@ mod tests {
 
         let prefix = Uuid::now_v7();
         let response = build_response("m1", 0, prefix, run_id);
-        let data = processor.execute_parser(response, None).await.expect("execute_parser should succeed");
+        let data = processor
+            .execute_parser(response, None)
+            .await
+            .expect("execute_parser should succeed");
 
         let task = data
-            .parser_task
+            .next_dispatches
             .first()
-            .expect("parser task should be produced");
+            .expect("parser dispatch should be produced");
         assert_eq!(task.context.step_idx, Some(1));
         assert_eq!(task.context.module_id.as_deref(), Some(module_id.as_str()));
         assert_eq!(task.prefix_request, prefix);
@@ -1023,14 +1240,20 @@ mod tests {
 
         let prefix = Uuid::now_v7();
         let response = build_response("m1", 0, prefix, run_id);
-        let data = processor.execute_parser(response, None).await.expect("execute_parser should return parser data with error task");
+        let data = processor
+            .execute_parser(response, None)
+            .await
+            .expect("execute_parser should return parser data with error envelope seed");
 
-        let err_task = data.error_task.expect("error task should be produced");
+        let err_task = data.error.expect("error seed should be produced");
         assert_eq!(err_task.context.step_idx, Some(0));
-        assert_eq!(err_task.context.module_id.as_deref(), Some(module_id.as_str()));
+        assert_eq!(
+            err_task.context.module_id.as_deref(),
+            Some(module_id.as_str())
+        );
         assert!(err_task.context.stay_current_step);
         assert_eq!(err_task.prefix_request, prefix);
-        assert!(!err_task.error_msg.is_empty());
+        assert!(!err_task.error_message.is_empty());
     }
 
     #[tokio::test]
@@ -1100,5 +1323,67 @@ mod tests {
             Ok(_) => panic!("second fallback must be blocked by fallback gate"),
             Err(_) => {}
         }
+    }
+
+    #[tokio::test]
+    async fn set_stopped_persists_only_canonical_execution_key() {
+        let run_id = Uuid::now_v7();
+        let module_id = "acc-pf-m1".to_string();
+        let cache = Arc::new(CacheService::new(None, "test".to_string(), None, None));
+        let processor = ModuleProcessorWithChain::new(module_id.clone(), cache.clone(), run_id, 60);
+
+        processor.set_stopped().await.expect("set_stopped should succeed");
+
+        let canonical_key = chain_key::execution_state_key(run_id, &module_id);
+        let canonical = StopSignal::sync(&canonical_key, &cache)
+            .await
+            .expect("canonical stop key lookup should succeed");
+        assert!(canonical.as_ref().is_some_and(|signal| signal.0));
+
+        let legacy_key = format!("run:{}:module:{}", run_id, module_id);
+        let legacy = StopSignal::sync(&legacy_key, &cache)
+            .await
+            .expect("legacy stop key lookup should succeed");
+        assert!(legacy.is_none());
+    }
+
+    #[tokio::test]
+    async fn execute_request_applies_response_cache_policy_from_legacy_common_config() {
+        let run_id = Uuid::now_v7();
+        let module_id = "acc-pf-m1".to_string();
+        let processor = ModuleProcessorWithChain::new(
+            module_id,
+            Arc::new(CacheService::new(None, "test".to_string(), None, None)),
+            run_id,
+            60,
+        );
+        processor.add_step_node(Arc::new(GenerateRequestNode)).await;
+
+        let mut config = ModuleConfig::default();
+        config.module_config = serde_json::json!({
+            "response_cache_enabled": true,
+            "response_cache_ttl_secs": 60,
+        });
+
+        let requests: Vec<_> = processor
+            .execute_request(
+                Arc::new(config),
+                serde_json::Map::new(),
+                None,
+                Some(ExecutionMark::default().with_step_idx(0)),
+                None,
+            )
+            .await
+            .expect("execute_request should succeed")
+            .collect()
+            .await;
+
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].enable_response_cache);
+        let expires_at = requests[0]
+            .meta
+            .get_trait_config::<i64>(RESPONSE_CACHE_EXPIRES_AT_KEY)
+            .expect("generated request should carry explicit cache expiry");
+        assert!(expires_at > current_time_ms());
     }
 }

@@ -1,26 +1,24 @@
-use crate::engine::chain::{
-    ConfigProcessor, ProxyMiddlewareProcessor, RequestMiddlewareProcessor,
-};
-use crate::engine::events::{
-    DownloadEvent, EventBus, EventEnvelope, EventPhase, EventType,
-};
-use serde_json::json;
-use crate::engine::processors::event_processor::{EventAwareTypedChain, EventProcessorTrait};
-use async_trait::async_trait;
-use crate::downloader::{DownloaderManager, WebSocketDownloader};
-use crate::errors::Error;
-use log::{error, warn};
-use crate::queue::{QueueManager, QueuedItem};
+use crate::cacheable::{CacheAble, CacheService};
+use crate::common::interface::MiddlewareManager;
+use crate::common::model::workflow_profile::TaskProfileSnapshot;
+use crate::common::model::Request;
 use crate::common::processors::processor::{
     ProcessorContext, ProcessorResult, ProcessorTrait, RetryPolicy,
 };
-use crate::proxy::ProxyManager;
-use std::sync::Arc;
-use crate::cacheable::{CacheAble, CacheService};
-use crate::common::interface::MiddlewareManager;
-use crate::common::model::{ModuleConfig, Request};
 use crate::common::state::State;
 use crate::common::stream_stats::StreamStats;
+use crate::downloader::{DownloaderManager, WebSocketDownloader};
+use crate::engine::chain::{ConfigProcessor, ProxyMiddlewareProcessor, RequestMiddlewareProcessor};
+use crate::engine::events::{DownloadEvent, EventBus, EventEnvelope, EventPhase, EventType};
+use crate::engine::processors::event_processor::{EventAwareTypedChain, EventProcessorTrait};
+use crate::engine::task::request_response_adapter::build_response_dispatch;
+use crate::errors::Error;
+use crate::proxy::ProxyManager;
+use crate::queue::{QueueManager, QueuedItem};
+use async_trait::async_trait;
+use log::{error, warn};
+use serde_json::json;
+use std::sync::Arc;
 
 /// WebSocket download processor that delegates response publishing in post-process.
 ///
@@ -35,14 +33,14 @@ struct WebSocketDownloadProcessor {
 }
 
 #[async_trait]
-impl ProcessorTrait<(Option<Request>, Option<ModuleConfig>), ()> for WebSocketDownloadProcessor {
+impl ProcessorTrait<(Option<Request>, Arc<TaskProfileSnapshot>), ()> for WebSocketDownloadProcessor {
     fn name(&self) -> &'static str {
         "WebSocketDownloadProcessor"
     }
 
     async fn process(
         &self,
-        input: (Option<Request>, Option<ModuleConfig>),
+        input: (Option<Request>, Arc<TaskProfileSnapshot>),
         context: ProcessorContext,
     ) -> ProcessorResult<()> {
         let request = match input.0 {
@@ -58,9 +56,7 @@ impl ProcessorTrait<(Option<Request>, Option<ModuleConfig>), ()> for WebSocketDo
             Err(e) => {
                 warn!(
                     "[WebSocketDownloadProcessor] download failed, will retry: request_id={} module_id={} error={}",
-                    request_id,
-                    module_id,
-                    e
+                    request_id, module_id, e
                 );
                 ProcessorResult::RetryableFailure(context.retry_policy.unwrap_or_default())
             }
@@ -68,7 +64,7 @@ impl ProcessorTrait<(Option<Request>, Option<ModuleConfig>), ()> for WebSocketDo
     }
     async fn post_process(
         &self,
-        input: &(Option<Request>, Option<ModuleConfig>),
+        input: &(Option<Request>, Arc<TaskProfileSnapshot>),
         _output: &(),
         _context: &ProcessorContext,
     ) -> crate::errors::Result<()> {
@@ -78,13 +74,8 @@ impl ProcessorTrait<(Option<Request>, Option<ModuleConfig>), ()> for WebSocketDo
         };
         // Read responses from websocket receiver and publish through queue manager.
         let (tx, mut rx) = tokio::sync::mpsc::channel(100);
-        let timeout = input
-            .1
-            .as_ref()
-            .and_then(|x| x.get_config::<u64>("wss_timeout"))
-            .unwrap_or(self.state.config.read().await.download_config.wss_timeout as u64);
+        let timeout = input.1.common.timeout_secs;
         let module_id = request.module_id();
-
 
         // Register module-scoped subscription.
         self.wss_downloader.subscribe(module_id.clone(), tx).await;
@@ -113,7 +104,7 @@ impl ProcessorTrait<(Option<Request>, Option<ModuleConfig>), ()> for WebSocketDo
                                  wss_downloader.close(&module_id_clone).await;
                                  break;
                              }
-                        
+
                         // Check idle timeout.
                         if last_activity.elapsed() > Duration::from_secs(timeout) {
                              let active = wss_downloader.active_count().await;
@@ -132,13 +123,36 @@ impl ProcessorTrait<(Option<Request>, Option<ModuleConfig>), ()> for WebSocketDo
                                 let Some(modified_response) = modified_response else {
                                     continue;
                                 };
-                                let item = QueuedItem::new(modified_response);
-                                if let Err(e) = match queue_manager.try_send_local_response(item) {
-                                    Ok(_) => Ok(()),
-                                    Err(tokio::sync::mpsc::error::TrySendError::Full(returned_item))
-                                    | Err(tokio::sync::mpsc::error::TrySendError::Closed(returned_item)) => {
-                                        sender.send(returned_item).await.map_err(|e| e.to_string())
+                                let dispatch = match build_response_dispatch(
+                                    &modified_response,
+                                    queue_manager.namespace.clone(),
+                                ) {
+                                    Ok(dispatch) => dispatch,
+                                    Err(err) => {
+                                        error!(
+                                            "Failed to build response envelope for websocket response {}: {}",
+                                            modified_response.id,
+                                            err
+                                        );
+                                        continue;
                                     }
+                                };
+                                let use_local_fast_path = queue_manager
+                                    .should_use_local_response_fast_path(&dispatch);
+                                let item = match queue_manager.response_namespace_override(&dispatch) {
+                                    Some(namespace) => QueuedItem::new(dispatch).with_namespace(namespace),
+                                    None => QueuedItem::new(dispatch),
+                                };
+                                if let Err(e) = if use_local_fast_path {
+                                    match queue_manager.try_send_local_response(item) {
+                                        Ok(_) => Ok(()),
+                                        Err(tokio::sync::mpsc::error::TrySendError::Full(returned_item))
+                                        | Err(tokio::sync::mpsc::error::TrySendError::Closed(returned_item)) => {
+                                            sender.send(returned_item).await.map_err(|e| e.to_string())
+                                        }
+                                    }
+                                } else {
+                                    sender.send(item).await.map_err(|e| e.to_string())
                                 } {
                                     error!("Failed to send response to queue: {e}");
                                     warn!("[ResponsePublish] will retry due to queue send error");
@@ -155,18 +169,27 @@ impl ProcessorTrait<(Option<Request>, Option<ModuleConfig>), ()> for WebSocketDo
             }
             // Always remove subscription on task exit.
             wss_downloader.unsubscribe(&module_id_clone).await;
-            log::info!("[ResponsePublish] Task completed for module {}", module_id_clone);
+            log::info!(
+                "[ResponsePublish] Task completed for module {}",
+                module_id_clone
+            );
         });
 
         Ok(())
     }
 }
-impl EventProcessorTrait<(Option<Request>, Option<ModuleConfig>), ()> for WebSocketDownloadProcessor {
-    fn pre_status(&self, input: &(Option<Request>, Option<ModuleConfig>)) -> Option<EventEnvelope> {
+impl EventProcessorTrait<(Option<Request>, Arc<TaskProfileSnapshot>), ()>
+    for WebSocketDownloadProcessor
+{
+    fn pre_status(&self, input: &(Option<Request>, Arc<TaskProfileSnapshot>)) -> Option<EventEnvelope> {
         match &input.0 {
             Some(request) => {
                 let ev: DownloadEvent = request.into();
-                Some(EventEnvelope::engine(EventType::Download, EventPhase::Started, ev))
+                Some(EventEnvelope::engine(
+                    EventType::Download,
+                    EventPhase::Started,
+                    ev,
+                ))
             }
             None => Some(EventEnvelope::system_error(
                 "wss_download_skipped_without_request",
@@ -175,11 +198,19 @@ impl EventProcessorTrait<(Option<Request>, Option<ModuleConfig>), ()> for WebSoc
         }
     }
 
-    fn finish_status(&self, input: &(Option<Request>, Option<ModuleConfig>), _output: &()) -> Option<EventEnvelope> {
+    fn finish_status(
+        &self,
+        input: &(Option<Request>, Arc<TaskProfileSnapshot>),
+        _output: &(),
+    ) -> Option<EventEnvelope> {
         match &input.0 {
             Some(request) => {
                 let ev: DownloadEvent = request.into();
-                Some(EventEnvelope::engine(EventType::Download, EventPhase::Completed, ev))
+                Some(EventEnvelope::engine(
+                    EventType::Download,
+                    EventPhase::Completed,
+                    ev,
+                ))
             }
             None => Some(EventEnvelope::system_error(
                 "wss_download_skipped_without_request",
@@ -188,11 +219,18 @@ impl EventProcessorTrait<(Option<Request>, Option<ModuleConfig>), ()> for WebSoc
         }
     }
 
-    fn working_status(&self, input: &(Option<Request>, Option<ModuleConfig>)) -> Option<EventEnvelope> {
+    fn working_status(
+        &self,
+        input: &(Option<Request>, Arc<TaskProfileSnapshot>),
+    ) -> Option<EventEnvelope> {
         match &input.0 {
             Some(request) => {
                 let ev: DownloadEvent = request.into();
-                Some(EventEnvelope::engine(EventType::Download, EventPhase::Started, ev))
+                Some(EventEnvelope::engine(
+                    EventType::Download,
+                    EventPhase::Started,
+                    ev,
+                ))
             }
             None => Some(EventEnvelope::system_error(
                 "wss_download_skipped_without_request",
@@ -201,7 +239,11 @@ impl EventProcessorTrait<(Option<Request>, Option<ModuleConfig>), ()> for WebSoc
         }
     }
 
-    fn error_status(&self, input: &(Option<Request>, Option<ModuleConfig>), err: &Error) -> Option<EventEnvelope> {
+    fn error_status(
+        &self,
+        input: &(Option<Request>, Arc<TaskProfileSnapshot>),
+        err: &Error,
+    ) -> Option<EventEnvelope> {
         match &input.0 {
             Some(request) => {
                 let ev: DownloadEvent = request.into();
@@ -221,7 +263,7 @@ impl EventProcessorTrait<(Option<Request>, Option<ModuleConfig>), ()> for WebSoc
 
     fn retry_status(
         &self,
-        input: &(Option<Request>, Option<ModuleConfig>),
+        input: &(Option<Request>, Arc<TaskProfileSnapshot>),
         retry_policy: &RetryPolicy,
     ) -> Option<EventEnvelope> {
         match &input.0 {
@@ -248,7 +290,7 @@ impl EventProcessorTrait<(Option<Request>, Option<ModuleConfig>), ()> for WebSoc
 /// Builds websocket request chain:
 /// config -> proxy middleware -> request middleware -> websocket download/subscription.
 pub async fn create_wss_download_chain(
-    state:Arc<State>,
+    state: Arc<State>,
     downloader_manager: Arc<DownloaderManager>,
     queue_manager: Arc<QueueManager>,
     middleware_manager: Arc<MiddlewareManager>,
@@ -267,12 +309,16 @@ pub async fn create_wss_download_chain(
     let request_middleware = RequestMiddlewareProcessor {
         middleware_manager: middleware_manager.clone(),
     };
-    let config_processor = ConfigProcessor { state: state.clone() };
+    let namespace = state.config.read().await.name.clone();
+    let config_processor = ConfigProcessor {
+        state: state.clone(),
+        namespace,
+    };
     let proxy_middleware = ProxyMiddlewareProcessor { proxy_manager };
 
     EventAwareTypedChain::<Request, Request>::new(event_bus)
-        .then::<(Request, Option<ModuleConfig>), _>(config_processor)
-        .then::<(Request, Option<ModuleConfig>), _>(proxy_middleware)
-        .then::<(Option<Request>, Option<ModuleConfig>), _>(request_middleware)
+        .then::<(Request, Arc<TaskProfileSnapshot>), _>(config_processor)
+        .then::<(Request, Arc<TaskProfileSnapshot>), _>(proxy_middleware)
+        .then::<(Option<Request>, Arc<TaskProfileSnapshot>), _>(request_middleware)
         .then::<(), _>(download_processor)
 }

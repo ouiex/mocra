@@ -1,22 +1,31 @@
 use super::*;
-use async_trait::async_trait;
-use crate::common::model::Request;
+use crate::common::model::{DeadLetterEnvelope, Request, RequestDispatchEnvelope, Response, ResponseDispatchEnvelope};
 use crate::common::policy::{PolicyConfig, PolicyOverride};
+use crate::engine::task::request_response_adapter::{build_request_dispatch, build_response_dispatch, decode_request_dispatch, decode_response_dispatch};
 use crate::errors::ErrorKind;
-use crate::queue::{Message, MqBackend};
+use crate::queue::codec::queue_codec;
+use crate::queue::{DlqRecord, Message, MqBackend};
+use async_trait::async_trait;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use tokio::sync::watch;
 use tokio::sync::mpsc;
+use uuid::Uuid;
 
 #[derive(Clone, Default)]
 struct TestBackend {
-    dlq_entries: Arc<Mutex<Vec<(String, String)>>>,
+    dlq_entries: Arc<Mutex<Vec<(String, Vec<u8>, String)>>>,
 }
 
 #[async_trait]
 impl MqBackend for TestBackend {
-    async fn publish(&self, _topic: &str, _key: Option<&str>, _payload: &[u8]) -> crate::errors::Result<()> {
+    async fn publish(
+        &self,
+        _topic: &str,
+        _key: Option<&str>,
+        _payload: &[u8],
+    ) -> crate::errors::Result<()> {
         Ok(())
     }
 
@@ -38,7 +47,11 @@ impl MqBackend for TestBackend {
         Ok(())
     }
 
-    async fn subscribe(&self, _topic: &str, _sender: mpsc::Sender<Message>) -> crate::errors::Result<()> {
+    async fn subscribe(
+        &self,
+        _topic: &str,
+        _sender: mpsc::Sender<Message>,
+    ) -> crate::errors::Result<()> {
         Ok(())
     }
 
@@ -50,17 +63,21 @@ impl MqBackend for TestBackend {
         &self,
         topic: &str,
         _id: &str,
-        _payload: &[u8],
+        payload: &[u8],
         reason: &str,
     ) -> crate::errors::Result<()> {
         self.dlq_entries
             .lock()
             .unwrap()
-            .push((topic.to_string(), reason.to_string()));
+            .push((topic.to_string(), payload.to_vec(), reason.to_string()));
         Ok(())
     }
 
-    async fn read_dlq(&self, _topic: &str, _count: usize) -> crate::errors::Result<Vec<(String, Vec<u8>, String, String)>> {
+    async fn read_dlq(
+        &self,
+        _topic: &str,
+        _count: usize,
+    ) -> crate::errors::Result<Vec<DlqRecord>> {
         Ok(Vec::new())
     }
 }
@@ -131,7 +148,130 @@ async fn retryable_failure_policy_can_route_to_dlq() {
     assert_eq!(dlq_entries[0].0, "request");
 }
 
-use crate::queue::{QueuedItem, Identifiable};
+#[tokio::test]
+async fn retryable_failure_policy_preserves_request_dispatch_payload_in_dlq() {
+    let backend = Arc::new(TestBackend::default());
+    let queue_manager = QueueManager::new(Some(backend.clone()), 10);
+
+    let policy_cfg = PolicyConfig {
+        overrides: vec![PolicyOverride {
+            domain: Some("engine".to_string()),
+            event_type: Some("download".to_string()),
+            phase: Some("retry".to_string()),
+            kind: ErrorKind::ProcessorChain,
+            retryable: Some(false),
+            backoff: None,
+            dlq: Some(DlqPolicy::Always),
+            alert: None,
+            max_retries: Some(0),
+            backoff_ms: Some(0),
+        }],
+    };
+
+    let policy_resolver = PolicyResolver::new(Some(&policy_cfg));
+    let request = Request::new("http://example.com", "GET");
+    let dispatch = build_request_dispatch(&request, "origin").expect("request dispatch should build");
+    let retry_policy = RetryPolicy::default().with_reason("unit test".to_string());
+
+    Engine::handle_policy_retry(
+        &policy_resolver,
+        &queue_manager,
+        "request",
+        "download",
+        &dispatch,
+        &retry_policy,
+        &mut None,
+        &mut None,
+    )
+    .await;
+
+    let dlq_entries = backend.dlq_entries.lock().unwrap();
+    assert_eq!(dlq_entries.len(), 1);
+
+    let envelope: DeadLetterEnvelope = queue_codec()
+        .decode(&dlq_entries[0].1)
+        .expect("dlq payload should decode as envelope");
+    let replay_dispatch: RequestDispatchEnvelope = queue_codec()
+        .decode(&envelope.payload.payload)
+        .expect("request dlq payload should remain a request dispatch envelope");
+    let replay_request =
+        decode_request_dispatch(replay_dispatch).expect("request dispatch should decode");
+    assert_eq!(replay_request.get_id(), request.get_id());
+}
+
+#[tokio::test]
+async fn retryable_failure_policy_preserves_response_dispatch_payload_in_dlq() {
+    let backend = Arc::new(TestBackend::default());
+    let queue_manager = QueueManager::new(Some(backend.clone()), 10);
+
+    let policy_cfg = PolicyConfig {
+        overrides: vec![PolicyOverride {
+            domain: Some("engine".to_string()),
+            event_type: Some("parser".to_string()),
+            phase: Some("retry".to_string()),
+            kind: ErrorKind::ProcessorChain,
+            retryable: Some(false),
+            backoff: None,
+            dlq: Some(DlqPolicy::Always),
+            alert: None,
+            max_retries: Some(0),
+            backoff_ms: Some(0),
+        }],
+    };
+
+    let policy_resolver = PolicyResolver::new(Some(&policy_cfg));
+    let response = Response {
+        id: Uuid::new_v4(),
+        platform: "".to_string(),
+        account: "".to_string(),
+        module: "".to_string(),
+        status_code: 200,
+        cookies: Default::default(),
+        content: b"ok".to_vec(),
+        storage_path: None,
+        headers: Vec::new(),
+        task_retry_times: 0,
+        metadata: Default::default(),
+        download_middleware: Vec::new(),
+        data_middleware: Vec::new(),
+        task_finished: false,
+        context: Default::default(),
+        run_id: Uuid::new_v4(),
+        prefix_request: Uuid::nil(),
+        request_hash: None,
+        priority: Default::default(),
+    };
+    let dispatch = build_response_dispatch(&response, "download-pool")
+        .expect("response dispatch should build");
+    let retry_policy = RetryPolicy::default().with_reason("unit test".to_string());
+
+    Engine::handle_policy_retry(
+        &policy_resolver,
+        &queue_manager,
+        "response",
+        "parser",
+        &dispatch,
+        &retry_policy,
+        &mut None,
+        &mut None,
+    )
+    .await;
+
+    let dlq_entries = backend.dlq_entries.lock().unwrap();
+    assert_eq!(dlq_entries.len(), 1);
+
+    let envelope: DeadLetterEnvelope = queue_codec()
+        .decode(&dlq_entries[0].1)
+        .expect("dlq payload should decode as envelope");
+    let replay_dispatch: ResponseDispatchEnvelope = queue_codec()
+        .decode(&envelope.payload.payload)
+        .expect("response dlq payload should remain a response dispatch envelope");
+    let replay_response =
+        decode_response_dispatch(replay_dispatch).expect("response dispatch should decode");
+    assert_eq!(replay_response.get_id(), response.get_id());
+}
+
+use crate::queue::{Identifiable, QueuedItem};
 
 #[derive(Clone)]
 struct TestItem {
@@ -153,7 +293,9 @@ async fn test_processor_failure_triggers_nack() {
     let nack_reason_clone = nack_reason.clone();
 
     let item = QueuedItem::with_ack(
-        TestItem { id: "test-1".to_string() },
+        TestItem {
+            id: "test-1".to_string(),
+        },
         move || {
             let ack_count_clone = ack_count_clone.clone();
             Box::pin(async move {
@@ -187,4 +329,16 @@ async fn test_processor_failure_triggers_nack() {
         nack_reason.lock().unwrap().as_deref(),
         Some("processor failed")
     );
+}
+
+#[test]
+fn apply_pause_state_update_only_sends_on_change() {
+    let (pause_tx, pause_rx) = watch::channel(false);
+
+    assert!(Engine::apply_pause_state_update(&pause_tx, true));
+    assert!(*pause_rx.borrow());
+
+    assert!(!Engine::apply_pause_state_update(&pause_tx, true));
+    assert!(Engine::apply_pause_state_update(&pause_tx, false));
+    assert!(!*pause_rx.borrow());
 }

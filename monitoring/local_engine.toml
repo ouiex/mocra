@@ -1,11 +1,12 @@
 name = "mocra_local"
 
 [api]
-port = 8905
+port = 8805
+api_key = "local-dev"
 
 [db]
 url = "sqlite://monitoring/tmp/mocra_metrics.sqlite?mode=rwc"
-pool_size = 5
+pool_size = 1
 
 [download_config]
 downloader_expire = 3600

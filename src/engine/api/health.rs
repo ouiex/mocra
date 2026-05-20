@@ -1,6 +1,7 @@
-use axum::{extract::State, Json};
 use crate::engine::api::state::ApiState;
+use axum::{Json, extract::State};
 use serde::Serialize;
+use std::time::Instant;
 // use sea_orm::ConnectionTrait; // for ping() - DatabaseConnection implements it inherently or via Deref?
 
 #[derive(Serialize)]
@@ -24,16 +25,21 @@ pub struct HealthResponse {
 
 impl ComponentStatus {
     fn up() -> Self {
-        Self { status: "up".to_string(), error: None }
+        Self {
+            status: "up".to_string(),
+            error: None,
+        }
     }
     fn down(e: impl ToString) -> Self {
-        Self { status: "down".to_string(), error: Some(e.to_string()) }
+        Self {
+            status: "down".to_string(),
+            error: Some(e.to_string()),
+        }
     }
 }
 
-pub async fn health_check(
-    State(state): State<ApiState>,
-) -> Json<HealthResponse> {
+pub async fn health_check(State(state): State<ApiState>) -> Json<HealthResponse> {
+    let started = Instant::now();
     // Check Redis
     let redis_status = match state.state.cache_service.ping().await {
         Ok(_) => ComponentStatus::up(),
@@ -51,6 +57,23 @@ pub async fn health_check(
     } else {
         "degraded"
     };
+
+    crate::common::metrics::set_component_health("cache", redis_status.status == "up");
+    crate::common::metrics::set_component_health("db", db_status.status == "up");
+    crate::common::metrics::inc_throughput(
+        "control_plane",
+        "health",
+        "health_check",
+        global_status,
+        1,
+    );
+    crate::common::metrics::observe_latency(
+        "control_plane",
+        "health",
+        "health_check",
+        global_status,
+        started.elapsed().as_secs_f64(),
+    );
 
     Json(HealthResponse {
         status: global_status.to_string(),

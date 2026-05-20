@@ -1,0 +1,84 @@
+groups:
+  - name: mocra-pack7-alerts
+    interval: 30s
+    rules:
+      - alert: MocraSchedulerIngressFallbackHigh
+        expr: |
+          sum(rate(mocra_scheduler_ingress_total{result="fallback"}[5m]))
+          /
+          clamp_min(sum(rate(mocra_scheduler_ingress_total[5m])), 0.001)
+          > 0.05
+        for: 10m
+        labels:
+          severity: warning
+          service: mocra
+          area: scheduler_ingress
+          category: cutover
+        annotations:
+          summary: "Scheduler ingress fallback ratio is high"
+          description: "Fallback ratio > 5% for 10m. Investigate typed context completeness and cutover gate status."
+
+      - alert: MocraSchedulerIngressFailureGateBlocked
+        expr: |
+          sum(rate(mocra_scheduler_ingress_total{result="fallback",reason="failure_gate_blocked"}[5m])) > 0
+        for: 10m
+        labels:
+          severity: warning
+          service: mocra
+          area: scheduler_ingress
+          category: cutover
+        annotations:
+          summary: "Scheduler ingress cutover blocked by failure gate"
+          description: "failure_gate_blocked fallback has persisted for 10m. Check module failure streak and recovery window."
+
+      - alert: MocraSchedulerIngressFallbackHotspot
+        expr: |
+          sum by (path, reason, module) (rate(mocra_scheduler_ingress_total{result="fallback"}[5m])) > 0.05
+        for: 10m
+        labels:
+          severity: warning
+          service: mocra
+          area: scheduler_ingress
+          category: cutover
+        annotations:
+          summary: "Scheduler ingress fallback hotspot detected"
+          description: "Fallback hotspot path={{ $labels.path }} reason={{ $labels.reason }} module={{ $labels.module }} has stayed above 0.05/s for 10m."
+
+      - alert: MocraControlPlaneForwardingErrorSpike
+        expr: |
+          sum(rate(mocra_stage_errors_total{pipeline="engine",stage="scheduler_ingress"}[5m])) > 1
+        for: 5m
+        labels:
+          severity: warning
+          service: mocra
+          area: control_plane
+          category: cutover
+        annotations:
+          summary: "Scheduler ingress error rate elevated"
+          description: "mocra_stage_errors_total(engine/scheduler_ingress) exceeds 1 per second over 5m."
+
+      - alert: MocraBusinessCriticalEventsPresent
+        expr: |
+          sum(rate(dag_alert_event_total{severity="critical"}[5m])) > 0
+        for: 5m
+        labels:
+          severity: critical
+          service: mocra
+          area: pipeline
+          category: business_failure
+        annotations:
+          summary: "Critical business alerts are present"
+          description: "dag_alert_event_total(severity=critical) is non-zero for 5m. Investigate crawler/runtime business failures before changing cutover state."
+
+      - alert: MocraBusinessNonRetryableErrorsHigh
+        expr: |
+          sum(rate(dag_execute_error_total{error_class="NonRetryable"}[5m])) > 0.2
+        for: 10m
+        labels:
+          severity: warning
+          service: mocra
+          area: pipeline
+          category: business_failure
+        annotations:
+          summary: "Non-retryable business errors are elevated"
+          description: "dag_execute_error_total(error_class=NonRetryable) is above 0.2/s for 10m. Treat as business failure pressure rather than cutover-only instability."

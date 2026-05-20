@@ -1,9 +1,8 @@
 #![allow(unused)]
 
-
-use std::sync::Arc;
 use crate::common::interface::DownloadMiddlewareHandle;
 use crate::common::model::ModuleConfig;
+use std::sync::Arc;
 
 /// Download middleware wrapper with bound config.
 pub struct DownloaderMiddleware {

@@ -1,6 +1,6 @@
-use log::{debug, warn, error};
-use tokio::sync::mpsc::Receiver;
 use crate::engine::events::{EventEnvelope, EventPhase};
+use log::{debug, error, warn};
+use tokio::sync::mpsc::Receiver;
 
 pub struct ConsoleLogHandler;
 

@@ -1,10 +1,10 @@
-
-use serde::{Deserialize, Serialize};
-use uuid::Uuid;
-use crate::common::model::message::{TaskErrorEvent, TaskParserEvent, TaskEvent};
+use crate::common::model::message::TaskEvent;
+use crate::common::model::{NodeDispatchEnvelope, NodeErrorEnvelope};
 use crate::common::model::{Request, Response};
 use crate::engine::task::module::Module;
 use crate::errors::{Error, ErrorKind};
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 /// Top-level domain that namespaces event families.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -17,7 +17,7 @@ pub enum EventDomain {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub enum EventType {
     TaskModel,
-    ParserTaskModel,
+    ParserDispatch,
     ParserTaskProduced,
     ErrorTaskProduced,
     ModuleStepAdvanced,
@@ -90,7 +90,7 @@ impl EventType {
     pub fn as_str(&self) -> &'static str {
         match self {
             EventType::TaskModel => "task_model",
-            EventType::ParserTaskModel => "parser_task_model",
+            EventType::ParserDispatch => "parser_dispatch",
             EventType::ParserTaskProduced => "parser_task_produced",
             EventType::ErrorTaskProduced => "error_task_produced",
             EventType::ModuleStepAdvanced => "module_step_advanced",
@@ -189,11 +189,16 @@ impl EventEnvelope {
     ///
     /// ```
     /// use mocra::engine::events::{EventEnvelope, EventPhase, EventType};
-    /// let evt = EventEnvelope::engine(EventType::ParserTaskModel, EventPhase::Completed, serde_json::json!({}));
-    /// assert_eq!(evt.event_key(), "engine.parser_task_model.completed");
+    /// let evt = EventEnvelope::engine(EventType::ParserDispatch, EventPhase::Completed, serde_json::json!({}));
+    /// assert_eq!(evt.event_key(), "engine.parser_dispatch.completed");
     /// ```
     pub fn event_key(&self) -> String {
-        format!("{}.{}.{}", self.domain.as_str(), self.event_type.as_str(), self.phase.as_str())
+        format!(
+            "{}.{}.{}",
+            self.domain.as_str(),
+            self.event_type.as_str(),
+            self.phase.as_str()
+        )
     }
 
     pub fn now_ms() -> u128 {
@@ -206,9 +211,12 @@ impl EventEnvelope {
 
 #[cfg(test)]
 mod tests {
-    use super::{EventEnvelope, EventPhase, EventType, ParserTaskModelEvent};
-    use crate::common::model::message::{TaskErrorEvent, TaskParserEvent, TaskEvent};
-    use crate::common::model::ExecutionMark;
+    use super::{EventEnvelope, EventPhase, EventType, ParserDispatchEvent};
+    use crate::common::model::{
+        ErrorDispatchContext, ExecutionMark, ExecutionMeta, NodeDispatch, NodeDispatchEnvelope,
+        NodeErrorEnvelope, NodeInput, ParserDispatchContext, PayloadCodec, PipelineStage,
+        RoutingMeta, TypedEnvelope,
+    };
     use serde_json::json;
     use uuid::Uuid;
 
@@ -222,58 +230,83 @@ mod tests {
 
     #[test]
     fn task_model_chain_semantic_event_types_have_stable_names() {
-        assert_eq!(EventType::ParserTaskProduced.as_str(), "parser_task_produced");
+        assert_eq!(
+            EventType::ParserTaskProduced.as_str(),
+            "parser_task_produced"
+        );
         assert_eq!(EventType::ErrorTaskProduced.as_str(), "error_task_produced");
-        assert_eq!(EventType::ModuleStepAdvanced.as_str(), "module_step_advanced");
-        assert_eq!(EventType::ModuleStepFallback.as_str(), "module_step_fallback");
+        assert_eq!(
+            EventType::ModuleStepAdvanced.as_str(),
+            "module_step_advanced"
+        );
+        assert_eq!(
+            EventType::ModuleStepFallback.as_str(),
+            "module_step_fallback"
+        );
     }
 
     #[test]
-    fn parser_task_model_event_mapping_is_consistent_for_parser_and_error_inputs() {
+    fn parser_dispatch_event_mapping_is_consistent_for_parser_and_error_inputs() {
         let run_id = Uuid::now_v7();
-        let task_model = TaskEvent {
+        let request_id = Uuid::now_v7();
+        let parent_request_id = Uuid::now_v7();
+        let routing = RoutingMeta {
+            namespace: "ns".to_string(),
             account: "acc".to_string(),
             platform: "pf".to_string(),
-            module: Some(vec!["m1".to_string()]),
+            module: "m1".to_string(),
+            node_key: "node_a".to_string(),
+            run_id,
+            request_id,
+            parent_request_id: Some(parent_request_id),
             priority: Default::default(),
-            run_id,
         };
+        let exec = ExecutionMeta::default();
+        let dispatch = NodeDispatch::new(
+            "node_a",
+            NodeInput::new(
+                "node_a",
+                TypedEnvelope::new("test.parser", 1, PayloadCodec::Json, b"null".to_vec()),
+            ),
+        );
 
-        let parser_task = TaskParserEvent {
-            id: Uuid::now_v7(),
-            account_task: task_model.clone(),
-            timestamp: 0,
-            metadata: json!({"k":"v"}).as_object().cloned().unwrap_or_default(),
-            context: ExecutionMark::default(),
-            run_id,
-            prefix_request: Uuid::now_v7(),
-        };
-        let parser_evt = ParserTaskModelEvent::from(&parser_task);
+        let parser_dispatch = NodeDispatchEnvelope::new(routing.clone(), exec.clone(), dispatch)
+            .with_parser_context(ParserDispatchContext {
+                modules: Some(vec!["m1".to_string()]),
+                metadata: json!({"k":"v"}).as_object().cloned().unwrap_or_default(),
+                context: ExecutionMark::default(),
+                prefix_request_id: Some(parent_request_id),
+                runtime_node: None,
+            });
+        let parser_evt = ParserDispatchEvent::from(&parser_dispatch);
         assert_eq!(parser_evt.account, "acc");
         assert_eq!(parser_evt.platform, "pf");
         assert_eq!(parser_evt.modules, Some(vec!["m1".to_string()]));
 
-        let error_task = TaskErrorEvent {
-            id: Uuid::now_v7(),
-            account_task: task_model,
-            error_msg: "err".to_string(),
-            timestamp: 0,
+        let error_envelope = NodeErrorEnvelope::new(
+            routing,
+            exec,
+            PipelineStage::ParserTask,
+            "err",
+        )
+        .with_error_context(ErrorDispatchContext {
+            modules: Some(vec!["m1".to_string()]),
             metadata: json!({"e":"x"}).as_object().cloned().unwrap_or_default(),
             context: ExecutionMark::default(),
-            run_id,
-            prefix_request: Uuid::now_v7(),
-        };
-        let error_evt = ParserTaskModelEvent::from(&error_task);
+            prefix_request_id: Some(parent_request_id),
+            runtime_node: None,
+        });
+        let error_evt = ParserDispatchEvent::from(&error_envelope);
         assert_eq!(error_evt.account, "acc");
         assert_eq!(error_evt.platform, "pf");
         assert_eq!(error_evt.modules, Some(vec!["m1".to_string()]));
     }
 
     #[test]
-    fn parser_task_model_event_envelope_key_is_stable() {
+    fn parser_dispatch_event_envelope_key_is_stable() {
         let payload = json!({"account":"acc","platform":"pf"});
-        let evt = EventEnvelope::engine(EventType::ParserTaskModel, EventPhase::Completed, payload);
-        assert_eq!(evt.event_key(), "engine.parser_task_model.completed");
+        let evt = EventEnvelope::engine(EventType::ParserDispatch, EventPhase::Completed, payload);
+        assert_eq!(evt.event_key(), "engine.parser_dispatch.completed");
     }
 }
 
@@ -282,7 +315,6 @@ pub struct TaskModelEvent {
     pub account: String,
     pub platform: String,
     pub modules: Option<Vec<String>>,
-    
 }
 impl From<&TaskEvent> for TaskModelEvent {
     fn from(value: &TaskEvent) -> Self {
@@ -296,34 +328,47 @@ impl From<&TaskEvent> for TaskModelEvent {
 
 /// Compact event payload representing parser/error task-model inputs.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ParserTaskModelEvent {
+pub struct ParserDispatchEvent {
     pub account: String,
     pub platform: String,
     pub modules: Option<Vec<String>>,
     #[serde(skip)]
     pub metadata: Option<serde_json::Value>,
 }
-impl From<&TaskParserEvent> for ParserTaskModelEvent {
-    fn from(value: &TaskParserEvent) -> Self {
-        ParserTaskModelEvent {
-            account: value.account_task.account.clone(),
-            platform: value.account_task.platform.clone(),
-            modules: value.account_task.module.clone(),
-            metadata: Some(serde_json::to_value(value.metadata.clone()).unwrap_or_default()),
-        }
-    }
-}
-impl From<&TaskErrorEvent> for ParserTaskModelEvent {
-    fn from(value: &TaskErrorEvent) -> Self {
+impl From<&NodeDispatchEnvelope> for ParserDispatchEvent {
+    fn from(value: &NodeDispatchEnvelope) -> Self {
         Self {
-            account: value.account_task.account.clone(),
-            platform: value.account_task.platform.clone(),
-            modules: value.account_task.module.clone(),
-            metadata: Some(serde_json::to_value(value.metadata.clone()).unwrap_or_default()),
+            account: value.routing.account.clone(),
+            platform: value.routing.platform.clone(),
+            modules: value
+                .parser_context
+                .as_ref()
+                .and_then(|ctx| ctx.modules.clone())
+                .or_else(|| Some(vec![value.routing.module.clone()])),
+            metadata: value
+                .parser_context
+                .as_ref()
+                .map(|ctx| serde_json::to_value(ctx.metadata.clone()).unwrap_or_default()),
         }
     }
 }
-
+impl From<&NodeErrorEnvelope> for ParserDispatchEvent {
+    fn from(value: &NodeErrorEnvelope) -> Self {
+        Self {
+            account: value.routing.account.clone(),
+            platform: value.routing.platform.clone(),
+            modules: value
+                .error_context
+                .as_ref()
+                .and_then(|ctx| ctx.modules.clone())
+                .or_else(|| Some(vec![value.routing.module.clone()])),
+            metadata: value
+                .error_context
+                .as_ref()
+                .map(|ctx| serde_json::to_value(ctx.metadata.clone()).unwrap_or_default()),
+        }
+    }
+}
 
 /// Event payload emitted when a concrete module instance is generated.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -338,11 +383,10 @@ impl From<&Module> for ModuleGenerateEvent {
         Self {
             account: value.account.name.clone(),
             platform: value.platform.name.clone(),
-            module: value.module.name().clone(),
+            module: value.module.name().to_string(),
         }
     }
 }
-
 
 /// Event payload for outbound request publication.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -443,7 +487,6 @@ impl From<&crate::common::model::data::DataEvent> for DataMiddlewareEvent {
     }
 }
 
-
 /// Event payload for final data-store persistence stages.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DataStoreEvent {
@@ -461,7 +504,7 @@ impl From<&crate::common::model::data::DataEvent> for DataStoreEvent {
             platform: value.platform.clone(),
             module: value.module.clone(),
             request_id: value.request_id.to_string(),
-            schema_size: (0,0),
+            schema_size: (0, 0),
             store_middleware: None,
         }
     }
@@ -514,8 +557,6 @@ impl From<&Response> for ResponseEvent {
         }
     }
 }
-
-
 
 /// Event payload for periodic component health reporting.
 #[derive(Debug, Clone, Serialize, Deserialize)]

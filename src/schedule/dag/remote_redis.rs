@@ -1,11 +1,11 @@
 use std::collections::HashMap;
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
     Arc,
+    atomic::{AtomicBool, Ordering},
 };
 
 use async_trait::async_trait;
-use deadpool_redis::redis::{from_redis_value, FromRedisValue, Value as RedisValue};
+use deadpool_redis::redis::{FromRedisValue, Value as RedisValue, from_redis_value};
 use metrics::{counter, histogram};
 use serde::{Deserialize, Serialize};
 use tokio::time::{Duration, Instant};
@@ -113,6 +113,10 @@ impl RedisRemoteDispatcher {
 
 #[async_trait]
 impl DagNodeDispatcher for RedisRemoteDispatcher {
+    fn backend_name(&self) -> &'static str {
+        "redis_remote"
+    }
+
     async fn dispatch(
         &self,
         node_id: &str,
@@ -251,10 +255,13 @@ impl DagNodeDispatcher for RedisRemoteDispatcher {
                         let _ = self.cache.del(&cancel_key).await;
                         let _ = self.cache.del(&request_map_key).await;
 
-                        let raw_resp = String::from_utf8(raw_resp)
-                            .map_err(|e| Self::cache_err(node_id, "decode remote response utf8", e))?;
-                        let resp: WireDispatchResponse = serde_json::from_str(&raw_resp)
-                            .map_err(|e| Self::cache_err(node_id, "deserialize remote response", e))?;
+                        let raw_resp = String::from_utf8(raw_resp).map_err(|e| {
+                            Self::cache_err(node_id, "decode remote response utf8", e)
+                        })?;
+                        let resp: WireDispatchResponse =
+                            serde_json::from_str(&raw_resp).map_err(|e| {
+                                Self::cache_err(node_id, "deserialize remote response", e)
+                            })?;
 
                         if resp.ok {
                             let payload_bytes = resp.payload_envelope.ok_or_else(|| {
@@ -308,11 +315,8 @@ impl DagNodeDispatcher for RedisRemoteDispatcher {
                     }
 
                     tokio::time::sleep(Duration::from_millis(current_poll_ms)).await;
-                    current_poll_ms = Self::next_poll_delay_ms(
-                        current_poll_ms,
-                        base_poll_ms,
-                        max_poll_ms,
-                    );
+                    current_poll_ms =
+                        Self::next_poll_delay_ms(current_poll_ms, base_poll_ms, max_poll_ms);
                 }
             }
         }
@@ -321,7 +325,69 @@ impl DagNodeDispatcher for RedisRemoteDispatcher {
 
 #[cfg(test)]
 mod tests {
-    use super::RedisRemoteDispatcher;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    use async_trait::async_trait;
+
+    use super::{RedisDagWorker, RedisRemoteDispatcher, WireDispatchRequest, WireNodeExecutionContext};
+    use crate::cacheable::CacheService;
+    use crate::engine::task::module_node_runtime_bridge::{
+        build_legacy_parse_runtime_input_with_common, decode_parser_runtime_input,
+        encode_parser_runtime_input,
+    };
+    use crate::common::model::{ExecutionMark, ModuleConfig, Priority, Response};
+    use crate::schedule::dag::{DagError, DagNodeTrait, NodeExecutionContext, TaskPayload};
+    use uuid::Uuid;
+
+    struct SuccessfulTestNode;
+
+    #[async_trait]
+    impl DagNodeTrait for SuccessfulTestNode {
+        async fn start(&self, _context: NodeExecutionContext) -> Result<TaskPayload, DagError> {
+            Ok(TaskPayload::from_bytes(vec![1, 2, 3]).with_content_type("application/test"))
+        }
+    }
+
+    struct FailingTestNode;
+
+    #[async_trait]
+    impl DagNodeTrait for FailingTestNode {
+        async fn start(&self, _context: NodeExecutionContext) -> Result<TaskPayload, DagError> {
+            Err(DagError::NodeExecutionFailed {
+                node_id: "remote-node".to_string(),
+                reason: "forced remote handler failure".to_string(),
+            })
+        }
+    }
+
+    fn make_worker() -> RedisDagWorker {
+        RedisDagWorker::new(
+            Arc::new(CacheService::new(None, "test".to_string(), None, None)),
+            "test-prefix",
+            "worker-group",
+        )
+    }
+
+    fn make_request(node_id: &str) -> WireDispatchRequest {
+        let context = NodeExecutionContext {
+            run_id: "run-1".to_string(),
+            run_fencing_token: Some(7),
+            node_id: node_id.to_string(),
+            attempt: 0,
+            upstream_nodes: Vec::new(),
+            upstream_outputs: HashMap::new(),
+            runtime_input: None,
+            layer_index: 0,
+        };
+
+        WireDispatchRequest {
+            request_id: "req-1".to_string(),
+            node_id: node_id.to_string(),
+            worker_group: "worker-group".to_string(),
+            context: WireNodeExecutionContext::from_runtime(&context).expect("wire context"),
+        }
+    }
 
     #[test]
     fn next_poll_delay_ms_grows_and_caps() {
@@ -339,6 +405,158 @@ mod tests {
         assert_eq!(p3, 40);
         assert_eq!(p4, 80);
         assert_eq!(p5, 80);
+    }
+
+    #[test]
+    fn wire_context_round_trips_runtime_input_payload() {
+        let runtime_input = TaskPayload::from_bytes(vec![7, 8, 9])
+            .with_content_type("application/x-mocra-runtime-input")
+            .with_meta("source", "test");
+        let context = NodeExecutionContext {
+            run_id: "run-1".to_string(),
+            run_fencing_token: Some(42),
+            node_id: "node-a".to_string(),
+            attempt: 2,
+            upstream_nodes: vec!["node-prev".to_string()],
+            upstream_outputs: HashMap::from([(
+                "node-prev".to_string(),
+                TaskPayload::from_bytes(vec![1, 2, 3]).with_content_type("application/test"),
+            )]),
+            runtime_input: Some(runtime_input.clone()),
+            layer_index: 3,
+        };
+
+        let wire = WireNodeExecutionContext::from_runtime(&context).expect("to wire");
+        let decoded = wire.into_runtime().expect("from wire");
+
+        assert_eq!(decoded.run_id, context.run_id);
+        assert_eq!(decoded.run_fencing_token, context.run_fencing_token);
+        assert_eq!(decoded.node_id, context.node_id);
+        assert_eq!(decoded.attempt, context.attempt);
+        assert_eq!(decoded.upstream_nodes, context.upstream_nodes);
+        assert_eq!(decoded.layer_index, context.layer_index);
+        assert_eq!(decoded.runtime_input, Some(runtime_input));
+        assert_eq!(decoded.upstream_outputs.len(), 1);
+    }
+
+    #[test]
+    fn wire_context_accepts_explicit_null_runtime_input_field() {
+        let raw = serde_json::json!({
+            "run_id": "run-with-null-runtime-input",
+            "run_fencing_token": null,
+            "node_id": "node-with-null-runtime-input",
+            "attempt": 0,
+            "upstream_nodes": [],
+            "upstream_outputs_envelope": {},
+            "runtime_input_envelope": null,
+            "layer_index": 1
+        });
+
+        let wire: WireNodeExecutionContext = serde_json::from_value(raw).expect("wire json");
+        let decoded = wire.into_runtime().expect("decode runtime context");
+
+        assert_eq!(decoded.run_id, "run-with-null-runtime-input");
+        assert!(decoded.runtime_input.is_none());
+        assert!(decoded.upstream_outputs.is_empty());
+    }
+
+    #[test]
+    fn wire_context_round_trips_parser_runtime_input_payload() {
+        let response = Response {
+            id: Uuid::now_v7(),
+            platform: "platform-x".to_string(),
+            account: "account-a".to_string(),
+            module: "catalog".to_string(),
+            status_code: 200,
+            cookies: Default::default(),
+            content: br#"{\"page\":1}"#.to_vec(),
+            storage_path: None,
+            headers: vec![("content-type".to_string(), "application/json".to_string())],
+            task_retry_times: 1,
+            metadata: Default::default(),
+            download_middleware: Vec::new(),
+            data_middleware: Vec::new(),
+            task_finished: false,
+            context: ExecutionMark::default().with_node_id("page"),
+            run_id: Uuid::now_v7(),
+            prefix_request: Uuid::now_v7(),
+            request_hash: None,
+            priority: Priority::Normal,
+        };
+        let parser_input = build_legacy_parse_runtime_input_with_common(
+            "account-a-platform-x-catalog",
+            "page",
+            crate::common::model::ResolvedCommonConfig::default(),
+            Some(&ModuleConfig::default()),
+            &response,
+        );
+        let runtime_input = encode_parser_runtime_input(&parser_input).expect("encode parser input");
+        let context = NodeExecutionContext {
+            run_id: "run-1".to_string(),
+            run_fencing_token: Some(42),
+            node_id: "node-a".to_string(),
+            attempt: 2,
+            upstream_nodes: vec![],
+            upstream_outputs: HashMap::new(),
+            runtime_input: Some(runtime_input),
+            layer_index: 3,
+        };
+
+        let wire = WireNodeExecutionContext::from_runtime(&context).expect("to wire");
+        let decoded = wire.into_runtime().expect("from wire");
+        let parser_runtime_input = decode_parser_runtime_input(
+            decoded.runtime_input.as_ref().expect("runtime input should exist"),
+        )
+        .expect("decode parser runtime input");
+
+        assert_eq!(parser_runtime_input.routing.node_key, "page");
+        assert_eq!(parser_runtime_input.response.id, response.id);
+    }
+
+    #[tokio::test]
+    async fn execute_request_returns_handler_missing_error() {
+        let worker = make_worker();
+
+        let response = worker.execute_request(make_request("missing-node")).await;
+
+        assert!(!response.ok);
+        assert!(response.payload_envelope.is_none());
+        assert_eq!(
+            response.error.as_deref(),
+            Some("remote worker handler missing for node missing-node")
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_request_returns_context_decode_error() {
+        let worker = make_worker().register_handler("remote-node", Arc::new(SuccessfulTestNode));
+        let mut request = make_request("remote-node");
+        request.context.runtime_input_envelope = Some(b"bad-envelope".to_vec());
+
+        let response = worker.execute_request(request).await;
+
+        assert!(!response.ok);
+        assert!(response.payload_envelope.is_none());
+        let error = response.error.expect("decode error should be present");
+        assert!(
+            error.contains("invalid payload envelope") || error.contains("payload envelope"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_request_returns_handler_execution_error() {
+        let worker = make_worker().register_handler("remote-node", Arc::new(FailingTestNode));
+
+        let response = worker.execute_request(make_request("remote-node")).await;
+
+        assert!(!response.ok);
+        assert!(response.payload_envelope.is_none());
+        let error = response.error.expect("handler error should be present");
+        assert!(
+            error.contains("node execution failed") && error.contains("forced remote handler failure"),
+            "unexpected error: {error}"
+        );
     }
 }
 
@@ -499,7 +717,9 @@ impl RedisDagWorker {
             .set(
                 &alive_key,
                 b"1",
-                Some(Duration::from_secs(Self::ms_to_ttl_secs(self.heartbeat_ttl_ms))),
+                Some(Duration::from_secs(Self::ms_to_ttl_secs(
+                    self.heartbeat_ttl_ms,
+                ))),
             )
             .await;
         counter!(
@@ -618,7 +838,9 @@ impl RedisDagWorker {
                 last_reclaim = Instant::now();
             }
 
-            let raw_job = self.pop_move_to_processing(&queue_key, &processing_key).await;
+            let raw_job = self
+                .pop_move_to_processing(&queue_key, &processing_key)
+                .await;
             let Some(raw_job) = raw_job else {
                 tokio::time::sleep(Duration::from_millis(self.idle_sleep_ms)).await;
                 continue;
@@ -652,7 +874,8 @@ impl RedisDagWorker {
                 continue;
             }
 
-            let canceled_before_execute = self.cache.get(&cancel_key).await.ok().flatten().is_some();
+            let canceled_before_execute =
+                self.cache.get(&cancel_key).await.ok().flatten().is_some();
             if canceled_before_execute {
                 counter!(
                     "mocra_dag_remote_worker_cancel_total",
@@ -667,7 +890,8 @@ impl RedisDagWorker {
             }
 
             let delivery_attempt = self.cache.incr(&delivery_count_key, 1).await.unwrap_or(1);
-            self.expire_key(&delivery_count_key, self.delivery_ttl_secs).await;
+            self.expire_key(&delivery_count_key, self.delivery_ttl_secs)
+                .await;
 
             if delivery_attempt as usize > self.max_delivery_attempts {
                 let response = WireDispatchResponse {
@@ -773,7 +997,10 @@ impl RedisDagWorker {
             return WireDispatchResponse {
                 ok: false,
                 payload_envelope: None,
-                error: Some(format!("remote worker handler missing for node {}", request.node_id)),
+                error: Some(format!(
+                    "remote worker handler missing for node {}",
+                    request.node_id
+                )),
             };
         };
 
@@ -784,7 +1011,7 @@ impl RedisDagWorker {
                     ok: false,
                     payload_envelope: None,
                     error: Some(e.to_string()),
-                }
+                };
             }
         };
 
@@ -803,12 +1030,13 @@ impl RedisDagWorker {
                             payload_envelope: None,
                             error: Some(e.to_string()),
                         },
-                    }
+                    };
                 }
                 Err(e) => {
                     last_error = Some(e.to_string());
                     if retry < self.handler_max_retries {
-                        tokio::time::sleep(Duration::from_millis(self.handler_retry_backoff_ms)).await;
+                        tokio::time::sleep(Duration::from_millis(self.handler_retry_backoff_ms))
+                            .await;
                         continue;
                     }
                 }
@@ -846,6 +1074,7 @@ struct WireNodeExecutionContext {
     attempt: usize,
     upstream_nodes: Vec<String>,
     upstream_outputs_envelope: HashMap<String, Vec<u8>>,
+    runtime_input_envelope: Option<Vec<u8>>,
     layer_index: usize,
 }
 
@@ -863,6 +1092,11 @@ impl WireNodeExecutionContext {
             attempt: context.attempt,
             upstream_nodes: context.upstream_nodes.clone(),
             upstream_outputs_envelope,
+            runtime_input_envelope: context
+                .runtime_input
+                .as_ref()
+                .map(TaskPayload::to_envelope_bytes)
+                .transpose()?,
             layer_index: context.layer_index,
         })
     }
@@ -880,6 +1114,10 @@ impl WireNodeExecutionContext {
             attempt: self.attempt,
             upstream_nodes: self.upstream_nodes,
             upstream_outputs,
+            runtime_input: self
+                .runtime_input_envelope
+                .map(|bytes| TaskPayload::from_envelope_bytes(&bytes))
+                .transpose()?,
             layer_index: self.layer_index,
         })
     }

@@ -1,12 +1,12 @@
 #![allow(unused)]
-use crate::errors::Result;
 use crate::common::interface::middleware::{
     DataMiddlewareHandle, DataStoreMiddlewareHandle, DownloadMiddlewareHandle,
 };
+use crate::common::model::workflow_profile::TaskProfileSnapshot;
 use crate::common::model::data::DataEvent;
-use crate::common::state::State;
-use crate::common::model::ModuleConfig;
 use crate::common::model::{Request, Response};
+use crate::common::state::State;
+use crate::errors::Result;
 use futures::future::join_all;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -80,10 +80,7 @@ impl MiddlewareManager {
         middlewares.push(middleware);
         index.insert(name, pos);
     }
-    pub async fn register_data_middleware_from_vec(
-        &self,
-        middlewares: Vec<DataMiddlewareHandle>,
-    ) {
+    pub async fn register_data_middleware_from_vec(&self, middlewares: Vec<DataMiddlewareHandle>) {
         let mut existing = self.data_middleware.write().await;
         let mut index = self.data_index.write().await;
         for middleware in middlewares {
@@ -119,7 +116,7 @@ impl MiddlewareManager {
     async fn get_download_middleware(
         &self,
         middleware_name: &[String],
-        config: &Option<ModuleConfig>,
+        profile: &TaskProfileSnapshot,
     ) -> Vec<(DownloadMiddlewareHandle, u32)> {
         let middlewares = self.download_middleware.read().await;
         let index = self.download_index.read().await;
@@ -128,9 +125,11 @@ impl MiddlewareManager {
             if let Some(&pos) = index.get(name) {
                 if let Some(handle) = middlewares.get(pos) {
                     let middleware_guard = handle.lock().await;
-                    let middleware_weight = config
-                        .as_ref()
-                        .and_then(|m| m.get_middleware_weight(name))
+                    let middleware_weight = profile
+                        .download_middleware
+                        .iter()
+                        .find(|b| b.name == *name)
+                        .map(|b| b.weight as u32)
                         .unwrap_or_else(|| middleware_guard.weight());
                     out.push((handle.clone(), middleware_weight));
                 }
@@ -141,7 +140,7 @@ impl MiddlewareManager {
     async fn get_data_middleware(
         &self,
         middleware_name: &[String],
-        config: &Option<ModuleConfig>,
+        profile: &TaskProfileSnapshot,
     ) -> Vec<(DataMiddlewareHandle, u32)> {
         let middlewares = self.data_middleware.read().await;
         let index = self.data_index.read().await;
@@ -150,9 +149,11 @@ impl MiddlewareManager {
             if let Some(&pos) = index.get(name) {
                 if let Some(handle) = middlewares.get(pos) {
                     let middleware_guard = handle.lock().await;
-                    let middleware_weight = config
-                        .as_ref()
-                        .and_then(|m| m.get_middleware_weight(name))
+                    let middleware_weight = profile
+                        .data_middleware
+                        .iter()
+                        .find(|b| b.name == *name)
+                        .map(|b| b.weight as u32)
                         .unwrap_or_else(|| middleware_guard.weight());
                     out.push((handle.clone(), middleware_weight));
                 }
@@ -178,15 +179,19 @@ impl MiddlewareManager {
         out
     }
 
-    pub async fn handle_request(&self, request: Request, config: &Option<ModuleConfig>) -> Option<Request> {
+    pub async fn handle_request(
+        &self,
+        request: Request,
+        profile: &TaskProfileSnapshot,
+    ) -> Option<Request> {
         let mut req = request;
         let mut middleware: Vec<(DownloadMiddlewareHandle, u32)> = self
-            .get_download_middleware(&req.download_middleware, config)
+            .get_download_middleware(&req.download_middleware, profile)
             .await;
         middleware.sort_by(|x, y| x.1.cmp(&y.1));
         for (middleware, _) in middleware {
             let mut middleware = middleware.lock().await;
-            match middleware.before_request(req, config).await {
+            match middleware.before_request(req, profile).await {
                 Some(next_req) => req = next_req,
                 None => return None,
             }
@@ -196,31 +201,35 @@ impl MiddlewareManager {
     pub async fn handle_response(
         &self,
         response: Response,
-        config: &Option<ModuleConfig>,
+        profile: &TaskProfileSnapshot,
     ) -> Option<Response> {
         let mut resp = response;
         let mut middleware: Vec<(DownloadMiddlewareHandle, u32)> = self
-            .get_download_middleware(&resp.download_middleware, config)
+            .get_download_middleware(&resp.download_middleware, profile)
             .await;
         middleware.sort_by(|x, y| y.1.cmp(&x.1));
         for (middleware, _) in middleware {
             let mut middleware = middleware.lock().await;
-            match middleware.after_response(resp, config).await {
+            match middleware.after_response(resp, profile).await {
                 Some(next_resp) => resp = next_resp,
                 None => return None,
             }
         }
         Some(resp)
     }
-    pub async fn handle_data(&self, data: DataEvent, config: &Option<ModuleConfig>) -> Option<DataEvent> {
+    pub async fn handle_data(
+        &self,
+        data: DataEvent,
+        profile: &TaskProfileSnapshot,
+    ) -> Option<DataEvent> {
         let mut data = data;
         let mut middleware: Vec<(DataMiddlewareHandle, u32)> = self
-            .get_data_middleware(&data.data_middleware, config)
+            .get_data_middleware(&data.data_middleware, profile)
             .await;
         middleware.sort_by(|x, y| x.1.cmp(&y.1));
         for (middleware, _) in middleware {
             let mut middleware = middleware.lock().await;
-            match middleware.handle_data(data, config).await {
+            match middleware.handle_data(data, profile).await {
                 Some(next_data) => data = next_data,
                 None => return None,
             }
@@ -231,7 +240,7 @@ impl MiddlewareManager {
     pub async fn handle_store_data(
         &self,
         data: DataEvent,
-        config: &Option<ModuleConfig>,
+        profile: &TaskProfileSnapshot,
     ) -> HashMap<String, Result<()>> {
         let middleware = self.get_store_middleware(&data.data_middleware).await;
 
@@ -246,9 +255,9 @@ impl MiddlewareManager {
                     "{}, schema: {}, table: {}",
                     middleware_name, module_name, middleware_name
                 );
-                let result = match middleware.before_store(config).await {
-                    Ok(()) => match middleware.store_data(data_cloned, config).await {
-                        Ok(()) => middleware.after_store(config).await,
+                let result = match middleware.before_store(profile).await {
+                    Ok(()) => match middleware.store_data(data_cloned, profile).await {
+                        Ok(()) => middleware.after_store(profile).await,
                         Err(e) => Err(e),
                     },
                     Err(e) => Err(e),
@@ -258,16 +267,13 @@ impl MiddlewareManager {
         });
 
         let mut results: Vec<(String, Result<()>)> = join_all(tasks).await;
-        results
-            .into_iter()
-            .filter(|x| x.1.is_err())
-            .collect()
+        results.into_iter().filter(|x| x.1.is_err()).collect()
     }
     pub async fn handle_store_data_with_middleware(
         &self,
         data: DataEvent,
         middleware: Vec<String>,
-        config: &Option<ModuleConfig>,
+        profile: &TaskProfileSnapshot,
     ) -> HashMap<String, Result<()>> {
         let middleware = self.get_store_middleware(&middleware).await;
 
@@ -277,9 +283,9 @@ impl MiddlewareManager {
             async move {
                 let mut middleware = m.lock().await;
                 let name = middleware.name();
-                let result = match middleware.before_store(config).await {
-                    Ok(()) => match middleware.store_data(data_cloned, config).await {
-                        Ok(()) => middleware.after_store(config).await,
+                let result = match middleware.before_store(profile).await {
+                    Ok(()) => match middleware.store_data(data_cloned, profile).await {
+                        Ok(()) => middleware.after_store(profile).await,
                         Err(e) => Err(e),
                     },
                     Err(e) => Err(e),
@@ -289,9 +295,6 @@ impl MiddlewareManager {
         });
 
         let mut results: Vec<(String, Result<()>)> = join_all(tasks).await;
-        results
-            .into_iter()
-            .filter(|x| x.1.is_err())
-            .collect()
+        results.into_iter().filter(|x| x.1.is_err()).collect()
     }
 }

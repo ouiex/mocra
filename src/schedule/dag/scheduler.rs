@@ -1,16 +1,17 @@
+use futures::FutureExt;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use futures::FutureExt;
 use uuid::Uuid;
 
 use crate::sync::SyncService;
 
 use super::graph::Dag;
 use super::types::{
-    DagError, DagErrorClass, DagErrorCode, DagFencingStore, DagNodeDispatcher,
-    DagNodeExecutionPolicy, DagNodeRetryMode, DagNodeStatus, DagNodeSyncState, DagRunGuard,
-    DagRunResumeState, DagRunStateStore, LocalNodeDispatcher, NodeExecutionContext,
+    DagAdvanceGate, DagError, DagErrorClass, DagErrorCode, DagFencingStore,
+    DagNodeDispatcher, DagNodeExecutionPolicy, DagNodeRetryMode, DagNodeRunState,
+    DagNodeRuntimeOverride, DagNodeStatus, DagNodeSyncState, DagRunGuard, DagRunState,
+    DagRunStateStore, DagRunStatus, DagStopSignal, LocalNodeDispatcher, NodeExecutionContext,
     NodePlacement, TaskPayload,
 };
 
@@ -47,6 +48,72 @@ impl DagSyncStage {
     }
 }
 
+fn current_time_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or_default()
+}
+
+fn is_control_node(node_id: &str) -> bool {
+    Dag::is_control_node(node_id)
+}
+
+fn collect_entry_nodes(runtime: &Dag) -> Vec<String> {
+    let mut entry_nodes: Vec<String> = runtime
+        .nodes
+        .iter()
+        .filter(|(node_id, _)| !is_control_node(node_id))
+        .filter(|(_, node)| {
+            node.predecessors.is_empty()
+                || node
+                    .predecessors
+                    .iter()
+                    .all(|predecessor| is_control_node(predecessor))
+        })
+        .map(|(node_id, _)| node_id.clone())
+        .collect();
+    entry_nodes.sort();
+    entry_nodes
+}
+
+fn runtime_identity(runtime: &Dag) -> HashMap<String, String> {
+    ["profile_version", "dag_version"]
+        .into_iter()
+        .filter_map(|key| runtime.metadata(key).map(|value| (key.to_string(), value.to_string())))
+        .collect()
+}
+
+fn resume_matches_runtime_identity(runtime: &Dag, state: &DagRunState) -> bool {
+    state.runtime_identity == runtime_identity(runtime)
+}
+
+fn derive_run_status(runtime: &Dag, stop_signal: &Option<DagStopSignal>) -> DagRunStatus {
+    if stop_signal.is_some() {
+        return DagRunStatus::Stopped;
+    }
+
+    let end_status = runtime
+        .nodes
+        .get(Dag::CONTROL_END_NODE)
+        .map(|node| node.status.clone())
+        .unwrap_or(DagNodeStatus::Pending);
+    if end_status == DagNodeStatus::Succeeded {
+        return DagRunStatus::Succeeded;
+    }
+
+    if runtime
+        .nodes
+        .iter()
+        .filter(|(node_id, _)| !is_control_node(node_id))
+        .any(|(_, node)| node.status == DagNodeStatus::Failed)
+    {
+        return DagRunStatus::Failed;
+    }
+
+    DagRunStatus::Running
+}
+
 struct RuntimeState {
     runtime: Dag,
     outputs: HashMap<String, TaskPayload>,
@@ -64,6 +131,8 @@ struct RuntimeState {
     ready_set: HashSet<String>,
     consecutive_failures: HashMap<String, usize>,
     dispatch_started_ms: HashMap<String, u64>,
+    persist_version: u64,
+    stop_signal: Option<DagStopSignal>,
 }
 
 struct PreparedDispatch {
@@ -76,21 +145,39 @@ struct PreparedDispatch {
 }
 
 impl RuntimeState {
-    fn new_with_resume(dag: &Dag, resume: Option<&DagRunResumeState>) -> Self {
+    fn new_with_resume(dag: &Dag, resume: Option<&DagRunState>) -> Self {
         let mut runtime = dag.clone();
         runtime.reset_runtime();
 
         let resumed_outputs: HashMap<String, TaskPayload> = resume
             .map(|r| r.succeeded_outputs.clone())
             .unwrap_or_default();
-        let resumed_nodes: std::collections::HashSet<String> =
-            resumed_outputs.keys().cloned().collect();
+        let resumed_nodes: std::collections::HashSet<String> = resume
+            .map(|r| r.completed_nodes.iter().cloned().collect())
+            .unwrap_or_else(|| resumed_outputs.keys().cloned().collect());
 
         for node_id in &resumed_nodes {
             if let Some(node) = runtime.nodes.get_mut(node_id) {
                 node.status = DagNodeStatus::Succeeded;
                 if let Some(payload) = resumed_outputs.get(node_id) {
                     node.result = Some(payload.clone());
+                }
+            }
+        }
+        if let Some(resume) = resume {
+            for (node_id, node_state) in &resume.node_states {
+                if let Some(node) = runtime.nodes.get_mut(node_id) {
+                    node.status = if resumed_nodes.contains(node_id) {
+                        DagNodeStatus::Succeeded
+                    } else if resume.ready_nodes.iter().any(|ready| ready == node_id) {
+                        DagNodeStatus::Ready
+                    } else {
+                        DagNodeStatus::Pending
+                    };
+                    node.error = node_state.last_error.clone();
+                    if let Some(payload) = resumed_outputs.get(node_id) {
+                        node.result = Some(payload.clone());
+                    }
                 }
             }
         }
@@ -110,16 +197,21 @@ impl RuntimeState {
                 (id.clone(), pending_preds)
             })
             .collect();
-        let mut ready_nodes: Vec<String> = remaining_preds
-            .iter()
-            .filter_map(|(id, cnt)| {
-                if *cnt == 0 && !resumed_nodes.contains(id) {
-                    Some(id.clone())
-                } else {
-                    None
-                }
-            })
-            .collect();
+        let mut ready_nodes: Vec<String> = resume
+            .map(|state| state.ready_nodes.clone())
+            .filter(|nodes| !nodes.is_empty())
+            .unwrap_or_else(|| {
+                remaining_preds
+                    .iter()
+                    .filter_map(|(id, cnt)| {
+                        if *cnt == 0 && !resumed_nodes.contains(id) {
+                            Some(id.clone())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect()
+            });
         ready_nodes.sort();
         let ready_set = ready_nodes.iter().cloned().collect();
         let ready_queue: VecDeque<String> = ready_nodes.into();
@@ -133,7 +225,15 @@ impl RuntimeState {
                 .map(|r| r.run_id.clone())
                 .unwrap_or_else(|| Uuid::now_v7().to_string()),
             run_fencing_token: resume.and_then(|r| r.run_fencing_token),
-            attempts: HashMap::new(),
+            attempts: resume
+                .map(|state| {
+                    state
+                        .node_states
+                        .iter()
+                        .map(|(node_id, node_state)| (node_id.clone(), node_state.attempt))
+                        .collect()
+                })
+                .unwrap_or_default(),
             idempotent_results: HashMap::new(),
             inflight_idempotency_owner: HashMap::new(),
             idempotency_waiters: HashMap::new(),
@@ -143,6 +243,8 @@ impl RuntimeState {
             ready_set,
             consecutive_failures: HashMap::new(),
             dispatch_started_ms: HashMap::new(),
+            persist_version: resume.map(|state| state.version).unwrap_or(0),
+            stop_signal: resume.and_then(|state| state.stop_signal.clone()),
         }
     }
 
@@ -158,20 +260,96 @@ impl RuntimeState {
         Some(node_id)
     }
 
-    fn snapshot(&self) -> DagRunResumeState {
+    fn snapshot(&mut self) -> DagRunState {
+        let updated_at_ms = current_time_ms();
         let mut succeeded_outputs = HashMap::new();
+        let mut completed_nodes = Vec::new();
+        let mut node_states = HashMap::new();
         for (id, node) in &self.runtime.nodes {
+            if is_control_node(id) {
+                continue;
+            }
+
+            let status = if self.ready_set.contains(id) {
+                DagNodeStatus::Ready
+            } else {
+                node.status.clone()
+            };
+            let mut run_state = DagNodeRunState::new(
+                id.clone(),
+                status.clone(),
+                node.placement.clone(),
+                updated_at_ms,
+            );
+            run_state.attempt = self.attempts.get(id).copied().unwrap_or(0);
+            run_state.last_error = node.error.clone();
+            node_states.insert(id.clone(), run_state);
+
             if node.status == DagNodeStatus::Succeeded {
-                if let Some(payload) = self.outputs.get(id).cloned().or_else(|| node.result.clone()) {
+                if let Some(payload) = self
+                    .outputs
+                    .get(id)
+                    .cloned()
+                    .or_else(|| node.result.clone())
+                {
                     succeeded_outputs.insert(id.clone(), payload);
+                    completed_nodes.push(id.clone());
                 }
             }
         }
 
-        DagRunResumeState {
+        completed_nodes.sort();
+        let mut ready_nodes: Vec<String> = self.ready_set.iter().cloned().collect();
+        ready_nodes.sort();
+
+        let completed_set: HashSet<String> = completed_nodes.iter().cloned().collect();
+        let advance_gates = self
+            .runtime
+            .nodes
+            .iter()
+            .filter(|(id, _)| !is_control_node(id))
+            .filter_map(|(id, node)| {
+                let expected_predecessors: Vec<String> = node
+                    .predecessors
+                    .iter()
+                    .filter(|pred| !is_control_node(pred))
+                    .cloned()
+                    .collect();
+                if expected_predecessors.is_empty() {
+                    return None;
+                }
+                let mut gate = DagAdvanceGate::new(id.clone(), expected_predecessors.clone());
+                for predecessor in expected_predecessors {
+                    if completed_set.contains(&predecessor) {
+                        gate.record_arrival(&predecessor, updated_at_ms);
+                    }
+                }
+                Some((id.clone(), gate))
+            })
+            .collect();
+
+        self.persist_version = self.persist_version.saturating_add(1);
+
+        DagRunState {
             run_id: self.run_id.clone(),
             run_fencing_token: self.run_fencing_token,
+            runtime_identity: runtime_identity(&self.runtime),
+            status: derive_run_status(&self.runtime, &self.stop_signal),
+            version: self.persist_version,
+            entry_nodes: collect_entry_nodes(&self.runtime),
+            ready_nodes,
+            completed_nodes,
             succeeded_outputs,
+            node_states,
+            advance_gates,
+            stop_signal: self.stop_signal.clone(),
+            last_error: self
+                .runtime
+                .nodes
+                .values()
+                .filter_map(|node| node.error.clone())
+                .next(),
+            updated_at_ms,
         }
     }
 
@@ -230,6 +408,7 @@ pub struct DagExecutionReport {
 #[derive(Clone)]
 pub struct DagScheduler {
     dag: Dag,
+    runtime_overrides: Vec<DagNodeRuntimeOverride>,
     dispatcher: Arc<dyn DagNodeDispatcher>,
     options: DagSchedulerOptions,
     sync_service: Option<SyncService>,
@@ -280,6 +459,7 @@ impl DagScheduler {
     pub fn new(dag: Dag) -> Self {
         Self {
             dag,
+            runtime_overrides: Vec::new(),
             dispatcher: Arc::new(LocalNodeDispatcher),
             options: DagSchedulerOptions::default(),
             sync_service: None,
@@ -291,6 +471,17 @@ impl DagScheduler {
 
     pub fn with_dispatcher(mut self, dispatcher: Arc<dyn DagNodeDispatcher>) -> Self {
         self.dispatcher = dispatcher;
+        self
+    }
+
+    pub fn with_runtime_overrides(
+        mut self,
+        runtime_overrides: Vec<DagNodeRuntimeOverride>,
+    ) -> Self {
+        self.runtime_overrides = runtime_overrides
+            .into_iter()
+            .filter(|runtime_override| !runtime_override.is_empty())
+            .collect();
         self
     }
 
@@ -379,7 +570,13 @@ impl DagScheduler {
 
     fn record_run_guard_latency(stage: &str, ok: bool, elapsed: Duration) {
         let result = if ok { "ok" } else { "err" };
-        crate::common::metrics::observe_latency("dag", "run_guard", stage, result, elapsed.as_secs_f64());
+        crate::common::metrics::observe_latency(
+            "dag",
+            "run_guard",
+            stage,
+            result,
+            elapsed.as_secs_f64(),
+        );
     }
 
     fn record_run_guard_counter(metric: &'static str, result: &str) {
@@ -429,6 +626,7 @@ impl DagScheduler {
             | DagError::RemoteDispatchNotConfigured(_)
             | DagError::ExecutionTimeout { .. }
             | DagError::ExecutionIncomplete { .. }
+            | DagError::RunStopped { .. }
             | DagError::InvalidStateTransition { .. } => DagErrorClass::NonRetryable,
         }
     }
@@ -481,6 +679,12 @@ impl DagScheduler {
         }
     }
 
+    fn runtime_dag(&self) -> Result<Dag, DagError> {
+        let mut runtime = self.dag.clone();
+        runtime.apply_runtime_overrides(&self.runtime_overrides)?;
+        Ok(runtime)
+    }
+
     fn panic_payload_to_reason(payload: Box<dyn std::any::Any + Send>) -> String {
         if let Some(s) = payload.downcast_ref::<&str>() {
             return (*s).to_string();
@@ -516,7 +720,8 @@ impl DagScheduler {
             | DagError::EmptyGraph
             | DagError::MissingNodeCompute(_)
             | DagError::ExecutionTimeout { .. }
-            | DagError::ExecutionIncomplete { .. } => NodeFailureClass::NonRetryable,
+            | DagError::ExecutionIncomplete { .. }
+            | DagError::RunStopped { .. } => NodeFailureClass::NonRetryable,
         }
     }
 
@@ -545,6 +750,7 @@ impl DagScheduler {
             DagError::NodeTimeout { .. } => DagErrorCode::NodeTimeout,
             DagError::ExecutionTimeout { .. } => DagErrorCode::ExecutionTimeout,
             DagError::ExecutionIncomplete { .. } => DagErrorCode::ExecutionIncomplete,
+            DagError::RunStopped { .. } => DagErrorCode::RunStopped,
             DagError::InvalidStateTransition { .. } => DagErrorCode::InvalidStateTransition,
         }
     }
@@ -708,7 +914,9 @@ impl DagScheduler {
             self.commit_with_fencing(state, node_id, &payload).await?;
         }
 
-        state.runtime.set_status(node_id, DagNodeStatus::Succeeded)?;
+        state
+            .runtime
+            .set_status(node_id, DagNodeStatus::Succeeded)?;
         if let Some(node) = state.runtime.nodes.get_mut(node_id) {
             node.result = Some(payload.clone());
         }
@@ -719,7 +927,9 @@ impl DagScheduler {
             .map(|started| Self::now_ms().saturating_sub(started));
 
         if let Some(key) = policy.idempotency_key.as_ref() {
-            state.idempotent_results.insert(key.clone(), payload.clone());
+            state
+                .idempotent_results
+                .insert(key.clone(), payload.clone());
             state.inflight_idempotency_owner.remove(key);
 
             if let Some(waiters) = state.idempotency_waiters.remove(key) {
@@ -737,30 +947,31 @@ impl DagScheduler {
                         waiter_node.result = Some(payload.clone());
                         waiter_node.error = None;
                     }
-                    state.outputs.insert(waiter_node_id.clone(), payload.clone());
+                    state
+                        .outputs
+                        .insert(waiter_node_id.clone(), payload.clone());
                     state.node_results.push(NodeExecutionResult {
                         node_id: waiter_node_id.clone(),
                         payload: payload.clone(),
                         layer_index: waiter_layer_index,
                     });
-                    self
-                        .emit_sync_state(
-                            &state.run_id,
-                            state.run_fencing_token,
-                            &waiter_node_id,
-                            DagSyncStage::SingleflightFulfilled,
-                            state.attempts.get(&waiter_node_id).copied().unwrap_or(0),
-                            waiter_layer_index,
-                            &placement,
-                            Some(key.clone()),
-                            None,
-                            None,
-                            None,
-                            None,
-                            None,
-                            None,
-                        )
-                        .await;
+                    self.emit_sync_state(
+                        &state.run_id,
+                        state.run_fencing_token,
+                        &waiter_node_id,
+                        DagSyncStage::SingleflightFulfilled,
+                        state.attempts.get(&waiter_node_id).copied().unwrap_or(0),
+                        waiter_layer_index,
+                        &placement,
+                        Some(key.clone()),
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                    )
+                    .await;
                     Self::unlock_successors(
                         &state.runtime,
                         &waiter_node_id,
@@ -781,24 +992,30 @@ impl DagScheduler {
             payload,
             layer_index,
         });
-        self
-            .emit_sync_state(
-                &state.run_id,
-                state.run_fencing_token,
-                node_id,
-                DagSyncStage::Succeeded,
-                attempt,
-                layer_index,
-                &placement,
-                policy.idempotency_key.clone(),
-                None,
-                None,
-                dispatch_latency_ms,
-                None,
-                None,
-                None,
-            )
-            .await;
+        self.emit_sync_state(
+            &state.run_id,
+            state.run_fencing_token,
+            node_id,
+            DagSyncStage::Succeeded,
+            attempt,
+            layer_index,
+            &placement,
+            policy.idempotency_key.clone(),
+            None,
+            None,
+            dispatch_latency_ms,
+            None,
+            None,
+            None,
+        )
+        .await;
+        if state.stop_signal.is_some() {
+            if let Some(cfg) = &self.run_state_store {
+                let snapshot = state.snapshot();
+                cfg.store.save_state(&cfg.run_key, &snapshot).await?;
+            }
+            return Ok(());
+        }
         Self::unlock_successors(
             &state.runtime,
             node_id,
@@ -811,7 +1028,7 @@ impl DagScheduler {
 
         if let Some(cfg) = &self.run_state_store {
             let snapshot = state.snapshot();
-            cfg.store.save(&cfg.run_key, &snapshot).await?;
+            cfg.store.save_state(&cfg.run_key, &snapshot).await?;
         }
 
         Ok(())
@@ -896,34 +1113,39 @@ impl DagScheduler {
             }
         }
 
-        if attempt <= policy.max_retries && allow_retry {
-            crate::common::metrics::inc_error("dag", "node", &failure_class_tag_str, &failure_code_tag, 1);
+        if state.stop_signal.is_none() && attempt <= policy.max_retries && allow_retry {
+            crate::common::metrics::inc_error(
+                "dag",
+                "node",
+                &failure_class_tag_str,
+                &failure_code_tag,
+                1,
+            );
             if let Some(node) = state.runtime.nodes.get_mut(&node_id) {
                 node.error = Some(error.to_string());
             }
             state.runtime.set_status(&node_id, DagNodeStatus::Pending)?;
-            self
-                .emit_sync_state(
-                    &state.run_id,
-                    state.run_fencing_token,
-                    &node_id,
-                    DagSyncStage::RetryScheduled,
-                    attempt,
-                    layer_index,
-                    &placement,
-                    policy.idempotency_key.clone(),
-                    None,
-                    None,
-                    state
-                        .dispatch_started_ms
-                        .get(&node_id)
-                        .copied()
-                        .map(|started| Self::now_ms().saturating_sub(started)),
-                    Some(failure_code.clone()),
-                    Some(failure_class_tag.clone()),
-                    Some(error.to_string()),
-                )
-                .await;
+            self.emit_sync_state(
+                &state.run_id,
+                state.run_fencing_token,
+                &node_id,
+                DagSyncStage::RetryScheduled,
+                attempt,
+                layer_index,
+                &placement,
+                policy.idempotency_key.clone(),
+                None,
+                None,
+                state
+                    .dispatch_started_ms
+                    .get(&node_id)
+                    .copied()
+                    .map(|started| Self::now_ms().saturating_sub(started)),
+                Some(failure_code.clone()),
+                Some(failure_class_tag.clone()),
+                Some(error.to_string()),
+            )
+            .await;
             if retry_delay_ms > 0 {
                 tokio::time::sleep(std::time::Duration::from_millis(retry_delay_ms)).await;
             }
@@ -934,7 +1156,13 @@ impl DagScheduler {
         if let Some(node) = state.runtime.nodes.get_mut(&node_id) {
             node.error = Some(error.to_string());
         }
-        crate::common::metrics::inc_error("dag", "node", &failure_class_tag_str, &failure_code_tag, 1);
+        crate::common::metrics::inc_error(
+            "dag",
+            "node",
+            &failure_class_tag_str,
+            &failure_code_tag,
+            1,
+        );
         let _ = failure_code_tag;
         let _ = failure_class_tag_str;
         let _ = placement_tag;
@@ -962,24 +1190,23 @@ impl DagScheduler {
                 }
             }
         }
-        self
-            .emit_sync_state(
-                &state.run_id,
-                state.run_fencing_token,
-                &node_id,
-                DagSyncStage::Failed,
-                attempt,
-                layer_index,
-                &placement,
-                policy.idempotency_key.clone(),
-                None,
-                None,
-                dispatch_latency_ms,
-                Some(failure_code),
-                Some(failure_class_tag),
-                Some(error.to_string()),
-            )
-            .await;
+        self.emit_sync_state(
+            &state.run_id,
+            state.run_fencing_token,
+            &node_id,
+            DagSyncStage::Failed,
+            attempt,
+            layer_index,
+            &placement,
+            policy.idempotency_key.clone(),
+            None,
+            None,
+            dispatch_latency_ms,
+            Some(failure_code),
+            Some(failure_class_tag),
+            Some(error.to_string()),
+        )
+        .await;
         Ok(Some(DagError::RetryExhausted {
             node_id,
             attempts: attempt,
@@ -1004,17 +1231,20 @@ impl DagScheduler {
             .or_default()
             .push(node_id.clone());
 
-        let (predecessors, upstream_outputs) = Self::collect_upstream_outputs(
-            &state.runtime,
-            &state.outputs,
-            &node_id,
-        );
+        let (predecessors, upstream_outputs) =
+            Self::collect_upstream_outputs(&state.runtime, &state.outputs, &node_id);
 
-        let (placement, policy) = state
+        let (placement, policy, runtime_input) = state
             .runtime
             .nodes
             .get(&node_id)
-            .map(|n| (n.placement.clone(), n.execution_policy.clone()))
+            .map(|n| {
+                (
+                    n.placement.clone(),
+                    n.execution_policy.clone(),
+                    n.runtime_input.clone(),
+                )
+            })
             .ok_or_else(|| DagError::NodeNotFound(node_id.clone()))?;
 
         if self
@@ -1034,6 +1264,7 @@ impl DagScheduler {
             attempt,
             upstream_nodes: predecessors,
             upstream_outputs,
+            runtime_input,
             layer_index,
         };
 
@@ -1078,6 +1309,10 @@ impl DagScheduler {
             .and_then(|n| n.executor.clone())
             .ok_or_else(|| DagError::MissingNodeCompute(node_id.clone()))?;
 
+        if !self.dispatcher.supports_placement(&placement) {
+            return Err(DagError::RemoteDispatchNotConfigured(node_id.clone()));
+        }
+
         if let Some(key) = policy.idempotency_key.as_ref() {
             state
                 .inflight_idempotency_owner
@@ -1097,7 +1332,9 @@ impl DagScheduler {
                 NodePlacement::Local => format!("local-{}", std::process::id()),
                 NodePlacement::Remote { worker_group } => worker_group.clone(),
             }),
-            policy.timeout_ms.map(|timeout_ms| Self::now_ms() + timeout_ms),
+            policy
+                .timeout_ms
+                .map(|timeout_ms| Self::now_ms() + timeout_ms),
             None,
             None,
             None,
@@ -1164,7 +1401,9 @@ impl DagScheduler {
         };
 
         if let Some(payload) = state.idempotent_results.get(key).cloned() {
-            state.runtime.set_status(node_id, DagNodeStatus::Succeeded)?;
+            state
+                .runtime
+                .set_status(node_id, DagNodeStatus::Succeeded)?;
             if let Some(node) = state.runtime.nodes.get_mut(node_id) {
                 node.result = Some(payload.clone());
             }
@@ -1233,13 +1472,13 @@ impl DagScheduler {
         Ok(false)
     }
 
-    async fn persist_failure_snapshot_if_enabled(&self, state: &RuntimeState, stage: &str) {
+    async fn persist_failure_snapshot_if_enabled(&self, state: &mut RuntimeState, stage: &str) {
         let Some(cfg) = &self.run_state_store else {
             return;
         };
 
         let snapshot = state.snapshot();
-        match cfg.store.save(&cfg.run_key, &snapshot).await {
+        match cfg.store.save_state(&cfg.run_key, &snapshot).await {
             Ok(()) => {
                 crate::common::metrics::inc_throughput("dag", "run_state", stage, "saved", 1);
             }
@@ -1247,12 +1486,23 @@ impl DagScheduler {
                 crate::common::metrics::inc_error("dag", "run_state", "store", "save_error", 1);
                 eprintln!(
                     "DAG run state snapshot save failed before error return: stage={} run_key={} error={}",
-                    stage,
-                    cfg.run_key,
-                    e
+                    stage, cfg.run_key, e
                 );
             }
         }
+    }
+
+    async fn refresh_stop_signal(&self, state: &mut RuntimeState) -> Result<(), DagError> {
+        let Some(cfg) = &self.run_state_store else {
+            return Ok(());
+        };
+        let Some(external_state) = cfg.store.load_state(&cfg.run_key).await? else {
+            return Ok(());
+        };
+        if let Some(stop_signal) = external_state.stop_signal {
+            state.stop_signal = Some(stop_signal);
+        }
+        Ok(())
     }
 
     pub async fn execute_parallel(&self) -> Result<DagExecutionReport, DagError> {
@@ -1295,7 +1545,11 @@ impl DagScheduler {
                 let result = Err(DagError::RunAlreadyInProgress {
                     lock_key: cfg.lock_key.clone(),
                 });
-                Self::record_execute_metrics(&result, run_started.elapsed(), self.run_guard.is_some());
+                Self::record_execute_metrics(
+                    &result,
+                    run_started.elapsed(),
+                    self.run_guard.is_some(),
+                );
                 return result;
             }
             Self::record_run_guard_counter("mocra_dag_run_guard_acquire_total", "success");
@@ -1313,7 +1567,11 @@ impl DagScheduler {
                 let result = Err(DagError::MissingRunFencingToken {
                     resource: fencing_cfg.resource.clone(),
                 });
-                Self::record_execute_metrics(&result, run_started.elapsed(), self.run_guard.is_some());
+                Self::record_execute_metrics(
+                    &result,
+                    run_started.elapsed(),
+                    self.run_guard.is_some(),
+                );
                 return result;
             }
         }
@@ -1370,15 +1628,23 @@ impl DagScheduler {
 
         let execute_result = async {
             let resume_state = if let Some(cfg) = &self.run_state_store {
-                cfg.store.load(&cfg.run_key).await?
+                cfg.store.load_state(&cfg.run_key).await?
             } else {
                 None
             };
 
-            let mut state = RuntimeState::new_with_resume(&self.dag, resume_state.as_ref());
-            state.run_fencing_token = run_guard_ctx
-                .as_ref()
-                .and_then(|(_, _, token)| *token);
+            let runtime_dag = self.runtime_dag()?;
+            let resume_state = match resume_state {
+                Some(state) if !resume_matches_runtime_identity(&runtime_dag, &state) => {
+                    if let Some(cfg) = &self.run_state_store {
+                        cfg.store.clear(&cfg.run_key).await?;
+                    }
+                    None
+                }
+                other => other,
+            };
+            let mut state = RuntimeState::new_with_resume(&runtime_dag, resume_state.as_ref());
+            state.run_fencing_token = run_guard_ctx.as_ref().and_then(|(_, _, token)| *token);
             let cancel_inflight_on_failure = self.options.cancel_inflight_on_failure;
             let max_in_flight = self.normalized_max_in_flight();
             let run_timeout = self.options.run_timeout_ms.map(Duration::from_millis);
@@ -1394,8 +1660,7 @@ impl DagScheduler {
                 if let Some(lock_key) = run_guard_lock_key.as_ref() {
                     if let Some(reason) = renew_failed_reason.lock().ok().and_then(|g| g.clone()) {
                         join_set.abort_all();
-                        self
-                            .persist_failure_snapshot_if_enabled(&state, "renew_lost")
+                        self.persist_failure_snapshot_if_enabled(&mut state, "renew_lost")
                             .await;
                         return Err(DagError::RunGuardRenewFailed {
                             lock_key: lock_key.clone(),
@@ -1407,8 +1672,7 @@ impl DagScheduler {
                 if let Some(timeout) = run_timeout {
                     if started_at.elapsed() > timeout {
                         join_set.abort_all();
-                        self
-                            .persist_failure_snapshot_if_enabled(&state, "run_timeout")
+                        self.persist_failure_snapshot_if_enabled(&mut state, "run_timeout")
                             .await;
                         return Err(DagError::ExecutionTimeout {
                             run_id: state.run_id.clone(),
@@ -1417,11 +1681,24 @@ impl DagScheduler {
                     }
                 }
 
-                while join_set.len() < max_in_flight {
+                self.refresh_stop_signal(&mut state).await?;
+                if let Some(stop_signal) = state.stop_signal.clone()
+                    && join_set.is_empty()
+                {
+                    self.persist_failure_snapshot_if_enabled(&mut state, "stop_signal")
+                        .await;
+                    return Err(DagError::RunStopped {
+                        run_id: state.run_id.clone(),
+                        reason: stop_signal.reason,
+                    });
+                }
+
+                while state.stop_signal.is_none() && join_set.len() < max_in_flight {
                     let Some(node_id) = state.pop_ready() else {
                         break;
                     };
-                    let Some(dispatch) = self.prepare_node_dispatch(&mut state, node_id).await? else {
+                    let Some(dispatch) = self.prepare_node_dispatch(&mut state, node_id).await?
+                    else {
                         continue;
                     };
                     self.spawn_node_task(&mut state, dispatch, &mut join_set)
@@ -1444,32 +1721,24 @@ impl DagScheduler {
 
                 match result {
                     Ok(payload) => {
-                        self
-                            .handle_node_success(
-                                &mut state,
-                                &node_id,
-                                layer_index,
-                                attempt,
-                                payload,
-                            )
-                            .await?;
+                        self.handle_node_success(
+                            &mut state,
+                            &node_id,
+                            layer_index,
+                            attempt,
+                            payload,
+                        )
+                        .await?;
                     }
                     Err(e) => {
                         if let Some(final_error) = self
-                            .handle_node_failure(
-                                &mut state,
-                                node_id,
-                                layer_index,
-                                attempt,
-                                e,
-                            )
+                            .handle_node_failure(&mut state, node_id, layer_index, attempt, e)
                             .await?
                         {
                             if cancel_inflight_on_failure {
                                 join_set.abort_all();
                             }
-                            self
-                                .persist_failure_snapshot_if_enabled(&state, "node_failed")
+                            self.persist_failure_snapshot_if_enabled(&mut state, "node_failed")
                                 .await;
                             return Err(final_error);
                         }
@@ -1494,10 +1763,7 @@ impl DagScheduler {
             let _ = task.await;
         }
 
-        let renew_failed = renew_failed_reason
-            .lock()
-            .ok()
-            .and_then(|g| g.clone());
+        let renew_failed = renew_failed_reason.lock().ok().and_then(|g| g.clone());
 
         if let Some((cfg, owner, _token)) = run_guard_ctx {
             let release_started = Instant::now();
@@ -1525,7 +1791,10 @@ impl DagScheduler {
             }
             if execute_result.is_ok() {
                 if let Some(reason) = renew_failed {
-                    Self::record_run_guard_counter("mocra_dag_run_guard_renew_total", "failed_final");
+                    Self::record_run_guard_counter(
+                        "mocra_dag_run_guard_renew_total",
+                        "failed_final",
+                    );
                     let result = Err(DagError::RunGuardRenewFailed {
                         lock_key: cfg.lock_key,
                         reason,

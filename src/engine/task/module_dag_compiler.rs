@@ -1,12 +1,10 @@
+use indexmap::IndexMap;
 use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::sync::Arc;
-use indexmap::IndexMap;
 
 use crate::common::interface::ModuleNodeTrait;
 use crate::engine::task::module_node_dag_adapter::ModuleNodeDagAdapter;
-use crate::schedule::dag::{
-    Dag, DagError, DagNodeExecutionPolicy, DagNodePtr, NodePlacement,
-};
+use crate::schedule::dag::{Dag, DagError, DagNodeExecutionPolicy, DagNodePtr, NodePlacement};
 
 #[derive(Clone)]
 pub struct ModuleDagNodeDef {
@@ -16,7 +14,7 @@ pub struct ModuleDagNodeDef {
     pub policy_override: Option<DagNodeExecutionPolicy>,
     pub tags: Vec<String>,
 }
-impl ModuleDagNodeDef{
+impl ModuleDagNodeDef {
     pub fn new(node: Arc<dyn ModuleNodeTrait>) -> Self {
         let key = node.stable_node_key();
         let node_id = if key.is_empty() {
@@ -49,9 +47,12 @@ pub struct ModuleDagEdgeDef {
     pub from: String,
     pub to: String,
 }
-impl ModuleDagEdgeDef{
+impl ModuleDagEdgeDef {
     pub fn new(from: &ModuleDagNodeDef, to: &ModuleDagNodeDef) -> Self {
-        Self { from: from.node_id.clone(), to: to.node_id.clone() }
+        Self {
+            from: from.node_id.clone(),
+            to: to.node_id.clone(),
+        }
     }
 }
 
@@ -96,7 +97,10 @@ impl ModuleDagDefinition {
             edges.push(ModuleDagEdgeDef::new(&nodes[idx - 1], &nodes[idx]));
         }
 
-        let entry_nodes = nodes.first().map(|n| vec![n.node_id.clone()]).unwrap_or_default();
+        let entry_nodes = nodes
+            .first()
+            .map(|n| vec![n.node_id.clone()])
+            .unwrap_or_default();
 
         Self {
             nodes,
@@ -137,8 +141,12 @@ impl ModuleDagBuilder {
     /// (subsequent calls with the same `node_id` are silently ignored so
     /// the same `ModuleDagNodeDef` reference is safe to reuse across calls).
     pub fn edge(mut self, from: &ModuleDagNodeDef, to: &ModuleDagNodeDef) -> Self {
-        self.nodes.entry(from.node_id.clone()).or_insert_with(|| from.clone());
-        self.nodes.entry(to.node_id.clone()).or_insert_with(|| to.clone());
+        self.nodes
+            .entry(from.node_id.clone())
+            .or_insert_with(|| from.clone());
+        self.nodes
+            .entry(to.node_id.clone())
+            .or_insert_with(|| to.clone());
         self.edges.push(ModuleDagEdgeDef {
             from: from.node_id.clone(),
             to: to.node_id.clone(),
@@ -148,7 +156,9 @@ impl ModuleDagBuilder {
 
     /// Registers an isolated node (no edges). Useful for single-node DAGs.
     pub fn node(mut self, node: &ModuleDagNodeDef) -> Self {
-        self.nodes.entry(node.node_id.clone()).or_insert_with(|| node.clone());
+        self.nodes
+            .entry(node.node_id.clone())
+            .or_insert_with(|| node.clone());
         self
     }
 
@@ -195,13 +205,21 @@ pub struct ModuleDagCompiler;
 
 impl ModuleDagCompiler {
     pub fn compile(definition: ModuleDagDefinition) -> Result<Dag, DagError> {
-        if definition.nodes.is_empty() {
+        let ModuleDagDefinition {
+            nodes,
+            edges,
+            entry_nodes,
+            default_policy,
+            metadata,
+        } = definition;
+
+        if nodes.is_empty() {
             return Err(DagError::EmptyGraph);
         }
 
         let mut seen = BTreeSet::new();
         let mut node_map: HashMap<String, ModuleDagNodeDef> = HashMap::new();
-        for node in definition.nodes {
+        for node in nodes {
             if Dag::is_control_node(&node.node_id) {
                 return Err(DagError::ReservedControlNode(node.node_id));
             }
@@ -211,7 +229,7 @@ impl ModuleDagCompiler {
             node_map.insert(node.node_id.clone(), node);
         }
 
-        for edge in &definition.edges {
+        for edge in &edges {
             if !node_map.contains_key(&edge.from) {
                 return Err(DagError::NodeNotFound(edge.from.clone()));
             }
@@ -220,7 +238,7 @@ impl ModuleDagCompiler {
             }
         }
 
-        for entry in &definition.entry_nodes {
+        for entry in &entry_nodes {
             if !node_map.contains_key(entry) {
                 return Err(DagError::NodeNotFound(entry.clone()));
             }
@@ -233,7 +251,7 @@ impl ModuleDagCompiler {
             outgoing.insert(node_id.clone(), Vec::new());
         }
 
-        for edge in &definition.edges {
+        for edge in &edges {
             predecessors
                 .get_mut(&edge.to)
                 .expect("edge destination is pre-validated")
@@ -251,7 +269,13 @@ impl ModuleDagCompiler {
 
         let mut zero_indegree: Vec<String> = indegree
             .iter()
-            .filter_map(|(node, degree)| if *degree == 0 { Some(node.clone()) } else { None })
+            .filter_map(|(node, degree)| {
+                if *degree == 0 {
+                    Some(node.clone())
+                } else {
+                    None
+                }
+            })
             .collect();
         zero_indegree.sort();
 
@@ -286,7 +310,7 @@ impl ModuleDagCompiler {
 
             if let Some(policy) = node_def
                 .policy_override
-                .or_else(|| definition.default_policy.clone())
+                .or_else(|| default_policy.clone())
             {
                 dag.set_node_execution_policy(&ptr, policy)?;
             }
@@ -313,6 +337,7 @@ impl ModuleDagCompiler {
             return Err(DagError::CycleDetected);
         }
 
+        dag.metadata = metadata;
         dag.topological_sort()?;
         Ok(dag)
     }
@@ -322,15 +347,13 @@ impl ModuleDagCompiler {
 mod tests {
     use std::sync::Arc;
 
-    use async_trait::async_trait;
-    use serde_json::Map;
-
-    use crate::common::interface::{ModuleNodeTrait, SyncBoxStream, ToSyncBoxStream};
-    use crate::common::model::login_info::LoginInfo;
-    use crate::common::model::message::TaskOutputEvent;
-    use crate::common::model::{ModuleConfig, Request, Response};
+    use crate::common::interface::{
+        ModuleNodeTrait, NodeGenerateContext, NodeParseContext, SyncBoxStream, ToSyncBoxStream,
+    };
+    use crate::common::model::{NodeParseOutput, Request, Response};
     use crate::errors::Result;
     use crate::schedule::dag::{DagError, DagNodeExecutionPolicy, NodePlacement};
+    use async_trait::async_trait;
 
     use super::{ModuleDagCompiler, ModuleDagDefinition, ModuleDagEdgeDef, ModuleDagNodeDef};
 
@@ -340,9 +363,7 @@ mod tests {
     impl ModuleNodeTrait for DummyNode {
         async fn generate(
             &self,
-            _config: Arc<ModuleConfig>,
-            _params: Map<String, serde_json::Value>,
-            _login_info: Option<LoginInfo>,
+            _ctx: NodeGenerateContext<'_>,
         ) -> Result<SyncBoxStream<'static, Request>> {
             Ok(Vec::<Request>::new().to_stream())
         }
@@ -350,9 +371,9 @@ mod tests {
         async fn parser(
             &self,
             _response: Response,
-            _config: Option<Arc<ModuleConfig>>,
-        ) -> Result<TaskOutputEvent> {
-            Ok(TaskOutputEvent::default())
+            _ctx: NodeParseContext<'_>,
+        ) -> Result<NodeParseOutput> {
+            Ok(NodeParseOutput::default())
         }
     }
 
@@ -367,7 +388,10 @@ mod tests {
 
         assert_eq!(definition.nodes.len(), 3);
         assert_eq!(definition.edges.len(), 2);
-        assert_eq!(definition.entry_nodes, vec![definition.nodes[0].node_id.clone()]);
+        assert_eq!(
+            definition.entry_nodes,
+            vec![definition.nodes[0].node_id.clone()]
+        );
         assert_eq!(definition.edges[0].from, definition.nodes[0].node_id);
         assert_eq!(definition.edges[0].to, definition.nodes[1].node_id);
         assert_eq!(definition.edges[1].from, definition.nodes[1].node_id);
@@ -414,8 +438,8 @@ mod tests {
         match ModuleDagCompiler::compile(def) {
             Ok(_) => panic!("duplicate id should fail"),
             Err(err) => match err {
-            DagError::DuplicateNode(id) => assert_eq!(id, "n1"),
-            other => panic!("unexpected error: {other:?}"),
+                DagError::DuplicateNode(id) => assert_eq!(id, "n1"),
+                other => panic!("unexpected error: {other:?}"),
             },
         }
     }
@@ -442,8 +466,8 @@ mod tests {
         match ModuleDagCompiler::compile(def) {
             Ok(_) => panic!("unknown edge endpoint should fail"),
             Err(err) => match err {
-            DagError::NodeNotFound(id) => assert_eq!(id, "missing"),
-            other => panic!("unexpected error: {other:?}"),
+                DagError::NodeNotFound(id) => assert_eq!(id, "missing"),
+                other => panic!("unexpected error: {other:?}"),
             },
         }
     }
@@ -485,8 +509,8 @@ mod tests {
         match ModuleDagCompiler::compile(def) {
             Ok(_) => panic!("cycle should fail"),
             Err(err) => match err {
-            DagError::CycleDetected => {}
-            other => panic!("unexpected error: {other:?}"),
+                DagError::CycleDetected => {}
+                other => panic!("unexpected error: {other:?}"),
             },
         }
     }

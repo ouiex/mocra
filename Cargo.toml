@@ -26,6 +26,7 @@ exclude = [
 
 
 [dependencies]
+hex = "0.4"
 async-trait = "0.1"
 reqwest = { version = "0.13", default-features = false, features = ["http2", "charset", "native-tls", "brotli","form", "cookies", "json", "socks", "gzip", "deflate", "zstd", "hickory-dns", "stream"] }
 serde = { version = "1", features = ["derive"] }
@@ -84,6 +85,8 @@ bloomfilter = "3"
 siphasher = "1"
 tempfile = "3"
 indexmap = { version = "2", features = ["serde"] }
+rocksdb = "0.24"
+openraft = { version = "0.10.0-alpha.17", features = ["serde", "tokio-rt"] }
 
 [profile.release]
 lto = true
@@ -95,6 +98,7 @@ strip = true
 [features]
 default = ["mimalloc"]
 js-v8 = ["dep:v8"]
+legacy-chain = []
 mimalloc = ["dep:mimalloc"]
 polars = []
 

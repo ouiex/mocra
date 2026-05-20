@@ -1,13 +1,13 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use futures::stream;
-use serde_json::{json, Map, Value};
+use serde_json::json;
 
-use mocra::common::interface::{ModuleNodeTrait, ModuleTrait, SyncBoxStream};
-use mocra::common::model::login_info::LoginInfo;
-use mocra::common::model::message::{TaskOutputEvent, TaskParserEvent};
-use mocra::common::model::{ModuleConfig, Request, RequestMethod, Response};
+use mocra::common::interface::{ModuleNodeTrait, ModuleTrait, SyncBoxStream, ToSyncBoxStream};
+use mocra::common::model::{
+    NodeDispatch, NodeGenerateContext, NodeInput, NodeParseContext, NodeParseOutput,
+    PayloadCodec, Request, RequestMethod, Response, TypedEnvelope,
+};
 use mocra::common::state::State;
 use mocra::engine::engine::Engine;
 use mocra::engine::task::module_dag_compiler::{
@@ -21,9 +21,7 @@ struct StartNode;
 impl ModuleNodeTrait for StartNode {
     async fn generate(
         &self,
-        _config: Arc<ModuleConfig>,
-        _params: Map<String, Value>,
-        _login_info: Option<LoginInfo>,
+        _ctx: NodeGenerateContext<'_>,
     ) -> Result<SyncBoxStream<'static, Request>> {
         let mut req = Request::new("https://httpbin.org/get", RequestMethod::Get.as_ref());
         req.account = "demo_account".to_string();
@@ -31,13 +29,33 @@ impl ModuleNodeTrait for StartNode {
         req.module = "demo_dag_module".to_string();
         req.meta = json!({"source": "start_node"}).into();
 
-        Ok(Box::pin(stream::iter(vec![req])))
+        vec![req].into_stream_ok()
     }
 
-    async fn parser(&self, response: Response, _config: Option<Arc<ModuleConfig>>) -> Result<TaskOutputEvent> {
-        // 这里演示将解析结果转成下游任务（可选）。
-        let next_task = TaskParserEvent::from(&response).add_meta("from_node", "start_node");
-        Ok(TaskOutputEvent::default().with_task(next_task))
+    async fn parser(
+        &self,
+        response: Response,
+        _ctx: NodeParseContext<'_>,
+    ) -> Result<NodeParseOutput> {
+        // 这里演示显式 typed parser output，可选地直接发出下游 dispatch。
+        let payload = serde_json::to_vec(&json!({
+            "from_node": "start_node",
+            "source_request": response.id,
+        }))?;
+        let next = NodeDispatch::new(
+            "follow_node",
+            NodeInput::new(
+                "follow_node",
+                TypedEnvelope::new("demo.follow", 1, PayloadCodec::Json, payload),
+            )
+            .from_source("start_node"),
+        );
+
+        Ok(NodeParseOutput::default().with_next(next))
+    }
+
+    fn stable_node_key(&self) -> &'static str {
+        "start_node"
     }
 }
 
@@ -47,20 +65,22 @@ struct FollowNode;
 impl ModuleNodeTrait for FollowNode {
     async fn generate(
         &self,
-        _config: Arc<ModuleConfig>,
-        _params: Map<String, Value>,
-        _login_info: Option<LoginInfo>,
+        _ctx: NodeGenerateContext<'_>,
     ) -> Result<SyncBoxStream<'static, Request>> {
         let mut req = Request::new("https://httpbin.org/anything", RequestMethod::Get.as_ref());
         req.account = "demo_account".to_string();
         req.platform = "demo_platform".to_string();
         req.module = "demo_dag_module".to_string();
 
-        Ok(Box::pin(stream::iter(vec![req])))
+        vec![req].into_stream_ok()
     }
 
-    async fn parser(&self, _response: Response, _config: Option<Arc<ModuleConfig>>) -> Result<TaskOutputEvent> {
-        Ok(TaskOutputEvent::default())
+    async fn parser(&self, _response: Response, _ctx: NodeParseContext<'_>) -> Result<NodeParseOutput> {
+        Ok(NodeParseOutput::default())
+    }
+
+    fn stable_node_key(&self) -> &'static str {
+        "follow_node"
     }
 }
 
@@ -70,20 +90,22 @@ struct BranchANode;
 impl ModuleNodeTrait for BranchANode {
     async fn generate(
         &self,
-        _config: Arc<ModuleConfig>,
-        _params: Map<String, Value>,
-        _login_info: Option<LoginInfo>,
+        _ctx: NodeGenerateContext<'_>,
     ) -> Result<SyncBoxStream<'static, Request>> {
         let mut req = Request::new("https://httpbin.org/uuid", RequestMethod::Get.as_ref());
         req.account = "demo_account".to_string();
         req.platform = "demo_platform".to_string();
         req.module = "demo_dag_module".to_string();
 
-        Ok(Box::pin(stream::iter(vec![req])))
+        vec![req].into_stream_ok()
     }
 
-    async fn parser(&self, _response: Response, _config: Option<Arc<ModuleConfig>>) -> Result<TaskOutputEvent> {
-        Ok(TaskOutputEvent::default())
+    async fn parser(&self, _response: Response, _ctx: NodeParseContext<'_>) -> Result<NodeParseOutput> {
+        Ok(NodeParseOutput::default())
+    }
+
+    fn stable_node_key(&self) -> &'static str {
+        "branch_a"
     }
 }
 
@@ -93,20 +115,22 @@ struct BranchBNode;
 impl ModuleNodeTrait for BranchBNode {
     async fn generate(
         &self,
-        _config: Arc<ModuleConfig>,
-        _params: Map<String, Value>,
-        _login_info: Option<LoginInfo>,
+        _ctx: NodeGenerateContext<'_>,
     ) -> Result<SyncBoxStream<'static, Request>> {
         let mut req = Request::new("https://httpbin.org/ip", RequestMethod::Get.as_ref());
         req.account = "demo_account".to_string();
         req.platform = "demo_platform".to_string();
         req.module = "demo_dag_module".to_string();
 
-        Ok(Box::pin(stream::iter(vec![req])))
+        vec![req].into_stream_ok()
     }
 
-    async fn parser(&self, _response: Response, _config: Option<Arc<ModuleConfig>>) -> Result<TaskOutputEvent> {
-        Ok(TaskOutputEvent::default())
+    async fn parser(&self, _response: Response, _ctx: NodeParseContext<'_>) -> Result<NodeParseOutput> {
+        Ok(NodeParseOutput::default())
+    }
+
+    fn stable_node_key(&self) -> &'static str {
+        "branch_b"
     }
 }
 
@@ -116,20 +140,22 @@ struct MergeNode;
 impl ModuleNodeTrait for MergeNode {
     async fn generate(
         &self,
-        _config: Arc<ModuleConfig>,
-        _params: Map<String, Value>,
-        _login_info: Option<LoginInfo>,
+        _ctx: NodeGenerateContext<'_>,
     ) -> Result<SyncBoxStream<'static, Request>> {
         let mut req = Request::new("https://httpbin.org/headers", RequestMethod::Get.as_ref());
         req.account = "demo_account".to_string();
         req.platform = "demo_platform".to_string();
         req.module = "demo_dag_module".to_string();
 
-        Ok(Box::pin(stream::iter(vec![req])))
+        vec![req].into_stream_ok()
     }
 
-    async fn parser(&self, _response: Response, _config: Option<Arc<ModuleConfig>>) -> Result<TaskOutputEvent> {
-        Ok(TaskOutputEvent::default())
+    async fn parser(&self, _response: Response, _ctx: NodeParseContext<'_>) -> Result<NodeParseOutput> {
+        Ok(NodeParseOutput::default())
+    }
+
+    fn stable_node_key(&self) -> &'static str {
+        "merge"
     }
 }
 
@@ -141,8 +167,8 @@ impl ModuleTrait for DemoDagModule {
         false
     }
 
-    fn name(&self) -> String {
-        "demo_dag_module".to_string()
+    fn name(&self) -> &'static str {
+        "demo_dag_module"
     }
 
     fn version(&self) -> i32 {

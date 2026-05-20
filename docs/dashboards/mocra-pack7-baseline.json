@@ -1,0 +1,61 @@
+{
+  "id": null,
+  "uid": "mocra-pack7-baseline",
+  "title": "Mocra Pack7 Baseline",
+  "tags": ["mocra", "pack7", "scheduler-ingress"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "refresh": "10s",
+  "panels": [
+    {
+      "type": "timeseries",
+      "title": "Scheduler Ingress Events by Result",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+      "targets": [
+        {
+          "expr": "sum by (path, result) (rate(mocra_scheduler_ingress_total[5m]))",
+          "legendFormat": "{{path}}/{{result}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Scheduler Ingress Fallback by Reason",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+      "targets": [
+        {
+          "expr": "sum by (path, reason, module) (rate(mocra_scheduler_ingress_total{result=\"fallback\"}[5m]))",
+          "legendFormat": "{{path}}/{{reason}}/{{module}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Unified Stage Events (engine/scheduler_ingress)",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
+      "targets": [
+        {
+          "expr": "sum by (action, result) (rate(mocra_stage_events_total{pipeline=\"engine\",stage=\"scheduler_ingress\"}[5m]))",
+          "legendFormat": "{{action}}/{{result}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Unified Stage Errors (engine/scheduler_ingress)",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
+      "targets": [
+        {
+          "expr": "sum by (error_code) (rate(mocra_stage_errors_total{pipeline=\"engine\",stage=\"scheduler_ingress\"}[5m]))",
+          "legendFormat": "{{error_code}}",
+          "refId": "A"
+        }
+      ]
+    }
+  ]
+}

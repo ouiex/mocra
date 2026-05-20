@@ -61,7 +61,12 @@ where
         Ok(())
     }
 
-    async fn send_with_ttl(&self, id: &str, sync: &CacheService, ttl: Duration) -> Result<(), CacheError> {
+    async fn send_with_ttl(
+        &self,
+        id: &str,
+        sync: &CacheService,
+        ttl: Duration,
+    ) -> Result<(), CacheError> {
         let key = Self::cache_id(id, sync);
         let content = if self
             .serialized_size_hint()
@@ -81,7 +86,12 @@ where
         Ok(())
     }
 
-    async fn send_nx(&self, id: &str, sync: &CacheService, ttl: Option<Duration>) -> Result<bool, CacheError> {
+    async fn send_nx(
+        &self,
+        id: &str,
+        sync: &CacheService,
+        ttl: Option<Duration>,
+    ) -> Result<bool, CacheError> {
         let key = Self::cache_id(id, sync);
         let content = if self
             .serialized_size_hint()
@@ -117,7 +127,12 @@ where
     }
 
     async fn scan(pattern_suffix: &str, sync: &CacheService) -> Result<Vec<String>, CacheError> {
-        let pattern = format!("{}:{}:{}", sync.namespace, Self::field().as_ref(), pattern_suffix);
+        let pattern = format!(
+            "{}:{}:{}",
+            sync.namespace,
+            Self::field().as_ref(),
+            pattern_suffix
+        );
         sync.backend.keys(&pattern).await
     }
 

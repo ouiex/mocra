@@ -1,15 +1,15 @@
 use async_trait::async_trait;
 use mocra::common::model::cron_config::CronConfig;
-use mocra::common::interface::{ModuleTrait, ModuleNodeTrait, SyncBoxStream, StoreTrait, ToSyncBoxStream};
-use mocra::common::model::{Headers, ModuleConfig, Request, Response};
-use mocra::common::model::login_info::LoginInfo;
+use mocra::common::interface::{
+    ModuleNodeTrait, ModuleTrait, NodeGenerateContext, NodeParseContext, StoreTrait,
+    SyncBoxStream, ToSyncBoxStream,
+};
+use mocra::common::model::data::DataEvent;
+use mocra::common::model::{Headers, NodeParseOutput, Request, Response};
 use mocra::common::model::request::RequestMethod;
-use mocra::common::model::message::ParserData;
-use mocra::common::model::data::Data;
 use mocra::errors::Result;
 use log::{info, warn};
 
-use serde_json::{Map, Value};
 use std::sync::Arc;
 
 pub struct MocDevModule {}
@@ -20,8 +20,8 @@ impl ModuleTrait for MocDevModule {
         true
     }
 
-    fn name(&self) -> String {
-        "moc.dev".to_string()
+    fn name(&self) -> &'static str {
+        "moc.dev"
     }
     fn version(&self) -> i32 {
         1
@@ -60,11 +60,9 @@ struct MocDevNode {
 impl ModuleNodeTrait for MocDevNode {
     async fn generate(
         &self,
-        _config: Arc<ModuleConfig>,
-        _params: Map<String, Value>,
-        login_info: Option<LoginInfo>,
+        ctx: NodeGenerateContext<'_>,
     ) ->  Result<SyncBoxStream<'static, Request>> {
-        if let Some(info) = login_info.as_ref() {
+        if let Some(info) = ctx.login_info {
             info!("moc_dev login_info loaded: cookies={}, ua={}", info.cookies.len(), info.useragent);
         } else {
             warn!("moc_dev login_info missing");
@@ -80,19 +78,19 @@ impl ModuleNodeTrait for MocDevNode {
     async fn parser(
         &self,
         response: Response,
-        _config: Option<Arc<ModuleConfig>>,
-    ) ->  Result<ParserData> {
+        _ctx: NodeParseContext<'_>,
+    ) ->  Result<NodeParseOutput> {
         // Just extract basic info, don't store files
         let status = response.status_code;
         
         // Build file store with response content
-        let data = Data::from(&response)
+        let data = DataEvent::from(&response)
             .with_file(response.content.clone())
             .with_name(format!("moc_dev_response_{}.html", status))
             .with_path("./data/moc_dev")
             .build();
 
-        Ok(ParserData::default().with_data(vec![data]))
+        Ok(NodeParseOutput::default().with_data(data))
     }
 
 }

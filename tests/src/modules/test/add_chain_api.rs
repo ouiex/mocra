@@ -1,13 +1,17 @@
 use async_trait::async_trait;
-use mocra::common::interface::{ModuleNodeTrait, ModuleTrait, StoreTrait, SyncBoxStream, ToSyncBoxStream};
+use mocra::common::interface::{
+    ModuleNodeTrait, ModuleTrait, NodeGenerateContext, NodeParseContext, StoreTrait,
+    SyncBoxStream, ToSyncBoxStream,
+};
 use mocra::common::model::cron_config::CronConfig;
-use mocra::common::model::data::Data;
-use mocra::common::model::login_info::LoginInfo;
-use mocra::common::model::message::{ParserData, ParserTaskModel};
+use mocra::common::model::data::DataEvent;
 use mocra::common::model::request::RequestMethod;
-use mocra::common::model::{Headers, ModuleConfig, Request, Response};
+use mocra::common::model::{
+    Headers, NodeDispatch, NodeInput, NodeParseOutput, PayloadCodec, Request, Response,
+    TypedEnvelope,
+};
 use mocra::errors::{Error, ErrorKind, Result};
-use serde_json::{Map, Value};
+use serde_json::Value;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -24,8 +28,8 @@ impl ModuleTrait for AddChainApiModule {
         true
     }
 
-    fn name(&self) -> String {
-        "test.add.chain.api".to_string()
+    fn name(&self) -> &'static str {
+        "test.add.chain.api"
     }
 
     fn version(&self) -> i32 {
@@ -79,9 +83,7 @@ struct AddChainNode {
 impl ModuleNodeTrait for AddChainNode {
     async fn generate(
         &self,
-        _config: Arc<ModuleConfig>,
-        params: Map<String, Value>,
-        _login_info: Option<LoginInfo>,
+        ctx: NodeGenerateContext<'_>,
     ) -> Result<SyncBoxStream<'static, Request>> {
         if should_random_fail("generate", self.step_idx) {
             return Err(new_stage_error(
@@ -91,7 +93,7 @@ impl ModuleNodeTrait for AddChainNode {
             ));
         }
 
-        let previous = parse_meta_i64(&params, META_SUM_KEY)
+        let previous = parse_payload_i64(&ctx.input.payload.bytes, META_SUM_KEY)
             .or_else(|| {
                 std::env::var("ADD_CHAIN_INITIAL")
                     .ok()
@@ -107,8 +109,8 @@ impl ModuleNodeTrait for AddChainNode {
     async fn parser(
         &self,
         response: Response,
-        _config: Option<Arc<ModuleConfig>>,
-    ) -> Result<ParserData> {
+        _ctx: NodeParseContext<'_>,
+    ) -> Result<NodeParseOutput> {
         if should_random_fail("parser", self.step_idx) {
             return Err(new_stage_error(
                 "parser",
@@ -134,25 +136,36 @@ impl ModuleNodeTrait for AddChainNode {
                 "last_node_value": self.value
             }))
             .map_err(|e| Error::new(ErrorKind::Parser, Some(e)))?;
-            let data = Data::from(&response)
+            let data = DataEvent::from(&response)
                 .with_middleware("object_store")
                 .with_file(payload)
                 .with_name("add_chain_result.json")
                 .with_path("./data/add_chain")
                 .build();
-            return Ok(ParserData::default().with_data(vec![data]));
+            return Ok(NodeParseOutput::default().with_data(data));
         }
 
-        let task = ParserTaskModel::from(&response)
-            .add_meta(META_SUM_KEY, sum)
-            .add_meta(META_STEP_KEY, self.step_idx + 1);
+        let next_target = format!("step_{}", self.step_idx + 1);
+        let next_payload = serde_json::to_vec(&serde_json::json!({
+            META_SUM_KEY: sum,
+            META_STEP_KEY: self.step_idx + 1,
+        }))
+        .map_err(|e| Error::new(ErrorKind::Parser, Some(e)))?;
 
-        Ok(ParserData::default().with_task(task))
+        Ok(NodeParseOutput::default().with_next(NodeDispatch::new(
+            next_target.clone(),
+            NodeInput::new(
+                next_target,
+                TypedEnvelope::new("tests.add_chain.params", 1, PayloadCodec::Json, next_payload),
+            )
+            .from_source(format!("step_{}", self.step_idx)),
+        )))
     }
 }
 
-fn parse_meta_i64(params: &Map<String, Value>, key: &str) -> Option<i64> {
-    let value = params.get(key)?;
+fn parse_payload_i64(payload: &[u8], key: &str) -> Option<i64> {
+    let value = serde_json::from_slice::<Value>(payload).ok()?;
+    let value = value.as_object()?.get(key)?;
     if let Some(n) = value.as_i64() {
         return Some(n);
     }

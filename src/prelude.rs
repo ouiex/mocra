@@ -5,16 +5,11 @@ pub use crate::common::interface::{
 };
 pub use crate::common::model::data::DataEvent;
 pub use crate::common::model::login_info::LoginInfo;
-pub use crate::common::model::message::{TaskOutputEvent, TaskParserEvent};
 pub use crate::common::model::request::RequestMethod;
-pub use crate::common::model::{
-    Cookies, ExecutionMark, Headers, ModuleConfig, Request, Response,
-};
+pub use crate::common::model::{Cookies, ExecutionMark, Headers, ModuleConfig, Request, Response};
 
 // Errors
-pub use crate::errors::{
-    BoxError, Error, ErrorKind, ParserError, RequestError, Result,
-};
+pub use crate::errors::{BoxError, Error, ErrorKind, ParserError, RequestError, Result};
 
 // Utils
 pub use crate::utils::date_utils::DateUtils;
@@ -62,9 +57,9 @@ pub mod schedule {
     pub use crate::schedule::TaskPayload;
 }
 pub mod sync {
+    pub use crate::sync::CoordinationBackend;
     pub use crate::sync::DistributedSync;
     pub use crate::sync::KafkaBackend;
-    pub use crate::sync::CoordinationBackend;
     pub use crate::sync::RedisBackend;
     pub use crate::sync::SyncAble;
     pub use crate::sync::SyncService;
@@ -100,4 +95,3 @@ pub mod polars {
         pub use ::polars_ops::*;
     }
 }
-

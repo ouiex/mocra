@@ -1,13 +1,13 @@
-use async_trait::async_trait;
 use crate::cacheable::CacheAble;
-use chrono::{TimeZone, Utc};
 use crate::errors::CookieError;
+use async_trait::async_trait;
+use chrono::{TimeZone, Utc};
 use reqwest::cookie::Jar;
 use reqwest::header::HeaderValue;
 use reqwest_cookie_store::CookieStore;
 use serde::{Deserialize, Deserializer, Serialize};
-use url::Url;
 use std::fmt;
+use url::Url;
 
 /// Cookie validity is managed externally.
 /// This type only performs serialization/deserialization and does not validate cookie validity.
@@ -28,7 +28,7 @@ pub struct CookieItem {
 
 impl fmt::Debug for CookieItem {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-         f.debug_struct("CookieItem")
+        f.debug_struct("CookieItem")
             .field("name", &self.name)
             .field("value", &"***REDACTED***")
             .field("domain", &self.domain)
@@ -221,13 +221,7 @@ impl<'de> Deserialize<'de> for CookieItem {
     }
 }
 
-#[derive(
-    Default,
-    Serialize,
-    Deserialize,
-    Debug,
-    Clone,
-)]
+#[derive(Default, Serialize, Deserialize, Debug, Clone)]
 pub struct Cookies {
     pub cookies: Vec<CookieItem>,
 }
@@ -350,12 +344,13 @@ impl From<Cookies> for Jar {
 
             // Add expiration (GMT, per cookie spec).
             if let Some(expires) = cookie_item.expires
-                && let Some(dt) = Utc.timestamp_opt(expires as i64, 0).single() {
-                    cookie_str.push_str(&format!(
-                        "; Expires={}",
-                        dt.format("%a, %d %b %Y %H:%M:%S GMT")
-                    ));
-                }
+                && let Some(dt) = Utc.timestamp_opt(expires as i64, 0).single()
+            {
+                cookie_str.push_str(&format!(
+                    "; Expires={}",
+                    dt.format("%a, %d %b %Y %H:%M:%S GMT")
+                ));
+            }
 
             // Add Max-Age (seconds).
             if let Some(max_age) = cookie_item.max_age {
@@ -397,12 +392,13 @@ impl From<CookieItem> for HeaderValue {
             cookie_str.push_str(&format!("; Path={}", value.path));
         }
         if let Some(expires) = value.expires
-            && let Some(dt) = Utc.timestamp_opt(expires as i64, 0).single() {
-                cookie_str.push_str(&format!(
-                    "; Expires={}",
-                    dt.format("%a, %d %b %Y %H:%M:%S GMT")
-                ));
-            }
+            && let Some(dt) = Utc.timestamp_opt(expires as i64, 0).single()
+        {
+            cookie_str.push_str(&format!(
+                "; Expires={}",
+                dt.format("%a, %d %b %Y %H:%M:%S GMT")
+            ));
+        }
         if let Some(max_age) = value.max_age {
             cookie_str.push_str(&format!("; Max-Age={max_age}"));
         }
@@ -436,9 +432,7 @@ impl From<CookieStore> for Cookies {
                 // Max-Age (seconds), or `None` when unavailable.
                 max_age: cookie.max_age().map(|duration| {
                     // `cookie_store` duration usually comes from `time` crate.
-                    {
-                        (duration.whole_seconds()).max(0) as u64
-                    }
+                    (duration.whole_seconds()).max(0) as u64
                 }),
                 secure: cookie.secure().unwrap_or(false),
                 http_only: cookie.http_only(),

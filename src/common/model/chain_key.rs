@@ -16,17 +16,6 @@ pub fn execution_state_key(run_id: Uuid, module_id: &str) -> String {
     format!("chain:exec:{}:{}", run_id, module_id)
 }
 
-pub fn legacy_execution_state_key(run_id: Uuid, module_id: &str) -> String {
-    format!("run:{}:module:{}", run_id, module_id)
-}
-
-pub fn execution_state_compat_keys(run_id: Uuid, module_id: &str) -> [String; 2] {
-    [
-        execution_state_key(run_id, module_id),
-        legacy_execution_state_key(run_id, module_id),
-    ]
-}
-
 pub fn dedup_key(ptm_key: &str) -> String {
     format!("chain:ptm:{}", ptm_key)
 }
@@ -45,7 +34,13 @@ pub fn ptm_key(
     )
 }
 
-pub fn advance_gate_key(run_id: Uuid, module_id: &str, from: usize, to: usize, prefix: Uuid) -> String {
+pub fn advance_gate_key(
+    run_id: Uuid,
+    module_id: &str,
+    from: usize,
+    to: usize,
+    prefix: Uuid,
+) -> String {
     format!(
         "chain:gate:advance:{}:{}:{}:{}:{}",
         run_id, module_id, from, to, prefix
@@ -56,32 +51,25 @@ pub fn module_step_advance_once_key(run_id: Uuid, module_id: &str, step_idx: usi
     format!("chain:gate:step:{}:{}:{}", run_id, module_id, step_idx)
 }
 
-pub fn module_step_fallback_once_key(run_id: Uuid, module_id: &str, step_idx: usize, prefix: Uuid) -> String {
-    format!(
-        "chain:gate:fallback:{}:{}:{}:{}",
-        run_id, module_id, step_idx, prefix
-    )
-}
-
-pub fn legacy_module_step_advance_once_key(run_id: Uuid, module_id: &str, step_idx: usize) -> String {
-    format!("{}:step:{}", legacy_execution_state_key(run_id, module_id), step_idx)
-}
-
-pub fn legacy_module_step_fallback_once_key(
+pub fn module_step_fallback_once_key(
     run_id: Uuid,
     module_id: &str,
     step_idx: usize,
     prefix: Uuid,
 ) -> String {
     format!(
-        "{}:step:{}:prefix:{}",
-        legacy_execution_state_key(run_id, module_id),
-        step_idx,
-        prefix
+        "chain:gate:fallback:{}:{}:{}:{}",
+        run_id, module_id, step_idx, prefix
     )
 }
 
-pub fn error_emit_key(run_id: Uuid, module_id: &str, step: usize, prefix: Uuid, error_hash: &str) -> String {
+pub fn error_emit_key(
+    run_id: Uuid,
+    module_id: &str,
+    step: usize,
+    prefix: Uuid,
+    error_hash: &str,
+) -> String {
     format!(
         "chain:error:emit:{}:{}:{}:{}:{}",
         run_id, module_id, step, prefix, error_hash
@@ -112,14 +100,30 @@ pub fn error_retry_schedule_key(task_id: &str) -> String {
 
 /// One-shot advance gate per (run, module, from_node, to_node).
 /// Prevents n concurrent parsers from each synthesizing a placeholder to the same successor.
-pub fn dag_node_advance_gate_key(run_id: Uuid, module_id: &str, node_id: &str, successor_id: &str) -> String {
-    format!("dag:gate:advance:{}:{}:{}:{}", run_id, module_id, node_id, successor_id)
+pub fn dag_node_advance_gate_key(
+    run_id: Uuid,
+    module_id: &str,
+    node_id: &str,
+    successor_id: &str,
+) -> String {
+    format!(
+        "dag:gate:advance:{}:{}:{}:{}",
+        run_id, module_id, node_id, successor_id
+    )
 }
 
 /// One-shot fallback gate per (run, module, node, prefix_request).
 /// Prevents infinite fallback loops when generate() fails on a non-entry node.
-pub fn dag_node_fallback_gate_key(run_id: Uuid, module_id: &str, node_id: &str, prefix: Uuid) -> String {
-    format!("dag:gate:fallback:{}:{}:{}:{}", run_id, module_id, node_id, prefix)
+pub fn dag_node_fallback_gate_key(
+    run_id: Uuid,
+    module_id: &str,
+    node_id: &str,
+    prefix: Uuid,
+) -> String {
+    format!(
+        "dag:gate:fallback:{}:{}:{}:{}",
+        run_id, module_id, node_id, prefix
+    )
 }
 
 /// Distributed stop signal key for a DAG processor run.
@@ -157,8 +161,9 @@ mod tests {
             execution_state_key(run_id, "a-x-m1"),
             "chain:exec:0194e7af-90f0-7c0a-a3cb-4f8f7d11ed88:a-x-m1"
         );
-        assert!(advance_gate_key(run_id, "a-x-m1", 1, 2, prefix)
-            .starts_with("chain:gate:advance:"));
+        assert!(
+            advance_gate_key(run_id, "a-x-m1", 1, 2, prefix).starts_with("chain:gate:advance:")
+        );
         assert_eq!(
             parser_processed_key("mocra", "abc"),
             "mocra:processed:parser:abc"
@@ -170,21 +175,16 @@ mod tests {
     }
 
     #[test]
-    fn execution_state_compat_keys_include_new_and_legacy() {
+    fn execution_state_key_uses_canonical_chain_namespace() {
         let run_id = Uuid::parse_str("0194e7af-90f0-7c0a-a3cb-4f8f7d11ed88").unwrap();
-        let keys = execution_state_compat_keys(run_id, "acc-pf-m1");
         assert_eq!(
-            keys[0],
+            execution_state_key(run_id, "acc-pf-m1"),
             "chain:exec:0194e7af-90f0-7c0a-a3cb-4f8f7d11ed88:acc-pf-m1"
-        );
-        assert_eq!(
-            keys[1],
-            "run:0194e7af-90f0-7c0a-a3cb-4f8f7d11ed88:module:acc-pf-m1"
         );
     }
 
     #[test]
-    fn module_step_gate_keys_are_stable_and_legacy_compatible() {
+    fn module_step_gate_keys_are_stable() {
         let run_id = Uuid::parse_str("0194e7af-90f0-7c0a-a3cb-4f8f7d11ed88").unwrap();
         let prefix = Uuid::parse_str("0194e7af-90f0-7c0a-a3cb-4f8f7d11ed89").unwrap();
         assert_eq!(
@@ -194,14 +194,6 @@ mod tests {
         assert_eq!(
             module_step_fallback_once_key(run_id, "acc-pf-m1", 3, prefix),
             "chain:gate:fallback:0194e7af-90f0-7c0a-a3cb-4f8f7d11ed88:acc-pf-m1:3:0194e7af-90f0-7c0a-a3cb-4f8f7d11ed89"
-        );
-        assert_eq!(
-            legacy_module_step_advance_once_key(run_id, "acc-pf-m1", 3),
-            "run:0194e7af-90f0-7c0a-a3cb-4f8f7d11ed88:module:acc-pf-m1:step:3"
-        );
-        assert_eq!(
-            legacy_module_step_fallback_once_key(run_id, "acc-pf-m1", 3, prefix),
-            "run:0194e7af-90f0-7c0a-a3cb-4f8f7d11ed88:module:acc-pf-m1:step:3:prefix:0194e7af-90f0-7c0a-a3cb-4f8f7d11ed89"
         );
     }
 }

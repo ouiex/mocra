@@ -9,7 +9,11 @@ impl Engine {
         };
 
         let log_rx = event_bus.subscribe("*".to_string()).await;
-        crate::engine::events::handlers::console_handler::ConsoleLogHandler::start(log_rx, "INFO".to_string()).await;
+        crate::engine::events::handlers::console_handler::ConsoleLogHandler::start(
+            log_rx,
+            "INFO".to_string(),
+        )
+        .await;
 
         let config = self.state.config.read().await;
         if let Some(redis_config) = &config.cookie {
@@ -23,11 +27,8 @@ impl Engine {
                 redis_config.tls.unwrap_or(false),
             ) {
                 let redis_rx = event_bus.subscribe("*".to_string()).await;
-                let redis_handler = RedisEventHandler::new(
-                    Arc::new(pool),
-                    config.name.clone(),
-                    3600,
-                );
+                let redis_handler =
+                    RedisEventHandler::new(Arc::new(pool), config.name.clone(), 3600);
                 redis_handler.start(redis_rx).await;
 
                 info!(
@@ -47,30 +48,29 @@ impl Engine {
     /// Starts the full engine runtime.
     ///
     /// Startup phases:
-    /// 1. Optional Lua preload for distributed mode.
+    /// 1. Optional Lua preload for cache-backed Redis atomics.
     /// 2. Optional API startup.
     /// 3. Event bus initialization.
     /// 4. Background services (cleaners/monitor/idle-stop watcher).
     /// 5. Chain construction and processor loops.
     pub async fn start(&self) {
         info!("Starting Schedule with event-driven architecture");
-        let use_distributed_lua = {
-            let config = self.state.config.read().await;
-            !config.is_single_node_mode()
-        };
-        if use_distributed_lua {
+        let use_cache_redis_lua = self.state.has_cache_redis_backend();
+        if use_cache_redis_lua {
             self.lua_registry
                 .preload(self.state.cache_service.as_ref())
                 .await;
         } else {
-            info!("Single-node mode detected, skipping Lua script preload");
+            info!("Cache Redis backend disabled, skipping Lua script preload");
         }
         let api_config = self.state.config.read().await.api.clone();
         if let Some(api) = api_config {
             self.start_api(api.port).await;
             info!("API server started on host:  http://127.0.0.1:{}", api.port);
             if api.api_key.is_none() {
-                warn!("No API Key configured; API requests will be rejected. Set 'api.api_key' in config to enable access.");
+                warn!(
+                    "No API Key configured; API requests will be rejected. Set 'api.api_key' in config to enable access."
+                );
             }
         }
 
@@ -189,7 +189,7 @@ impl Engine {
                 self.queue_manager.clone(),
                 self.event_bus.clone(),
                 self.state.clone(),
-                if use_distributed_lua {
+                if use_cache_redis_lua {
                     Some(self.lua_registry.clone())
                 } else {
                     None
@@ -259,7 +259,7 @@ impl Engine {
             ),
             run_processor!("HealthMonitor", self.start_health_monitor()),
             run_processor!("ResponseProcessor", self.start_response_parser_processor()),
-            run_processor!("NodeRegistry", self.start_node_registry()),
+            run_processor!("NodeHeartbeat", self.start_node_heartbeat()),
         );
     }
 
@@ -267,7 +267,7 @@ impl Engine {
     pub async fn shutdown(&self) {
         info!("Shutting down Schedule");
 
-        if let Err(e) = self.node_registry.deregister().await {
+        if let Err(e) = self.state.profile_store.deregister_node(&self.node_id).await {
             warn!("Failed to deregister node: {}", e);
         }
         let _ = self.shutdown_tx.send(());
@@ -312,14 +312,14 @@ impl Engine {
         let queue_manager = self.queue_manager.clone();
         let prometheus_handle = self.prometheus_handle.clone();
         let state = self.state.clone();
-        let node_registry = self.node_registry.clone();
+        let task_manager = self.task_manager.clone();
         tokio::spawn(async move {
-            let api_state = crate::engine::api::state::ApiState {
+            let api_state = crate::engine::api::state::ApiState::new(
                 queue_manager,
                 prometheus_handle,
                 state,
-                node_registry,
-            };
+                task_manager,
+            );
             let app = crate::engine::api::router::router(api_state);
             let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
             let listener = match tokio::net::TcpListener::bind(addr).await {

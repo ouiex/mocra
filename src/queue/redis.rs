@@ -1,19 +1,67 @@
-use crate::queue::{AckAction, Message, MqBackend, NackPolicy, NackDisposition, decide_nack, parse_attempt, HEADER_ATTEMPT, HEADER_NACK_REASON};
-use async_trait::async_trait;
 use crate::common::model::config::RedisConfig;
 use crate::errors::Result;
 use crate::errors::error::QueueError;
-use log::{error, info, warn, debug};
-use deadpool_redis::redis::{AsyncCommands, FromRedisValue};
+use crate::queue::contract::split_explicit_topic_namespace;
+use crate::queue::{
+    AckAction, DlqRecord, HEADER_ATTEMPT, HEADER_NACK_REASON, Message, MqBackend,
+    NackDisposition, NackPolicy, decide_nack, parse_attempt,
+};
+use async_trait::async_trait;
 use deadpool_redis::redis;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tokio::sync::mpsc;
+use deadpool_redis::redis::{AsyncCommands, FromRedisValue};
+use log::{debug, error, info, warn};
 use std::collections::HashMap;
-use tokio::sync::RwLock;
 use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tokio::sync::RwLock;
+use tokio::sync::mpsc;
 
 struct StreamRouter {
     routes: HashMap<String, mpsc::Sender<Message>>,
+}
+
+fn resolve_topic_namespace<'a>(default_namespace: &'a str, topic: &'a str) -> (&'a str, &'a str) {
+    split_explicit_topic_namespace(topic).unwrap_or((default_namespace, topic))
+}
+
+fn build_topic_key(namespace: &str, topic: &str, shards: usize, key: Option<&str>) -> String {
+    if shards > 1 {
+        let shard = if let Some(key) = key {
+            let mut hasher = crc32fast::Hasher::new();
+            hasher.update(key.as_bytes());
+            (hasher.finalize() as usize) % shards
+        } else {
+            (rand::random::<u64>() as usize) % shards
+        };
+        format!("{{{}:{}:{}}}", namespace, topic, shard)
+    } else {
+        format!("{{{}:{}}}", namespace, topic)
+    }
+}
+
+fn build_topic_keys(namespace: &str, topic: &str, shards: usize) -> Vec<String> {
+    if shards > 1 {
+        (0..shards)
+            .map(|shard| format!("{{{}:{}:{}}}", namespace, topic, shard))
+            .collect()
+    } else {
+        vec![format!("{{{}:{}}}", namespace, topic)]
+    }
+}
+
+fn build_dlq_keys(namespace: &str, topic: &str, shards: usize) -> Vec<String> {
+    let mut dlq_keys = Vec::new();
+    dlq_keys.push(format!("{}:{}:dlq", namespace, topic));
+
+    if shards > 1 {
+        for shard in 0..shards {
+            dlq_keys.push(format!("{{{}:{}:{}}}:dlq", namespace, topic, shard));
+        }
+    } else {
+        dlq_keys.push(format!("{{{}:{}}}:dlq", namespace, topic));
+    }
+
+    dlq_keys
 }
 
 pub struct RedisQueue {
@@ -61,10 +109,12 @@ impl RedisQueue {
         let claim_count = redis_config.claim_count.unwrap_or(100); // Default 100
         let claim_interval = redis_config.claim_interval.unwrap_or(60000); // Default 60s
         let listener_count = redis_config.listener_count.unwrap_or(8);
-        
+
         // Create shared ACK channel (Buffer size 10000 to handle high throughput)
         let (ack_tx, ack_rx) = mpsc::channel::<(String, AckAction)>(10000);
-        let router = Arc::new(RwLock::new(StreamRouter { routes: HashMap::new() }));
+        let router = Arc::new(RwLock::new(StreamRouter {
+            routes: HashMap::new(),
+        }));
 
         let queue = Self {
             pool: pool.clone(),
@@ -81,19 +131,19 @@ impl RedisQueue {
             ack_tx,
             router,
         };
-        
+
         // Spawn shared components
         queue.spawn_ack_processor(pool.clone(), group_id.clone(), ack_rx, nack_policy);
         queue.spawn_shared_claimer();
         queue.spawn_shared_lag_monitor();
         queue.spawn_sharded_listeners();
-        
+
         Ok(queue)
     }
 
     fn extract_shard_id(key: &str) -> Option<usize> {
         let key = if key.starts_with('{') && key.ends_with('}') {
-            &key[1..key.len()-1]
+            &key[1..key.len() - 1]
         } else {
             key
         };
@@ -104,6 +154,32 @@ impl RedisQueue {
         }
     }
 
+    fn dlq_keys(&self, topic: &str) -> Vec<String> {
+        let (namespace, route_topic) = resolve_topic_namespace(&self.namespace, topic);
+        build_dlq_keys(namespace, route_topic, self.shards)
+    }
+
+    fn parse_dlq_record(id: String, map: HashMap<String, Vec<u8>>) -> DlqRecord {
+        let payload = map.get("payload").cloned().unwrap_or_default();
+        let reason = String::from_utf8(map.get("reason").cloned().unwrap_or_default())
+            .unwrap_or_else(|_| "Invalid UTF-8".to_string());
+        let original_id = String::from_utf8(map.get("original_id").cloned().unwrap_or_default())
+            .unwrap_or_default();
+
+        let attempt = map
+            .get("attempt")
+            .and_then(|value| std::str::from_utf8(value).ok())
+            .and_then(|value| value.parse::<u32>().ok());
+
+        DlqRecord {
+            id,
+            payload,
+            reason,
+            original_id,
+            attempt,
+        }
+    }
+
     fn spawn_sharded_listeners(&self) {
         let listener_count = self.listener_count;
 
@@ -111,14 +187,20 @@ impl RedisQueue {
             let pool = self.pool.clone();
             let group_id = self.group_id.clone();
             // Use distinct consumer name for observability, though they handle disjoint key sets
-            let consumer_name = format!("{}-{}", self.consumer_name, i); 
+            let consumer_name = format!("{}-{}", self.consumer_name, i);
             let router = self.router.clone();
             let batch_size = self.batch_size;
             let ack_tx = self.ack_tx.clone();
             let listener_index = i;
 
             tokio::spawn(async move {
-                info!("Starting Sharded Redis Listener {}/{} (Group: {}, Consumer: {})", listener_index + 1, listener_count, group_id, consumer_name);
+                info!(
+                    "Starting Sharded Redis Listener {}/{} (Group: {}, Consumer: {})",
+                    listener_index + 1,
+                    listener_count,
+                    group_id,
+                    consumer_name
+                );
                 let mut conn: Option<deadpool_redis::Connection> = None;
 
                 loop {
@@ -128,7 +210,8 @@ impl RedisQueue {
                         r.routes.clone()
                     };
 
-                    let keys: Vec<String> = routes.keys()
+                    let keys: Vec<String> = routes
+                        .keys()
                         .filter(|k| {
                             // Try to extract shard ID from the key (format: ...:shard_id)
                             if let Some(shard_id) = Self::extract_shard_id(k) {
@@ -149,13 +232,16 @@ impl RedisQueue {
                     }
 
                     let ids: Vec<&str> = vec![">"; keys.len()];
-                    
+
                     // 2. Get Connection
                     if conn.is_none() {
                         match pool.get().await {
                             Ok(c) => conn = Some(c),
                             Err(e) => {
-                                error!("Listener {} failed to get connection: {}. Retrying...", listener_index, e);
+                                error!(
+                                    "Listener {} failed to get connection: {}. Retrying...",
+                                    listener_index, e
+                                );
                                 tokio::time::sleep(Duration::from_secs(1)).await;
                                 continue;
                             }
@@ -174,8 +260,8 @@ impl RedisQueue {
                         .group(&group_id, &consumer_name)
                         .block(2000)
                         .count(batch_size);
-                    
-                    let result: redis::RedisResult<redis::streams::StreamReadReply> = 
+
+                    let result: redis::RedisResult<redis::streams::StreamReadReply> =
                         active_conn.xread_options(&keys, &ids, &opts).await;
 
                     match result {
@@ -186,40 +272,45 @@ impl RedisQueue {
                                     for stream_id in stream_key.ids {
                                         let id = stream_id.id.clone();
                                         if let Some(val) = stream_id.map.get("payload")
-                                            && let Ok(data) = Vec::<u8>::from_redis_value(val) {
-                                                
-                                                let mut headers = HashMap::new();
-                                                for (k, v) in &stream_id.map {
-                                                    if k.starts_with("h:")
-                                                        && let Ok(s) = String::from_redis_value(v) {
-                                                            headers.insert(k[2..].to_string(), s);
-                                                        }
-                                                }
-
-                                                let msg = Message {
-                                                    payload: std::sync::Arc::new(data),
-                                                    id: format!("{}@{}", s_key, id),
-                                                    headers: std::sync::Arc::new(headers),
-                                                    ack_tx: ack_tx.clone(),
-                                                };
-                                                
-                                                crate::common::metrics::inc_throughput("queue", "consumer", "consume", "success", 1);
-
-                                                if sender.send(msg).await.is_err() {
-                                                    warn!("Subscriber for {} dropped", s_key);
+                                            && let Ok(data) = Vec::<u8>::from_redis_value(val)
+                                        {
+                                            let mut headers = HashMap::new();
+                                            for (k, v) in &stream_id.map {
+                                                if k.starts_with("h:")
+                                                    && let Ok(s) = String::from_redis_value(v)
+                                                {
+                                                    headers.insert(k[2..].to_string(), s);
                                                 }
                                             }
+
+                                            let msg = Message {
+                                                payload: std::sync::Arc::new(data),
+                                                id: format!("{}@{}", s_key, id),
+                                                headers: std::sync::Arc::new(headers),
+                                                ack_tx: ack_tx.clone(),
+                                            };
+
+                                            crate::common::metrics::inc_throughput(
+                                                "queue", "consumer", "consume", "success", 1,
+                                            );
+
+                                            if sender.send(msg).await.is_err() {
+                                                warn!("Subscriber for {} dropped", s_key);
+                                            }
+                                        }
                                     }
                                 }
                             }
                         }
                         Err(e) => {
-                             if let Some(code) = e.code() && code == "NOGROUP" {
-                                 // NOGROUP usually handled by subscribe ensuring group creation.
-                             }
-                             error!("Error in listener {}: {}. Retrying...", listener_index, e);
-                             conn = None;
-                             tokio::time::sleep(Duration::from_secs(1)).await;
+                            if let Some(code) = e.code()
+                                && code == "NOGROUP"
+                            {
+                                // NOGROUP usually handled by subscribe ensuring group creation.
+                            }
+                            error!("Error in listener {}: {}. Retrying...", listener_index, e);
+                            conn = None;
+                            tokio::time::sleep(Duration::from_secs(1)).await;
                         }
                     }
                 }
@@ -338,26 +429,40 @@ impl RedisQueue {
         });
     }
 
-    async fn flush_acks(pool: &deadpool_redis::Pool, group_id: &str, batches: &mut HashMap<String, Vec<String>>) -> bool {
-        if batches.is_empty() { return true; }
-        
+    async fn flush_acks(
+        pool: &deadpool_redis::Pool,
+        group_id: &str,
+        batches: &mut HashMap<String, Vec<String>>,
+    ) -> bool {
+        if batches.is_empty() {
+            return true;
+        }
+
         match pool.get().await {
             Ok(mut ack_conn) => {
                 let mut pipeline = redis::pipe();
                 let mut count_map = HashMap::new();
-                
+
                 for (s_key, ids) in batches.iter() {
-                    if ids.is_empty() { continue; }
+                    if ids.is_empty() {
+                        continue;
+                    }
                     pipeline.xack(s_key, group_id, ids).ignore();
                     count_map.insert(s_key.clone(), ids.len());
                 }
 
                 let result: redis::RedisResult<()> = pipeline.query_async(&mut ack_conn).await;
-                
+
                 match result {
                     Ok(_) => {
                         for (_k, v) in count_map {
-                            crate::common::metrics::inc_throughput("queue", "ack_processor", "ack", "success", v as u64);
+                            crate::common::metrics::inc_throughput(
+                                "queue",
+                                "ack_processor",
+                                "ack",
+                                "success",
+                                v as u64,
+                            );
                         }
                         batches.clear();
                         true
@@ -370,7 +475,10 @@ impl RedisQueue {
                 }
             }
             Err(e) => {
-                error!("Failed to get Redis connection for ACK flush: {}. Retrying next tick.", e);
+                error!(
+                    "Failed to get Redis connection for ACK flush: {}. Retrying next tick.",
+                    e
+                );
                 // Do NOT clear batches, retry next time
                 false
             }
@@ -408,7 +516,11 @@ impl RedisQueue {
                     }
 
                     for (topic_label, total_len) in totals {
-                        crate::common::metrics::set_backlog("queue", &topic_label, total_len as f64);
+                        crate::common::metrics::set_backlog(
+                            "queue",
+                            &topic_label,
+                            total_len as f64,
+                        );
                         if total_len > 1000 {
                             warn!("High queue depth for {}: {}", topic_label, total_len);
                         } else if total_len > 0 {
@@ -459,7 +571,11 @@ impl RedisQueue {
                 for (topic_claim, sender) in routes {
                     // Loop to drain all stuck messages if there are more than claim_count
                     loop {
-                        let result: redis::RedisResult<(String, Vec<(String, Vec<Vec<u8>>)>, Vec<String>)> = redis::cmd("XAUTOCLAIM")
+                        let result: redis::RedisResult<(
+                            String,
+                            Vec<(String, Vec<Vec<u8>>)>,
+                            Vec<String>,
+                        )> = redis::cmd("XAUTOCLAIM")
                             .arg(topic_claim.as_str())
                             .arg(&group_id)
                             .arg(&consumer_name)
@@ -474,10 +590,25 @@ impl RedisQueue {
                             Ok((cursor, messages, _deleted)) => {
                                 let is_empty = messages.is_empty();
                                 if !is_empty {
-                                    info!("Claimed {} stuck messages from topic {}", messages.len(), topic_claim);
-                                    crate::common::metrics::inc_throughput("queue", "claimer", "claim", "success", messages.len() as u64);
+                                    info!(
+                                        "Claimed {} stuck messages from topic {}",
+                                        messages.len(),
+                                        topic_claim
+                                    );
+                                    crate::common::metrics::inc_throughput(
+                                        "queue",
+                                        "claimer",
+                                        "claim",
+                                        "success",
+                                        messages.len() as u64,
+                                    );
                                     for (id, fields) in messages {
-                                        if let Some(msg) = Self::parse_message(&topic_claim, id, fields, ack_tx.clone()) {
+                                        if let Some(msg) = Self::parse_message(
+                                            &topic_claim,
+                                            id,
+                                            fields,
+                                            ack_tx.clone(),
+                                        ) {
                                             if let Err(e) = sender.send(msg).await {
                                                 warn!("Failed to send claimed message: {}", e);
                                             }
@@ -514,27 +645,18 @@ impl RedisQueue {
         }
     }
 
-
-
     fn get_topic_key(&self, topic: &str, key: Option<&str>) -> String {
-        if self.shards > 1 {
-            let shard = if let Some(k) = key {
-                let mut hasher = crc32fast::Hasher::new();
-                hasher.update(k.as_bytes());
-                (hasher.finalize() as usize) % self.shards
-            } else {
-                (rand::random::<u64>() as usize) % self.shards
-            };
-            format!("{{{}:{}:{}}}", self.namespace, topic, shard)
-        } else {
-            format!("{{{}:{}}}", self.namespace, topic)
-        }
+        let (namespace, route_topic) = resolve_topic_namespace(&self.namespace, topic);
+        build_topic_key(namespace, route_topic, self.shards, key)
     }
 
     fn get_minid_threshold(&self) -> Option<String> {
         if self.minid_time > 0 {
             let retention_ms = (self.minid_time as u128) * 60 * 60 * 1000;
-            let now_ms = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis();
+            let now_ms = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_millis();
             let threshold = now_ms.saturating_sub(retention_ms);
             Some(threshold.to_string())
         } else {
@@ -543,13 +665,21 @@ impl RedisQueue {
     }
 
     async fn get_connection(&self) -> Result<deadpool_redis::Connection> {
-        self.pool.get().await.map_err(|_| QueueError::ConnectionFailed.into())
+        self.pool
+            .get()
+            .await
+            .map_err(|_| QueueError::ConnectionFailed.into())
     }
 
-    fn parse_message(topic_claim: &str, id: String, fields: Vec<Vec<u8>>, ack_tx: mpsc::Sender<(String, AckAction)>) -> Option<Message> {
+    fn parse_message(
+        topic_claim: &str,
+        id: String,
+        fields: Vec<Vec<u8>>,
+        ack_tx: mpsc::Sender<(String, AckAction)>,
+    ) -> Option<Message> {
         let mut found_payload = None;
         let mut headers = HashMap::new();
-        
+
         let mut iter = fields.into_iter();
         while let Some(key) = iter.next() {
             if let Some(val) = iter.next() {
@@ -570,7 +700,7 @@ impl RedisQueue {
                 }
             }
         }
-        
+
         if let Some(payload) = found_payload {
             Some(Message {
                 payload: std::sync::Arc::new(payload),
@@ -586,7 +716,13 @@ impl RedisQueue {
 
 #[async_trait]
 impl MqBackend for RedisQueue {
-    async fn publish_with_headers(&self, topic: &str, key: Option<&str>, payload: &[u8], headers: &HashMap<String, String>) -> Result<()> {
+    async fn publish_with_headers(
+        &self,
+        topic: &str,
+        key: Option<&str>,
+        payload: &[u8],
+        headers: &HashMap<String, String>,
+    ) -> Result<()> {
         let mut conn = self.get_connection().await?;
         let topic_key = self.get_topic_key(topic, key);
 
@@ -598,16 +734,16 @@ impl MqBackend for RedisQueue {
         }
 
         cmd.arg("*").arg("payload").arg(payload);
-        
+
         for (k, v) in headers {
-             cmd.arg(format!("h:{}", k)).arg(v);
+            cmd.arg(format!("h:{}", k)).arg(v);
         }
 
         let _: String = cmd
             .query_async(&mut conn)
             .await
             .map_err(|e| QueueError::PushFailed(Box::new(e)))?;
-        
+
         crate::common::metrics::inc_throughput("queue", "producer", "publish", "success", 1);
         Ok(())
     }
@@ -617,7 +753,7 @@ impl MqBackend for RedisQueue {
             return Ok(());
         }
         let mut conn = self.get_connection().await?;
-        
+
         let mut batches: HashMap<String, Vec<&Vec<u8>>> = HashMap::new();
         for (key, payload) in items {
             let topic_key = self.get_topic_key(topic, key.as_deref());
@@ -626,7 +762,8 @@ impl MqBackend for RedisQueue {
 
         let minid_threshold = self.get_minid_threshold().unwrap_or_default();
 
-        let script = redis::Script::new(r"
+        let script = redis::Script::new(
+            r"
             local key = KEYS[1]
             local minid = KEYS[2]
             for i, payload in ipairs(ARGV) do
@@ -636,30 +773,43 @@ impl MqBackend for RedisQueue {
                     redis.call('XADD', key, '*', 'payload', payload)
                 end
             end
-        ");
+        ",
+        );
 
         for attempt in 0..2 {
             let mut pipe = redis::pipe();
             for (topic_key, payloads) in &batches {
-                 let mut invocation = script.key(topic_key);
-                 invocation.key(&minid_threshold);
-                 for p in payloads {
-                     invocation.arg(p.as_slice());
-                 }
-                 pipe.invoke_script(&invocation);
+                let mut invocation = script.key(topic_key);
+                invocation.key(&minid_threshold);
+                for p in payloads {
+                    invocation.arg(p.as_slice());
+                }
+                pipe.invoke_script(&invocation);
             }
-            
+
             let result: redis::RedisResult<()> = pipe.query_async(&mut conn).await;
-            
+
             match result {
                 Ok(_) => {
-                    crate::common::metrics::inc_throughput("queue", "producer", "publish_batch", "success", items.len() as u64);
+                    crate::common::metrics::inc_throughput(
+                        "queue",
+                        "producer",
+                        "publish_batch",
+                        "success",
+                        items.len() as u64,
+                    );
                     return Ok(());
-                },
+                }
                 Err(e) => {
-                    let is_noscript = e.kind() == redis::ErrorKind::NoScriptError || e.to_string().contains("NOSCRIPT");
+                    let is_noscript = e.kind() == redis::ErrorKind::NoScriptError
+                        || e.to_string().contains("NOSCRIPT");
                     if is_noscript && attempt == 0 {
-                        let _ = script.key("").key("").arg("").invoke_async::<()>(&mut conn).await;
+                        let _ = script
+                            .key("")
+                            .key("")
+                            .arg("")
+                            .invoke_async::<()>(&mut conn)
+                            .await;
                         continue;
                     }
                     return Err(QueueError::PushFailed(Box::new(e)).into());
@@ -668,22 +818,31 @@ impl MqBackend for RedisQueue {
         }
         Ok(())
     }
-    
-    async fn publish_batch_with_headers(&self, topic: &str, items: &[(Option<String>, Vec<u8>, HashMap<String, String>)]) -> Result<()> {
+
+    async fn publish_batch_with_headers(
+        &self,
+        topic: &str,
+        items: &[(Option<String>, Vec<u8>, HashMap<String, String>)],
+    ) -> Result<()> {
         if items.is_empty() {
             return Ok(());
         }
         let mut conn = self.get_connection().await?;
-        
-        let mut batches: HashMap<String, Vec<(&Vec<u8>, &HashMap<String, String>)>> = HashMap::new();
+
+        let mut batches: HashMap<String, Vec<(&Vec<u8>, &HashMap<String, String>)>> =
+            HashMap::new();
         for (key, payload, headers) in items {
             let topic_key = self.get_topic_key(topic, key.as_deref());
-            batches.entry(topic_key).or_default().push((payload, headers));
+            batches
+                .entry(topic_key)
+                .or_default()
+                .push((payload, headers));
         }
 
         let minid_threshold = self.get_minid_threshold().unwrap_or_default();
 
-        let script = redis::Script::new(r"
+        let script = redis::Script::new(
+            r"
             local key = KEYS[1]
             local minid = KEYS[2]
             for i = 1, #ARGV, 2 do
@@ -711,37 +870,51 @@ impl MqBackend for RedisQueue {
                 
                 redis.call(unpack(args))
             end
-        ");
+        ",
+        );
 
         for attempt in 0..2 {
             let mut pipe = redis::pipe();
             for (topic_key, item_list) in &batches {
-                 let mut invocation = script.key(topic_key);
-                 invocation.key(&minid_threshold);
-                 for (p, h) in item_list {
-                     invocation.arg(p.as_slice());
-                     if h.is_empty() {
-                         invocation.arg("");
-                     } else {
-                         let h_json = serde_json::to_string(h).unwrap_or_default();
-                         invocation.arg(h_json);
-                     }
-                 }
-                 pipe.invoke_script(&invocation);
+                let mut invocation = script.key(topic_key);
+                invocation.key(&minid_threshold);
+                for (p, h) in item_list {
+                    invocation.arg(p.as_slice());
+                    if h.is_empty() {
+                        invocation.arg("");
+                    } else {
+                        let h_json = serde_json::to_string(h).unwrap_or_default();
+                        invocation.arg(h_json);
+                    }
+                }
+                pipe.invoke_script(&invocation);
             }
-            
+
             let result: redis::RedisResult<()> = pipe.query_async(&mut conn).await;
-            
+
             match result {
                 Ok(_) => {
-                    crate::common::metrics::inc_throughput("queue", "producer", "publish_batch", "success", items.len() as u64);
+                    crate::common::metrics::inc_throughput(
+                        "queue",
+                        "producer",
+                        "publish_batch",
+                        "success",
+                        items.len() as u64,
+                    );
                     return Ok(());
-                },
+                }
                 Err(e) => {
-                    let is_noscript = e.kind() == redis::ErrorKind::NoScriptError || e.to_string().contains("NOSCRIPT");
+                    let is_noscript = e.kind() == redis::ErrorKind::NoScriptError
+                        || e.to_string().contains("NOSCRIPT");
                     if is_noscript && attempt == 0 {
-                         let _ = script.key("").key("").arg("").arg("").invoke_async::<()>(&mut conn).await;
-                         continue;
+                        let _ = script
+                            .key("")
+                            .key("")
+                            .arg("")
+                            .arg("")
+                            .invoke_async::<()>(&mut conn)
+                            .await;
+                        continue;
                     }
                     return Err(QueueError::PushFailed(Box::new(e)).into());
                 }
@@ -752,27 +925,28 @@ impl MqBackend for RedisQueue {
 
     async fn subscribe(&self, topic: &str, sender: mpsc::Sender<Message>) -> Result<()> {
         let topic = topic.to_string();
-        
-        let topic_keys: Vec<String> = if self.shards > 1 {
-            (0..self.shards).map(|i| format!("{{{}:{}:{}}}", self.namespace, topic, i)).collect()
-        } else {
-            vec![format!("{{{}:{}}}", self.namespace, topic)]
-        };
+        let (namespace, route_topic) = resolve_topic_namespace(&self.namespace, &topic);
+
+        let topic_keys = build_topic_keys(namespace, route_topic, self.shards);
 
         let group_id = self.group_id.clone();
         // let consumer_name = self.consumer_name.clone(); // Not used here anymore
 
         // Ensure Groups Exist & Register Routes
         {
-             let mut conn = self.pool.get().await.map_err(|_e| QueueError::ConnectionFailed)?;
-             let mut router = self.router.write().await;
-             
-             for t_key in &topic_keys {
-                 // Register route
-                 router.routes.insert(t_key.clone(), sender.clone());
-                 
-                 // Ensure group exists
-                 match conn
+            let mut conn = self
+                .pool
+                .get()
+                .await
+                .map_err(|_e| QueueError::ConnectionFailed)?;
+            let mut router = self.router.write().await;
+
+            for t_key in &topic_keys {
+                // Register route
+                router.routes.insert(t_key.clone(), sender.clone());
+
+                // Ensure group exists
+                match conn
                     .xgroup_create_mkstream::<&str, &str, &str, ()>(t_key, &group_id, "$")
                     .await
                 {
@@ -785,13 +959,11 @@ impl MqBackend for RedisQueue {
                         }
                     }
                 }
-             }
+            }
         }
 
         Ok(())
     }
-
-
 
     async fn clean_storage(&self) -> Result<()> {
         if self.minid_time == 0 {
@@ -849,7 +1021,10 @@ impl MqBackend for RedisQueue {
         for key in &keys {
             pipe.cmd("TYPE").arg(key);
         }
-        let types: Vec<String> = pipe.query_async(&mut conn).await.map_err(|e| QueueError::OperationFailed(Box::new(e)))?;
+        let types: Vec<String> = pipe
+            .query_async(&mut conn)
+            .await
+            .map_err(|e| QueueError::OperationFailed(Box::new(e)))?;
 
         let mut trim_pipe = redis::pipe();
         let mut has_trim = false;
@@ -868,7 +1043,10 @@ impl MqBackend for RedisQueue {
         }
 
         if has_trim {
-            let _: () = trim_pipe.query_async(&mut conn).await.map_err(|e| QueueError::OperationFailed(Box::new(e)))?;
+            let _: () = trim_pipe
+                .query_async(&mut conn)
+                .await
+                .map_err(|e| QueueError::OperationFailed(Box::new(e)))?;
         }
 
         Ok(())
@@ -880,66 +1058,55 @@ impl MqBackend for RedisQueue {
             .get()
             .await
             .map_err(|_| QueueError::ConnectionFailed)?;
-        
-        let topic_key = format!("{}:{}", self.namespace, topic);
+
+        let (namespace, route_topic) = resolve_topic_namespace(&self.namespace, topic);
+        let topic_key = format!("{}:{}", namespace, route_topic);
         let dlq_key = format!("{}:dlq", topic_key);
-        
+
         let _: () = redis::cmd("XADD")
-             .arg(&dlq_key)
-             .arg("*")
-             .arg("payload")
-             .arg(payload)
-             .arg("reason")
-             .arg(reason)
-             .arg("original_id")
-             .arg(id)
-             .query_async(&mut conn)
-             .await
-             .map_err(|e| QueueError::PushFailed(Box::new(e)))?;
-             
-            crate::common::metrics::inc_throughput("queue", "producer", "send_dlq", "success", 1);
-         Ok(())
+            .arg(&dlq_key)
+            .arg("*")
+            .arg("payload")
+            .arg(payload)
+            .arg("reason")
+            .arg(reason)
+            .arg("original_id")
+            .arg(id)
+            .query_async(&mut conn)
+            .await
+            .map_err(|e| QueueError::PushFailed(Box::new(e)))?;
+
+        crate::common::metrics::inc_throughput("queue", "producer", "send_dlq", "success", 1);
+        Ok(())
     }
 
-    async fn read_dlq(&self, topic: &str, count: usize) -> Result<Vec<(String, Vec<u8>, String, String)>> {
+    async fn read_dlq(
+        &self,
+        topic: &str,
+        count: usize,
+    ) -> Result<Vec<DlqRecord>> {
         let mut conn = self
             .pool
             .get()
             .await
             .map_err(|_| QueueError::ConnectionFailed)?;
 
-        let mut dlq_keys = Vec::new();
-        dlq_keys.push(format!("{}:{}:dlq", self.namespace, topic));
-
-        if self.shards > 1 {
-            for shard in 0..self.shards {
-                dlq_keys.push(format!("{{{}:{}:{}}}:dlq", self.namespace, topic, shard));
-            }
-        } else {
-            dlq_keys.push(format!("{{{}:{}}}:dlq", self.namespace, topic));
-        }
-
         let mut output = Vec::new();
-        for dlq_key in dlq_keys {
-            let result: redis::RedisResult<Vec<(String, HashMap<String, Vec<u8>>)>> = redis::cmd("XREVRANGE")
-                .arg(&dlq_key)
-                .arg("+")
-                .arg("-")
-                .arg("COUNT")
-                .arg(count)
-                .query_async(&mut conn)
-                .await;
+        for dlq_key in self.dlq_keys(topic) {
+            let result: redis::RedisResult<Vec<(String, HashMap<String, Vec<u8>>)>> =
+                redis::cmd("XREVRANGE")
+                    .arg(&dlq_key)
+                    .arg("+")
+                    .arg("-")
+                    .arg("COUNT")
+                    .arg(count)
+                    .query_async(&mut conn)
+                    .await;
 
             match result {
                 Ok(messages) => {
                     for (id, map) in messages {
-                        let payload = map.get("payload").cloned().unwrap_or_default();
-                        let reason = String::from_utf8(map.get("reason").cloned().unwrap_or_default())
-                            .unwrap_or_else(|_| "Invalid UTF-8".to_string());
-                        let original_id = String::from_utf8(map.get("original_id").cloned().unwrap_or_default())
-                            .unwrap_or_default();
-
-                        output.push((id, payload, reason, original_id));
+                        output.push(Self::parse_dlq_record(id, map));
                     }
                 }
                 Err(e) => {
@@ -951,6 +1118,71 @@ impl MqBackend for RedisQueue {
         }
 
         Ok(output)
+    }
+
+    async fn read_dlq_record(
+        &self,
+        topic: &str,
+        record_id: &str,
+    ) -> Result<Option<DlqRecord>> {
+        let mut conn = self
+            .pool
+            .get()
+            .await
+            .map_err(|_| QueueError::ConnectionFailed)?;
+
+        for dlq_key in self.dlq_keys(topic) {
+            let result: redis::RedisResult<Vec<(String, HashMap<String, Vec<u8>>)>> =
+                redis::cmd("XRANGE")
+                    .arg(&dlq_key)
+                    .arg(record_id)
+                    .arg(record_id)
+                    .query_async(&mut conn)
+                    .await;
+
+            match result {
+                Ok(mut messages) => {
+                    if let Some((id, map)) = messages.pop() {
+                        return Ok(Some(Self::parse_dlq_record(id, map)));
+                    }
+                }
+                Err(e) => {
+                    if let Some(_code) = e.code() {
+                        warn!("Error reading DLQ record {} from {}: {}", record_id, dlq_key, e);
+                    }
+                }
+            }
+        }
+
+        Ok(None)
+    }
+
+    async fn delete_dlq(
+        &self,
+        topic: &str,
+        record_id: &str,
+    ) -> Result<bool> {
+        let mut conn = self
+            .pool
+            .get()
+            .await
+            .map_err(|_| QueueError::ConnectionFailed)?;
+
+        for dlq_key in self.dlq_keys(topic) {
+            let deleted: redis::RedisResult<i64> = redis::cmd("XDEL")
+                .arg(&dlq_key)
+                .arg(record_id)
+                .query_async(&mut conn)
+                .await;
+
+            match deleted {
+                Ok(count) if count > 0 => return Ok(true),
+                Ok(_) => {}
+                Err(e) => return Err(QueueError::OperationFailed(Box::new(e)).into()),
+            }
+        }
+
+        Ok(false)
     }
 }
 
@@ -967,5 +1199,27 @@ mod tests {
         assert_eq!(RedisQueue::extract_shard_id("mocra:task:a"), None);
         assert_eq!(RedisQueue::extract_shard_id("simple"), None);
     }
-}
 
+    #[test]
+    fn explicit_namespace_topic_key_overrides_local_redis_namespace() {
+        assert_eq!(
+            build_topic_key("local", "response-normal", 1, Some("user-1")),
+            "{local:response-normal}"
+        );
+        assert_eq!(
+            build_topic_key("origin", "response-normal", 1, Some("user-1")),
+            "{origin:response-normal}"
+        );
+        assert_eq!(
+            resolve_topic_namespace("local", "origin::response-normal"),
+            ("origin", "response-normal")
+        );
+        assert_eq!(
+            build_dlq_keys("origin", "response-normal", 1),
+            vec![
+                "origin:response-normal:dlq".to_string(),
+                "{origin:response-normal}:dlq".to_string()
+            ]
+        );
+    }
+}

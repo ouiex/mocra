@@ -1,4 +1,5 @@
 pub mod request_downloader;
+pub mod response_cache_remote;
 use crate::common::model::download_config::DownloadConfig;
 use crate::common::model::{Request, Response};
 use crate::errors::Result;

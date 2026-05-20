@@ -4,7 +4,8 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use super::types::{
-    DagError, DagNodeExecutionPolicy, DagNodeRecord, DagNodeStatus, DagNodeTrait, NodePlacement,
+    DagError, DagNodeExecutionPolicy, DagNodeRecord, DagNodeRuntimeOverride, DagNodeStatus,
+    DagNodeTrait, NodePlacement,
 };
 
 pub type DagNodePtr = Arc<DagNodeRecord>;
@@ -15,10 +16,7 @@ pub struct DagChainBuilder<'a> {
 }
 
 impl<'a> DagChainBuilder<'a> {
-    pub fn add_chain_node(
-        mut self,
-        current_node: Arc<dyn DagNodeTrait>,
-    ) -> Result<Self, DagError> {
+    pub fn add_chain_node(mut self, current_node: Arc<dyn DagNodeTrait>) -> Result<Self, DagError> {
         let next = self
             .dag
             .add_node(Some(&[self.last.clone()]), current_node)?;
@@ -51,6 +49,7 @@ impl<'a> DagChainBuilder<'a> {
 pub struct Dag {
     pub(crate) nodes: HashMap<String, DagNodeRecord>,
     pub(crate) edges: HashMap<String, Vec<String>>,
+    pub(crate) metadata: HashMap<String, String>,
 }
 
 impl Dag {
@@ -61,6 +60,7 @@ impl Dag {
         let mut dag = Self {
             nodes: HashMap::new(),
             edges: HashMap::new(),
+            metadata: HashMap::new(),
         };
 
         dag.insert_control_node(Self::CONTROL_START_NODE);
@@ -83,6 +83,7 @@ impl Dag {
                 status: DagNodeStatus::Pending,
                 placement: NodePlacement::Local,
                 execution_policy: DagNodeExecutionPolicy::default(),
+                runtime_input: None,
                 executor: None,
                 result: None,
                 metadata: HashMap::new(),
@@ -98,6 +99,10 @@ impl Dag {
 
     pub fn is_empty(&self) -> bool {
         self.nodes.len() <= 2
+    }
+
+    pub fn metadata(&self, key: &str) -> Option<&str> {
+        self.metadata.get(key).map(String::as_str)
     }
 
     pub fn node_ptrs(&self) -> Vec<DagNodePtr> {
@@ -209,6 +214,7 @@ impl Dag {
                 status: DagNodeStatus::Pending,
                 placement: NodePlacement::Local,
                 execution_policy: DagNodeExecutionPolicy::default(),
+                runtime_input: None,
                 executor: Some(current_node),
                 result: None,
                 metadata: HashMap::new(),
@@ -224,8 +230,7 @@ impl Dag {
 
         self.connect(&node_id, Self::CONTROL_END_NODE)?;
 
-        self
-            .nodes
+        self.nodes
             .get(&node_id)
             .cloned()
             .map(Arc::new)
@@ -300,6 +305,45 @@ impl Dag {
         Ok(())
     }
 
+    pub fn apply_runtime_override(
+        &mut self,
+        runtime_override: &DagNodeRuntimeOverride,
+    ) -> Result<(), DagError> {
+        if runtime_override.is_empty() {
+            return Ok(());
+        }
+        if Self::is_control_node(&runtime_override.node_id) {
+            return Err(DagError::ReservedControlNode(runtime_override.node_id.clone()));
+        }
+
+        let record = self
+            .nodes
+            .get_mut(&runtime_override.node_id)
+            .ok_or_else(|| DagError::NodeNotFound(runtime_override.node_id.clone()))?;
+
+        if let Some(placement) = runtime_override.placement.clone() {
+            record.placement = placement;
+        }
+        if let Some(execution_policy) = runtime_override.execution_policy.clone() {
+            record.execution_policy = execution_policy;
+        }
+        if let Some(runtime_input) = runtime_override.runtime_input.clone() {
+            record.runtime_input = Some(runtime_input);
+        }
+
+        Ok(())
+    }
+
+    pub fn apply_runtime_overrides(
+        &mut self,
+        runtime_overrides: &[DagNodeRuntimeOverride],
+    ) -> Result<(), DagError> {
+        for runtime_override in runtime_overrides {
+            self.apply_runtime_override(runtime_override)?;
+        }
+        Ok(())
+    }
+
     pub fn successors(&self, node: &DagNodePtr) -> Result<Vec<DagNodePtr>, DagError> {
         let id = &node.id;
         if !self.nodes.contains_key(id) {
@@ -321,11 +365,8 @@ impl Dag {
             return Err(DagError::EmptyGraph);
         }
 
-        let mut indegree: HashMap<String, usize> = self
-            .nodes
-            .keys()
-            .map(|n| (n.clone(), 0usize))
-            .collect();
+        let mut indegree: HashMap<String, usize> =
+            self.nodes.keys().map(|n| (n.clone(), 0usize)).collect();
 
         for tos in self.edges.values() {
             for to in tos {
@@ -337,7 +378,13 @@ impl Dag {
 
         let mut queue: BinaryHeap<Reverse<String>> = indegree
             .iter()
-            .filter_map(|(n, deg)| if *deg == 0 { Some(Reverse(n.clone())) } else { None })
+            .filter_map(|(n, deg)| {
+                if *deg == 0 {
+                    Some(Reverse(n.clone()))
+                } else {
+                    None
+                }
+            })
             .collect();
 
         let mut ordered = Vec::with_capacity(self.nodes.len());

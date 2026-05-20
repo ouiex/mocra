@@ -1,10 +1,10 @@
+use crate::cacheable::CacheAble;
 use crate::common::model::cookies::CookieItem;
 use crate::common::model::headers::HeaderItem;
 use crate::common::model::{Cookies, Headers};
-use crate::cacheable::{CacheAble};
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize,)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LoginInfo {
     pub cookies: Vec<CookieItem>,
     pub useragent: String,
@@ -40,7 +40,6 @@ impl From<&LoginInfo> for Headers {
     }
 }
 impl LoginInfo {
-
     pub fn get_extra<T>(&self, key: &str) -> Option<T>
     where
         T: Serialize + for<'de> Deserialize<'de>,
@@ -53,7 +52,6 @@ impl LoginInfo {
         self.get_extra("shopid")
     }
 }
-
 
 impl CacheAble for LoginInfo {
     fn field() -> impl AsRef<str> {

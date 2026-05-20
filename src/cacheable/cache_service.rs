@@ -1,7 +1,7 @@
-
 mod backend;
 mod cache_able;
 mod local_backend;
+pub mod raft_backend;
 mod redis_backend;
 mod service;
 mod two_level_backend;

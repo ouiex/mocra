@@ -1,16 +1,14 @@
 use super::*;
+use crate::cacheable::CacheService;
+use crate::sync::SyncService;
+use crate::utils::connector::create_redis_pool;
 use async_trait::async_trait;
-use dashmap::mapref::entry::Entry;
 use dashmap::DashMap;
 use redis::AsyncCommands;
-use redis::Script;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 use uuid::Uuid;
-use crate::cacheable::CacheService;
-use crate::sync::SyncService;
-use crate::utils::connector::create_redis_pool;
 
 fn i64_to_payload(v: i64) -> TaskPayload {
     TaskPayload::from_bytes(v.to_le_bytes().to_vec())
@@ -26,15 +24,7 @@ fn payload_to_i64(payload: &TaskPayload) -> i64 {
 }
 
 fn local_redis_cache_service(namespace: &str) -> Option<Arc<CacheService>> {
-    let pool = create_redis_pool(
-        "127.0.0.1",
-        6379,
-        0,
-        &None,
-        &None,
-        Some(16),
-        false,
-    )?;
+    let pool = create_redis_pool("127.0.0.1", 6379, 0, &None, &None, Some(16), false)?;
     Some(Arc::new(CacheService::new(
         Some(pool),
         namespace.to_string(),
@@ -45,7 +35,9 @@ fn local_redis_cache_service(namespace: &str) -> Option<Arc<CacheService>> {
 
 struct TestNode {
     logic: Arc<
-        dyn Fn(NodeExecutionContext) -> std::pin::Pin<
+        dyn Fn(
+                NodeExecutionContext,
+            ) -> std::pin::Pin<
                 Box<dyn std::future::Future<Output = Result<TaskPayload, DagError>> + Send>,
             > + Send
             + Sync,
@@ -87,68 +79,6 @@ impl DagNodeDispatcher for DashMapWorkerDispatcher {
 struct RedisTracingDispatcher {
     client: redis::Client,
     key_prefix: String,
-}
-
-#[derive(Default)]
-struct InMemoryRunGuard {
-    locks: DashMap<String, (String, u64)>,
-    renew_count: AtomicUsize,
-    next_fencing_token: AtomicUsize,
-}
-
-#[async_trait]
-impl DagRunGuard for InMemoryRunGuard {
-    async fn try_acquire(
-        &self,
-        lock_key: &str,
-        owner: &str,
-        _ttl_ms: u64,
-    ) -> Result<DagRunGuardAcquireOutcome, DagError> {
-        match self.locks.entry(lock_key.to_string()) {
-            Entry::Occupied(existing) => {
-                let (current_owner, token) = existing.get();
-                Ok(DagRunGuardAcquireOutcome {
-                    acquired: current_owner == owner,
-                    fencing_token: Some(*token),
-                })
-            }
-            Entry::Vacant(slot) => {
-                let token = self
-                    .next_fencing_token
-                    .fetch_add(1, Ordering::SeqCst)
-                    .saturating_add(1) as u64;
-                slot.insert((owner.to_string(), token));
-                Ok(DagRunGuardAcquireOutcome {
-                    acquired: true,
-                    fencing_token: Some(token),
-                })
-            }
-        }
-    }
-
-    async fn renew(&self, lock_key: &str, owner: &str, _ttl_ms: u64) -> Result<bool, DagError> {
-        self.renew_count.fetch_add(1, Ordering::SeqCst);
-        let ok = self
-            .locks
-            .get(lock_key)
-            .map(|v| v.value().0 == owner)
-            .unwrap_or(false);
-        Ok(ok)
-    }
-
-    async fn release(&self, lock_key: &str, owner: &str) -> Result<(), DagError> {
-        if let Some(current) = self.locks.get(lock_key) {
-            if current.value().0 != owner {
-                return Ok(());
-            }
-        }
-        self.locks.remove(lock_key);
-        Ok(())
-    }
-}
-
-struct RedisRunGuard {
-    client: redis::Client,
 }
 
 struct FailAfterNRenewRunGuard {
@@ -219,23 +149,22 @@ impl DagRunGuard for FixedTokenRunGuard {
 }
 
 #[derive(Default)]
-struct InMemoryFencingStore {
-    latest_token_by_resource: DashMap<String, u64>,
-}
-
-#[derive(Default)]
 struct InMemoryRunStateStore {
-    snapshots: DashMap<String, DagRunResumeState>,
+    snapshots: DashMap<String, DagRunState>,
 }
 
 #[async_trait]
 impl DagRunStateStore for InMemoryRunStateStore {
     async fn load(&self, run_key: &str) -> Result<Option<DagRunResumeState>, DagError> {
-        Ok(self.snapshots.get(run_key).map(|v| v.clone()))
+        Ok(self
+            .snapshots
+            .get(run_key)
+            .map(|state| state.value().to_resume_state()))
     }
 
     async fn save(&self, run_key: &str, state: &DagRunResumeState) -> Result<(), DagError> {
-        self.snapshots.insert(run_key.to_string(), state.clone());
+        self.snapshots
+            .insert(run_key.to_string(), state.clone().into_run_state());
         Ok(())
     }
 
@@ -243,159 +172,13 @@ impl DagRunStateStore for InMemoryRunStateStore {
         self.snapshots.remove(run_key);
         Ok(())
     }
-}
 
-#[async_trait]
-impl DagFencingStore for InMemoryFencingStore {
-    async fn commit(
-        &self,
-        resource: &str,
-        token: u64,
-        node_id: &str,
-        _payload: &TaskPayload,
-    ) -> Result<(), DagError> {
-        match self.latest_token_by_resource.entry(resource.to_string()) {
-            Entry::Occupied(mut slot) => {
-                if token <= *slot.get() {
-                    return Err(DagError::NodeExecutionFailed {
-                        node_id: node_id.to_string(),
-                        reason: format!(
-                            "stale fencing token: token={} latest={}",
-                            token,
-                            slot.get()
-                        ),
-                    });
-                }
-                slot.insert(token);
-                Ok(())
-            }
-            Entry::Vacant(slot) => {
-                slot.insert(token);
-                Ok(())
-            }
-        }
-    }
-}
-
-#[async_trait]
-impl DagRunGuard for RedisRunGuard {
-    async fn try_acquire(
-        &self,
-        lock_key: &str,
-        owner: &str,
-        ttl_ms: u64,
-    ) -> Result<DagRunGuardAcquireOutcome, DagError> {
-        let mut conn = self
-            .client
-            .get_multiplexed_async_connection()
-            .await
-            .map_err(|e| DagError::RunGuardAcquireFailed {
-                lock_key: lock_key.to_string(),
-                reason: e.to_string(),
-            })?;
-
-        let token_key = format!("{lock_key}:token");
-        let holder_token_key = format!("{lock_key}:holder_token");
-        let script = Script::new(
-            r#"
-            if redis.call('GET', KEYS[1]) then
-                return 0
-            end
-            redis.call('SET', KEYS[1], ARGV[1], 'PX', ARGV[2])
-            local t = redis.call('INCR', KEYS[2])
-            redis.call('SET', KEYS[3], t, 'PX', ARGV[2])
-            return t
-            "#,
-        );
-        let token: i64 = script
-            .key(lock_key)
-            .key(&token_key)
-            .key(&holder_token_key)
-            .arg(owner)
-            .arg(ttl_ms as i64)
-            .invoke_async(&mut conn)
-            .await
-            .map_err(|e| DagError::RunGuardAcquireFailed {
-                lock_key: lock_key.to_string(),
-                reason: e.to_string(),
-            })?;
-
-        if token <= 0 {
-            return Ok(DagRunGuardAcquireOutcome {
-                acquired: false,
-                fencing_token: None,
-            });
-        }
-
-        Ok(DagRunGuardAcquireOutcome {
-            acquired: true,
-            fencing_token: Some(token as u64),
-        })
+    async fn load_state(&self, run_key: &str) -> Result<Option<DagRunState>, DagError> {
+        Ok(self.snapshots.get(run_key).map(|state| state.value().clone()))
     }
 
-    async fn renew(&self, lock_key: &str, owner: &str, ttl_ms: u64) -> Result<bool, DagError> {
-        let mut conn = self
-            .client
-            .get_multiplexed_async_connection()
-            .await
-            .map_err(|e| DagError::RunGuardRenewFailed {
-                lock_key: lock_key.to_string(),
-                reason: e.to_string(),
-            })?;
-
-        let script = Script::new(
-            r#"
-            if redis.call('GET', KEYS[1]) == ARGV[1] then
-                return redis.call('PEXPIRE', KEYS[1], ARGV[2])
-            end
-            return 0
-            "#,
-        );
-        let renewed: i64 = script
-            .key(lock_key)
-            .arg(owner)
-            .arg(ttl_ms as i64)
-            .invoke_async(&mut conn)
-            .await
-            .map_err(|e| DagError::RunGuardRenewFailed {
-                lock_key: lock_key.to_string(),
-                reason: e.to_string(),
-            })?;
-
-        Ok(renewed == 1)
-    }
-
-    async fn release(&self, lock_key: &str, owner: &str) -> Result<(), DagError> {
-        let mut conn = self
-            .client
-            .get_multiplexed_async_connection()
-            .await
-            .map_err(|e| DagError::RunGuardReleaseFailed {
-                lock_key: lock_key.to_string(),
-                reason: e.to_string(),
-            })?;
-
-        let script = Script::new(
-            r#"
-            if redis.call('GET', KEYS[1]) == ARGV[1] then
-                redis.call('DEL', KEYS[2])
-                return redis.call('DEL', KEYS[1])
-            end
-            return 0
-            "#,
-        );
-        let holder_token_key = format!("{lock_key}:holder_token");
-        let _: i64 = script
-            .key(lock_key)
-            .key(&holder_token_key)
-            .arg(owner)
-            .invoke_async(&mut conn)
-            .await
-            .map_err(|e| DagError::RunGuardReleaseFailed {
-                lock_key: lock_key.to_string(),
-                reason: e.to_string(),
-            })?;
-
+    async fn save_state(&self, run_key: &str, state: &DagRunState) -> Result<(), DagError> {
+        self.snapshots.insert(run_key.to_string(), state.clone());
         Ok(())
     }
 }
@@ -433,13 +216,12 @@ impl DagNodeDispatcher for RedisTracingDispatcher {
                 node_id: node_id.to_string(),
                 reason: format!("redis lpush failed: {e}"),
             })?;
-        let _: f64 = conn
-            .hincr(&worker_key, worker, 1)
-            .await
-            .map_err(|e| DagError::NodeExecutionFailed {
+        let _: f64 = conn.hincr(&worker_key, worker, 1).await.map_err(|e| {
+            DagError::NodeExecutionFailed {
                 node_id: node_id.to_string(),
                 reason: format!("redis hincr failed: {e}"),
-            })?;
+            }
+        })?;
 
         executor.start(context).await
     }
@@ -511,13 +293,17 @@ fn add_node_checks_preceding_exists() {
         status: DagNodeStatus::Pending,
         placement: NodePlacement::Local,
         execution_policy: DagNodeExecutionPolicy::default(),
+        runtime_input: None,
         executor: None,
         result: None,
         metadata: std::collections::HashMap::new(),
         error: None,
     });
     let err = dag
-        .add_node(Some(&[fake]), node(|_ctx| async move { Ok(i64_to_payload(1)) }))
+        .add_node(
+            Some(&[fake]),
+            node(|_ctx| async move { Ok(i64_to_payload(1)) }),
+        )
         .err()
         .expect("expected preceding node check to fail");
     assert!(matches!(err, DagError::PrecedingNodeNotFound(_)));
@@ -542,7 +328,10 @@ fn add_node_rejects_end_node_as_predecessor() {
     let mut dag = Dag::new();
     let end = dag.control_end_ptr();
     let err = dag
-        .add_node(Some(&[end]), node(|_ctx| async move { Ok(i64_to_payload(1)) }))
+        .add_node(
+            Some(&[end]),
+            node(|_ctx| async move { Ok(i64_to_payload(1)) }),
+        )
         .err()
         .expect("expected end node predecessor rejection");
     assert!(matches!(err, DagError::InvalidPrecedingControlNode(_)));
@@ -723,10 +512,11 @@ async fn execute_parallel_file_lifecycle_validates_dag_node_trait_genericity() {
                         reason: "missing path payload".to_string(),
                     })?;
 
-                let content = std::fs::read_to_string(&path).map_err(|e| DagError::NodeExecutionFailed {
-                    node_id: "FILE_READ".to_string(),
-                    reason: e.to_string(),
-                })?;
+                let content =
+                    std::fs::read_to_string(&path).map_err(|e| DagError::NodeExecutionFailed {
+                        node_id: "FILE_READ".to_string(),
+                        reason: e.to_string(),
+                    })?;
                 Ok(TaskPayload::from_bytes(content.into_bytes()))
             }),
         )
@@ -762,7 +552,10 @@ async fn execute_parallel_file_lifecycle_validates_dag_node_trait_genericity() {
         .map(payload_to_string)
         .expect("read node output should exist");
     assert_eq!(actual_content, expected_content);
-    assert!(!file_path.exists(), "file should be deleted by FILE_DELETE node");
+    assert!(
+        !file_path.exists(),
+        "file should be deleted by FILE_DELETE node"
+    );
 }
 
 #[tokio::test]
@@ -833,7 +626,11 @@ async fn execute_parallel_fan_in_waits_for_all_upstream() {
 async fn execute_parallel_simulated_full_workflow() {
     let mut dag = Dag::new();
     let source = dag
-        .add_node_with_id(None, "S", node(|_ctx| async move { Ok(i64_to_payload(10)) }))
+        .add_node_with_id(
+            None,
+            "S",
+            node(|_ctx| async move { Ok(i64_to_payload(10)) }),
+        )
         .unwrap();
 
     let x = dag
@@ -937,7 +734,11 @@ async fn execute_parallel_returns_node_failure() {
 async fn execute_parallel_remote_node_requires_dispatcher() {
     let mut dag = Dag::new();
     let n = dag
-        .add_node_with_id(None, "REMOTE", node(|_ctx| async move { Ok(i64_to_payload(1)) }))
+        .add_node_with_id(
+            None,
+            "REMOTE",
+            node(|_ctx| async move { Ok(i64_to_payload(1)) }),
+        )
         .unwrap();
     dag.set_node_placement(
         &n,
@@ -950,13 +751,8 @@ async fn execute_parallel_remote_node_requires_dispatcher() {
     let scheduler = DagScheduler::new(dag);
     let err = scheduler.execute_parallel().await.unwrap_err();
     match err {
-        DagError::RetryExhausted {
-            node_id,
-            last_error: reason,
-            ..
-        } => {
+        DagError::RemoteDispatchNotConfigured(node_id) => {
             assert_eq!(node_id, "REMOTE");
-            assert!(reason.contains("remote dispatch not configured"));
         }
         other => panic!("unexpected error: {other}"),
     }
@@ -978,7 +774,11 @@ async fn execute_parallel_node_panic_is_captured_with_node_context() {
 
     let err = DagScheduler::new(dag).execute_parallel().await.unwrap_err();
     match err {
-        DagError::RetryExhausted { node_id, last_error, .. } => {
+        DagError::RetryExhausted {
+            node_id,
+            last_error,
+            ..
+        } => {
             assert_eq!(node_id, "PANIC_NODE");
             assert!(last_error.contains("node task panicked"));
             assert!(last_error.contains("panic-for-test"));
@@ -998,41 +798,33 @@ async fn execute_parallel_event_driven_allows_cross_layer_overlap() {
         .add_node_with_id(None, "A", node(|_ctx| async move { Ok(i64_to_payload(1)) }))
         .unwrap();
 
-    dag.add_node_with_id(
-        None,
-        "F",
-        {
+    dag.add_node_with_id(None, "F", {
+        let f_done = f_done.clone();
+        node(move |_ctx| {
             let f_done = f_done.clone();
-            node(move |_ctx| {
-                let f_done = f_done.clone();
-                async move {
-                    tokio::time::sleep(Duration::from_millis(250)).await;
-                    f_done.store(true, Ordering::SeqCst);
-                    Ok(i64_to_payload(6))
-                }
-            })
-        },
-    )
+            async move {
+                tokio::time::sleep(Duration::from_millis(250)).await;
+                f_done.store(true, Ordering::SeqCst);
+                Ok(i64_to_payload(6))
+            }
+        })
+    })
     .unwrap();
 
-    dag.add_node_with_id(
-        Some(&[a]),
-        "B",
-        {
+    dag.add_node_with_id(Some(&[a]), "B", {
+        let f_done = f_done.clone();
+        let b_saw_f_done = b_saw_f_done.clone();
+        node(move |_ctx| {
             let f_done = f_done.clone();
             let b_saw_f_done = b_saw_f_done.clone();
-            node(move |_ctx| {
-                let f_done = f_done.clone();
-                let b_saw_f_done = b_saw_f_done.clone();
-                async move {
-                    if f_done.load(Ordering::SeqCst) {
-                        b_saw_f_done.store(true, Ordering::SeqCst);
-                    }
-                    Ok(i64_to_payload(2))
+            async move {
+                if f_done.load(Ordering::SeqCst) {
+                    b_saw_f_done.store(true, Ordering::SeqCst);
                 }
-            })
-        },
-    )
+                Ok(i64_to_payload(2))
+            }
+        })
+    })
     .unwrap();
 
     let scheduler = DagScheduler::new(dag);
@@ -1135,7 +927,11 @@ async fn execute_parallel_ready_queue_dedup_avoids_duplicate_dispatch() {
     let b_attempts = Arc::new(AtomicUsize::new(0));
 
     let a = dag
-        .add_node_with_id(None, "RQ_A", node(|_ctx| async move { Ok(i64_to_payload(1)) }))
+        .add_node_with_id(
+            None,
+            "RQ_A",
+            node(|_ctx| async move { Ok(i64_to_payload(1)) }),
+        )
         .unwrap();
 
     let b = {
@@ -1148,7 +944,9 @@ async fn execute_parallel_ready_queue_dedup_avoids_duplicate_dispatch() {
                 async move {
                     let now = b_attempts.fetch_add(1, Ordering::SeqCst);
                     if now == 0 {
-                        return Err(DagError::InvalidPayloadEnvelope("rq_b_first_fail".to_string()));
+                        return Err(DagError::InvalidPayloadEnvelope(
+                            "rq_b_first_fail".to_string(),
+                        ));
                     }
                     Ok(i64_to_payload(2))
                 }
@@ -1375,8 +1173,12 @@ async fn execute_parallel_singleflight_for_inflight_same_idempotency_key() {
 #[tokio::test]
 async fn execute_parallel_emits_syncable_state() {
     let mut dag = Dag::new();
-    dag.add_node_with_id(None, "S1", node(|_ctx| async move { Ok(i64_to_payload(11)) }))
-        .unwrap();
+    dag.add_node_with_id(
+        None,
+        "S1",
+        node(|_ctx| async move { Ok(i64_to_payload(11)) }),
+    )
+    .unwrap();
 
     let sync_service = SyncService::new(None, "dag_schedule_test".to_string());
     let scheduler = DagScheduler::new(dag).with_sync_service(sync_service.clone());
@@ -1554,10 +1356,18 @@ async fn execute_parallel_dashmap_dispatcher_simulates_multi_worker_execution() 
     let mut dag = Dag::new();
 
     let n1 = dag
-        .add_node_with_id(None, "DW1", node(|_ctx| async move { Ok(i64_to_payload(2)) }))
+        .add_node_with_id(
+            None,
+            "DW1",
+            node(|_ctx| async move { Ok(i64_to_payload(2)) }),
+        )
         .unwrap();
     let n2 = dag
-        .add_node_with_id(None, "DW2", node(|_ctx| async move { Ok(i64_to_payload(3)) }))
+        .add_node_with_id(
+            None,
+            "DW2",
+            node(|_ctx| async move { Ok(i64_to_payload(3)) }),
+        )
         .unwrap();
     dag.set_node_placement(
         &n1,
@@ -1619,6 +1429,129 @@ async fn execute_parallel_dashmap_dispatcher_simulates_multi_worker_execution() 
 }
 
 #[tokio::test]
+async fn execute_parallel_runtime_override_retargets_dispatch_worker() {
+    let mut dag = Dag::new();
+    dag.add_node_with_id(
+        None,
+        "OVERRIDE_STEP",
+        node(|_ctx| async move { Ok(i64_to_payload(11)) }),
+    )
+    .unwrap();
+
+    let dispatcher = Arc::new(DashMapWorkerDispatcher::default());
+    let scheduler = DagScheduler::new(dag)
+        .with_dispatcher(dispatcher.clone())
+        .with_runtime_overrides(vec![DagNodeRuntimeOverride::new("OVERRIDE_STEP")
+            .with_placement(NodePlacement::remote("wg-override"))]);
+
+    let report = scheduler.execute_parallel().await.unwrap();
+
+    assert_eq!(
+        payload_to_i64(
+            report
+                .outputs
+                .get("OVERRIDE_STEP")
+                .expect("override output missing")
+        ),
+        11
+    );
+    assert_eq!(
+        dispatcher
+            .dispatch_count_by_worker
+            .get("wg-override")
+            .map(|value| *value)
+            .unwrap_or_default(),
+        1
+    );
+    assert!(dispatcher.dispatch_count_by_worker.get("local").is_none());
+}
+
+#[tokio::test]
+async fn execute_parallel_runtime_override_updates_retry_policy() {
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let attempts_for_node = attempts.clone();
+
+    let mut dag = Dag::new();
+    dag.add_node_with_id(
+        None,
+        "RETRY_OVERRIDE",
+        node(move |_ctx| {
+            let attempts_for_node = attempts_for_node.clone();
+            async move {
+                let attempt = attempts_for_node.fetch_add(1, Ordering::SeqCst);
+                if attempt == 0 {
+                    Err(DagError::NodeExecutionFailed {
+                        node_id: "RETRY_OVERRIDE".to_string(),
+                        reason: "fail first".to_string(),
+                    })
+                } else {
+                    Ok(i64_to_payload(19))
+                }
+            }
+        }),
+    )
+    .unwrap();
+
+    let scheduler = DagScheduler::new(dag).with_runtime_overrides(vec![
+        DagNodeRuntimeOverride::new("RETRY_OVERRIDE").with_execution_policy(
+            DagNodeExecutionPolicy {
+                max_retries: 1,
+                ..DagNodeExecutionPolicy::default()
+            },
+        ),
+    ]);
+
+    let report = scheduler.execute_parallel().await.unwrap();
+
+    assert_eq!(
+        payload_to_i64(
+            report
+                .outputs
+                .get("RETRY_OVERRIDE")
+                .expect("retry override output missing")
+        ),
+        19
+    );
+    assert_eq!(attempts.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn execute_parallel_runtime_override_injects_runtime_input() {
+    let mut dag = Dag::new();
+    dag.add_node_with_id(
+        None,
+        "RUNTIME_INPUT_STEP",
+        node(|ctx| async move {
+            Ok(ctx
+                .runtime_input
+                .expect("runtime input should be present"))
+        }),
+    )
+    .unwrap();
+
+    let runtime_input = TaskPayload::from_bytes(br#"{\"cursor\":\"abc\"}"#.to_vec())
+        .with_content_type("application/json")
+        .with_meta("schema", "test.runtime_input");
+
+    let report = DagScheduler::new(dag)
+        .with_runtime_overrides(vec![
+            DagNodeRuntimeOverride::new("RUNTIME_INPUT_STEP")
+                .with_runtime_input(runtime_input.clone()),
+        ])
+        .execute_parallel()
+        .await
+        .expect("scheduler should pass runtime input through override");
+
+    assert_eq!(
+        report
+            .outputs
+            .get("RUNTIME_INPUT_STEP")
+            .expect("runtime input output missing"),
+        &runtime_input
+    );
+}
+
+#[tokio::test]
 async fn execute_parallel_redis_dispatcher_records_multi_worker_traffic() {
     let client = match redis::Client::open("redis://127.0.0.1:6379/") {
         Ok(c) => c,
@@ -1639,10 +1572,18 @@ async fn execute_parallel_redis_dispatcher_records_multi_worker_traffic() {
 
     let mut dag = Dag::new();
     let r1 = dag
-        .add_node_with_id(None, "RR1", node(|_ctx| async move { Ok(i64_to_payload(4)) }))
+        .add_node_with_id(
+            None,
+            "RR1",
+            node(|_ctx| async move { Ok(i64_to_payload(4)) }),
+        )
         .unwrap();
     let r2 = dag
-        .add_node_with_id(None, "RR2", node(|_ctx| async move { Ok(i64_to_payload(6)) }))
+        .add_node_with_id(
+            None,
+            "RR2",
+            node(|_ctx| async move { Ok(i64_to_payload(6)) }),
+        )
         .unwrap();
     dag.set_node_placement(
         &r1,
@@ -1686,18 +1627,16 @@ async fn execute_parallel_redis_dispatcher_records_multi_worker_traffic() {
 
     let report = scheduler.execute_parallel().await.unwrap();
     assert_eq!(
-        payload_to_i64(
-            report
-                .outputs
-                .get("RR_SUM")
-                .expect("RR_SUM output missing")
-        ),
+        payload_to_i64(report.outputs.get("RR_SUM").expect("RR_SUM output missing")),
         10
     );
 
     let mut conn = client.get_multiplexed_async_connection().await.unwrap();
     let dispatches: Vec<String> = conn.lrange(&dispatch_key, 0, -1).await.unwrap_or_default();
-    assert!(dispatches.len() >= 2, "redis should record remote dispatches");
+    assert!(
+        dispatches.len() >= 2,
+        "redis should record remote dispatches"
+    );
     let workers: Vec<String> = conn.hkeys(&worker_key).await.unwrap_or_default();
     assert!(workers.iter().any(|w| w == "redis-worker-a"));
     assert!(workers.iter().any(|w| w == "redis-worker-b"));
@@ -1786,7 +1725,8 @@ async fn execute_parallel_redis_singleflight_cross_worker_runs_once() {
         circuit_breaker_failure_threshold: None,
         circuit_breaker_open_ms: 0,
     };
-    dag.set_node_execution_policy(&n1, sf_policy.clone()).unwrap();
+    dag.set_node_execution_policy(&n1, sf_policy.clone())
+        .unwrap();
     dag.set_node_execution_policy(&n2, sf_policy).unwrap();
 
     let dispatcher = Arc::new(RedisTracingDispatcher {
@@ -1917,26 +1857,20 @@ async fn execute_parallel_run_guard_blocks_duplicate_run_in_memory() {
         dag
     }
 
-    let guard = Arc::new(InMemoryRunGuard::default());
+    let guard = Arc::new(InMemoryDagRunGuard::default());
     let scheduler_1 = DagScheduler::new(build_two_node_dag()).with_run_guard(
         guard.clone(),
         "dag:run-lock:mem",
         3_000,
     );
-    let scheduler_2 = DagScheduler::new(build_two_node_dag()).with_run_guard(
-        guard,
-        "dag:run-lock:mem",
-        3_000,
-    );
+    let scheduler_2 =
+        DagScheduler::new(build_two_node_dag()).with_run_guard(guard, "dag:run-lock:mem", 3_000);
 
     let first = tokio::spawn(async move { scheduler_1.execute_parallel().await });
     tokio::time::sleep(Duration::from_millis(15)).await;
     let second = scheduler_2.execute_parallel().await;
 
-    assert!(matches!(
-        second,
-        Err(DagError::RunAlreadyInProgress { .. })
-    ));
+    assert!(matches!(second, Err(DagError::RunAlreadyInProgress { .. })));
 
     let first_report = first
         .await
@@ -1961,7 +1895,7 @@ async fn execute_parallel_run_guard_heartbeat_renews_in_memory_for_long_run() {
     )
     .unwrap();
 
-    let guard = Arc::new(InMemoryRunGuard::default());
+    let guard = Arc::new(InMemoryDagRunGuard::default());
     let scheduler = DagScheduler::new(dag)
         .with_run_guard(guard.clone(), "dag:run-lock:mem:heartbeat", 180)
         .with_run_guard_heartbeat_ms(Some(40));
@@ -2047,7 +1981,7 @@ async fn execute_parallel_run_guard_propagates_fencing_token_into_context() {
     )
     .unwrap();
 
-    let guard = Arc::new(InMemoryRunGuard::default());
+    let guard = Arc::new(InMemoryDagRunGuard::default());
     let scheduler = DagScheduler::new(dag).with_run_guard(guard, "dag:run-lock:mem:token", 3_000);
 
     let report = scheduler.execute_parallel().await.unwrap();
@@ -2073,7 +2007,7 @@ async fn execute_parallel_fencing_store_requires_run_fencing_token() {
     )
     .unwrap();
 
-    let store = Arc::new(InMemoryFencingStore::default());
+    let store = Arc::new(InMemoryDagFencingStore::default());
     let scheduler = DagScheduler::new(dag).with_fencing_store(store, "fencing:resource:1");
 
     let err = scheduler.execute_parallel().await.unwrap_err();
@@ -2094,7 +2028,7 @@ async fn execute_parallel_fencing_store_rejects_stale_token() {
         dag
     };
 
-    let store = Arc::new(InMemoryFencingStore::default());
+    let store = Arc::new(InMemoryDagFencingStore::default());
     let guard_high = Arc::new(FixedTokenRunGuard { token: 10 });
     let guard_low = Arc::new(FixedTokenRunGuard { token: 9 });
 
@@ -2226,11 +2160,23 @@ async fn execute_parallel_redis_fencing_store_rejects_invalid_latest_token_forma
 #[tokio::test]
 async fn execute_parallel_resumes_from_run_state_store_snapshot() {
     let mut dag = Dag::new();
+    dag.metadata
+        .insert("profile_version".to_string(), "7".to_string());
+    dag.metadata
+        .insert("dag_version".to_string(), "dag-v1".to_string());
+    let a_runs = Arc::new(AtomicUsize::new(0));
+    let a_runs_clone = a_runs.clone();
     let a = dag
         .add_node_with_id(
             None,
             "RS_A",
-            node(|_ctx| async move { Ok(i64_to_payload(10)) }),
+            node(move |_ctx| {
+                let a_runs = a_runs_clone.clone();
+                async move {
+                    a_runs.fetch_add(1, Ordering::SeqCst);
+                    Ok(i64_to_payload(10))
+                }
+            }),
         )
         .unwrap();
     dag.add_node_with_id(
@@ -2254,6 +2200,9 @@ async fn execute_parallel_resumes_from_run_state_store_snapshot() {
             &DagRunResumeState {
                 run_id: "resume-run-1".to_string(),
                 run_fencing_token: Some(123),
+                runtime_identity: std::iter::once(("profile_version".to_string(), "7".to_string()))
+                    .chain(std::iter::once(("dag_version".to_string(), "dag-v1".to_string())))
+                    .collect(),
                 succeeded_outputs: std::iter::once(("RS_A".to_string(), i64_to_payload(10)))
                     .collect(),
             },
@@ -2272,7 +2221,77 @@ async fn execute_parallel_resumes_from_run_state_store_snapshot() {
         payload_to_i64(report.outputs.get("RS_B").expect("RS_B missing")),
         15
     );
+    assert_eq!(a_runs.load(Ordering::SeqCst), 0);
     assert!(store.load("resume-key-1").await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn execute_parallel_discards_resume_snapshot_when_runtime_identity_changes() {
+    let mut dag = Dag::new();
+    dag.metadata
+        .insert("profile_version".to_string(), "8".to_string());
+    dag.metadata
+        .insert("dag_version".to_string(), "dag-v2".to_string());
+    let a_runs = Arc::new(AtomicUsize::new(0));
+    let a_runs_clone = a_runs.clone();
+    let a = dag
+        .add_node_with_id(
+            None,
+            "RI_A",
+            node(move |_ctx| {
+                let a_runs = a_runs_clone.clone();
+                async move {
+                    a_runs.fetch_add(1, Ordering::SeqCst);
+                    Ok(i64_to_payload(20))
+                }
+            }),
+        )
+        .unwrap();
+    dag.add_node_with_id(
+        Some(&[a]),
+        "RI_B",
+        node(|ctx| async move {
+            let v = ctx
+                .upstream_outputs
+                .get("RI_A")
+                .map(payload_to_i64)
+                .unwrap_or(0);
+            Ok(i64_to_payload(v + 5))
+        }),
+    )
+    .unwrap();
+
+    let store = Arc::new(InMemoryRunStateStore::default());
+    store
+        .save(
+            "resume-key-identity-1",
+            &DagRunResumeState {
+                run_id: "resume-run-identity-1".to_string(),
+                run_fencing_token: Some(321),
+                runtime_identity: std::iter::once(("profile_version".to_string(), "7".to_string()))
+                    .chain(std::iter::once(("dag_version".to_string(), "dag-v1".to_string())))
+                    .collect(),
+                succeeded_outputs: std::iter::once(("RI_A".to_string(), i64_to_payload(10)))
+                    .collect(),
+            },
+        )
+        .await
+        .unwrap();
+
+    let scheduler =
+        DagScheduler::new(dag).with_run_state_store(store.clone(), "resume-key-identity-1");
+    let report = scheduler.execute_parallel().await.unwrap();
+
+    assert_eq!(
+        payload_to_i64(report.outputs.get("RI_A").expect("RI_A missing")),
+        20
+    );
+    assert_eq!(
+        payload_to_i64(report.outputs.get("RI_B").expect("RI_B missing")),
+        25
+    );
+    assert_eq!(a_runs.load(Ordering::SeqCst), 1);
+    assert!(store.load("resume-key-identity-1").await.unwrap().is_none());
 }
 
 #[tokio::test]
@@ -2335,8 +2354,29 @@ async fn execute_parallel_failure_snapshot_allows_resume_without_rerunning_succe
         .expect("snapshot should be persisted on failure");
     assert!(snap.succeeded_outputs.contains_key("FR_A"));
     assert!(!snap.succeeded_outputs.contains_key("FR_B"));
+    let rich_state = store
+        .load_state("resume-key-fail-1")
+        .await
+        .unwrap()
+        .expect("rich state should be persisted on failure");
+    assert_eq!(rich_state.completed_nodes, vec!["FR_A".to_string()]);
+    assert_eq!(
+        rich_state
+            .node_states
+            .get("FR_A")
+            .map(|node| node.status.clone()),
+        Some(DagNodeStatus::Succeeded)
+    );
+    assert_eq!(
+        rich_state
+            .node_states
+            .get("FR_B")
+            .map(|node| node.status.clone()),
+        Some(DagNodeStatus::Failed)
+    );
 
-    let scheduler_second = DagScheduler::new(dag).with_run_state_store(store.clone(), "resume-key-fail-1");
+    let scheduler_second =
+        DagScheduler::new(dag).with_run_state_store(store.clone(), "resume-key-fail-1");
     let report = scheduler_second.execute_parallel().await.unwrap();
     assert_eq!(
         payload_to_i64(report.outputs.get("FR_B").expect("FR_B missing")),
@@ -2350,6 +2390,84 @@ async fn execute_parallel_failure_snapshot_allows_resume_without_rerunning_succe
     assert_eq!(b_runs.load(Ordering::SeqCst), 2);
 
     assert!(store.load("resume-key-fail-1").await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn execute_parallel_stop_signal_prevents_new_dispatch_and_persists_state() {
+    let mut dag = Dag::new();
+    let a_runs = Arc::new(AtomicUsize::new(0));
+    let b_runs = Arc::new(AtomicUsize::new(0));
+
+    let a_runs_clone = a_runs.clone();
+    dag.add_node_with_id(
+        None,
+        "STOP_A",
+        node(move |_ctx| {
+            let a_runs = a_runs_clone.clone();
+            async move {
+                a_runs.fetch_add(1, Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_millis(120)).await;
+                Ok(i64_to_payload(11))
+            }
+        }),
+    )
+    .unwrap();
+
+    let b_runs_clone = b_runs.clone();
+    dag.add_node_with_id(
+        None,
+        "STOP_B",
+        node(move |_ctx| {
+            let b_runs = b_runs_clone.clone();
+            async move {
+                b_runs.fetch_add(1, Ordering::SeqCst);
+                Ok(i64_to_payload(22))
+            }
+        }),
+    )
+    .unwrap();
+
+    let store = Arc::new(InMemoryRunStateStore::default());
+    let scheduler = DagScheduler::new(dag)
+        .with_options(DagSchedulerOptions {
+            max_in_flight: 1,
+            ..DagSchedulerOptions::default()
+        })
+        .with_run_state_store(store.clone(), "stop-key-1");
+
+    let scheduler_task = tokio::spawn(async move { scheduler.execute_parallel().await });
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    store.request_stop(
+        "stop-key-1",
+        DagStopSignal {
+            requested_by: "tester".to_string(),
+            reason: "manual stop".to_string(),
+            requested_at_ms: 1,
+        },
+    )
+    .await
+    .unwrap();
+
+    let err = scheduler_task
+        .await
+        .expect("scheduler join should succeed")
+        .unwrap_err();
+    assert!(matches!(err, DagError::RunStopped { .. }));
+    assert_eq!(a_runs.load(Ordering::SeqCst), 1);
+    assert_eq!(b_runs.load(Ordering::SeqCst), 0);
+
+    let state = store
+        .load_state("stop-key-1")
+        .await
+        .unwrap()
+        .expect("stopped state should persist");
+    assert_eq!(state.status, DagRunStatus::Stopped);
+    assert_eq!(state.completed_nodes, vec!["STOP_A".to_string()]);
+    assert_eq!(state.ready_nodes, vec!["STOP_B".to_string()]);
+    assert_eq!(
+        state.stop_signal.as_ref().map(|signal| signal.reason.as_str()),
+        Some("manual stop")
+    );
 }
 
 #[tokio::test]
@@ -2402,20 +2520,34 @@ async fn execute_parallel_real_redis_remote_dispatch_worker_flow() {
 
     let mut dag = Dag::new();
     let src = dag
-        .add_node_with_id(None, "RR_SRC", node(|_ctx| async move { Ok(i64_to_payload(10)) }))
+        .add_node_with_id(
+            None,
+            "RR_SRC",
+            node(|_ctx| async move { Ok(i64_to_payload(10)) }),
+        )
         .unwrap();
     let a = dag
         .add_node_with_id(
             Some(&[src.clone()]),
             "RR_A",
-            node(|_ctx| async move { Err(DagError::NodeExecutionFailed { node_id: "RR_A".into(), reason: "should not execute locally".into() }) }),
+            node(|_ctx| async move {
+                Err(DagError::NodeExecutionFailed {
+                    node_id: "RR_A".into(),
+                    reason: "should not execute locally".into(),
+                })
+            }),
         )
         .unwrap();
     let b = dag
         .add_node_with_id(
             Some(&[src]),
             "RR_B",
-            node(|_ctx| async move { Err(DagError::NodeExecutionFailed { node_id: "RR_B".into(), reason: "should not execute locally".into() }) }),
+            node(|_ctx| async move {
+                Err(DagError::NodeExecutionFailed {
+                    node_id: "RR_B".into(),
+                    reason: "should not execute locally".into(),
+                })
+            }),
         )
         .unwrap();
     dag.set_node_placement(
@@ -2531,6 +2663,7 @@ async fn execute_parallel_real_redis_remote_dispatch_dedupes_same_attempt_reques
         attempt: 0,
         upstream_nodes: vec![],
         upstream_outputs: Default::default(),
+        runtime_input: None,
         layer_index: 1,
     };
     let local_executor = node(|_ctx| async move {
@@ -2633,6 +2766,7 @@ async fn execute_parallel_real_redis_remote_dispatch_dedupes_long_running_with_s
         attempt: 0,
         upstream_nodes: vec![],
         upstream_outputs: Default::default(),
+        runtime_input: None,
         layer_index: 1,
     };
     let local_executor = node(|_ctx| async move {
@@ -2747,6 +2881,7 @@ async fn execute_parallel_real_redis_remote_worker_retries_transient_failure() {
         attempt: 0,
         upstream_nodes: vec![],
         upstream_outputs: Default::default(),
+        runtime_input: None,
         layer_index: 1,
     };
     let local_executor = node(|_ctx| async move {
@@ -2808,6 +2943,7 @@ async fn execute_parallel_real_redis_remote_worker_reclaims_stale_processing_job
         attempt: 0,
         upstream_nodes: vec![],
         upstream_outputs: Default::default(),
+        runtime_input: None,
         layer_index: 1,
     };
     let local_executor = node(|_ctx| async move {
@@ -2852,7 +2988,10 @@ async fn execute_parallel_real_redis_remote_worker_reclaims_stale_processing_job
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    assert!(moved, "expected to move one queued job into stale processing");
+    assert!(
+        moved,
+        "expected to move one queued job into stale processing"
+    );
 
     let _ = redis::cmd("SADD")
         .arg(&workers_key)
@@ -2921,6 +3060,7 @@ async fn execute_parallel_real_redis_remote_worker_skips_canceled_request_before
         attempt: 0,
         upstream_nodes: vec![],
         upstream_outputs: Default::default(),
+        runtime_input: None,
         layer_index: 1,
     };
     let local_executor = node(|_ctx| async move {
@@ -2934,9 +3074,11 @@ async fn execute_parallel_real_redis_remote_worker_skips_canceled_request_before
         .dispatch("CANCEL_NODE", &placement, local_executor, context)
         .await
         .unwrap_err();
-    assert!(dispatch_err
-        .to_string()
-        .contains("remote dispatch response timeout"));
+    assert!(
+        dispatch_err
+            .to_string()
+            .contains("remote dispatch response timeout")
+    );
 
     let stop = Arc::new(AtomicBool::new(false));
     let execute_count_clone = execute_count.clone();
@@ -2967,7 +3109,8 @@ async fn execute_parallel_real_redis_remote_worker_skips_canceled_request_before
 }
 
 #[tokio::test]
-async fn execute_parallel_real_redis_remote_worker_canceled_request_not_dlq_even_if_delivery_counter_high() {
+async fn execute_parallel_real_redis_remote_worker_canceled_request_not_dlq_even_if_delivery_counter_high()
+ {
     let client = match redis::Client::open("redis://127.0.0.1:6379/") {
         Ok(c) => c,
         Err(_) => return,
@@ -3133,16 +3276,16 @@ async fn execute_parallel_real_redis_remote_dispatch_multi_dag_concurrent() {
                 .add_node_with_id(
                     Some(&[src]),
                     "MR_STEP",
-                    node(|_ctx| async move { Err(DagError::NodeExecutionFailed { node_id: "MR_STEP".into(), reason: "should not execute locally".into() }) }),
+                    node(|_ctx| async move {
+                        Err(DagError::NodeExecutionFailed {
+                            node_id: "MR_STEP".into(),
+                            reason: "should not execute locally".into(),
+                        })
+                    }),
                 )
                 .unwrap();
-            dag.set_node_placement(
-                &step,
-                NodePlacement::Remote {
-                    worker_group,
-                },
-            )
-            .unwrap();
+            dag.set_node_placement(&step, NodePlacement::Remote { worker_group })
+                .unwrap();
 
             let scheduler = DagScheduler::new(dag)
                 .with_dispatcher(dispatcher)
@@ -3210,28 +3353,17 @@ async fn execute_parallel_redis_run_guard_blocks_duplicate_then_allows_reentry()
     }
 
     let lock_key = format!("dag:run-lock:redis:{}", Uuid::now_v7());
-    let guard = Arc::new(RedisRunGuard {
-        client: client.clone(),
-    });
+    let guard = Arc::new(RedisDagRunGuard::new(client.clone()));
 
-    let scheduler_1 = DagScheduler::new(build_two_node_dag()).with_run_guard(
-        guard.clone(),
-        &lock_key,
-        5_000,
-    );
-    let scheduler_2 = DagScheduler::new(build_two_node_dag()).with_run_guard(
-        guard.clone(),
-        &lock_key,
-        5_000,
-    );
+    let scheduler_1 =
+        DagScheduler::new(build_two_node_dag()).with_run_guard(guard.clone(), &lock_key, 5_000);
+    let scheduler_2 =
+        DagScheduler::new(build_two_node_dag()).with_run_guard(guard.clone(), &lock_key, 5_000);
 
     let first = tokio::spawn(async move { scheduler_1.execute_parallel().await });
     tokio::time::sleep(Duration::from_millis(15)).await;
     let second = scheduler_2.execute_parallel().await;
-    assert!(matches!(
-        second,
-        Err(DagError::RunAlreadyInProgress { .. })
-    ));
+    assert!(matches!(second, Err(DagError::RunAlreadyInProgress { .. })));
 
     let first_report = first
         .await
@@ -3242,11 +3374,8 @@ async fn execute_parallel_redis_run_guard_blocks_duplicate_then_allows_reentry()
         5
     );
 
-    let scheduler_3 = DagScheduler::new(build_two_node_dag()).with_run_guard(
-        guard,
-        &lock_key,
-        5_000,
-    );
+    let scheduler_3 =
+        DagScheduler::new(build_two_node_dag()).with_run_guard(guard, &lock_key, 5_000);
     let third_report = scheduler_3
         .execute_parallel()
         .await
@@ -3284,9 +3413,7 @@ async fn execute_parallel_redis_run_guard_heartbeat_prevents_ttl_expiry() {
     .unwrap();
 
     let lock_key = format!("dag:run-lock:redis:heartbeat:{}", Uuid::now_v7());
-    let guard = Arc::new(RedisRunGuard {
-        client: client.clone(),
-    });
+    let guard = Arc::new(RedisDagRunGuard::new(client.clone()));
     let scheduler_1 = DagScheduler::new(dag)
         .with_run_guard(guard.clone(), &lock_key, 120)
         .with_run_guard_heartbeat_ms(Some(40));
@@ -3306,10 +3433,7 @@ async fn execute_parallel_redis_run_guard_heartbeat_prevents_ttl_expiry() {
         .with_run_guard(guard, &lock_key, 120)
         .with_run_guard_heartbeat_ms(Some(40));
     let second = scheduler_2.execute_parallel().await;
-    assert!(matches!(
-        second,
-        Err(DagError::RunAlreadyInProgress { .. })
-    ));
+    assert!(matches!(second, Err(DagError::RunAlreadyInProgress { .. })));
 
     let first_report = first
         .await

@@ -14,7 +14,9 @@ async fn build_engine_with_logger(enable_logger: bool) -> Engine {
 
     let _logging_enabled = enable_logger;
 
-    let engine: Engine = Engine::new(Arc::clone(&state), None).await;
+    let engine: Engine = Engine::new(Arc::clone(&state), None)
+        .await
+        .expect("build tests engine");
     for middleware in middleware::register_data_middlewares(){
         engine.register_data_middleware(middleware).await;
     }
@@ -56,6 +58,7 @@ mod tests {
     use mocra::common::model::download_config::DownloadConfig;
     use mocra::common::model::cookies::CookieItem;
     use mocra::common::model::{Cookies, Headers, Request};
+    use mocra::common::state::State;
     use mocra::downloader::request_downloader::RequestDownloader;
     use mocra::downloader::Downloader;
     use mocra::utils::distributed_rate_limit::{DistributedSlidingWindowRateLimiter, RateLimitConfig};
@@ -122,6 +125,11 @@ mod tests {
             Some(Duration::from_secs(120)),
             None,
         );
+
+        if cache_a.ping().await.is_err() || cache_b.ping().await.is_err() {
+            eprintln!("skip session redis roundtrip test: redis is unavailable");
+            return;
+        }
 
         let session_key = format!("{}", Uuid::new_v4());
 
@@ -239,20 +247,30 @@ mod tests {
         )))
     }
 
-    fn create_downloader(cache_service: Arc<CacheService>) -> Arc<RequestDownloader> {
+    async fn create_downloader(cache_service: Arc<CacheService>) -> Arc<RequestDownloader> {
+        let namespace = "tests-session-e2e";
         let locker = Arc::new(DistributedLockManager::new(None, "tests-session-e2e"));
         let rate_limit_config = RateLimitConfig::new(50.0);
         let limiter = Arc::new(DistributedSlidingWindowRateLimiter::new(
             None,
             locker.clone(),
-            "tests-session-e2e",
+            namespace,
             rate_limit_config,
         ));
+        let config_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("config.toml");
+        let state = State::try_new(config_path.to_str().expect("config path to str"))
+            .await
+            .expect("build tests session state");
+        let profile_store = state.profile_store.clone();
 
         Arc::new(RequestDownloader::new(
             limiter,
             locker,
             cache_service,
+            namespace,
+            None,
+            profile_store,
+            None,
             64,
             1024 * 1024,
         ))
@@ -280,7 +298,7 @@ mod tests {
             return;
         }
 
-        let downloader = create_downloader(cache_service);
+        let downloader = create_downloader(cache_service).await;
         let (addr, shutdown_tx) = start_session_test_server().await;
         let base_url = format!("http://{}", addr);
 

@@ -1,6 +1,6 @@
-use sea_orm::{Database, DatabaseConnection};
-use once_cell::sync::Lazy;
 use dashmap::DashMap;
+use once_cell::sync::Lazy;
+use sea_orm::{Database, DatabaseConnection};
 
 // Global cache for connection pools
 static CONNECTION_POOLS: Lazy<DashMap<String, DatabaseConnection>> = Lazy::new(|| DashMap::new());
@@ -65,15 +65,16 @@ pub async fn db_connection(
     if let Some(s) = schema {
         db_options.set_schema_search_path(s);
     }
-    db_options.max_connections(pool_size.unwrap_or(10))
+    db_options
+        .max_connections(pool_size.unwrap_or(10))
         .sqlx_logging(true)
         .sqlx_logging_level(log::LevelFilter::Trace);
 
-    match Database::connect(db_options).await{
+    match Database::connect(db_options).await {
         Ok(db) => {
             CONNECTION_POOLS.insert(key, db.clone());
             Some(db)
-        },
+        }
         Err(e) => {
             log::error!("Failed to connect to database: {}", e);
             None

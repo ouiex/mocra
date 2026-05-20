@@ -120,7 +120,7 @@ async fn local_backend_zset_and_script_interfaces_behave_as_expected() {
     assert!(
         script_err
             .to_string()
-            .contains("Lua scripts are only supported in distributed Redis mode")
+            .contains("Lua scripts require a cache-backed Redis backend")
     );
 }
 
@@ -159,8 +159,14 @@ async fn redis_and_single_node_set_get_behave_consistently() {
         .await
         .expect("redis set should succeed");
 
-    let local_value = local_cache.get(&key).await.expect("local get should succeed");
-    let redis_value = redis_cache.get(&key).await.expect("redis get should succeed");
+    let local_value = local_cache
+        .get(&key)
+        .await
+        .expect("local get should succeed");
+    let redis_value = redis_cache
+        .get(&key)
+        .await
+        .expect("redis get should succeed");
     assert_eq!(local_value, redis_value);
 
     local_cache

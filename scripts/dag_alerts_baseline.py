@@ -47,6 +47,17 @@ INSTANT_QUERIES = {
     "run_state_save_error_by_stage": 'sum by (stage) (rate(dag_run_state_store_total{result="save_error"}[5m]))',
 }
 
+SCHEDULER_RANGE_QUERIES = {
+    "scheduler_ingress_fallback_ratio": 'sum(rate(mocra_scheduler_ingress_total{result="fallback"}[5m])) / clamp_min(sum(rate(mocra_scheduler_ingress_total[5m])), 0.001)',
+    "scheduler_ingress_failure_gate_blocked": 'sum(rate(mocra_scheduler_ingress_total{result="fallback",reason="failure_gate_blocked"}[5m]))',
+    "scheduler_ingress_stage_errors": 'sum(rate(mocra_stage_errors_total{pipeline="engine",stage="scheduler_ingress"}[5m]))',
+}
+
+SCHEDULER_INSTANT_QUERIES = {
+    "scheduler_ingress_fallback_by_path_reason_module": 'sum by (path, reason, module) (rate(mocra_scheduler_ingress_total{result="fallback"}[5m]))',
+    "scheduler_ingress_result_by_path": 'sum by (path, result) (rate(mocra_scheduler_ingress_total[5m]))',
+}
+
 
 def _http_get_json(url: str) -> dict:
     req = urllib.request.Request(url, headers={"Accept": "application/json"})
@@ -137,6 +148,102 @@ def build_verdicts(range_stats: Dict[str, Dict[str, float]], profile: str) -> Di
     return {name: verdict(name, stats, profile) for name, stats in range_stats.items()}
 
 
+def classify_alert_signals(
+    range_stats: Dict[str, Dict[str, float]],
+    scheduler_range_stats: Dict[str, Dict[str, float]],
+    profile: str,
+) -> Dict[str, List[Dict[str, float | str]]]:
+    thresholds = PROFILE_THRESHOLDS[profile]
+
+    cutover = [
+        {
+            "metric": "scheduler_ingress_fallback_ratio",
+            "avg": scheduler_range_stats["scheduler_ingress_fallback_ratio"]["avg"],
+            "p95": scheduler_range_stats["scheduler_ingress_fallback_ratio"]["p95"],
+            "max": scheduler_range_stats["scheduler_ingress_fallback_ratio"]["max"],
+            "status": "ATTENTION"
+            if scheduler_range_stats["scheduler_ingress_fallback_ratio"]["max"] > 0.05
+            else "OK",
+        },
+        {
+            "metric": "scheduler_ingress_failure_gate_blocked",
+            "avg": scheduler_range_stats["scheduler_ingress_failure_gate_blocked"]["avg"],
+            "p95": scheduler_range_stats["scheduler_ingress_failure_gate_blocked"]["p95"],
+            "max": scheduler_range_stats["scheduler_ingress_failure_gate_blocked"]["max"],
+            "status": "ATTENTION"
+            if scheduler_range_stats["scheduler_ingress_failure_gate_blocked"]["max"] > 0.0
+            else "OK",
+        },
+        {
+            "metric": "scheduler_ingress_stage_errors",
+            "avg": scheduler_range_stats["scheduler_ingress_stage_errors"]["avg"],
+            "p95": scheduler_range_stats["scheduler_ingress_stage_errors"]["p95"],
+            "max": scheduler_range_stats["scheduler_ingress_stage_errors"]["max"],
+            "status": "ATTENTION"
+            if scheduler_range_stats["scheduler_ingress_stage_errors"]["avg"] > 1.0
+            else "OK",
+        },
+        {
+            "metric": "snapshot_save_errors",
+            "avg": range_stats["snapshot_save_errors"]["avg"],
+            "p95": range_stats["snapshot_save_errors"]["p95"],
+            "max": range_stats["snapshot_save_errors"]["max"],
+            "status": "ATTENTION" if range_stats["snapshot_save_errors"]["max"] > 0.0 else "OK",
+        },
+    ]
+
+    business_failure = [
+        {
+            "metric": "critical_events",
+            "avg": range_stats["critical_events"]["avg"],
+            "p95": range_stats["critical_events"]["p95"],
+            "max": range_stats["critical_events"]["max"],
+            "status": "ATTENTION" if range_stats["critical_events"]["max"] > 0.0 else "OK",
+        },
+        {
+            "metric": "warning_events",
+            "avg": range_stats["warning_events"]["avg"],
+            "p95": range_stats["warning_events"]["p95"],
+            "max": range_stats["warning_events"]["max"],
+            "status": "ATTENTION"
+            if range_stats["warning_events"]["avg"] > thresholds["warning_rate_per_sec"]
+            else "OK",
+        },
+        {
+            "metric": "non_retryable_errors",
+            "avg": range_stats["non_retryable_errors"]["avg"],
+            "p95": range_stats["non_retryable_errors"]["p95"],
+            "max": range_stats["non_retryable_errors"]["max"],
+            "status": "ATTENTION"
+            if range_stats["non_retryable_errors"]["avg"] > thresholds["non_retryable_rate_per_sec"]
+            else "OK",
+        },
+        {
+            "metric": "retryable_errors",
+            "avg": range_stats["retryable_errors"]["avg"],
+            "p95": range_stats["retryable_errors"]["p95"],
+            "max": range_stats["retryable_errors"]["max"],
+            "status": "ATTENTION"
+            if range_stats["retryable_errors"]["avg"] > thresholds["retryable_rate_per_sec"]
+            else "OK",
+        },
+    ]
+
+    return {
+        "cutover": cutover,
+        "business_failure": business_failure,
+    }
+
+
+def render_classification_rows(rows: List[Dict[str, float | str]]) -> List[str]:
+    lines = ["| Metric | Avg | P95 | Max | Status |", "|---|---:|---:|---:|---|"]
+    for row in rows:
+        lines.append(
+            f"| {row['metric']} | {float(row['avg']):.4f} | {float(row['p95']):.4f} | {float(row['max']):.4f} | {row['status']} |"
+        )
+    return lines
+
+
 def evaluate_rollout_gates(range_stats: Dict[str, Dict[str, float]], profile: str) -> List[str]:
     thresholds = PROFILE_THRESHOLDS[profile]
     failures: List[str] = []
@@ -188,6 +295,9 @@ def build_report(
     step_sec: int,
     range_stats: Dict[str, Dict[str, float]],
     instant_rows: Dict[str, List[Tuple[Dict[str, str], float]]],
+    scheduler_range_stats: Dict[str, Dict[str, float]],
+    scheduler_instant_rows: Dict[str, List[Tuple[Dict[str, str], float]]],
+    alert_classification: Dict[str, List[Dict[str, float | str]]],
 ) -> str:
     now = dt.datetime.utcnow()
     start = now - dt.timedelta(hours=lookback_hours)
@@ -211,6 +321,17 @@ def build_report(
         lines.append(
             f"| {name} | {st['avg']:.4f} | {st['p95']:.4f} | {st['max']:.4f} | {verdict(name, st, profile)} |"
         )
+    lines.append("")
+
+    lines.append("## Alert Classification")
+    lines.append("")
+    lines.append("### Cutover Signals")
+    lines.append("")
+    lines.extend(render_classification_rows(alert_classification["cutover"]))
+    lines.append("")
+    lines.append("### Business Failure Signals")
+    lines.append("")
+    lines.extend(render_classification_rows(alert_classification["business_failure"]))
     lines.append("")
 
     lines.append("## Critical Events By Source/Event")
@@ -253,11 +374,44 @@ def build_report(
     )
     lines.append("")
 
+    lines.append("## Scheduler Ingress Fallback Summary")
+    lines.append("")
+    lines.append("| Metric | Avg | P95 | Max |")
+    lines.append("|---|---:|---:|---:|")
+    for name in SCHEDULER_RANGE_QUERIES.keys():
+        st = scheduler_range_stats[name]
+        lines.append(
+            f"| {name} | {st['avg']:.4f} | {st['p95']:.4f} | {st['max']:.4f} |"
+        )
+    lines.append("")
+
+    lines.append("## Scheduler Ingress Fallback Hotspots By Path/Reason/Module")
+    lines.append("")
+    lines.extend(
+        render_table_rows(
+            scheduler_instant_rows["scheduler_ingress_fallback_by_path_reason_module"],
+            ["path", "reason", "module"],
+        )
+    )
+    lines.append("")
+
+    lines.append("## Scheduler Ingress Result Mix By Path")
+    lines.append("")
+    lines.extend(
+        render_table_rows(
+            scheduler_instant_rows["scheduler_ingress_result_by_path"],
+            ["path", "result"],
+        )
+    )
+    lines.append("")
+
     lines.append("## Calibration Notes")
     lines.append("")
     lines.append("- Compare Avg/P95 with docs/alerts/dag_alerts_calibration_runbook.md environment profile.")
     lines.append("- If critical_events max > 0, treat as immediate rollback gate in gray rollout.")
     lines.append("- If warning/non-retryable stays above profile for 24h, keep preview mode and postpone cutover.")
+    lines.append("- Scheduler ingress fallback daily report must retain hotspot rows grouped by path/reason/module for operator review.")
+    lines.append("- Treat scheduler fallback / failure gate / scheduler_ingress stage errors as cutover signals; treat critical/warning/non-retryable/retryable as business failure signals.")
     lines.append("")
 
     return "\n".join(lines)
@@ -314,9 +468,20 @@ def main() -> int:
         values = query_range(args.prom_url, expr, start_ts, end_ts, args.step_seconds)
         range_stats[key] = summarize(values)
 
+    scheduler_range_stats: Dict[str, Dict[str, float]] = {}
+    for key, expr in SCHEDULER_RANGE_QUERIES.items():
+        values = query_range(args.prom_url, expr, start_ts, end_ts, args.step_seconds)
+        scheduler_range_stats[key] = summarize(values)
+
     instant_rows: Dict[str, List[Tuple[Dict[str, str], float]]] = {}
     for key, expr in INSTANT_QUERIES.items():
         instant_rows[key] = query_instant(args.prom_url, expr)
+
+    scheduler_instant_rows: Dict[str, List[Tuple[Dict[str, str], float]]] = {}
+    for key, expr in SCHEDULER_INSTANT_QUERIES.items():
+        scheduler_instant_rows[key] = query_instant(args.prom_url, expr)
+
+    alert_classification = classify_alert_signals(range_stats, scheduler_range_stats, args.profile)
 
     report = build_report(
         args.prom_url,
@@ -325,6 +490,9 @@ def main() -> int:
         args.step_seconds,
         range_stats,
         instant_rows,
+        scheduler_range_stats,
+        scheduler_instant_rows,
+        alert_classification,
     )
 
     verdicts = build_verdicts(range_stats, args.profile)
@@ -349,8 +517,28 @@ def main() -> int:
             "lookback_hours": args.lookback_hours,
             "step_seconds": args.step_seconds,
             "range_stats": range_stats,
+            "scheduler_range_stats": scheduler_range_stats,
             "verdicts": verdicts,
             "gate_failures": gate_failures,
+            "scheduler_hotspots": [
+                {
+                    "labels": metric,
+                    "value": value,
+                }
+                for metric, value in scheduler_instant_rows[
+                    "scheduler_ingress_fallback_by_path_reason_module"
+                ]
+            ],
+            "scheduler_result_mix": [
+                {
+                    "labels": metric,
+                    "value": value,
+                }
+                for metric, value in scheduler_instant_rows[
+                    "scheduler_ingress_result_by_path"
+                ]
+            ],
+            "alert_classification": alert_classification,
             "output": str(output_path),
             "archive": str(archive_path),
         }

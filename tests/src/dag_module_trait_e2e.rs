@@ -1,9 +1,10 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use serde_json::{Map, Value};
 use tokio::signal;
+use mocra::common::interface::{NodeGenerateContext, NodeParseContext};
 use mocra::common::model::CronConfig;
+use mocra::common::model::NodeParseOutput;
 use mocra::prelude::*;
 use mocra::prelude::common::ToSyncBoxStream;
 use mocra::common::state::State;
@@ -24,23 +25,13 @@ struct LoginNode;
 
 #[async_trait]
 impl ModuleNodeTrait for LoginNode {
-    async fn generate(
-        &self,
-        _config: Arc<ModuleConfig>,
-        _params: Map<String, Value>,
-        _login_info: Option<LoginInfo>,
-    ) -> Result<SyncBoxStream<'static, Request>> {
+    async fn generate(&self, _ctx: NodeGenerateContext<'_>) -> Result<SyncBoxStream<'static, Request>> {
         let req = Request::new("http://127.0.0.1:8000", RequestMethod::Post.as_ref());
         vec![req].into_stream_ok()
     }
 
-    async fn parser(
-        &self,
-        response: Response,
-        _config: Option<Arc<ModuleConfig>>,
-    ) -> Result<TaskOutputEvent> {
-        let task = TaskParserEvent::from(&response).add_meta("from", "login_node");
-        Ok(TaskOutputEvent::default().with_task(task))
+    async fn parser(&self, _response: Response, _ctx: NodeParseContext<'_>) -> Result<NodeParseOutput> {
+        Ok(NodeParseOutput::default())
     }
 
     fn stable_node_key(&self) -> &'static str {
@@ -54,23 +45,13 @@ struct CateListNode;
 
 #[async_trait]
 impl ModuleNodeTrait for CateListNode {
-    async fn generate(
-        &self,
-        _config: Arc<ModuleConfig>,
-        _params: Map<String, Value>,
-        _login_info: Option<LoginInfo>,
-    ) -> Result<SyncBoxStream<'static, Request>> {
+    async fn generate(&self, _ctx: NodeGenerateContext<'_>) -> Result<SyncBoxStream<'static, Request>> {
         let req = Request::new("http://127.0.0.1:8000", RequestMethod::Get.as_ref());
         vec![req].into_stream_ok()
     }
 
-    async fn parser(
-        &self,
-        response: Response,
-        _config: Option<Arc<ModuleConfig>>,
-    ) -> Result<TaskOutputEvent> {
-        let task = TaskParserEvent::from(&response).add_meta("from", "cate_list_node");
-        Ok(TaskOutputEvent::default().with_task(task))
+    async fn parser(&self, _response: Response, _ctx: NodeParseContext<'_>) -> Result<NodeParseOutput> {
+        Ok(NodeParseOutput::default())
     }
 
     fn stable_node_key(&self) -> &'static str {
@@ -84,24 +65,15 @@ struct CateSalesTrendNode;
 
 #[async_trait]
 impl ModuleNodeTrait for CateSalesTrendNode {
-    async fn generate(
-        &self,
-        _config: Arc<ModuleConfig>,
-        _params: Map<String, Value>,
-        _login_info: Option<LoginInfo>,
-    ) -> Result<SyncBoxStream<'static, Request>> {
+    async fn generate(&self, _ctx: NodeGenerateContext<'_>) -> Result<SyncBoxStream<'static, Request>> {
         let requests = (0..4)
-            .map(|i| Request::new(format!("http://127.0.0.1:8000"), RequestMethod::Get.as_ref()))
+            .map(|_| Request::new(format!("http://127.0.0.1:8000"), RequestMethod::Get.as_ref()))
             .collect::<Vec<_>>();
         requests.into_stream_ok()
     }
 
-    async fn parser(
-        &self,
-        _response: Response,
-        _config: Option<Arc<ModuleConfig>>,
-    ) -> Result<TaskOutputEvent> {
-        Ok(TaskOutputEvent::default())
+    async fn parser(&self, _response: Response, _ctx: NodeParseContext<'_>) -> Result<NodeParseOutput> {
+        Ok(NodeParseOutput::default())
     }
 
     fn stable_node_key(&self) -> &'static str {
@@ -115,25 +87,15 @@ struct BrandRankDownloader;
 
 #[async_trait]
 impl ModuleNodeTrait for BrandRankDownloader {
-    async fn generate(
-        &self,
-        _config: Arc<ModuleConfig>,
-        _params: Map<String, Value>,
-        _login_info: Option<LoginInfo>,
-    ) -> Result<SyncBoxStream<'static, Request>> {
+    async fn generate(&self, _ctx: NodeGenerateContext<'_>) -> Result<SyncBoxStream<'static, Request>> {
         let requests = (0..10)
-            .map(|i| Request::new(format!("http://127.0.0.1:8000"), RequestMethod::Get.as_ref()))
+            .map(|_| Request::new(format!("http://127.0.0.1:8000"), RequestMethod::Get.as_ref()))
             .collect::<Vec<_>>();
         requests.into_stream_ok()
     }
 
-    async fn parser(
-        &self,
-        response: Response,
-        _config: Option<Arc<ModuleConfig>>,
-    ) -> Result<TaskOutputEvent> {
-        let task = TaskParserEvent::from(&response).add_meta("from", "brand_rank_downloader");
-        Ok(TaskOutputEvent::default().with_task(task))
+    async fn parser(&self, _response: Response, _ctx: NodeParseContext<'_>) -> Result<NodeParseOutput> {
+        Ok(NodeParseOutput::default())
     }
 
     fn stable_node_key(&self) -> &'static str {
@@ -147,25 +109,15 @@ struct GoodsCateDownloader;
 
 #[async_trait]
 impl ModuleNodeTrait for GoodsCateDownloader {
-    async fn generate(
-        &self,
-        _config: Arc<ModuleConfig>,
-        _params: Map<String, Value>,
-        _login_info: Option<LoginInfo>,
-    ) -> Result<SyncBoxStream<'static, Request>> {
+    async fn generate(&self, _ctx: NodeGenerateContext<'_>) -> Result<SyncBoxStream<'static, Request>> {
         let requests = (0..10)
-            .map(|i| Request::new(format!("http://127.0.0.1:8000"), RequestMethod::Get.as_ref()))
+            .map(|_| Request::new(format!("http://127.0.0.1:8000"), RequestMethod::Get.as_ref()))
             .collect::<Vec<_>>();
         requests.into_stream_ok()
     }
 
-    async fn parser(
-        &self,
-        response: Response,
-        _config: Option<Arc<ModuleConfig>>,
-    ) -> Result<TaskOutputEvent> {
-        let task = TaskParserEvent::from(&response).add_meta("from", "goods_cate_downloader");
-        Ok(TaskOutputEvent::default().with_task(task))
+    async fn parser(&self, _response: Response, _ctx: NodeParseContext<'_>) -> Result<NodeParseOutput> {
+        Ok(NodeParseOutput::default())
     }
 
     fn stable_node_key(&self) -> &'static str {
@@ -179,23 +131,13 @@ struct DownloadUrlNode;
 
 #[async_trait]
 impl ModuleNodeTrait for DownloadUrlNode {
-    async fn generate(
-        &self,
-        _config: Arc<ModuleConfig>,
-        _params: Map<String, Value>,
-        _login_info: Option<LoginInfo>,
-    ) -> Result<SyncBoxStream<'static, Request>> {
+    async fn generate(&self, _ctx: NodeGenerateContext<'_>) -> Result<SyncBoxStream<'static, Request>> {
         let req = Request::new("http://127.0.0.1:8000", RequestMethod::Get.as_ref());
         vec![req].into_stream_ok()
     }
 
-    async fn parser(
-        &self,
-        response: Response,
-        _config: Option<Arc<ModuleConfig>>,
-    ) -> Result<TaskOutputEvent> {
-        let task = TaskParserEvent::from(&response).add_meta("from", "download_url_node");
-        Ok(TaskOutputEvent::default().with_task(task))
+    async fn parser(&self, _response: Response, _ctx: NodeParseContext<'_>) -> Result<NodeParseOutput> {
+        Ok(NodeParseOutput::default())
     }
 
     fn stable_node_key(&self) -> &'static str {
@@ -209,22 +151,13 @@ struct DownloadFileNode;
 
 #[async_trait]
 impl ModuleNodeTrait for DownloadFileNode {
-    async fn generate(
-        &self,
-        _config: Arc<ModuleConfig>,
-        _params: Map<String, Value>,
-        _login_info: Option<LoginInfo>,
-    ) -> Result<SyncBoxStream<'static, Request>> {
+    async fn generate(&self, _ctx: NodeGenerateContext<'_>) -> Result<SyncBoxStream<'static, Request>> {
         let req = Request::new("http://127.0.0.1:8000", RequestMethod::Get.as_ref());
         vec![req].into_stream_ok()
     }
 
-    async fn parser(
-        &self,
-        _response: Response,
-        _config: Option<Arc<ModuleConfig>>,
-    ) -> Result<TaskOutputEvent> {
-        Ok(TaskOutputEvent::default())
+    async fn parser(&self, _response: Response, _ctx: NodeParseContext<'_>) -> Result<NodeParseOutput> {
+        Ok(NodeParseOutput::default())
     }
 
     fn stable_node_key(&self) -> &'static str {
@@ -242,8 +175,8 @@ impl ModuleTrait for DagModuleE2ETest {
         false
     }
 
-    fn name(&self) -> String {
-        "dag_module_e2e_test".to_string()
+    fn name(&self) -> &'static str {
+        "dag_module_e2e_test"
     }
 
     fn version(&self) -> i32 {

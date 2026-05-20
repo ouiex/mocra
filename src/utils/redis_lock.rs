@@ -1,6 +1,9 @@
 #![allow(unused)]
 use dashmap::DashMap;
-use deadpool_redis::{Config, Runtime,redis::{AsyncCommands,Script}};
+use deadpool_redis::{
+    Config, Runtime,
+    redis::{AsyncCommands, Script},
+};
 use log::trace;
 use std::collections::HashMap;
 use std::future::Future;
@@ -198,7 +201,7 @@ impl AdvancedDistributedLock {
 
                     match pool.get().await {
                         Ok(mut conn) => {
-                            let result: Result<i32, _> =  deadpool_redis::redis::Script::new(script)
+                            let result: Result<i32, _> = deadpool_redis::redis::Script::new(script)
                                 .key(&key)
                                 .arg(&value)
                                 .arg(ttl)
@@ -266,7 +269,7 @@ impl AdvancedDistributedLock {
         "#;
 
             let mut conn = pool.get().await?;
-            let result: i32 =  deadpool_redis::redis::Script::new(script)
+            let result: i32 = deadpool_redis::redis::Script::new(script)
                 .key(&self.lock_info.key)
                 .arg(&self.lock_info.value)
                 .invoke_async(&mut *conn)
@@ -331,6 +334,7 @@ pub struct DistributedLockManager {
     redis_pool: Option<Arc<deadpool_redis::Pool>>,
     locks: Arc<DashMap<String, AdvancedDistributedLock>>,
     local_locks: Arc<DashMap<String, (String, Instant)>>, // Key -> (Value, Expiration Time)
+    backend: Option<Arc<dyn LockBackend>>,
     prefix: String,
 }
 
@@ -340,6 +344,17 @@ impl DistributedLockManager {
             redis_pool: pool,
             locks: Arc::new(DashMap::new()),
             local_locks: Arc::new(DashMap::new()),
+            backend: None,
+            prefix: prefix.to_string(),
+        }
+    }
+
+    pub fn with_backend(backend: Arc<dyn LockBackend>, prefix: &str) -> Self {
+        Self {
+            redis_pool: None,
+            locks: Arc::new(DashMap::new()),
+            local_locks: Arc::new(DashMap::new()),
+            backend: Some(backend),
             prefix: prefix.to_string(),
         }
     }
@@ -360,12 +375,44 @@ impl DistributedLockManager {
     ) -> Result<bool, LockError> {
         let full_lock_name = self.format_key(lock_name);
 
+        // Use LockBackend if configured
+        if let Some(backend) = &self.backend {
+            let token = uuid::Uuid::now_v7().to_string();
+            let start = Instant::now();
+            loop {
+                match backend
+                    .acquire(&full_lock_name, &token, ttl_seconds * 1000)
+                    .await
+                {
+                    Ok(true) => {
+                        // Store token for release
+                        self.local_locks
+                            .insert(lock_name.to_string(), (token.clone(), Instant::now() + Duration::from_secs(ttl_seconds)));
+                        return Ok(true);
+                    }
+                    Ok(false) => {
+                        if start.elapsed() >= max_wait {
+                            return Ok(false);
+                        }
+                        sleep(Duration::from_millis(50)).await;
+                    }
+                    Err(e) => {
+                        return Err(LockError::InvalidOperation(e));
+                    }
+                }
+            }
+        }
+
         if let Some(lock) = AdvancedDistributedLock::acquire_with_retry(
             self.redis_pool.clone(),
             Some(self.local_locks.clone()),
             full_lock_name,
             ttl_seconds,
-            if self.redis_pool.is_some() { Duration::from_millis(50) } else { Duration::from_millis(1) },
+            if self.redis_pool.is_some() {
+                Duration::from_millis(50)
+            } else {
+                Duration::from_millis(1)
+            },
             max_wait,
         )
         .await?
@@ -382,12 +429,24 @@ impl DistributedLockManager {
     }
 
     pub async fn release_lock(&self, lock_name: &str) -> Result<bool, LockError> {
+        let full_lock_name = self.format_key(lock_name);
+
         if let Some((_, lock)) = self.locks.remove(lock_name) {
             let released = lock.release().await?;
-            Ok(released)
-        } else {
-            Ok(false) // Lock does not exist.
+            return Ok(released);
         }
+
+        // Fallback: try backend release using stored token
+        if let Some(backend) = &self.backend {
+            if let Some((_, (token, _))) = self.local_locks.remove(lock_name) {
+                return backend
+                    .release(&full_lock_name, &token)
+                    .await
+                    .map_err(|e| LockError::InvalidOperation(e));
+            }
+        }
+
+        Ok(false) // Lock does not exist.
     }
 
     pub async fn with_lock<F, R>(
@@ -416,7 +475,11 @@ impl DistributedLockManager {
         // (parking_lot RwLock blocks the OS thread).
         let snapshot = self.locks.get(lock_name).map(|l| {
             let lock = l.value();
-            (lock.pool.clone(), lock.local_map.clone(), lock.lock_info.clone())
+            (
+                lock.pool.clone(),
+                lock.local_map.clone(),
+                lock.lock_info.clone(),
+            )
         });
         // guard dropped here
         if let Some((pool, local_map, lock_info)) = snapshot {
@@ -444,5 +507,241 @@ impl DistributedLockManager {
     }
 }
 
-// DistributedLockManager is Send + Sync via its fields (Arc<Pool>, Arc<RwLock<...>>)
-// Rely on compiler to enforce/derive thread-safety without unsafe impls.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn local_lock_acquire_release() {
+        let backend = LocalLockBackend::new();
+        assert!(backend.acquire("k1", "owner1", 5000).await.unwrap());
+        // Same owner re-acquire fails (already held)
+        assert!(!backend.acquire("k1", "owner1", 5000).await.unwrap());
+        // Different owner fails
+        assert!(!backend.acquire("k1", "owner2", 5000).await.unwrap());
+        assert!(backend.release("k1", "owner1").await.unwrap());
+        // After release, new owner can acquire
+        assert!(backend.acquire("k1", "owner2", 5000).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn local_lock_renew_wrong_owner_fails() {
+        let backend = LocalLockBackend::new();
+        backend.acquire("k1", "owner1", 5000).await.unwrap();
+        assert!(backend.renew("k1", "owner1", 10000).await.unwrap());
+        assert!(!backend.renew("k1", "owner2", 10000).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn local_lock_release_wrong_owner_fails() {
+        let backend = LocalLockBackend::new();
+        backend.acquire("k1", "owner1", 5000).await.unwrap();
+        assert!(!backend.release("k1", "owner2").await.unwrap());
+        assert!(backend.release("k1", "owner1").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn raft_lock_acquire_release() {
+        let store = crate::engine::api::profile_store::ProfileControlPlaneStore::default();
+        let backend = RaftLockBackend::new(Arc::new(store), "ns");
+        assert!(backend.acquire("k1", "owner1", 5000).await.unwrap());
+        assert!(!backend.acquire("k1", "owner2", 5000).await.unwrap());
+        assert!(backend.release("k1", "owner1").await.unwrap());
+        assert!(backend.acquire("k1", "owner2", 5000).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn raft_lock_renew_owner_check() {
+        let store = crate::engine::api::profile_store::ProfileControlPlaneStore::default();
+        let backend = RaftLockBackend::new(Arc::new(store), "ns");
+        backend.acquire("k2", "owner1", 5000).await.unwrap();
+        assert!(backend.renew("k2", "owner1", 10000).await.unwrap());
+        assert!(!backend.renew("k2", "owner2", 10000).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn raft_lock_expired_preemption() {
+        let store = crate::engine::api::profile_store::ProfileControlPlaneStore::default();
+        let backend = RaftLockBackend::new(Arc::new(store), "ns");
+        backend.acquire("k3", "owner1", 1).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        // Lock expired, new owner can acquire
+        assert!(backend.acquire("k3", "owner2", 5000).await.unwrap());
+    }
+}
+
+// ── LockBackend trait ──
+
+/// Trait abstracting lock acquire/renew/release across backends.
+#[async_trait::async_trait]
+pub trait LockBackend: Send + Sync + std::fmt::Debug {
+    async fn acquire(&self, key: &str, owner_token: &str, ttl_ms: u64) -> Result<bool, String>;
+    async fn renew(&self, key: &str, owner_token: &str, ttl_ms: u64) -> Result<bool, String>;
+    async fn release(&self, key: &str, owner_token: &str) -> Result<bool, String>;
+}
+
+// ── RedisLockBackend ──
+
+#[derive(Debug)]
+pub struct RedisLockBackend {
+    pool: Arc<deadpool_redis::Pool>,
+}
+
+impl RedisLockBackend {
+    pub fn new(pool: Arc<deadpool_redis::Pool>) -> Self {
+        Self { pool }
+    }
+}
+
+#[async_trait::async_trait]
+impl LockBackend for RedisLockBackend {
+    async fn acquire(&self, key: &str, owner_token: &str, ttl_ms: u64) -> Result<bool, String> {
+        let mut conn = self.pool.get().await.map_err(|e| format!("{e}"))?;
+        let ttl_sec = std::cmp::max(1, ttl_ms / 1000);
+        let script = deadpool_redis::redis::Script::new(
+            r#"return redis.call("SET", KEYS[1], ARGV[1], "NX", "EX", ARGV[2])"#,
+        );
+        let result: Option<String> = script
+            .key(key)
+            .arg(owner_token)
+            .arg(ttl_sec)
+            .invoke_async(&mut *conn)
+            .await
+            .map_err(|e| format!("{e}"))?;
+        Ok(result.is_some())
+    }
+
+    async fn renew(&self, key: &str, owner_token: &str, ttl_ms: u64) -> Result<bool, String> {
+        let mut conn = self.pool.get().await.map_err(|e| format!("{e}"))?;
+        let ttl_sec = std::cmp::max(1, ttl_ms / 1000);
+        let script = deadpool_redis::redis::Script::new(
+            r#"if redis.call("GET", KEYS[1]) == ARGV[1] then return redis.call("EXPIRE", KEYS[1], ARGV[2]) else return 0 end"#,
+        );
+        let result: i32 = script
+            .key(key)
+            .arg(owner_token)
+            .arg(ttl_sec)
+            .invoke_async(&mut *conn)
+            .await
+            .map_err(|e| format!("{e}"))?;
+        Ok(result == 1)
+    }
+
+    async fn release(&self, key: &str, owner_token: &str) -> Result<bool, String> {
+        let mut conn = self.pool.get().await.map_err(|e| format!("{e}"))?;
+        let script = deadpool_redis::redis::Script::new(
+            r#"if redis.call("GET", KEYS[1]) == ARGV[1] then return redis.call("DEL", KEYS[1]) else return 0 end"#,
+        );
+        let result: i32 = script
+            .key(key)
+            .arg(owner_token)
+            .invoke_async(&mut *conn)
+            .await
+            .map_err(|e| format!("{e}"))?;
+        Ok(result == 1)
+    }
+}
+
+// ── LocalLockBackend ──
+
+#[derive(Debug)]
+pub struct LocalLockBackend {
+    locks: Arc<DashMap<String, (String, Instant)>>,
+}
+
+impl LocalLockBackend {
+    pub fn new() -> Self {
+        Self {
+            locks: Arc::new(DashMap::new()),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl LockBackend for LocalLockBackend {
+    async fn acquire(&self, key: &str, owner_token: &str, ttl_ms: u64) -> Result<bool, String> {
+        let now = Instant::now();
+        let ttl = Duration::from_millis(ttl_ms);
+        match self.locks.entry(key.to_string()) {
+            dashmap::mapref::entry::Entry::Occupied(mut entry) => {
+                if entry.get().1 < now {
+                    entry.insert((owner_token.to_string(), now + ttl));
+                    Ok(true)
+                } else {
+                    Ok(false)
+                }
+            }
+            dashmap::mapref::entry::Entry::Vacant(entry) => {
+                entry.insert((owner_token.to_string(), now + ttl));
+                Ok(true)
+            }
+        }
+    }
+
+    async fn renew(&self, key: &str, owner_token: &str, ttl_ms: u64) -> Result<bool, String> {
+        if let Some(mut entry) = self.locks.get_mut(key) {
+            if entry.0 == *owner_token {
+                entry.1 = Instant::now() + Duration::from_millis(ttl_ms);
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    async fn release(&self, key: &str, owner_token: &str) -> Result<bool, String> {
+        match self.locks.entry(key.to_string()) {
+            dashmap::mapref::entry::Entry::Occupied(entry) => {
+                if entry.get().0 == owner_token {
+                    entry.remove();
+                    Ok(true)
+                } else {
+                    Ok(false)
+                }
+            }
+            dashmap::mapref::entry::Entry::Vacant(_) => Ok(false),
+        }
+    }
+}
+
+// ── RaftLockBackend ──
+
+use crate::engine::api::profile_store::ProfileControlPlaneStore;
+
+#[derive(Debug)]
+pub struct RaftLockBackend {
+    store: Arc<ProfileControlPlaneStore>,
+    namespace: String,
+}
+
+impl RaftLockBackend {
+    pub fn new(store: Arc<ProfileControlPlaneStore>, namespace: impl Into<String>) -> Self {
+        Self {
+            store,
+            namespace: namespace.into(),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl LockBackend for RaftLockBackend {
+    async fn acquire(&self, key: &str, owner_token: &str, ttl_ms: u64) -> Result<bool, String> {
+        self.store
+            .submit_lock_acquire(&self.namespace, key, owner_token, ttl_ms)
+            .await
+            .map_err(|e| format!("{e}"))
+    }
+
+    async fn renew(&self, key: &str, owner_token: &str, ttl_ms: u64) -> Result<bool, String> {
+        self.store
+            .submit_lock_renew(&self.namespace, key, owner_token, ttl_ms)
+            .await
+            .map_err(|e| format!("{e}"))
+    }
+
+    async fn release(&self, key: &str, owner_token: &str) -> Result<bool, String> {
+        self.store
+            .submit_lock_release(&self.namespace, key, owner_token)
+            .await
+            .map_err(|e| format!("{e}"))
+    }
+}

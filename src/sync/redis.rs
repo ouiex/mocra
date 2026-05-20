@@ -1,10 +1,10 @@
 use crate::sync::CoordinationBackend;
+use deadpool_redis::Pool;
 use deadpool_redis::redis::streams::{StreamReadOptions, StreamReadReply};
 use deadpool_redis::redis::{AsyncCommands, RedisResult};
-use deadpool_redis::Pool;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{RwLock, mpsc};
 use tracing::{error, info, warn};
 
 /// Multiplexed stream router for sync subscriptions.
@@ -22,9 +22,11 @@ pub struct RedisBackend {
 
 impl RedisBackend {
     pub fn new(pool: Pool) -> Self {
-        let backend = Self { 
+        let backend = Self {
             pool,
-            router: Arc::new(RwLock::new(StreamRouter { routes: HashMap::new() })),
+            router: Arc::new(RwLock::new(StreamRouter {
+                routes: HashMap::new(),
+            })),
             listener_started: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
         backend
@@ -34,7 +36,7 @@ impl RedisBackend {
     /// Uses only ONE connection from the pool, regardless of subscription count.
     fn ensure_listener_started(&self) {
         use std::sync::atomic::Ordering;
-        
+
         // Only start once
         if self.listener_started.swap(true, Ordering::SeqCst) {
             return;
@@ -45,7 +47,7 @@ impl RedisBackend {
 
         tokio::spawn(async move {
             info!("Starting multiplexed sync listener (uses 1 connection for all subscriptions)");
-            
+
             // Get a dedicated connection (not from pool, to avoid blocking pool)
             let client = match pool.get().await {
                 Ok(c) => c,
@@ -54,7 +56,7 @@ impl RedisBackend {
                     return;
                 }
             };
-            
+
             // We need to hold the connection and keep reusing it
             // But deadpool connections have timeouts, so we use a raw connection approach
             let mut conn: Option<deadpool_redis::Connection> = Some(client);
@@ -68,7 +70,8 @@ impl RedisBackend {
                         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                         continue;
                     }
-                    r.routes.iter()
+                    r.routes
+                        .iter()
                         .map(|(topic, (_, last_id))| (topic.clone(), last_id.clone()))
                         .unzip()
                 };
@@ -96,15 +99,14 @@ impl RedisBackend {
                 };
 
                 // 3. XREAD multiple streams with short block time (2s) to allow dynamic updates
-                let opts = StreamReadOptions::default()
-                    .count(100)
-                    .block(2000);
+                let opts = StreamReadOptions::default().count(100).block(2000);
 
                 let ids_refs: Vec<&str> = last_ids.iter().map(|s| s.as_str()).collect();
                 let topics_refs: Vec<&str> = topics.iter().map(|s| s.as_str()).collect();
 
-                let result: RedisResult<StreamReadReply> = 
-                    active_conn.xread_options(&topics_refs, &ids_refs, &opts).await;
+                let result: RedisResult<StreamReadReply> = active_conn
+                    .xread_options(&topics_refs, &ids_refs, &opts)
+                    .await;
 
                 match result {
                     Ok(reply) => {
@@ -114,8 +116,10 @@ impl RedisBackend {
                             if let Some((sender, last_id)) = router_guard.routes.get_mut(topic) {
                                 for element in stream_key.ids {
                                     *last_id = element.id.clone();
-                                    
-                                    let payload_val = element.map.get("payload")
+
+                                    let payload_val = element
+                                        .map
+                                        .get("payload")
                                         .unwrap_or(&deadpool_redis::redis::Value::Nil);
                                     let payload_vec: Vec<u8> = match deadpool_redis::redis::FromRedisValue::from_redis_value(payload_val) {
                                         Ok(v) => v,
@@ -123,14 +127,19 @@ impl RedisBackend {
                                     };
 
                                     if sender.send(payload_vec).await.is_err() {
-                                        warn!("Sync subscriber for {} dropped, removing route", topic);
+                                        warn!(
+                                            "Sync subscriber for {} dropped, removing route",
+                                            topic
+                                        );
                                         // Will be cleaned up next iteration
                                     }
                                 }
                             }
                         }
                         // Clean up dead routes
-                        router_guard.routes.retain(|_, (sender, _)| !sender.is_closed());
+                        router_guard
+                            .routes
+                            .retain(|_, (sender, _)| !sender.is_closed());
                     }
                     Err(e) => {
                         error!("Sync listener XREAD error: {}. Reconnecting...", e);
@@ -158,15 +167,20 @@ impl CoordinationBackend for RedisBackend {
         self.ensure_listener_started();
 
         let (tx, rx) = mpsc::channel(1000);
-        
+
         // Register this topic in the router
         {
             let mut router = self.router.write().await;
             // Start from new messages ($)
-            router.routes.insert(topic.to_string(), (tx, "$".to_string()));
+            router
+                .routes
+                .insert(topic.to_string(), (tx, "$".to_string()));
         }
 
-        info!("Registered sync subscription for topic: {} (multiplexed)", topic);
+        info!(
+            "Registered sync subscription for topic: {} (multiplexed)",
+            topic
+        );
         Ok(rx)
     }
 

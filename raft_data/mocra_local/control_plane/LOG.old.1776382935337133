@@ -1,0 +1,240 @@
+2026/04/17-07:41:32.384176 d468 RocksDB version: 10.4.2
+2026/04/17-07:41:32.385504 d468 Compile date 2025-07-09 11:14:20
+2026/04/17-07:41:32.385530 d468 DB SUMMARY
+2026/04/17-07:41:32.385547 d468 Host name (Env):  DESKTOP-CBK66ND
+2026/04/17-07:41:32.385559 d468 DB Session ID:  GXEFVS4G0RQNZBN8GX7V
+2026/04/17-07:41:32.386136 d468 CURRENT file:  CURRENT
+2026/04/17-07:41:32.386158 d468 IDENTITY file:  IDENTITY
+2026/04/17-07:41:32.386274 d468 MANIFEST file:  MANIFEST-000005 size: 299 Bytes
+2026/04/17-07:41:32.386295 d468 SST files in ./raft_data\mocra_local\control_plane dir, Total Num: 0, files: 
+2026/04/17-07:41:32.386315 d468 Write Ahead Log file in ./raft_data\mocra_local\control_plane: 000004.log size: 0 ; 
+2026/04/17-07:41:32.386338 d468                         Options.error_if_exists: 0
+2026/04/17-07:41:32.386472 d468                       Options.create_if_missing: 1
+2026/04/17-07:41:32.386483 d468                         Options.paranoid_checks: 1
+2026/04/17-07:41:32.386491 d468             Options.flush_verify_memtable_count: 1
+2026/04/17-07:41:32.386497 d468          Options.compaction_verify_record_count: 1
+2026/04/17-07:41:32.386504 d468                               Options.track_and_verify_wals_in_manifest: 0
+2026/04/17-07:41:32.386510 d468                               Options.track_and_verify_wals: 0
+2026/04/17-07:41:32.386516 d468        Options.verify_sst_unique_id_in_manifest: 1
+2026/04/17-07:41:32.386523 d468                                     Options.env: 000002982EBAC080
+2026/04/17-07:41:32.386529 d468                                      Options.fs: WinFS
+2026/04/17-07:41:32.386536 d468                                Options.info_log: 000002982E71F9D0
+2026/04/17-07:41:32.386543 d468                Options.max_file_opening_threads: 16
+2026/04/17-07:41:32.386554 d468                              Options.statistics: 0000000000000000
+2026/04/17-07:41:32.386560 d468                               Options.use_fsync: 0
+2026/04/17-07:41:32.386566 d468                       Options.max_log_file_size: 0
+2026/04/17-07:41:32.386573 d468                  Options.max_manifest_file_size: 1073741824
+2026/04/17-07:41:32.386579 d468                   Options.log_file_time_to_roll: 0
+2026/04/17-07:41:32.386586 d468                       Options.keep_log_file_num: 1000
+2026/04/17-07:41:32.386592 d468                    Options.recycle_log_file_num: 0
+2026/04/17-07:41:32.386599 d468                         Options.allow_fallocate: 1
+2026/04/17-07:41:32.386605 d468                        Options.allow_mmap_reads: 0
+2026/04/17-07:41:32.386612 d468                       Options.allow_mmap_writes: 0
+2026/04/17-07:41:32.386618 d468                        Options.use_direct_reads: 0
+2026/04/17-07:41:32.386625 d468                        Options.use_direct_io_for_flush_and_compaction: 0
+2026/04/17-07:41:32.386632 d468          Options.create_missing_column_families: 1
+2026/04/17-07:41:32.386638 d468                              Options.db_log_dir: 
+2026/04/17-07:41:32.386645 d468                                 Options.wal_dir: 
+2026/04/17-07:41:32.386651 d468                Options.table_cache_numshardbits: 6
+2026/04/17-07:41:32.386657 d468                         Options.WAL_ttl_seconds: 0
+2026/04/17-07:41:32.386663 d468                       Options.WAL_size_limit_MB: 0
+2026/04/17-07:41:32.386669 d468                        Options.max_write_batch_group_size_bytes: 1048576
+2026/04/17-07:41:32.386676 d468             Options.manifest_preallocation_size: 4194304
+2026/04/17-07:41:32.386682 d468                     Options.is_fd_close_on_exec: 1
+2026/04/17-07:41:32.386688 d468                   Options.advise_random_on_open: 1
+2026/04/17-07:41:32.386695 d468                    Options.db_write_buffer_size: 0
+2026/04/17-07:41:32.386701 d468                    Options.write_buffer_manager: 000002982EBAC170
+2026/04/17-07:41:32.386708 d468                      Options.use_adaptive_mutex: 0
+2026/04/17-07:41:32.386715 d468                            Options.rate_limiter: 0000000000000000
+2026/04/17-07:41:32.386722 d468     Options.sst_file_manager.rate_bytes_per_sec: 0
+2026/04/17-07:41:32.386761 d468                       Options.wal_recovery_mode: 2
+2026/04/17-07:41:32.386772 d468                  Options.enable_thread_tracking: 0
+2026/04/17-07:41:32.386780 d468                  Options.enable_pipelined_write: 0
+2026/04/17-07:41:32.386787 d468                  Options.unordered_write: 0
+2026/04/17-07:41:32.386794 d468         Options.allow_concurrent_memtable_write: 1
+2026/04/17-07:41:32.386800 d468      Options.enable_write_thread_adaptive_yield: 1
+2026/04/17-07:41:32.386807 d468             Options.write_thread_max_yield_usec: 100
+2026/04/17-07:41:32.386813 d468            Options.write_thread_slow_yield_usec: 3
+2026/04/17-07:41:32.386820 d468                               Options.row_cache: None
+2026/04/17-07:41:32.386829 d468                              Options.wal_filter: None
+2026/04/17-07:41:32.386835 d468             Options.avoid_flush_during_recovery: 0
+2026/04/17-07:41:32.386841 d468             Options.allow_ingest_behind: 0
+2026/04/17-07:41:32.386848 d468             Options.two_write_queues: 0
+2026/04/17-07:41:32.386854 d468             Options.manual_wal_flush: 0
+2026/04/17-07:41:32.386860 d468             Options.wal_compression: 0
+2026/04/17-07:41:32.386867 d468             Options.background_close_inactive_wals: 0
+2026/04/17-07:41:32.386873 d468             Options.atomic_flush: 0
+2026/04/17-07:41:32.386880 d468             Options.avoid_unnecessary_blocking_io: 0
+2026/04/17-07:41:32.386886 d468             Options.prefix_seek_opt_in_only: 0
+2026/04/17-07:41:32.386893 d468                 Options.persist_stats_to_disk: 0
+2026/04/17-07:41:32.386899 d468                 Options.write_dbid_to_manifest: 1
+2026/04/17-07:41:32.386906 d468                 Options.write_identity_file: 1
+2026/04/17-07:41:32.386913 d468                 Options.log_readahead_size: 0
+2026/04/17-07:41:32.386920 d468                 Options.file_checksum_gen_factory: Unknown
+2026/04/17-07:41:32.386926 d468                 Options.best_efforts_recovery: 0
+2026/04/17-07:41:32.386934 d468                Options.max_bgerror_resume_count: 2147483647
+2026/04/17-07:41:32.386940 d468            Options.bgerror_resume_retry_interval: 1000000
+2026/04/17-07:41:32.386947 d468             Options.allow_data_in_errors: 0
+2026/04/17-07:41:32.386952 d468             Options.db_host_id: __hostname__
+2026/04/17-07:41:32.386959 d468             Options.enforce_single_del_contracts: true
+2026/04/17-07:41:32.386967 d468             Options.metadata_write_temperature: kUnknown
+2026/04/17-07:41:32.386973 d468             Options.wal_write_temperature: kUnknown
+2026/04/17-07:41:32.386980 d468             Options.max_background_jobs: 2
+2026/04/17-07:41:32.386986 d468             Options.max_background_compactions: -1
+2026/04/17-07:41:32.386993 d468             Options.max_subcompactions: 1
+2026/04/17-07:41:32.387000 d468             Options.avoid_flush_during_shutdown: 0
+2026/04/17-07:41:32.387006 d468           Options.writable_file_max_buffer_size: 1048576
+2026/04/17-07:41:32.387013 d468             Options.delayed_write_rate : 16777216
+2026/04/17-07:41:32.387019 d468             Options.max_total_wal_size: 0
+2026/04/17-07:41:32.387025 d468             Options.delete_obsolete_files_period_micros: 21600000000
+2026/04/17-07:41:32.387031 d468                   Options.stats_dump_period_sec: 600
+2026/04/17-07:41:32.387037 d468                 Options.stats_persist_period_sec: 600
+2026/04/17-07:41:32.387043 d468                 Options.stats_history_buffer_size: 1048576
+2026/04/17-07:41:32.387050 d468                          Options.max_open_files: -1
+2026/04/17-07:41:32.387056 d468                          Options.bytes_per_sync: 0
+2026/04/17-07:41:32.387063 d468                      Options.wal_bytes_per_sync: 0
+2026/04/17-07:41:32.387069 d468                   Options.strict_bytes_per_sync: 0
+2026/04/17-07:41:32.387075 d468       Options.compaction_readahead_size: 2097152
+2026/04/17-07:41:32.387082 d468                  Options.max_background_flushes: -1
+2026/04/17-07:41:32.387090 d468 Options.daily_offpeak_time_utc: 
+2026/04/17-07:41:32.387126 d468 Compression algorithms supported:
+2026/04/17-07:41:32.387138 d468 	kZSTD supported: 1
+2026/04/17-07:41:32.387146 d468 	kCustomCompressionA3 supported: 0
+2026/04/17-07:41:32.387153 d468 	kSnappyCompression supported: 1
+2026/04/17-07:41:32.387160 d468 	kCustomCompressionA5 supported: 0
+2026/04/17-07:41:32.387167 d468 	kBZip2Compression supported: 1
+2026/04/17-07:41:32.387173 d468 	kZlibCompression supported: 1
+2026/04/17-07:41:32.387180 d468 	kLZ4Compression supported: 1
+2026/04/17-07:41:32.387186 d468 	kXpressCompression supported: 0
+2026/04/17-07:41:32.387193 d468 	kCustomCompressionA7 supported: 0
+2026/04/17-07:41:32.387198 d468 	kLZ4HCCompression supported: 1
+2026/04/17-07:41:32.387204 d468 	kCustomCompressionB2 supported: 0
+2026/04/17-07:41:32.387210 d468 	kCustomCompression9C supported: 0
+2026/04/17-07:41:32.387217 d468 	kCustomCompression80 supported: 0
+2026/04/17-07:41:32.387223 d468 	kCustomCompressionB3 supported: 0
+2026/04/17-07:41:32.387230 d468 	kCustomCompression9B supported: 0
+2026/04/17-07:41:32.387237 d468 	kCustomCompression81 supported: 0
+2026/04/17-07:41:32.387243 d468 	kCustomCompressionB0 supported: 0
+2026/04/17-07:41:32.387250 d468 	kCustomCompression9A supported: 0
+2026/04/17-07:41:32.387256 d468 	kCustomCompression82 supported: 0
+2026/04/17-07:41:32.387263 d468 	kCustomCompressionB1 supported: 0
+2026/04/17-07:41:32.387269 d468 	kCustomCompression83 supported: 0
+2026/04/17-07:41:32.387276 d468 	kCustomCompressionB6 supported: 0
+2026/04/17-07:41:32.387283 d468 	kCustomCompression84 supported: 0
+2026/04/17-07:41:32.387289 d468 	kCustomCompressionB7 supported: 0
+2026/04/17-07:41:32.387296 d468 	kCustomCompression9F supported: 0
+2026/04/17-07:41:32.387302 d468 	kCustomCompression85 supported: 0
+2026/04/17-07:41:32.387309 d468 	kCustomCompressionB4 supported: 0
+2026/04/17-07:41:32.387315 d468 	kCustomCompression9E supported: 0
+2026/04/17-07:41:32.387322 d468 	kCustomCompression86 supported: 0
+2026/04/17-07:41:32.387328 d468 	kCustomCompressionB5 supported: 0
+2026/04/17-07:41:32.387335 d468 	kCustomCompression9D supported: 0
+2026/04/17-07:41:32.387341 d468 	kCustomCompression87 supported: 0
+2026/04/17-07:41:32.387348 d468 	kCustomCompression88 supported: 0
+2026/04/17-07:41:32.387353 d468 	kCustomCompression89 supported: 0
+2026/04/17-07:41:32.387359 d468 	kCustomCompression92 supported: 0
+2026/04/17-07:41:32.387365 d468 	kCustomCompression8A supported: 0
+2026/04/17-07:41:32.387371 d468 	kCustomCompression91 supported: 0
+2026/04/17-07:41:32.387377 d468 	kCustomCompression8B supported: 0
+2026/04/17-07:41:32.387383 d468 	kCustomCompression90 supported: 0
+2026/04/17-07:41:32.387389 d468 	kCustomCompression8C supported: 0
+2026/04/17-07:41:32.387396 d468 	kCustomCompression97 supported: 0
+2026/04/17-07:41:32.387403 d468 	kCustomCompression8D supported: 0
+2026/04/17-07:41:32.387409 d468 	kCustomCompression96 supported: 0
+2026/04/17-07:41:32.387415 d468 	kCustomCompression8E supported: 0
+2026/04/17-07:41:32.387422 d468 	kCustomCompression95 supported: 0
+2026/04/17-07:41:32.387428 d468 	kCustomCompression8F supported: 0
+2026/04/17-07:41:32.387435 d468 	kCustomCompression93 supported: 0
+2026/04/17-07:41:32.387441 d468 	kCustomCompression94 supported: 0
+2026/04/17-07:41:32.387448 d468 	kCustomCompression98 supported: 0
+2026/04/17-07:41:32.387455 d468 	kCustomCompression99 supported: 0
+2026/04/17-07:41:32.387462 d468 	kCustomCompressionA0 supported: 0
+2026/04/17-07:41:32.387468 d468 	kCustomCompressionA1 supported: 0
+2026/04/17-07:41:32.387474 d468 	kCustomCompressionA2 supported: 0
+2026/04/17-07:41:32.387480 d468 	kCustomCompressionA4 supported: 0
+2026/04/17-07:41:32.387486 d468 	kCustomCompressionA6 supported: 0
+2026/04/17-07:41:32.387492 d468 	kCustomCompressionA8 supported: 0
+2026/04/17-07:41:32.387498 d468 	kCustomCompressionA9 supported: 0
+2026/04/17-07:41:32.387504 d468 	kCustomCompressionAA supported: 0
+2026/04/17-07:41:32.387511 d468 	kCustomCompressionAB supported: 0
+2026/04/17-07:41:32.387517 d468 	kCustomCompressionAC supported: 0
+2026/04/17-07:41:32.387524 d468 	kCustomCompressionAD supported: 0
+2026/04/17-07:41:32.387533 d468 	kCustomCompressionAE supported: 0
+2026/04/17-07:41:32.387541 d468 	kCustomCompressionAF supported: 0
+2026/04/17-07:41:32.387548 d468 	kCustomCompressionB8 supported: 0
+2026/04/17-07:41:32.387554 d468 	kCustomCompressionB9 supported: 0
+2026/04/17-07:41:32.387560 d468 	kCustomCompressionBA supported: 0
+2026/04/17-07:41:32.387566 d468 	kCustomCompressionBB supported: 0
+2026/04/17-07:41:32.387573 d468 	kCustomCompressionBC supported: 0
+2026/04/17-07:41:32.387579 d468 	kCustomCompressionBD supported: 0
+2026/04/17-07:41:32.387585 d468 	kCustomCompressionBE supported: 0
+2026/04/17-07:41:32.387591 d468 	kCustomCompressionBF supported: 0
+2026/04/17-07:41:32.387597 d468 	kCustomCompressionC0 supported: 0
+2026/04/17-07:41:32.387604 d468 	kCustomCompressionC1 supported: 0
+2026/04/17-07:41:32.387610 d468 	kCustomCompressionC2 supported: 0
+2026/04/17-07:41:32.387618 d468 	kCustomCompressionC3 supported: 0
+2026/04/17-07:41:32.387623 d468 	kCustomCompressionC4 supported: 0
+2026/04/17-07:41:32.387629 d468 	kCustomCompressionC5 supported: 0
+2026/04/17-07:41:32.387636 d468 	kCustomCompressionC6 supported: 0
+2026/04/17-07:41:32.387642 d468 	kCustomCompressionC7 supported: 0
+2026/04/17-07:41:32.387648 d468 	kCustomCompressionC8 supported: 0
+2026/04/17-07:41:32.387655 d468 	kCustomCompressionC9 supported: 0
+2026/04/17-07:41:32.387662 d468 	kCustomCompressionCA supported: 0
+2026/04/17-07:41:32.387668 d468 	kCustomCompressionCB supported: 0
+2026/04/17-07:41:32.387674 d468 	kCustomCompressionCC supported: 0
+2026/04/17-07:41:32.387681 d468 	kCustomCompressionCD supported: 0
+2026/04/17-07:41:32.387687 d468 	kCustomCompressionCE supported: 0
+2026/04/17-07:41:32.387693 d468 	kCustomCompressionCF supported: 0
+2026/04/17-07:41:32.387700 d468 	kCustomCompressionD0 supported: 0
+2026/04/17-07:41:32.387706 d468 	kCustomCompressionD1 supported: 0
+2026/04/17-07:41:32.387712 d468 	kCustomCompressionD2 supported: 0
+2026/04/17-07:41:32.387749 d468 	kCustomCompressionD3 supported: 0
+2026/04/17-07:41:32.387757 d468 	kCustomCompressionD4 supported: 0
+2026/04/17-07:41:32.387764 d468 	kCustomCompressionD5 supported: 0
+2026/04/17-07:41:32.387771 d468 	kCustomCompressionD6 supported: 0
+2026/04/17-07:41:32.387778 d468 	kCustomCompressionD7 supported: 0
+2026/04/17-07:41:32.387784 d468 	kCustomCompressionD8 supported: 0
+2026/04/17-07:41:32.387791 d468 	kCustomCompressionD9 supported: 0
+2026/04/17-07:41:32.387798 d468 	kCustomCompressionDA supported: 0
+2026/04/17-07:41:32.387805 d468 	kCustomCompressionDB supported: 0
+2026/04/17-07:41:32.387811 d468 	kCustomCompressionDC supported: 0
+2026/04/17-07:41:32.387818 d468 	kCustomCompressionDD supported: 0
+2026/04/17-07:41:32.387824 d468 	kCustomCompressionDE supported: 0
+2026/04/17-07:41:32.387831 d468 	kCustomCompressionDF supported: 0
+2026/04/17-07:41:32.387838 d468 	kCustomCompressionE0 supported: 0
+2026/04/17-07:41:32.387844 d468 	kCustomCompressionE1 supported: 0
+2026/04/17-07:41:32.387851 d468 	kCustomCompressionE2 supported: 0
+2026/04/17-07:41:32.387857 d468 	kCustomCompressionE3 supported: 0
+2026/04/17-07:41:32.387863 d468 	kCustomCompressionE4 supported: 0
+2026/04/17-07:41:32.387870 d468 	kCustomCompressionE5 supported: 0
+2026/04/17-07:41:32.387876 d468 	kCustomCompressionE6 supported: 0
+2026/04/17-07:41:32.387882 d468 	kCustomCompressionE7 supported: 0
+2026/04/17-07:41:32.387888 d468 	kCustomCompressionE8 supported: 0
+2026/04/17-07:41:32.387894 d468 	kCustomCompressionE9 supported: 0
+2026/04/17-07:41:32.387900 d468 	kCustomCompressionEA supported: 0
+2026/04/17-07:41:32.387906 d468 	kCustomCompressionEB supported: 0
+2026/04/17-07:41:32.387912 d468 	kCustomCompressionEC supported: 0
+2026/04/17-07:41:32.387919 d468 	kCustomCompressionED supported: 0
+2026/04/17-07:41:32.387925 d468 	kCustomCompressionEE supported: 0
+2026/04/17-07:41:32.387932 d468 	kCustomCompressionEF supported: 0
+2026/04/17-07:41:32.387939 d468 	kCustomCompressionF0 supported: 0
+2026/04/17-07:41:32.387945 d468 	kCustomCompressionF1 supported: 0
+2026/04/17-07:41:32.387951 d468 	kCustomCompressionF2 supported: 0
+2026/04/17-07:41:32.387989 d468 	kCustomCompressionF3 supported: 0
+2026/04/17-07:41:32.388001 d468 	kCustomCompressionF4 supported: 0
+2026/04/17-07:41:32.388008 d468 	kCustomCompressionF5 supported: 0
+2026/04/17-07:41:32.388015 d468 	kCustomCompressionF6 supported: 0
+2026/04/17-07:41:32.388021 d468 	kCustomCompressionF7 supported: 0
+2026/04/17-07:41:32.388028 d468 	kCustomCompressionF8 supported: 0
+2026/04/17-07:41:32.388034 d468 	kCustomCompressionF9 supported: 0
+2026/04/17-07:41:32.388040 d468 	kCustomCompressionFA supported: 0
+2026/04/17-07:41:32.388046 d468 	kCustomCompressionFB supported: 0
+2026/04/17-07:41:32.388053 d468 	kCustomCompressionFC supported: 0
+2026/04/17-07:41:32.388059 d468 	kCustomCompressionFD supported: 0
+2026/04/17-07:41:32.388066 d468 	kCustomCompressionFE supported: 0
+2026/04/17-07:41:32.388079 d468 Fast CRC32 supported: Not supported on x86
+2026/04/17-07:41:32.388086 d468 DMutex implementation: std::mutex
+2026/04/17-07:41:32.388093 d468 Jemalloc supported: 0
+2026/04/17-07:41:32.389458 d468 [WARN] [Get:2693] DB::Open() failed: IO error: Failed to create lock file: ./raft_data\mocra_local\control_plane/LOCK: 另一个程序正在使用此文件，进程无法访问。
+2026/04/17-07:41:32.389496 d468 [unreleased snapshot.:467] Shutdown: canceling all background work
+2026/04/17-07:41:32.389569 d468 [48] Ignoring error %s:681] Shutdown complete

@@ -1,10 +1,31 @@
 use crate::sync::CoordinationBackend;
+use async_trait::async_trait;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::watch;
 use tokio::time::sleep;
-use uuid::Uuid;
 use tracing::debug;
+use uuid::Uuid;
+
+#[async_trait]
+pub trait LeadershipGate: Send + Sync {
+    async fn start(self: Arc<Self>);
+    fn is_leader(&self) -> bool;
+}
+
+#[derive(Default)]
+pub struct LocalLeadershipGate;
+
+#[async_trait]
+impl LeadershipGate for LocalLeadershipGate {
+    async fn start(self: Arc<Self>) {
+        let _ = self;
+    }
+
+    fn is_leader(&self) -> bool {
+        true
+    }
+}
 
 pub struct LeaderElector {
     backend: Option<Arc<dyn CoordinationBackend>>,
@@ -18,7 +39,11 @@ pub struct LeaderElector {
 }
 
 impl LeaderElector {
-    pub fn new(backend: Option<Arc<dyn CoordinationBackend>>, key: String, ttl_ms: u64) -> (Arc<Self>, watch::Receiver<bool>) {
+    pub fn new(
+        backend: Option<Arc<dyn CoordinationBackend>>,
+        key: String,
+        ttl_ms: u64,
+    ) -> (Arc<Self>, watch::Receiver<bool>) {
         let (tx, rx) = watch::channel(false);
         let elector = Arc::new(Self {
             backend,
@@ -45,7 +70,7 @@ impl LeaderElector {
             let _ = self.leader_signal.send(true);
             return;
         }
-        
+
         let backend = self.backend.as_ref().unwrap();
         let value = self.id.as_bytes();
 
@@ -55,14 +80,17 @@ impl LeaderElector {
             match backend.acquire_lock(&self.key, value, self.ttl_ms).await {
                 Ok(true) => {
                     // Acquired!
-                    debug!("LeaderElector[{}]: Lock ACQUIRED for key: {}", self.id, self.key);
+                    debug!(
+                        "LeaderElector[{}]: Lock ACQUIRED for key: {}",
+                        self.id, self.key
+                    );
                     if !*self.leader_signal.borrow() {
                         let _ = self.leader_signal.send(true);
                         debug!("LeaderElector[{}]: Signal set to TRUE", self.id);
                     } else {
                         debug!("LeaderElector[{}]: Signal ALREADY TRUE", self.id);
                     }
-                    
+
                     // Maintain leadership (renew lock)
                     // We need to renew before TTL expires. Let's renew at 1/3 of TTL.
                     let renew_interval = Duration::from_millis(self.ttl_ms / 3);
@@ -73,8 +101,9 @@ impl LeaderElector {
                         } else {
                             renew_interval
                         };
-                        
-                        let sleep_duration = sleep_duration + Duration::from_millis(Self::jitter_ms(100));
+
+                        let sleep_duration =
+                            sleep_duration + Duration::from_millis(Self::jitter_ms(100));
                         sleep(sleep_duration).await;
 
                         match backend.renew_lock(&self.key, value, self.ttl_ms).await {
@@ -95,7 +124,10 @@ impl LeaderElector {
                                 // If we fail too many times or total time exceeds TTL, we must assume lost.
                                 // renew_interval * 3 = TTL. So if we fail 3 times in a row, we are close to expiration.
                                 if fail_count >= 3 {
-                                    debug!("LeaderElector[{}]: Too many renewal errors, stepping down", self.id);
+                                    debug!(
+                                        "LeaderElector[{}]: Too many renewal errors, stepping down",
+                                        self.id
+                                    );
                                     let _ = self.leader_signal.send(false);
                                     break;
                                 }
@@ -107,12 +139,12 @@ impl LeaderElector {
                 Ok(false) => {
                     // Failed to acquire. Not leader.
                     if *self.leader_signal.borrow() {
-                         debug!("LeaderElector[{}]: Stepped down from leadership", self.id);
-                         let _ = self.leader_signal.send(false);
+                        debug!("LeaderElector[{}]: Stepped down from leadership", self.id);
+                        let _ = self.leader_signal.send(false);
                     } else {
-                         // eprintln!("LeaderElector: Failed to acquire lock, retrying...");
+                        // eprintln!("LeaderElector: Failed to acquire lock, retrying...");
                     }
-                    // Wait before retrying. 
+                    // Wait before retrying.
                     // Optimization: Check more frequently to pick up dropped leadership faster.
                     // But not too fast to spam backend.
                     // 1/10 of TTL or 1s, whichever is smaller?
@@ -136,5 +168,30 @@ impl LeaderElector {
             .unwrap_or_default()
             .subsec_nanos() as u64;
         nanos % max
+    }
+}
+
+#[async_trait]
+impl LeadershipGate for LeaderElector {
+    async fn start(self: Arc<Self>) {
+        LeaderElector::start(self).await;
+    }
+
+    fn is_leader(&self) -> bool {
+        LeaderElector::is_leader(self)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn local_leadership_gate_is_always_leader() {
+        let gate = Arc::new(LocalLeadershipGate);
+
+        gate.clone().start().await;
+
+        assert!(gate.is_leader());
     }
 }

@@ -1,37 +1,52 @@
 #![allow(unused)]
 use crate::common::status_tracker::ErrorDecision;
-use log::info;
 use crate::engine::events::{
-    EventBus, EventEnvelope, EventPhase, EventType, ModuleGenerateEvent, ParserTaskModelEvent,
+    EventBus, EventEnvelope, EventPhase, EventType, ModuleGenerateEvent, ParserDispatchEvent,
     RequestEvent, TaskModelEvent,
 };
 use crate::engine::processors::event_processor::{EventAwareTypedChain, EventProcessorTrait};
-
-
-use async_trait::async_trait;
-use crate::errors::{Error, ModuleError, Result};
-use crate::common::model::chain_key;
-use crate::common::model::message::{TaskErrorEvent, TaskParserEvent, TaskEvent, UnifiedTaskInput};
-use crate::common::model::{ModuleConfig, Request};
-use crate::common::state::State;
-
+use log::info;
 use log::{debug, error, warn};
+
+use crate::common::model::chain_key;
+use crate::common::metrics as metrics_facade;
+use crate::common::model::message::{TaskEvent, UnifiedTaskInput};
+use crate::common::model::workflow_profile::TaskProfileSnapshot;
+use crate::common::model::{
+    ErrorDispatchContext, ExecutionMeta, ModuleConfig, NodeDispatchEnvelope,
+    NodeErrorEnvelope, NodeInput, ParserDispatchContext, PayloadCodec, Request, RoutingMeta,
+    RuntimeNodeRoutingHint, TypedEnvelope,
+};
+use crate::common::state::State;
+use crate::errors::{Error, ModuleError, RequestError, Result};
+use async_trait::async_trait;
+use futures::stream::StreamExt;
 use metrics::counter;
-use crate::queue::{QueueManager, QueuedItem};
+use serde_json::json;
+
 use crate::common::processors::processor::{
     ProcessorContext, ProcessorResult, ProcessorTrait, RetryPolicy,
 };
 use crate::common::processors::processor_chain::ErrorStrategy;
-use std::sync::Arc;
-use uuid::Uuid;
-use futures::stream::{StreamExt};
-use std::marker::PhantomData;
-use serde_json::json;
-use std::time::{SystemTime, UNIX_EPOCH};
-
+use crate::engine::chain::backpressure::{BackpressureSendState, send_with_backpressure};
 use crate::engine::deduplication::Deduplicator;
 use crate::engine::lua::LuaScriptRegistry;
-use crate::engine::chain::backpressure::{BackpressureSendState, send_with_backpressure};
+use crate::engine::task::module_dag_orchestrator::ModuleDagOrchestrator;
+use crate::engine::task::module_node_runtime_bridge::{
+    SchedulerNodeGenerateRuntimeInput, decode_request_batch_payload,
+};
+use crate::engine::task::parser_error_adapter::{
+    ErrorEnvelopeSeed, build_error_envelope_from_seed, extract_error_envelope_seed,
+    extract_parser_dispatch_seed,
+};
+use crate::engine::task::request_response_adapter::build_request_dispatch;
+use crate::queue::{QueueManager, QueuedItem};
+use crate::schedule::DagError;
+use crate::schedule::dag::NodePlacement;
+use std::marker::PhantomData;
+use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
+use uuid::Uuid;
 
 /// High-level action produced by threshold checks in ingress chains.
 #[derive(Debug, Clone)]
@@ -67,20 +82,17 @@ impl ChainDecision {
 }
 
 #[cfg(test)]
-mod decision_tests {
-    use super::ChainDecision;
+mod threshold_decision_tests {
+    use super::{lua_thresholds_enabled, ChainDecision};
 
     #[test]
-    fn chain_decision_action_applied_flags_are_stable() {
-        let continue_decision = ChainDecision::Continue;
-        assert!(!continue_decision.action_applied());
-
+    fn chain_decision_action_applied_tracks_lua_side_effects() {
         let retry_lua = ChainDecision::RetryAfter {
-            delay: std::time::Duration::from_millis(1000),
+            delay: std::time::Duration::from_millis(100),
             action_applied: true,
         };
         let retry_fallback = ChainDecision::RetryAfter {
-            delay: std::time::Duration::from_millis(1000),
+            delay: std::time::Duration::from_millis(100),
             action_applied: false,
         };
         assert!(retry_lua.action_applied());
@@ -108,6 +120,124 @@ mod decision_tests {
         assert!(terminate_task_lua.action_applied());
         assert!(!terminate_task_fallback.action_applied());
     }
+
+    #[test]
+    fn lua_thresholds_require_backend_and_registry() {
+        assert!(lua_thresholds_enabled(true, true));
+        assert!(!lua_thresholds_enabled(true, false));
+        assert!(!lua_thresholds_enabled(false, true));
+        assert!(!lua_thresholds_enabled(false, false));
+    }
+}
+
+#[cfg(test)]
+mod task_routing_policy_tests {
+    use super::{derive_generate_retry_policy, local_fast_path_error, module_matches_pending_context};
+    use crate::common::model::{ExecutionMark, RuntimeNodeRoutingHint};
+    use crate::common::processors::processor::{ProcessorContext, RetryPolicy};
+    use crate::errors::RequestError;
+    use crate::schedule::dag::{DagNodeExecutionPolicy, DagNodeRetryMode, NodePlacement};
+
+    #[test]
+    fn module_target_filter_uses_pending_ctx_module_id() {
+        let pending_ctx = Some(ExecutionMark::default().with_module_id("module-a"));
+        assert!(module_matches_pending_context("module-a", &pending_ctx));
+        assert!(!module_matches_pending_context("module-b", &pending_ctx));
+    }
+
+    #[test]
+    fn local_fast_path_rejects_remote_runtime_hint() {
+        let err = local_fast_path_error(
+            "module-a",
+            &RuntimeNodeRoutingHint::new("node-a")
+                .with_placement(NodePlacement::remote("wg-parser")),
+        )
+        .expect("remote placement should be rejected on the local fast path");
+
+        assert!(err.to_string().contains("local fast path cannot execute remote-placed node"));
+    }
+
+    #[test]
+    fn retry_policy_uses_runtime_hint_policy() {
+        let hint = RuntimeNodeRoutingHint::new("node-a").with_policy(DagNodeExecutionPolicy {
+            max_retries: 5,
+            timeout_ms: Some(1200),
+            retry_backoff_ms: 250,
+            idempotency_key: None,
+            retry_mode: DagNodeRetryMode::RetryableOnly,
+            circuit_breaker_failure_threshold: None,
+            circuit_breaker_open_ms: 0,
+        });
+        let context = ProcessorContext::default().with_retry_policy(RetryPolicy {
+            max_retries: 1,
+            retry_delay: 10,
+            current_retry: 2,
+            reason: None,
+            meta: Default::default(),
+        });
+        let err: crate::errors::Error = RequestError::Timeout.into();
+
+        let retry_policy = derive_generate_retry_policy(&context, Some(&hint), &err);
+        assert_eq!(retry_policy.max_retries, 5);
+        assert_eq!(retry_policy.retry_delay, 250);
+        assert_eq!(retry_policy.current_retry, 2);
+        assert!(retry_policy.reason.as_deref().unwrap_or_default().contains("request error"));
+    }
+}
+
+fn lua_thresholds_enabled(cache_redis_enabled: bool, has_lua_registry: bool) -> bool {
+    cache_redis_enabled && has_lua_registry
+}
+
+fn module_matches_pending_context(
+    module_id: &str,
+    pending_ctx: &Option<crate::common::model::ExecutionMark>,
+) -> bool {
+    let Some(target_module_id) = pending_ctx
+        .as_ref()
+        .and_then(|ctx| ctx.module_id.as_deref())
+        .filter(|module_id| !module_id.is_empty())
+    else {
+        return true;
+    };
+
+    target_module_id == module_id
+}
+
+fn local_fast_path_error(
+    module_id: &str,
+    hint: &RuntimeNodeRoutingHint,
+) -> Option<Error> {
+    match hint.placement.as_ref() {
+        Some(NodePlacement::Remote { worker_group }) => Some(
+            RequestError::InvalidMetaForRemote(
+                std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    format!(
+                        "local fast path cannot execute remote-placed node '{}' for module '{}' (worker_group='{}')",
+                        hint.node_key, module_id, worker_group
+                    ),
+                )
+                .into(),
+            )
+            .into(),
+        ),
+        _ => None,
+    }
+}
+
+fn derive_generate_retry_policy(
+    context: &ProcessorContext,
+    hint: Option<&RuntimeNodeRoutingHint>,
+    err: &Error,
+) -> RetryPolicy {
+    let mut policy = context.retry_policy.clone().unwrap_or_default();
+    if let Some(execution_policy) = hint.and_then(|hint| hint.policy.as_ref()) {
+        policy.max_retries = execution_policy.max_retries as u32;
+        policy.retry_delay = execution_policy.retry_backoff_ms;
+    }
+    policy.reason = Some(err.to_string());
+    policy
 }
 
 #[async_trait]
@@ -116,7 +246,7 @@ pub trait ThresholdDecisionService: Send + Sync {
     /// Performs preflight validation before task expansion.
     async fn task_precheck(&self, task_id: &str) -> ChainDecision;
     /// Decides how to handle an `ErrorTaskModel` path.
-    async fn error_task_decide(&self, input: &TaskErrorEvent) -> ChainDecision;
+    async fn error_task_decide(&self, input: &ErrorEnvelopeSeed) -> ChainDecision;
 }
 
 /// Default threshold decision service backed by `StatusTracker` and optional Lua atomics.
@@ -129,14 +259,33 @@ pub struct StatusTrackerThresholdDecisionService {
 impl StatusTrackerThresholdDecisionService {
     /// Creates a service with fallback-safe behavior when Lua is unavailable.
     pub fn new(state: Arc<State>, lua_registry: Option<Arc<LuaScriptRegistry>>) -> Self {
-        Self { state, lua_registry }
+        Self {
+            state,
+            lua_registry,
+        }
+    }
+
+    fn lua_registry(&self) -> Option<&Arc<LuaScriptRegistry>> {
+        if lua_thresholds_enabled(
+            self.state.has_cache_redis_backend(),
+            self.lua_registry.is_some(),
+        ) {
+            self.lua_registry.as_ref()
+        } else {
+            None
+        }
     }
 }
 
 #[async_trait]
 impl ThresholdDecisionService for StatusTrackerThresholdDecisionService {
     async fn task_precheck(&self, task_id: &str) -> ChainDecision {
-        match self.state.status_tracker.should_task_continue(task_id).await {
+        match self
+            .state
+            .status_tracker
+            .should_task_continue(task_id)
+            .await
+        {
             Ok(ErrorDecision::Continue) => ChainDecision::Continue,
             Ok(ErrorDecision::Terminate(reason)) => ChainDecision::TerminateTask {
                 reason,
@@ -153,19 +302,20 @@ impl ThresholdDecisionService for StatusTrackerThresholdDecisionService {
         }
     }
 
-    async fn error_task_decide(&self, input: &TaskErrorEvent) -> ChainDecision {
+    async fn error_task_decide(&self, input: &ErrorEnvelopeSeed) -> ChainDecision {
         let task_id = chain_key::task_runtime_id(
-            &input.account_task.platform,
-            &input.account_task.account,
+            &input.task_model.platform,
+            &input.task_model.account,
             input.run_id,
         );
 
-        if let (Some(lua_registry), Some(modules)) = (&self.lua_registry, input.account_task.module.as_ref())
+        if let (Some(lua_registry), Some(modules)) =
+            (self.lua_registry(), input.task_model.module.as_ref())
             && let Some(module_name) = modules.first()
         {
             let module_id = chain_key::module_runtime_id(
-                &input.account_task.account,
-                &input.account_task.platform,
+                &input.task_model.account,
+                &input.task_model.platform,
                 module_name,
             );
             let module_counter_key = chain_key::module_threshold_key(&task_id, &module_id);
@@ -205,7 +355,8 @@ impl ThresholdDecisionService for StatusTrackerThresholdDecisionService {
                 Ok((0, _, _)) => return ChainDecision::Continue,
                 Ok((1, _, _)) => {
                     let retry_schedule_key = chain_key::error_retry_schedule_key(&task_id);
-                    let retry_member = format!("{}:{}:{}", task_id, module_id, input.prefix_request);
+                    let retry_member =
+                        format!("{}:{}:{}", task_id, module_id, input.prefix_request);
                     let schedule_keys = [retry_schedule_key.as_str()];
                     let schedule_args = [
                         retry_member.as_str(),
@@ -288,7 +439,10 @@ impl ThresholdDecisionService for StatusTrackerThresholdDecisionService {
                             );
                         }
                     }
-                    self.state.status_tracker.release_module_locker(&format!("{}-{}", module_id, input.run_id)).await;
+                    self.state
+                        .status_tracker
+                        .release_module_locker(&format!("{}-{}", module_id, input.run_id))
+                        .await;
                     return ChainDecision::TerminateModule {
                         reason: msg,
                         action_applied: true,
@@ -329,7 +483,11 @@ impl ThresholdDecisionService for StatusTrackerThresholdDecisionService {
                             );
                         }
                     }
-                    let _ = self.state.status_tracker.mark_task_terminated(&task_id).await;
+                    let _ = self
+                        .state
+                        .status_tracker
+                        .mark_task_terminated(&task_id)
+                        .await;
                     return ChainDecision::TerminateTask {
                         reason: msg,
                         action_applied: true,
@@ -350,14 +508,14 @@ impl ThresholdDecisionService for StatusTrackerThresholdDecisionService {
             }
         }
 
-        let parse_error: Error = ModuleError::ModuleNotFound(input.error_msg.clone().into()).into();
+        let parse_error: Error = ModuleError::ModuleNotFound(input.error_message.clone().into()).into();
         let mut retry_after: Option<std::time::Duration> = None;
 
-        if let Some(modules) = &input.account_task.module {
+        if let Some(modules) = &input.task_model.module {
             for module_name in modules {
                 let module_id = chain_key::module_runtime_id(
-                    &input.account_task.account,
-                    &input.account_task.platform,
+                    &input.task_model.account,
+                    &input.task_model.platform,
                     module_name,
                 );
                 // Run-scoped module ID for StatusTracker error isolation across runs
@@ -388,7 +546,12 @@ impl ThresholdDecisionService for StatusTrackerThresholdDecisionService {
                     }
                 }
 
-                match self.state.status_tracker.should_module_continue(&module_id_scoped).await {
+                match self
+                    .state
+                    .status_tracker
+                    .should_module_continue(&module_id_scoped)
+                    .await
+                {
                     Ok(ErrorDecision::Terminate(reason)) => {
                         return ChainDecision::TerminateModule {
                             reason,
@@ -421,7 +584,7 @@ impl ThresholdDecisionService for StatusTrackerThresholdDecisionService {
     }
 }
 
-/// First ingress processor for `TaskModel` and `ParserTaskModel` variants.
+/// First ingress processor for `TaskModel` and parser-dispatch variants.
 ///
 /// Responsibilities:
 /// - pre-check task thresholds,
@@ -441,14 +604,20 @@ impl TaskModelProcessor {
         self.threshold_decision_service.task_precheck(task_id).await
     }
 
-    async fn error_task_decide(&self, input: &TaskErrorEvent) -> ChainDecision {
-        self.threshold_decision_service.error_task_decide(input).await
+    async fn error_task_decide(&self, input: &ErrorEnvelopeSeed) -> ChainDecision {
+        self.threshold_decision_service
+            .error_task_decide(input)
+            .await
     }
 
-    async fn persist_error_retry_schedule(&self, input: &TaskErrorEvent, delay: std::time::Duration) {
+    async fn persist_error_retry_schedule(
+        &self,
+        input: &ErrorEnvelopeSeed,
+        delay: std::time::Duration,
+    ) {
         let task_id = chain_key::task_runtime_id(
-            &input.account_task.platform,
-            &input.account_task.account,
+            &input.task_model.platform,
+            &input.task_model.account,
             input.run_id,
         );
         let module_id = input
@@ -456,22 +625,20 @@ impl TaskModelProcessor {
             .module_id
             .clone()
             .or_else(|| {
-                input
-                    .account_task
-                    .module
-                    .as_ref()
-                    .and_then(|m| m.first().map(|name| {
+                input.task_model.module.as_ref().and_then(|m| {
+                    m.first().map(|name| {
                         chain_key::module_runtime_id(
-                            &input.account_task.account,
-                            &input.account_task.platform,
+                            &input.task_model.account,
+                            &input.task_model.platform,
                             name,
                         )
-                    }))
+                    })
+                })
             })
             .unwrap_or_else(|| {
                 chain_key::module_runtime_id(
-                    &input.account_task.account,
-                    &input.account_task.platform,
+                    &input.task_model.account,
+                    &input.task_model.platform,
                     "unknown",
                 )
             });
@@ -498,13 +665,13 @@ impl TaskModelProcessor {
 
     async fn persist_terminate_mark(
         &self,
-        input: &TaskErrorEvent,
+        input: &ErrorEnvelopeSeed,
         terminate_module: Option<&str>,
         reason: &str,
     ) {
         let task_id = chain_key::task_runtime_id(
-            &input.account_task.platform,
-            &input.account_task.account,
+            &input.task_model.platform,
+            &input.task_model.account,
             input.run_id,
         );
         let terminate_key = if let Some(module_id) = terminate_module {
@@ -543,7 +710,7 @@ impl TaskModelProcessor {
 
     async fn emit_threshold_terminated_event(
         &self,
-        input: &TaskErrorEvent,
+        input: &ErrorEnvelopeSeed,
         decision: &str,
         reason: &str,
     ) {
@@ -553,8 +720,8 @@ impl TaskModelProcessor {
 
         let payload = json!({
             "run_id": input.run_id.to_string(),
-            "account": input.account_task.account,
-            "platform": input.account_task.platform,
+            "account": input.task_model.account,
+            "platform": input.task_model.platform,
             "module_id": input.context.module_id,
             "step_idx": input.context.step_idx,
             "prefix_request": input.prefix_request.to_string(),
@@ -574,6 +741,199 @@ impl TaskModelProcessor {
                 "[TaskModelProcessor<ErrorTaskModel>] failed to publish threshold termination event: {}",
                 err
             );
+        }
+    }
+
+    async fn process_parser_dispatch(
+        &self,
+        input: NodeDispatchEnvelope,
+        context: ProcessorContext,
+    ) -> ProcessorResult<Task> {
+        let parser_seed = match extract_parser_dispatch_seed(&input) {
+            Ok(seed) => seed,
+            Err(err) => return ProcessorResult::FatalFailure(err),
+        };
+
+        let task_id = chain_key::task_runtime_id(
+            &parser_seed.task_model.platform,
+            &parser_seed.task_model.account,
+            parser_seed.run_id,
+        );
+        match self.task_precheck(&task_id).await {
+            ChainDecision::Continue => {}
+            ChainDecision::TerminateTask { reason, .. } => {
+                return ProcessorResult::FatalFailure(
+                    ModuleError::TaskMaxError(reason.into()).into(),
+                );
+            }
+            _ => {}
+        }
+
+        match self.task_manager.load_parser_dispatch(&input).await {
+            Ok(task) => ProcessorResult::Success(task),
+            Err(err) => ProcessorResult::RetryableFailure(
+                context
+                    .retry_policy
+                    .unwrap_or(RetryPolicy::default().with_reason(err.to_string())),
+            ),
+        }
+    }
+
+    async fn handle_parser_dispatch_error(
+        &self,
+        input: &NodeDispatchEnvelope,
+        error: Error,
+    ) -> ProcessorResult<Task> {
+        let parser_seed = match extract_parser_dispatch_seed(input) {
+            Ok(seed) => seed,
+            Err(err) => return ProcessorResult::FatalFailure(err),
+        };
+        let sender = self.queue_manager.get_error_push_channel();
+        let error_msg = ErrorEnvelopeSeed {
+            request_id: Uuid::nil(),
+            task_model: parser_seed.task_model.clone(),
+            error_message: error.to_string(),
+            timestamp: chrono::Utc::now().timestamp_millis() as u64,
+            metadata: Default::default(),
+            context: Default::default(),
+            run_id: parser_seed.run_id,
+            prefix_request: parser_seed.prefix_request,
+        };
+        let envelope = match build_error_envelope_from_seed(&error_msg, self.queue_manager.namespace.clone()) {
+            Ok(envelope) => envelope,
+            Err(err) => return ProcessorResult::FatalFailure(err),
+        };
+        if let Err(err) = sender.send(QueuedItem::new(envelope)).await {
+            error!("[TaskModelProcessor<ParserDispatch>] failed to enqueue ErrorTaskModel: {err}");
+        }
+        ProcessorResult::FatalFailure(
+            ModuleError::ModuleNotFound("Failed to load task, re-queued".into()).into(),
+        )
+    }
+
+    async fn process_error_envelope(
+        &self,
+        input: NodeErrorEnvelope,
+        context: ProcessorContext,
+    ) -> ProcessorResult<Task> {
+        let error_seed = match extract_error_envelope_seed(&input) {
+            Ok(seed) => seed,
+            Err(err) => return ProcessorResult::FatalFailure(err),
+        };
+
+        let task_id = chain_key::task_runtime_id(
+            &error_seed.task_model.platform,
+            &error_seed.task_model.account,
+            error_seed.run_id,
+        );
+        match self.error_task_decide(&error_seed).await {
+            ChainDecision::Continue => {
+                counter!("mocra_error_task_threshold_decision_total", "decision" => "continue")
+                    .increment(1);
+                debug!(
+                    "[TaskModelProcessor<ErrorEnvelope>] task can continue: task_id={}",
+                    task_id
+                );
+            }
+            ChainDecision::RetryAfter {
+                delay,
+                action_applied,
+            } => {
+                counter!("mocra_error_task_threshold_decision_total", "decision" => "retry_after")
+                    .increment(1);
+                if !(ChainDecision::RetryAfter {
+                    delay,
+                    action_applied,
+                })
+                .action_applied()
+                {
+                    self.persist_error_retry_schedule(&error_seed, delay).await;
+                }
+                let mut retry_policy = context.retry_policy.unwrap_or_default();
+                retry_policy.retry_delay = std::cmp::max(delay.as_millis() as u64, 1);
+                retry_policy.reason = Some(format!(
+                    "error task retry after {}ms",
+                    retry_policy.retry_delay
+                ));
+                return ProcessorResult::RetryableFailure(retry_policy);
+            }
+            ChainDecision::TerminateModule {
+                reason,
+                action_applied,
+            } => {
+                counter!("mocra_error_task_threshold_decision_total", "decision" => "terminate_module").increment(1);
+                let module_id = error_seed
+                    .context
+                    .module_id
+                    .clone()
+                    .or_else(|| {
+                        error_seed.task_model.module.as_ref().and_then(|m| {
+                            m.first().map(|name| {
+                                chain_key::module_runtime_id(
+                                    &error_seed.task_model.account,
+                                    &error_seed.task_model.platform,
+                                    name,
+                                )
+                            })
+                        })
+                    })
+                    .unwrap_or_else(|| {
+                        chain_key::module_runtime_id(
+                            &error_seed.task_model.account,
+                            &error_seed.task_model.platform,
+                            "unknown",
+                        )
+                    });
+                if !(ChainDecision::TerminateModule {
+                    reason: reason.clone(),
+                    action_applied,
+                })
+                .action_applied()
+                {
+                    self.persist_terminate_mark(&error_seed, Some(&module_id), &reason)
+                        .await;
+                }
+                self.emit_threshold_terminated_event(&error_seed, "terminate_module", &reason)
+                    .await;
+                return ProcessorResult::FatalFailure(
+                    ModuleError::ModuleMaxError(reason.into()).into(),
+                );
+            }
+            ChainDecision::TerminateTask {
+                reason,
+                action_applied,
+            } => {
+                counter!("mocra_error_task_threshold_decision_total", "decision" => "terminate_task").increment(1);
+                if !(ChainDecision::TerminateTask {
+                    reason: reason.clone(),
+                    action_applied,
+                })
+                .action_applied()
+                {
+                    self.persist_terminate_mark(&error_seed, None, &reason).await;
+                }
+                self.emit_threshold_terminated_event(&error_seed, "terminate_task", &reason)
+                    .await;
+                if let Err(err) = self
+                    .queue_manager
+                    .send_to_dlq("error_task", &input, &reason)
+                    .await
+                {
+                    error!("[TaskModelProcessor<ErrorEnvelope>] failed to send to DLQ: {}", err);
+                }
+                return ProcessorResult::FatalFailure(
+                    ModuleError::TaskMaxError(reason.into()).into(),
+                );
+            }
+        }
+
+        match self.task_manager.load_error_envelope(&input).await {
+            Ok(task) => ProcessorResult::Success(task),
+            Err(err) => ProcessorResult::RetryableFailure(
+                context
+                    .retry_policy
+                    .unwrap_or(RetryPolicy::default().with_reason(err.to_string())),
+            ),
         }
     }
 }
@@ -602,11 +962,17 @@ impl ProcessorTrait<TaskEvent, Task> for TaskModelProcessor {
             ChainDecision::TerminateTask { reason, .. } => {
                 error!(
                     "[TaskModelProcessor<TaskModel>] task terminated (pre-check): task_id={} reason={}",
-                    task_id,
-                    reason
+                    task_id, reason
                 );
-                if let Err(e) = self.queue_manager.send_to_dlq("task", &input, &reason).await {
-                    error!("[TaskModelProcessor<TaskModel>] failed to send to DLQ: {}", e);
+                if let Err(e) = self
+                    .queue_manager
+                    .send_to_dlq("task", &input, &reason)
+                    .await
+                {
+                    error!(
+                        "[TaskModelProcessor<TaskModel>] failed to send to DLQ: {}",
+                        e
+                    );
                 }
                 return ProcessorResult::FatalFailure(
                     ModuleError::TaskMaxError(reason.into()).into(),
@@ -673,10 +1039,14 @@ impl ProcessorTrait<TaskEvent, Task> for TaskModelProcessor {
                 ProcessorResult::Success(task)
             }
             Err(e) => {
-                debug!("[TaskModelProcessor] load_with_model failed: account={} platform={} run_id={} error={e}",
-                    input.account, input.platform, input.run_id);
-                warn!("[TaskModelProcessor<TaskModel>] load_with_model failed, will retry: account={} platform={} run_id={} error={e}",
-                    input.account, input.platform, input.run_id);
+                debug!(
+                    "[TaskModelProcessor] load_with_model failed: account={} platform={} run_id={} error={e}",
+                    input.account, input.platform, input.run_id
+                );
+                warn!(
+                    "[TaskModelProcessor<TaskModel>] load_with_model failed, will retry: account={} platform={} run_id={} error={e}",
+                    input.account, input.platform, input.run_id
+                );
                 ProcessorResult::RetryableFailure(
                     context
                         .retry_policy
@@ -695,17 +1065,26 @@ impl ProcessorTrait<TaskEvent, Task> for TaskModelProcessor {
         _context: &ProcessorContext,
     ) -> ProcessorResult<Task> {
         let sender = self.queue_manager.get_error_push_channel();
-        let error_msg = TaskErrorEvent {
-            id: Default::default(),
-            account_task: input.clone(),
-            error_msg: error.to_string(),
+        let error_msg = ErrorEnvelopeSeed {
+            request_id: Uuid::nil(),
+            task_model: input.clone(),
+            error_message: error.to_string(),
             timestamp: chrono::Utc::now().timestamp_millis() as u64,
             metadata: Default::default(),
             context: Default::default(),
             run_id: input.run_id,
             prefix_request: Uuid::nil(),
         };
-        if let Err(e) = sender.send(QueuedItem::new(error_msg)).await {
+        let envelope = match build_error_envelope_from_seed(&error_msg, self.queue_manager.namespace.clone()) {
+            Ok(envelope) => envelope,
+            Err(err) => {
+                error!("[TaskModelProcessor<TaskModel>] failed to build ErrorTaskModel envelope: {err}");
+                return ProcessorResult::FatalFailure(
+                    ModuleError::ModuleNotFound("Failed to load task, re-queued".into()).into(),
+                );
+            }
+        };
+        if let Err(e) = sender.send(QueuedItem::new(envelope)).await {
             error!("[TaskModelProcessor<TaskModel>] failed to enqueue ErrorTaskModel: {e}");
         }
         ProcessorResult::FatalFailure(
@@ -763,145 +1142,84 @@ impl EventProcessorTrait<TaskEvent, Task> for TaskModelProcessor {
     }
 }
 #[async_trait]
-impl ProcessorTrait<TaskParserEvent, Task> for TaskModelProcessor {
+impl ProcessorTrait<NodeDispatchEnvelope, Task> for TaskModelProcessor {
     fn name(&self) -> &'static str {
         "TaskModelProcessor"
     }
 
     async fn process(
         &self,
-        input: TaskParserEvent,
+        input: NodeDispatchEnvelope,
         context: ProcessorContext,
     ) -> ProcessorResult<Task> {
-        debug!(
-            "[TaskModelProcessor<ParserTaskModel>] start: account={} platform={} crawler={:?} retry_count={}",
-            input.account_task.account,
-            input.account_task.platform,
-            input.account_task.module,
-            context
-                .retry_policy
-                .as_ref()
-                .map(|r| r.current_retry)
-                .unwrap_or(0)
-        );
-
-        // Check whether this task scope has already been terminated.
-        let task_id = chain_key::task_runtime_id(
-            &input.account_task.platform,
-            &input.account_task.account,
-            input.run_id,
-        );
-        match self.task_precheck(&task_id).await {
-            ChainDecision::Continue => {
-                debug!(
-                    "[TaskModelProcessor<ParserTaskModel>] task can continue: task_id={}",
-                    task_id
-                );
-            }
-            ChainDecision::TerminateTask { reason, .. } => {
-                error!(
-                    "[TaskModelProcessor<ParserTaskModel>] task terminated (pre-check): task_id={} reason={}",
-                    task_id,
-                    reason
-                );
-                return ProcessorResult::FatalFailure(
-                    ModuleError::TaskMaxError(reason.into()).into(),
-                );
-            }
-            _ => {}
-        }
-
-        let task = self.task_manager.load_parser(&input).await;
-        match task {
-            Ok(task) => {
-                ProcessorResult::Success(task)
-            }
-            Err(e) => {
-                warn!("[TaskModelProcessor<ParserTaskModel>] load_parser failed, will retry: account={} platform={} run_id={} error={e}",
-                    input.account_task.account, input.account_task.platform, input.run_id);
-                ProcessorResult::RetryableFailure(
-                    context
-                        .retry_policy
-                        .unwrap_or(RetryPolicy::default().with_reason(e.to_string())),
-                )
-            }
-        }
+        self.process_parser_dispatch(input, context).await
     }
+
     async fn pre_process(
         &self,
-        _input: &TaskParserEvent,
+        _input: &NodeDispatchEnvelope,
         _context: &ProcessorContext,
     ) -> Result<()> {
         Ok(())
     }
+
     async fn handle_error(
         &self,
-        input: &TaskParserEvent,
+        input: &NodeDispatchEnvelope,
         error: Error,
         _context: &ProcessorContext,
     ) -> ProcessorResult<Task> {
-        let sender = self.queue_manager.get_error_push_channel();
-        let error_msg = TaskErrorEvent {
-            id: Default::default(),
-            account_task: input.account_task.clone(),
-            error_msg: error.to_string(),
-            timestamp: chrono::Utc::now().timestamp_millis() as u64,
-            metadata: Default::default(),
-            context: Default::default(),
-            run_id: input.run_id,
-            prefix_request: input.prefix_request,
-        };
-        if let Err(e) = sender.send(QueuedItem::new(error_msg)).await {
-            error!("[TaskModelProcessor<ParserTaskModel>] failed to enqueue ErrorTaskModel: {e}");
-        }
-        ProcessorResult::FatalFailure(
-            ModuleError::ModuleNotFound("Failed to load task, re-queued".into()).into(),
-        )
+        self.handle_parser_dispatch_error(input, error).await
     }
 }
+
 #[async_trait]
-impl EventProcessorTrait<TaskParserEvent, Task> for TaskModelProcessor {
-    fn pre_status(&self, input: &TaskParserEvent) -> Option<EventEnvelope> {
+impl EventProcessorTrait<NodeDispatchEnvelope, Task> for TaskModelProcessor {
+    fn pre_status(&self, input: &NodeDispatchEnvelope) -> Option<EventEnvelope> {
         Some(EventEnvelope::engine(
-            EventType::ParserTaskModel,
+            EventType::ParserDispatch,
             EventPhase::Started,
-            ParserTaskModelEvent::from(input),
+            ParserDispatchEvent::from(input),
         ))
     }
 
-    fn finish_status(&self, input: &TaskParserEvent, output: &Task) -> Option<EventEnvelope> {
-        let mut evt: ParserTaskModelEvent = input.into();
+    fn finish_status(&self, input: &NodeDispatchEnvelope, output: &Task) -> Option<EventEnvelope> {
+        let mut evt: ParserDispatchEvent = input.into();
         evt.modules = Some(output.get_module_names());
         Some(EventEnvelope::engine(
-            EventType::ParserTaskModel,
+            EventType::ParserDispatch,
             EventPhase::Completed,
             evt,
         ))
     }
 
-    fn working_status(&self, input: &TaskParserEvent) -> Option<EventEnvelope> {
+    fn working_status(&self, input: &NodeDispatchEnvelope) -> Option<EventEnvelope> {
         Some(EventEnvelope::engine(
-            EventType::ParserTaskModel,
+            EventType::ParserDispatch,
             EventPhase::Started,
-            ParserTaskModelEvent::from(input),
+            ParserDispatchEvent::from(input),
         ))
     }
 
-    fn error_status(&self, input: &TaskParserEvent, err: &Error) -> Option<EventEnvelope> {
+    fn error_status(&self, input: &NodeDispatchEnvelope, err: &Error) -> Option<EventEnvelope> {
         Some(EventEnvelope::engine_error(
-            EventType::ParserTaskModel,
+            EventType::ParserDispatch,
             EventPhase::Failed,
-            ParserTaskModelEvent::from(input),
+            ParserDispatchEvent::from(input),
             err,
         ))
     }
 
-    fn retry_status(&self, input: &TaskParserEvent, retry_policy: &RetryPolicy) -> Option<EventEnvelope> {
+    fn retry_status(
+        &self,
+        input: &NodeDispatchEnvelope,
+        retry_policy: &RetryPolicy,
+    ) -> Option<EventEnvelope> {
         Some(EventEnvelope::engine(
-            EventType::ParserTaskModel,
+            EventType::ParserDispatch,
             EventPhase::Retry,
             json!({
-                "data": ParserTaskModelEvent::from(input),
+                "data": ParserDispatchEvent::from(input),
                 "retry_count": retry_policy.current_retry,
                 "reason": retry_policy.reason.clone().unwrap_or_default(),
             }),
@@ -909,198 +1227,75 @@ impl EventProcessorTrait<TaskParserEvent, Task> for TaskModelProcessor {
     }
 }
 #[async_trait]
-impl ProcessorTrait<TaskErrorEvent, Task> for TaskModelProcessor {
+impl ProcessorTrait<NodeErrorEnvelope, Task> for TaskModelProcessor {
     fn name(&self) -> &'static str {
         "TaskModelProcessor"
     }
 
     async fn process(
         &self,
-        input: TaskErrorEvent,
+        input: NodeErrorEnvelope,
         context: ProcessorContext,
     ) -> ProcessorResult<Task> {
-        debug!(
-            "[TaskModelProcessor<ErrorTaskModel>] start: account={} platform={} crawler={:?} retry_count={}",
-            input.account_task.account,
-            input.account_task.platform,
-            input.account_task.module,
-            context
-                .retry_policy
-                .as_ref()
-                .map(|r| r.current_retry)
-                .unwrap_or(0)
-        );
-
-        let task_id = chain_key::task_runtime_id(
-            &input.account_task.platform,
-            &input.account_task.account,
-            input.run_id,
-        );
-        match self.error_task_decide(&input).await {
-            ChainDecision::Continue => {
-                counter!("mocra_error_task_threshold_decision_total", "decision" => "continue").increment(1);
-                debug!(
-                    "[TaskModelProcessor<ErrorTaskModel>] task can continue: task_id={}",
-                    task_id
-                );
-            }
-            ChainDecision::RetryAfter {
-                delay,
-                action_applied,
-            } => {
-                counter!("mocra_error_task_threshold_decision_total", "decision" => "retry_after").increment(1);
-                if !(ChainDecision::RetryAfter {
-                    delay,
-                    action_applied,
-                })
-                .action_applied()
-                {
-                    self.persist_error_retry_schedule(&input, delay).await;
-                }
-                let mut retry_policy = context.retry_policy.unwrap_or_default();
-                retry_policy.retry_delay = std::cmp::max(delay.as_millis() as u64, 1);
-                retry_policy.reason = Some(format!("error task retry after {}ms", retry_policy.retry_delay));
-                return ProcessorResult::RetryableFailure(retry_policy);
-            }
-            ChainDecision::TerminateModule {
-                reason,
-                action_applied,
-            } => {
-                counter!("mocra_error_task_threshold_decision_total", "decision" => "terminate_module").increment(1);
-                let module_id = input
-                    .context
-                    .module_id
-                    .clone()
-                    .or_else(|| {
-                        input
-                            .account_task
-                            .module
-                            .as_ref()
-                            .and_then(|m| m.first().map(|name| {
-                                chain_key::module_runtime_id(
-                                    &input.account_task.account,
-                                    &input.account_task.platform,
-                                    name,
-                                )
-                            }))
-                    })
-                    .unwrap_or_else(|| {
-                        chain_key::module_runtime_id(
-                            &input.account_task.account,
-                            &input.account_task.platform,
-                            "unknown",
-                        )
-                    });
-                if !(ChainDecision::TerminateModule {
-                    reason: reason.clone(),
-                    action_applied,
-                })
-                .action_applied()
-                {
-                    self.persist_terminate_mark(&input, Some(&module_id), &reason).await;
-                }
-                self.emit_threshold_terminated_event(&input, "terminate_module", &reason)
-                    .await;
-                warn!(
-                    "[TaskModelProcessor<ErrorTaskModel>] module terminated by threshold: task_id={} reason={}",
-                    task_id, reason
-                );
-                return ProcessorResult::FatalFailure(
-                    ModuleError::ModuleMaxError(reason.into()).into(),
-                );
-            }
-            ChainDecision::TerminateTask {
-                reason,
-                action_applied,
-            } => {
-                counter!("mocra_error_task_threshold_decision_total", "decision" => "terminate_task").increment(1);
-                if !(ChainDecision::TerminateTask {
-                    reason: reason.clone(),
-                    action_applied,
-                })
-                .action_applied()
-                {
-                    self.persist_terminate_mark(&input, None, &reason).await;
-                }
-                self.emit_threshold_terminated_event(&input, "terminate_task", &reason)
-                    .await;
-                error!(
-                    "[TaskModelProcessor<ErrorTaskModel>] task terminated (pre-check): task_id={} reason={}",
-                    task_id,
-                    reason
-                );
-                if let Err(e) = self.queue_manager.send_to_dlq("error_task", &input, &reason).await {
-                    error!("[TaskModelProcessor<ErrorTaskModel>] failed to send to DLQ: {}", e);
-                }
-                return ProcessorResult::FatalFailure(
-                    ModuleError::TaskMaxError(reason.into()).into(),
-                );
-            }
-        }
-
-        let task = self.task_manager.load_error(&input).await;
-        match task {
-            Ok(task) => {
-                ProcessorResult::Success(task)
-            }
-            Err(e) => {
-                warn!("[TaskModelProcessor<ErrorTaskModel>] load_error failed, will retry: account={} platform={} run_id={} error={e}",
-                    input.account_task.account, input.account_task.platform, input.run_id);
-                ProcessorResult::RetryableFailure(
-                    context
-                        .retry_policy
-                        .unwrap_or(RetryPolicy::default().with_reason(e.to_string())),
-                )
-            }
-        }
+        self.process_error_envelope(input, context).await
     }
-    async fn pre_process(&self, _input: &TaskErrorEvent, _context: &ProcessorContext) -> Result<()> {
+
+    async fn pre_process(
+        &self,
+        _input: &NodeErrorEnvelope,
+        _context: &ProcessorContext,
+    ) -> Result<()> {
         Ok(())
     }
 }
+
 #[async_trait]
-impl EventProcessorTrait<TaskErrorEvent, Task> for TaskModelProcessor {
-    fn pre_status(&self, input: &TaskErrorEvent) -> Option<EventEnvelope> {
+impl EventProcessorTrait<NodeErrorEnvelope, Task> for TaskModelProcessor {
+    fn pre_status(&self, input: &NodeErrorEnvelope) -> Option<EventEnvelope> {
         Some(EventEnvelope::engine(
-            EventType::ParserTaskModel,
+            EventType::ParserDispatch,
             EventPhase::Started,
-            ParserTaskModelEvent::from(input),
+            ParserDispatchEvent::from(input),
         ))
     }
 
-    fn finish_status(&self, input: &TaskErrorEvent, output: &Task) -> Option<EventEnvelope> {
-        let mut evt: ParserTaskModelEvent = input.into();
+    fn finish_status(&self, input: &NodeErrorEnvelope, output: &Task) -> Option<EventEnvelope> {
+        let mut evt: ParserDispatchEvent = input.into();
         evt.modules = Some(output.get_module_names());
         Some(EventEnvelope::engine(
-            EventType::ParserTaskModel,
+            EventType::ParserDispatch,
             EventPhase::Completed,
             evt,
         ))
     }
 
-    fn working_status(&self, input: &TaskErrorEvent) -> Option<EventEnvelope> {
+    fn working_status(&self, input: &NodeErrorEnvelope) -> Option<EventEnvelope> {
         Some(EventEnvelope::engine(
-            EventType::ParserTaskModel,
+            EventType::ParserDispatch,
             EventPhase::Started,
-            ParserTaskModelEvent::from(input),
+            ParserDispatchEvent::from(input),
         ))
     }
 
-    fn error_status(&self, input: &TaskErrorEvent, err: &Error) -> Option<EventEnvelope> {
+    fn error_status(&self, input: &NodeErrorEnvelope, err: &Error) -> Option<EventEnvelope> {
         Some(EventEnvelope::engine_error(
-            EventType::ParserTaskModel,
+            EventType::ParserDispatch,
             EventPhase::Failed,
-            ParserTaskModelEvent::from(input),
+            ParserDispatchEvent::from(input),
             err,
         ))
     }
 
-    fn retry_status(&self, input: &TaskErrorEvent, retry_policy: &RetryPolicy) -> Option<EventEnvelope> {
+    fn retry_status(
+        &self,
+        input: &NodeErrorEnvelope,
+        retry_policy: &RetryPolicy,
+    ) -> Option<EventEnvelope> {
         Some(EventEnvelope::engine(
-            EventType::ParserTaskModel,
+            EventType::ParserDispatch,
             EventPhase::Retry,
             json!({
-                "data": ParserTaskModelEvent::from(input),
+                "data": ParserDispatchEvent::from(input),
                 "retry_count": retry_policy.current_retry,
                 "reason": retry_policy.reason.clone().unwrap_or_default(),
             }),
@@ -1132,6 +1327,18 @@ impl ProcessorTrait<Task, Vec<Module>> for TaskModuleProcessor {
         let mut modules: Vec<Module> = Vec::new();
         let default_locker_ttl = self.state.config.read().await.crawler.module_locker_ttl;
         for mut module in input.modules {
+            if !module_matches_pending_context(&module.id(), &module.pending_ctx) {
+                debug!(
+                    "[TaskModuleProcessor] skip module due to pending_ctx target mismatch: module_id={} target={:?}",
+                    module.id(),
+                    module
+                        .pending_ctx
+                        .as_ref()
+                        .and_then(|ctx| ctx.module_id.as_deref())
+                );
+                continue;
+            }
+
             // Check module-level threshold before generating requests.
             match self
                 .state
@@ -1226,19 +1433,29 @@ impl ProcessorTrait<Module, SyncBoxStream<'static, Request>> for TaskProcessor {
             input.module.name()
         );
 
+        let runtime_hint = input.processor.resolve_runtime_hint(&input.pending_ctx).await;
+        if let Some(err) = runtime_hint
+            .as_ref()
+            .and_then(|hint| local_fast_path_error(&input.id(), hint))
+        {
+            warn!("[TaskProcessor] generate blocked by runtime routing hint: {err}");
+            return ProcessorResult::FatalFailure(err);
+        }
+
         let (meta, login_info) = input.runtime_task_context();
 
         // Context propagation path:
-        // `TaskParserEvent.meta -> Task.metadata -> Module.bind_task_context -> Module.generate`.
-        let requests: SyncBoxStream<'static, Request> = match input.generate(meta, login_info).await {
+        // `ParserDispatchSeed.metadata -> Task.metadata -> Module.bind_task_context -> Module.generate`.
+        let requests: SyncBoxStream<'static, Request> = match input.generate(meta, login_info).await
+        {
             Ok(stream) => stream,
             Err(e) => {
                 warn!("[TaskProcessor] generate error, will retry: {e}");
-                return ProcessorResult::RetryableFailure(
-                    context
-                        .retry_policy
-                        .unwrap_or(RetryPolicy::default().with_reason(e.to_string())),
-                );
+                return ProcessorResult::RetryableFailure(derive_generate_retry_policy(
+                    &context,
+                    runtime_hint.as_ref(),
+                    &e,
+                ));
             }
         };
         ProcessorResult::Success(requests)
@@ -1263,7 +1480,11 @@ impl EventProcessorTrait<Module, SyncBoxStream<'static, Request>> for TaskProces
         ))
     }
 
-    fn finish_status(&self, input: &Module, _output: &SyncBoxStream<'static, Request>) -> Option<EventEnvelope> {
+    fn finish_status(
+        &self,
+        input: &Module,
+        _output: &SyncBoxStream<'static, Request>,
+    ) -> Option<EventEnvelope> {
         Some(EventEnvelope::engine(
             EventType::ModuleGenerate,
             EventPhase::Completed,
@@ -1326,9 +1547,7 @@ impl ProcessorTrait<Request, ()> for RequestPublish {
                 Ok(false) => {
                     info!(
                         "[RequestPublish] duplicate request skipped: request_id={} module_id={} hash={}",
-                        request_id,
-                        module_id,
-                        request_hash
+                        request_id, module_id, request_hash
                     );
                     return ProcessorResult::Success(());
                 }
@@ -1336,17 +1555,14 @@ impl ProcessorTrait<Request, ()> for RequestPublish {
                 Err(e) => {
                     warn!(
                         "[RequestPublish] deduplication check failed, allowing request: request_id={} module_id={} error={}",
-                        request_id,
-                        module_id,
-                        e
+                        request_id, module_id, e
                     );
                 }
             }
         }
         info!(
             "[RequestPublish] publish request: request_id={} module_id={}",
-            request_id,
-            module_id
+            request_id, module_id
         );
 
         // Persist request for downstream fallback/recovery.
@@ -1363,11 +1579,27 @@ impl ProcessorTrait<Request, ()> for RequestPublish {
             }
         });
 
+        let dispatch = match build_request_dispatch(&input, self.queue_manager.namespace.clone()) {
+            Ok(dispatch) => dispatch,
+            Err(err) => {
+                let mut retry_policy = context.retry_policy.unwrap_or_default();
+                if let Some(delay_ms) = backpressure_retry_delay_ms {
+                    retry_policy.retry_delay = delay_ms.max(1);
+                }
+                retry_policy.reason = Some(format!(
+                    "request envelope build failed: request_id={} module_id={} error={err}",
+                    request_id, module_id
+                ));
+                return ProcessorResult::RetryableFailure(retry_policy);
+            }
+        };
+
         let tx = self.queue_manager.get_request_push_channel();
-        match send_with_backpressure(&tx, QueuedItem::new(input)).await {
+        match send_with_backpressure(&tx, QueuedItem::new(dispatch)).await {
             Ok(BackpressureSendState::Direct) => {}
             Ok(BackpressureSendState::RecoveredFromFull) => {
-                counter!("mocra_request_publish_backpressure_total", "reason" => "queue_full").increment(1);
+                counter!("mocra_request_publish_backpressure_total", "reason" => "queue_full")
+                    .increment(1);
                 warn!(
                     "[RequestPublish] queue full, falling back to awaited send: request_id={} module_id={} remaining_capacity={}",
                     request_id,
@@ -1377,7 +1609,8 @@ impl ProcessorTrait<Request, ()> for RequestPublish {
             }
             Err(err) => {
                 if err.after_full {
-                    counter!("mocra_request_publish_backpressure_total", "reason" => "queue_full").increment(1);
+                    counter!("mocra_request_publish_backpressure_total", "reason" => "queue_full")
+                        .increment(1);
                     warn!(
                         "[RequestPublish] queue full before close: request_id={} module_id={} remaining_capacity={}",
                         request_id,
@@ -1385,11 +1618,12 @@ impl ProcessorTrait<Request, ()> for RequestPublish {
                         tx.capacity()
                     );
                 }
-                counter!("mocra_request_publish_backpressure_total", "reason" => "queue_closed").increment(1);
+                counter!("mocra_request_publish_backpressure_total", "reason" => "queue_closed")
+                    .increment(1);
                 let retry_reason = format!(
                     "request queue closed: request_id={} module_id={}",
-                    err.item.inner.id,
-                    err.item.inner.module_id()
+                    request_id,
+                    module_id
                 );
                 error!("[RequestPublish] {retry_reason}");
                 let mut retry_policy = context.retry_policy.unwrap_or_default();
@@ -1410,7 +1644,8 @@ impl ProcessorTrait<Request, ()> for RequestPublish {
     ) -> ProcessorResult<()> {
         // If we can't publish the request after retries, release the module lock
         // to avoid locking out future runs of this module.
-        self.state.status_tracker
+        self.state
+            .status_tracker
             .release_module_locker(&input.module_runtime_id())
             .await;
         ProcessorResult::FatalFailure(error)
@@ -1465,9 +1700,10 @@ impl EventProcessorTrait<Request, ()> for RequestPublish {
 }
 pub struct ConfigProcessor {
     pub state: Arc<State>,
+    pub namespace: String,
 }
 #[async_trait]
-impl ProcessorTrait<Request, (Request, Option<ModuleConfig>)> for ConfigProcessor {
+impl ProcessorTrait<Request, (Request, Arc<TaskProfileSnapshot>)> for ConfigProcessor {
     fn name(&self) -> &'static str {
         "ConfigProcessor"
     }
@@ -1475,28 +1711,20 @@ impl ProcessorTrait<Request, (Request, Option<ModuleConfig>)> for ConfigProcesso
     async fn process(
         &self,
         input: Request,
-        context: ProcessorContext,
-    ) -> ProcessorResult<(Request, Option<ModuleConfig>)> {
-        // ModuleConfig is persisted by loader flow keyed by `module_id`; read-through here.
-        match ModuleConfig::sync(&input.module_id(), &self.state.cache_service).await {
-            Ok(Some(config)) => ProcessorResult::Success((input, Some(config))),
-            Ok(None) => ProcessorResult::Success((input, None)),
-            Err(e) => {
-                error!(
-                    "Failed to fetch config for module {}: {}",
-                    input.task_id(),
-                    e
-                );
-                ProcessorResult::RetryableFailure(
-                    context
-                        .retry_policy
-                        .unwrap_or(RetryPolicy::default().with_reason(e.to_string())),
-                )
-            }
-        }
+        _context: ProcessorContext,
+    ) -> ProcessorResult<(Request, Arc<TaskProfileSnapshot>)> {
+        let profile = self
+            .state
+            .profile_store
+            .get_profile(&self.namespace, &input.account, &input.platform, &input.module)
+            .unwrap_or_default();
+        ProcessorResult::Success((input, Arc::new(profile)))
     }
     async fn pre_process(&self, _input: &Request, _context: &ProcessorContext) -> Result<()> {
-        self.state.status_tracker.lock_module(&_input.module_runtime_id()).await;
+        self.state
+            .status_tracker
+            .lock_module(&_input.module_runtime_id())
+            .await;
         Ok(())
     }
     async fn handle_error(
@@ -1504,12 +1732,12 @@ impl ProcessorTrait<Request, (Request, Option<ModuleConfig>)> for ConfigProcesso
         _input: &Request,
         _error: Error,
         _context: &ProcessorContext,
-    ) -> ProcessorResult<(Request, Option<ModuleConfig>)> {
-        ProcessorResult::Success((_input.clone(), None))
+    ) -> ProcessorResult<(Request, Arc<TaskProfileSnapshot>)> {
+        ProcessorResult::Success((_input.clone(), Arc::new(TaskProfileSnapshot::default())))
     }
 }
 #[async_trait]
-impl EventProcessorTrait<Request, (Request, Option<ModuleConfig>)> for ConfigProcessor {
+impl EventProcessorTrait<Request, (Request, Arc<TaskProfileSnapshot>)> for ConfigProcessor {
     fn pre_status(&self, _input: &Request) -> Option<EventEnvelope> {
         None
     }
@@ -1517,7 +1745,7 @@ impl EventProcessorTrait<Request, (Request, Option<ModuleConfig>)> for ConfigPro
     fn finish_status(
         &self,
         _input: &Request,
-        _out: &(Request, Option<ModuleConfig>),
+        _out: &(Request, Arc<TaskProfileSnapshot>),
     ) -> Option<EventEnvelope> {
         None
     }
@@ -1535,13 +1763,13 @@ impl EventProcessorTrait<Request, (Request, Option<ModuleConfig>)> for ConfigPro
     }
 }
 
+use crate::cacheable::CacheAble;
+use crate::engine::task::module::Module;
+use crate::engine::task::{Task, TaskManager};
 use futures::stream::Stream;
 use std::pin::Pin;
-use crate::cacheable::{CacheAble};
-use crate::engine::task::{Task, TaskManager};
-use crate::engine::task::module::Module;
 
-pub type SyncBoxStream<'a, T> = Pin<Box<dyn Stream<Item=T> + Send + Sync + 'a>>;
+pub type SyncBoxStream<'a, T> = Pin<Box<dyn Stream<Item = T> + Send + Sync + 'a>>;
 
 /// Converts a vector into a boxed stream for stream-native chain stages.
 pub struct VecToStreamProcessor<T> {
@@ -1563,7 +1791,9 @@ impl<T> VecToStreamProcessor<T> {
 }
 
 #[async_trait]
-impl<T: Send + Sync + 'static> ProcessorTrait<Vec<T>, SyncBoxStream<'static, T>> for VecToStreamProcessor<T> {
+impl<T: Send + Sync + 'static> ProcessorTrait<Vec<T>, SyncBoxStream<'static, T>>
+    for VecToStreamProcessor<T>
+{
     fn name(&self) -> &'static str {
         "VecToStreamProcessor"
     }
@@ -1580,12 +1810,28 @@ impl<T: Send + Sync + 'static> ProcessorTrait<Vec<T>, SyncBoxStream<'static, T>>
 }
 
 #[async_trait]
-impl<T: Send + Sync + 'static> EventProcessorTrait<Vec<T>, SyncBoxStream<'static, T>> for VecToStreamProcessor<T> {
-    fn pre_status(&self, _input: &Vec<T>) -> Option<EventEnvelope> { None }
-    fn finish_status(&self, _input: &Vec<T>, _output: &SyncBoxStream<'static, T>) -> Option<EventEnvelope> { None }
-    fn working_status(&self, _input: &Vec<T>) -> Option<EventEnvelope> { None }
-    fn error_status(&self, _input: &Vec<T>, _err: &Error) -> Option<EventEnvelope> { None }
-    fn retry_status(&self, _input: &Vec<T>, _retry_policy: &RetryPolicy) -> Option<EventEnvelope> { None }
+impl<T: Send + Sync + 'static> EventProcessorTrait<Vec<T>, SyncBoxStream<'static, T>>
+    for VecToStreamProcessor<T>
+{
+    fn pre_status(&self, _input: &Vec<T>) -> Option<EventEnvelope> {
+        None
+    }
+    fn finish_status(
+        &self,
+        _input: &Vec<T>,
+        _output: &SyncBoxStream<'static, T>,
+    ) -> Option<EventEnvelope> {
+        None
+    }
+    fn working_status(&self, _input: &Vec<T>) -> Option<EventEnvelope> {
+        None
+    }
+    fn error_status(&self, _input: &Vec<T>, _err: &Error) -> Option<EventEnvelope> {
+        None
+    }
+    fn retry_status(&self, _input: &Vec<T>, _retry_policy: &RetryPolicy) -> Option<EventEnvelope> {
+        None
+    }
 }
 
 pub struct FlattenStreamVecProcessor<T> {
@@ -1617,8 +1863,9 @@ impl<T> FlattenStreamVecProcessor<T> {
 }
 
 #[async_trait]
-impl<T: Send + Sync + 'static> ProcessorTrait<SyncBoxStream<'static, Vec<T>>, SyncBoxStream<'static, T>>
-for FlattenStreamVecProcessor<T>
+impl<T: Send + Sync + 'static>
+    ProcessorTrait<SyncBoxStream<'static, Vec<T>>, SyncBoxStream<'static, T>>
+    for FlattenStreamVecProcessor<T>
 {
     fn name(&self) -> &'static str {
         "FlattenStreamVecProcessor"
@@ -1645,12 +1892,37 @@ for FlattenStreamVecProcessor<T>
 }
 
 #[async_trait]
-impl<T: Send + Sync + 'static> EventProcessorTrait<SyncBoxStream<'static, Vec<T>>, SyncBoxStream<'static, T>> for FlattenStreamVecProcessor<T> {
-    fn pre_status(&self, _input: &SyncBoxStream<'static, Vec<T>>) -> Option<EventEnvelope> { None }
-    fn finish_status(&self, _input: &SyncBoxStream<'static, Vec<T>>, _output: &SyncBoxStream<'static, T>) -> Option<EventEnvelope> { None }
-    fn working_status(&self, _input: &SyncBoxStream<'static, Vec<T>>) -> Option<EventEnvelope> { None }
-    fn error_status(&self, _input: &SyncBoxStream<'static, Vec<T>>, _err: &Error) -> Option<EventEnvelope> { None }
-    fn retry_status(&self, _input: &SyncBoxStream<'static, Vec<T>>, _retry_policy: &RetryPolicy) -> Option<EventEnvelope> { None }
+impl<T: Send + Sync + 'static>
+    EventProcessorTrait<SyncBoxStream<'static, Vec<T>>, SyncBoxStream<'static, T>>
+    for FlattenStreamVecProcessor<T>
+{
+    fn pre_status(&self, _input: &SyncBoxStream<'static, Vec<T>>) -> Option<EventEnvelope> {
+        None
+    }
+    fn finish_status(
+        &self,
+        _input: &SyncBoxStream<'static, Vec<T>>,
+        _output: &SyncBoxStream<'static, T>,
+    ) -> Option<EventEnvelope> {
+        None
+    }
+    fn working_status(&self, _input: &SyncBoxStream<'static, Vec<T>>) -> Option<EventEnvelope> {
+        None
+    }
+    fn error_status(
+        &self,
+        _input: &SyncBoxStream<'static, Vec<T>>,
+        _err: &Error,
+    ) -> Option<EventEnvelope> {
+        None
+    }
+    fn retry_status(
+        &self,
+        _input: &SyncBoxStream<'static, Vec<T>>,
+        _retry_policy: &RetryPolicy,
+    ) -> Option<EventEnvelope> {
+        None
+    }
 }
 
 pub struct StreamLoggerProcessor<T> {
@@ -1679,7 +1951,7 @@ impl<T> StreamLoggerProcessor<T> {
 
 #[async_trait]
 impl<T: Send + Sync + 'static> ProcessorTrait<SyncBoxStream<'static, T>, SyncBoxStream<'static, T>>
-for StreamLoggerProcessor<T>
+    for StreamLoggerProcessor<T>
 {
     fn name(&self) -> &'static str {
         "StreamLoggerProcessor"
@@ -1703,12 +1975,37 @@ for StreamLoggerProcessor<T>
 }
 
 #[async_trait]
-impl<T: Send + Sync + 'static> EventProcessorTrait<SyncBoxStream<'static, T>, SyncBoxStream<'static, T>> for StreamLoggerProcessor<T> {
-    fn pre_status(&self, _input: &SyncBoxStream<'static, T>) -> Option<EventEnvelope> { None }
-    fn finish_status(&self, _input: &SyncBoxStream<'static, T>, _output: &SyncBoxStream<'static, T>) -> Option<EventEnvelope> { None }
-    fn working_status(&self, _input: &SyncBoxStream<'static, T>) -> Option<EventEnvelope> { None }
-    fn error_status(&self, _input: &SyncBoxStream<'static, T>, _err: &Error) -> Option<EventEnvelope> { None }
-    fn retry_status(&self, _input: &SyncBoxStream<'static, T>, _retry_policy: &RetryPolicy) -> Option<EventEnvelope> { None }
+impl<T: Send + Sync + 'static>
+    EventProcessorTrait<SyncBoxStream<'static, T>, SyncBoxStream<'static, T>>
+    for StreamLoggerProcessor<T>
+{
+    fn pre_status(&self, _input: &SyncBoxStream<'static, T>) -> Option<EventEnvelope> {
+        None
+    }
+    fn finish_status(
+        &self,
+        _input: &SyncBoxStream<'static, T>,
+        _output: &SyncBoxStream<'static, T>,
+    ) -> Option<EventEnvelope> {
+        None
+    }
+    fn working_status(&self, _input: &SyncBoxStream<'static, T>) -> Option<EventEnvelope> {
+        None
+    }
+    fn error_status(
+        &self,
+        _input: &SyncBoxStream<'static, T>,
+        _err: &Error,
+    ) -> Option<EventEnvelope> {
+        None
+    }
+    fn retry_status(
+        &self,
+        _input: &SyncBoxStream<'static, T>,
+        _retry_policy: &RetryPolicy,
+    ) -> Option<EventEnvelope> {
+        None
+    }
 }
 
 pub struct FlattenStreamProcessor<T> {
@@ -1730,8 +2027,9 @@ impl<T> FlattenStreamProcessor<T> {
 }
 
 #[async_trait]
-impl<T: Send + Sync + 'static> ProcessorTrait<SyncBoxStream<'static, SyncBoxStream<'static, T>>, SyncBoxStream<'static, T>>
-for FlattenStreamProcessor<T>
+impl<T: Send + Sync + 'static>
+    ProcessorTrait<SyncBoxStream<'static, SyncBoxStream<'static, T>>, SyncBoxStream<'static, T>>
+    for FlattenStreamProcessor<T>
 {
     fn name(&self) -> &'static str {
         "FlattenStreamProcessor"
@@ -1749,12 +2047,45 @@ for FlattenStreamProcessor<T>
 }
 
 #[async_trait]
-impl<T: Send + Sync + 'static> EventProcessorTrait<SyncBoxStream<'static, SyncBoxStream<'static, T>>, SyncBoxStream<'static, T>> for FlattenStreamProcessor<T> {
-    fn pre_status(&self, _input: &SyncBoxStream<'static, SyncBoxStream<'static, T>>) -> Option<EventEnvelope> { None }
-    fn finish_status(&self, _input: &SyncBoxStream<'static, SyncBoxStream<'static, T>>, _output: &SyncBoxStream<'static, T>) -> Option<EventEnvelope> { None }
-    fn working_status(&self, _input: &SyncBoxStream<'static, SyncBoxStream<'static, T>>) -> Option<EventEnvelope> { None }
-    fn error_status(&self, _input: &SyncBoxStream<'static, SyncBoxStream<'static, T>>, _err: &Error) -> Option<EventEnvelope> { None }
-    fn retry_status(&self, _input: &SyncBoxStream<'static, SyncBoxStream<'static, T>>, _retry_policy: &RetryPolicy) -> Option<EventEnvelope> { None }
+impl<T: Send + Sync + 'static>
+    EventProcessorTrait<
+        SyncBoxStream<'static, SyncBoxStream<'static, T>>,
+        SyncBoxStream<'static, T>,
+    > for FlattenStreamProcessor<T>
+{
+    fn pre_status(
+        &self,
+        _input: &SyncBoxStream<'static, SyncBoxStream<'static, T>>,
+    ) -> Option<EventEnvelope> {
+        None
+    }
+    fn finish_status(
+        &self,
+        _input: &SyncBoxStream<'static, SyncBoxStream<'static, T>>,
+        _output: &SyncBoxStream<'static, T>,
+    ) -> Option<EventEnvelope> {
+        None
+    }
+    fn working_status(
+        &self,
+        _input: &SyncBoxStream<'static, SyncBoxStream<'static, T>>,
+    ) -> Option<EventEnvelope> {
+        None
+    }
+    fn error_status(
+        &self,
+        _input: &SyncBoxStream<'static, SyncBoxStream<'static, T>>,
+        _err: &Error,
+    ) -> Option<EventEnvelope> {
+        None
+    }
+    fn retry_status(
+        &self,
+        _input: &SyncBoxStream<'static, SyncBoxStream<'static, T>>,
+        _retry_policy: &RetryPolicy,
+    ) -> Option<EventEnvelope> {
+        None
+    }
 }
 
 async fn build_request_deduplicator(state: &Arc<State>) -> Option<Arc<Deduplicator>> {
@@ -1776,23 +2107,51 @@ pub struct UnifiedTaskIngressChain {
     /// Ingress chain for standard task creation path.
     task_chain: Arc<EventAwareTypedChain<TaskEvent, SyncBoxStream<'static, ()>>>,
     /// Ingress chain for parser-produced follow-up tasks.
-    parser_chain: Arc<EventAwareTypedChain<TaskParserEvent, SyncBoxStream<'static, ()>>>,
+    parser_chain: Arc<EventAwareTypedChain<NodeDispatchEnvelope, SyncBoxStream<'static, ()>>>,
     /// Ingress chain for error-task retries/termination path.
-    error_chain: Arc<EventAwareTypedChain<TaskErrorEvent, SyncBoxStream<'static, ()>>>,
+    error_chain: Arc<EventAwareTypedChain<NodeErrorEnvelope, SyncBoxStream<'static, ()>>>,
+    namespace: String,
+    /// Task manager for scheduler-based ingress (Phase 3).
+    task_manager: Option<Arc<TaskManager>>,
+    /// Queue manager for publishing requests from scheduler path.
+    queue_manager: Option<Arc<QueueManager>>,
+    /// State for deduplication and config access.
+    state: Option<Arc<State>>,
 }
 
 impl UnifiedTaskIngressChain {
+    const FALLBACK_FAILURE_GATE_BLOCKED: &'static str = "failure_gate_blocked";
+    const FALLBACK_GRAY_GATE_BLOCKED: &'static str = "gray_gate_blocked";
+
     /// Constructs a multiplexer over three ingress typed chains.
     pub fn new(
         task_chain: Arc<EventAwareTypedChain<TaskEvent, SyncBoxStream<'static, ()>>>,
-        parser_chain: Arc<EventAwareTypedChain<TaskParserEvent, SyncBoxStream<'static, ()>>>,
-        error_chain: Arc<EventAwareTypedChain<TaskErrorEvent, SyncBoxStream<'static, ()>>>,
+        parser_chain: Arc<EventAwareTypedChain<NodeDispatchEnvelope, SyncBoxStream<'static, ()>>>,
+        error_chain: Arc<EventAwareTypedChain<NodeErrorEnvelope, SyncBoxStream<'static, ()>>>,
+        namespace: String,
     ) -> Self {
         Self {
             task_chain,
             parser_chain,
             error_chain,
+            namespace,
+            task_manager: None,
+            queue_manager: None,
+            state: None,
         }
+    }
+
+    /// Attaches scheduler ingress bridge dependencies for Phase 3 cutover.
+    pub fn with_scheduler_bridge(
+        mut self,
+        task_manager: Arc<TaskManager>,
+        queue_manager: Arc<QueueManager>,
+        state: Arc<State>,
+    ) -> Self {
+        self.task_manager = Some(task_manager);
+        self.queue_manager = Some(queue_manager);
+        self.state = Some(state);
+        self
     }
 
     pub async fn execute(
@@ -1802,9 +2161,798 @@ impl UnifiedTaskIngressChain {
     ) -> ProcessorResult<SyncBoxStream<'static, ()>> {
         match input {
             UnifiedTaskInput::Task(task) => self.task_chain.execute(task, context).await,
-            UnifiedTaskInput::ParserTask(task) => self.parser_chain.execute(task, context).await,
-            UnifiedTaskInput::ErrorTask(task) => self.error_chain.execute(task, context).await,
+            UnifiedTaskInput::ParserDispatch(dispatch) => {
+                if let Some(result) = self.try_scheduler_parser_dispatch(&dispatch).await {
+                    return result;
+                }
+                self.parser_chain.execute(dispatch, context).await
+            }
+            UnifiedTaskInput::ErrorEnvelope(envelope) => {
+                if let Some(result) = self.try_scheduler_error_dispatch(&envelope).await {
+                    return result;
+                }
+                self.error_chain.execute(envelope, context).await
+            }
         }
+    }
+
+    /// Attempts scheduler-based execution for a parser dispatch envelope.
+    ///
+    /// Returns `Some(result)` when the scheduler fast-path was taken (success or failure).
+    /// Returns `None` when the fast-path is not eligible, signalling fallback to the parser ingress chain.
+    async fn try_scheduler_parser_dispatch(
+        &self,
+        dispatch: &NodeDispatchEnvelope,
+    ) -> Option<ProcessorResult<SyncBoxStream<'static, ()>>> {
+        let parser_ctx = dispatch.parser_context.as_ref();
+        let resolved_node_id = self.resolve_parser_node_id(dispatch, parser_ctx);
+        let node_id = match resolved_node_id.as_deref().filter(|s| !s.is_empty()) {
+            Some(id) => id,
+            None => {
+                counter!("mocra_scheduler_ingress_total", "path" => "parser", "result" => "node_id_missing").increment(1);
+                self.record_scheduler_ingress_result("parser", "node_id_missing");
+                self.record_scheduler_ingress_error("parser", "node_id_missing");
+                return Some(self.scheduler_missing_target_result(
+                    "parser",
+                    "node_id",
+                    dispatch.routing.module.as_str(),
+                ));
+            }
+        };
+
+        let module_name = match self.resolve_parser_module_name(dispatch, parser_ctx) {
+            Some(m) if !m.is_empty() => m,
+            _ => {
+                counter!("mocra_scheduler_ingress_total", "path" => "parser", "result" => "modules_missing").increment(1);
+                self.record_scheduler_ingress_result("parser", "modules_missing");
+                self.record_scheduler_ingress_error("parser", "modules_missing");
+                return Some(self.scheduler_missing_target_result(
+                    "parser",
+                    "module_name",
+                    dispatch.routing.module.as_str(),
+                ));
+            }
+        };
+
+        let (task_manager, queue_manager, _state) = match self.scheduler_bridge_deps() {
+            Some(deps) => deps,
+            None => {
+                counter!("mocra_scheduler_ingress_total", "path" => "parser", "result" => "bridge_missing").increment(1);
+                self.record_scheduler_ingress_result("parser", "bridge_missing");
+                self.record_scheduler_ingress_error("parser", "bridge_missing");
+                return Some(self.scheduler_bridge_missing_result(
+                    "parser",
+                    module_name.as_str(),
+                ));
+            }
+        };
+
+        if let Some(reason) = self
+            .scheduler_cutover_gate_fallback_reason(
+                &task_manager,
+                &module_name,
+                dispatch.routing.run_id,
+            )
+            .await
+        {
+            self.record_scheduler_ingress_fallback(
+                "parser",
+                reason,
+                Some(module_name.as_str()),
+            );
+            let gate = self.scheduler_cutover_gate_config().await;
+            if gate.legacy_scheduler_ingress_fallback_enabled {
+                return None;
+            }
+            task_manager.record_module_dag_cutover_failure(&module_name);
+            return Some(ProcessorResult::RetryableFailure(
+                RetryPolicy::default()
+                    .with_reason(format!("scheduler parser gate blocked: {reason}")),
+            ));
+        }
+
+        let dag = match task_manager.get_module_dag(&module_name) {
+            Some(d) => d,
+            None => {
+                counter!("mocra_scheduler_ingress_total", "path" => "parser", "result" => "dag_missing").increment(1);
+                self.record_scheduler_ingress_result("parser", "dag_missing");
+                self.record_scheduler_ingress_error("parser", "dag_missing");
+                task_manager.record_module_dag_cutover_failure(&module_name);
+                return Some(self.scheduler_dag_missing_result("parser", &module_name));
+            }
+        };
+
+        // Load full Task to obtain module config and login info.
+        let task = match task_manager.load_parser_dispatch(dispatch).await {
+            Ok(t) => t,
+            Err(err) => {
+                counter!("mocra_scheduler_ingress_total", "path" => "parser", "result" => "load_failed").increment(1);
+                self.record_scheduler_ingress_result("parser", "load_failed");
+                self.record_scheduler_ingress_error("parser", "load_failed");
+                task_manager.record_module_dag_cutover_failure(&module_name);
+                return Some(ProcessorResult::RetryableFailure(
+                    RetryPolicy::default().with_reason(format!("scheduler parser load failed: {err}")),
+                ));
+            }
+        };
+
+        let target_module = task.modules.iter().find(|m| {
+            m.pending_ctx
+                .as_ref()
+                .and_then(|ctx| ctx.node_id.as_deref())
+                == Some(node_id)
+                || m.module.name() == module_name
+        });
+        let (config, login_info, module_id, profile, dag_dispatcher) = match target_module {
+            Some(m) => (
+                m.config.clone(),
+                m.bound_login_info.clone(),
+                m.id(),
+                m.profile.clone(),
+                m.dag_dispatcher.clone(),
+            ),
+            None => {
+                counter!("mocra_scheduler_ingress_total", "path" => "parser", "result" => "module_not_found").increment(1);
+                self.record_scheduler_ingress_result("parser", "module_not_found");
+                self.record_scheduler_ingress_error("parser", "module_not_found");
+                task_manager.record_module_dag_cutover_failure(&module_name);
+                return Some(self.scheduler_task_module_not_found_result(
+                    "parser",
+                    &module_name,
+                    node_id,
+                ));
+            }
+        };
+
+        let metadata = self.resolve_parser_metadata(parser_ctx).unwrap_or_default();
+        let prefix_request = self.resolve_parser_prefix_request(dispatch, parser_ctx);
+
+        let runtime_input = match Self::build_scheduler_generate_runtime_input(
+            &module_id,
+            profile.as_deref(),
+            &dispatch.routing,
+            &module_name,
+            node_id,
+            metadata,
+            login_info,
+            prefix_request,
+        ) {
+            Ok(runtime_input) => runtime_input,
+            Err(err) => {
+                counter!("mocra_scheduler_ingress_total", "path" => "parser", "result" => "runtime_input_invalid").increment(1);
+                self.record_scheduler_ingress_result("parser", "runtime_input_invalid");
+                self.record_scheduler_ingress_error("parser", "runtime_input_invalid");
+                task_manager.record_module_dag_cutover_failure(&module_name);
+                return Some(ProcessorResult::RetryableFailure(
+                    RetryPolicy::default().with_reason(format!(
+                        "scheduler parser runtime input invalid: {err}"
+                    )),
+                ));
+            }
+        };
+
+        let hints: Vec<RuntimeNodeRoutingHint> = parser_ctx
+            .and_then(|ctx| ctx.runtime_node.clone())
+            .into_iter()
+            .collect();
+
+        if Self::requires_remote_dispatch_hint(&hints) && dag_dispatcher.is_none() {
+            counter!("mocra_scheduler_ingress_total", "path" => "parser", "result" => "no_dispatcher").increment(1);
+            self.record_scheduler_ingress_result("parser", "no_dispatcher");
+            self.record_scheduler_ingress_error("parser", "no_dispatcher");
+            task_manager.record_module_dag_cutover_failure(&module_name);
+            return Some(ProcessorResult::RetryableFailure(
+                RetryPolicy::default().with_reason(format!(
+                    "scheduler parser execution failed: remote node '{}' requires dag_dispatcher but none configured",
+                    node_id
+                )),
+            ));
+        }
+
+        let report = match ModuleDagOrchestrator::default()
+            .execute_dag_with_generate_runtime_input_and_dispatcher(
+                dag,
+                node_id,
+                &runtime_input,
+                hints,
+                dag_dispatcher,
+            )
+            .await
+        {
+            Ok(r) => r,
+            Err(err) => {
+                task_manager.record_module_dag_cutover_failure(&module_name);
+                return Some(self.scheduler_dispatch_failed_result("parser", &err));
+            }
+        };
+
+        let requests = match report.outputs.get(node_id) {
+            Some(payload) => match decode_request_batch_payload(payload) {
+                Ok(reqs) => reqs,
+                Err(err) => {
+                    counter!("mocra_scheduler_ingress_total", "path" => "parser", "result" => "decode_error").increment(1);
+                    self.record_scheduler_ingress_result("parser", "decode_error");
+                    self.record_scheduler_ingress_error("parser", "decode_error");
+                    task_manager.record_module_dag_cutover_failure(&module_name);
+                    return Some(ProcessorResult::RetryableFailure(
+                        RetryPolicy::default().with_reason(format!("scheduler parser output decode failed: {err}")),
+                    ));
+                }
+            },
+            None => vec![],
+        };
+
+        // Publish requests to the download queue.
+        let sender = queue_manager.get_request_push_channel();
+        for request in &requests {
+            let dispatch_envelope = match build_request_dispatch(request, self.namespace.clone()) {
+                Ok(d) => d,
+                Err(err) => {
+                    warn!("[scheduler_ingress] failed to build request dispatch: {err}");
+                    continue;
+                }
+            };
+            if let Err(err) = sender.send(QueuedItem::new(dispatch_envelope)).await {
+                warn!("[scheduler_ingress] failed to publish request: {err}");
+            }
+        }
+
+        counter!("mocra_scheduler_ingress_total", "path" => "parser", "result" => "success").increment(1);
+        self.record_scheduler_ingress_result("parser", "success");
+        task_manager.record_module_dag_cutover_success(&module_name);
+        Some(ProcessorResult::Success(
+            Box::pin(futures::stream::empty()) as SyncBoxStream<'static, ()>,
+        ))
+    }
+
+    /// Attempts scheduler-based execution for an error dispatch envelope.
+    ///
+    /// Returns `Some(result)` when the scheduler fast-path was taken.
+    /// Returns `None` when the fast-path is not eligible.
+    async fn try_scheduler_error_dispatch(
+        &self,
+        envelope: &NodeErrorEnvelope,
+    ) -> Option<ProcessorResult<SyncBoxStream<'static, ()>>> {
+        let error_ctx = envelope.error_context.as_ref();
+        let resolved_node_id = self.resolve_error_node_id(envelope, error_ctx);
+        let node_id = match resolved_node_id.as_deref().filter(|s| !s.is_empty()) {
+            Some(id) => id,
+            None => {
+                counter!("mocra_scheduler_ingress_total", "path" => "error", "result" => "node_id_missing").increment(1);
+                self.record_scheduler_ingress_result("error", "node_id_missing");
+                self.record_scheduler_ingress_error("error", "node_id_missing");
+                return Some(self.scheduler_missing_target_result(
+                    "error",
+                    "node_id",
+                    envelope.routing.module.as_str(),
+                ));
+            }
+        };
+
+        let module_name = match self.resolve_error_module_name(envelope, error_ctx) {
+            Some(m) if !m.is_empty() => m,
+            _ => {
+                counter!("mocra_scheduler_ingress_total", "path" => "error", "result" => "modules_missing").increment(1);
+                self.record_scheduler_ingress_result("error", "modules_missing");
+                self.record_scheduler_ingress_error("error", "modules_missing");
+                return Some(self.scheduler_missing_target_result(
+                    "error",
+                    "module_name",
+                    envelope.routing.module.as_str(),
+                ));
+            }
+        };
+
+        let (task_manager, queue_manager, _state) = match self.scheduler_bridge_deps() {
+            Some(deps) => deps,
+            None => {
+                counter!("mocra_scheduler_ingress_total", "path" => "error", "result" => "bridge_missing").increment(1);
+                self.record_scheduler_ingress_result("error", "bridge_missing");
+                self.record_scheduler_ingress_error("error", "bridge_missing");
+                return Some(self.scheduler_bridge_missing_result(
+                    "error",
+                    module_name.as_str(),
+                ));
+            }
+        };
+
+        if let Some(reason) = self
+            .scheduler_cutover_gate_fallback_reason(
+                &task_manager,
+                &module_name,
+                envelope.routing.run_id,
+            )
+            .await
+        {
+            self.record_scheduler_ingress_fallback(
+                "error",
+                reason,
+                Some(module_name.as_str()),
+            );
+            let gate = self.scheduler_cutover_gate_config().await;
+            if gate.legacy_scheduler_ingress_fallback_enabled {
+                return None;
+            }
+            task_manager.record_module_dag_cutover_failure(&module_name);
+            return Some(ProcessorResult::RetryableFailure(
+                RetryPolicy::default()
+                    .with_reason(format!("scheduler error gate blocked: {reason}")),
+            ));
+        }
+
+        let dag = match task_manager.get_module_dag(&module_name) {
+            Some(d) => d,
+            None => {
+                counter!("mocra_scheduler_ingress_total", "path" => "error", "result" => "dag_missing").increment(1);
+                self.record_scheduler_ingress_result("error", "dag_missing");
+                self.record_scheduler_ingress_error("error", "dag_missing");
+                task_manager.record_module_dag_cutover_failure(&module_name);
+                return Some(self.scheduler_dag_missing_result("error", &module_name));
+            }
+        };
+
+        let task = match task_manager.load_error_envelope(envelope).await {
+            Ok(t) => t,
+            Err(err) => {
+                counter!("mocra_scheduler_ingress_total", "path" => "error", "result" => "load_failed").increment(1);
+                self.record_scheduler_ingress_result("error", "load_failed");
+                self.record_scheduler_ingress_error("error", "load_failed");
+                task_manager.record_module_dag_cutover_failure(&module_name);
+                return Some(ProcessorResult::RetryableFailure(
+                    RetryPolicy::default().with_reason(format!("scheduler error load failed: {err}")),
+                ));
+            }
+        };
+
+        let target_module = task.modules.iter().find(|m| {
+            m.pending_ctx
+                .as_ref()
+                .and_then(|ctx| ctx.node_id.as_deref())
+                == Some(node_id)
+                || m.module.name() == module_name
+        });
+        let (config, login_info, module_id, profile, dag_dispatcher) = match target_module {
+            Some(m) => (
+                m.config.clone(),
+                m.bound_login_info.clone(),
+                m.id(),
+                m.profile.clone(),
+                m.dag_dispatcher.clone(),
+            ),
+            None => {
+                counter!("mocra_scheduler_ingress_total", "path" => "error", "result" => "module_not_found").increment(1);
+                self.record_scheduler_ingress_result("error", "module_not_found");
+                self.record_scheduler_ingress_error("error", "module_not_found");
+                task_manager.record_module_dag_cutover_failure(&module_name);
+                return Some(self.scheduler_task_module_not_found_result(
+                    "error",
+                    &module_name,
+                    node_id,
+                ));
+            }
+        };
+
+        let metadata = self.resolve_error_metadata(error_ctx).unwrap_or_default();
+        let prefix_request = self.resolve_error_prefix_request(envelope, error_ctx);
+
+        let runtime_input = match Self::build_scheduler_generate_runtime_input(
+            &module_id,
+            profile.as_deref(),
+            &envelope.routing,
+            &module_name,
+            node_id,
+            metadata,
+            login_info,
+            prefix_request,
+        ) {
+            Ok(runtime_input) => runtime_input,
+            Err(err) => {
+                counter!("mocra_scheduler_ingress_total", "path" => "error", "result" => "runtime_input_invalid").increment(1);
+                self.record_scheduler_ingress_result("error", "runtime_input_invalid");
+                self.record_scheduler_ingress_error("error", "runtime_input_invalid");
+                task_manager.record_module_dag_cutover_failure(&module_name);
+                return Some(ProcessorResult::RetryableFailure(
+                    RetryPolicy::default().with_reason(format!(
+                        "scheduler error runtime input invalid: {err}"
+                    )),
+                ));
+            }
+        };
+
+        let hints: Vec<RuntimeNodeRoutingHint> = error_ctx
+            .and_then(|ctx| ctx.runtime_node.clone())
+            .into_iter()
+            .collect();
+
+        if Self::requires_remote_dispatch_hint(&hints) && dag_dispatcher.is_none() {
+            counter!("mocra_scheduler_ingress_total", "path" => "error", "result" => "no_dispatcher").increment(1);
+            self.record_scheduler_ingress_result("error", "no_dispatcher");
+            self.record_scheduler_ingress_error("error", "no_dispatcher");
+            task_manager.record_module_dag_cutover_failure(&module_name);
+            return Some(ProcessorResult::RetryableFailure(
+                RetryPolicy::default().with_reason(format!(
+                    "scheduler error execution failed: remote node '{}' requires dag_dispatcher but none configured",
+                    node_id
+                )),
+            ));
+        }
+
+        let report = match ModuleDagOrchestrator::default()
+            .execute_dag_with_generate_runtime_input_and_dispatcher(
+                dag,
+                node_id,
+                &runtime_input,
+                hints,
+                dag_dispatcher,
+            )
+            .await
+        {
+            Ok(r) => r,
+            Err(err) => {
+                task_manager.record_module_dag_cutover_failure(&module_name);
+                return Some(self.scheduler_dispatch_failed_result("error", &err));
+            }
+        };
+
+        let requests = match report.outputs.get(node_id) {
+            Some(payload) => match decode_request_batch_payload(payload) {
+                Ok(reqs) => reqs,
+                Err(err) => {
+                    counter!("mocra_scheduler_ingress_total", "path" => "error", "result" => "decode_error").increment(1);
+                    self.record_scheduler_ingress_result("error", "decode_error");
+                    self.record_scheduler_ingress_error("error", "decode_error");
+                    task_manager.record_module_dag_cutover_failure(&module_name);
+                    return Some(ProcessorResult::RetryableFailure(
+                        RetryPolicy::default().with_reason(format!("scheduler error output decode failed: {err}")),
+                    ));
+                }
+            },
+            None => vec![],
+        };
+
+        let sender = queue_manager.get_request_push_channel();
+        for request in &requests {
+            let dispatch_envelope = match build_request_dispatch(request, self.namespace.clone()) {
+                Ok(d) => d,
+                Err(err) => {
+                    warn!("[scheduler_ingress] failed to build request dispatch: {err}");
+                    continue;
+                }
+            };
+            if let Err(err) = sender.send(QueuedItem::new(dispatch_envelope)).await {
+                warn!("[scheduler_ingress] failed to publish request: {err}");
+            }
+        }
+
+        counter!("mocra_scheduler_ingress_total", "path" => "error", "result" => "success").increment(1);
+        self.record_scheduler_ingress_result("error", "success");
+        task_manager.record_module_dag_cutover_success(&module_name);
+        Some(ProcessorResult::Success(
+            Box::pin(futures::stream::empty()) as SyncBoxStream<'static, ()>,
+        ))
+    }
+
+    /// Returns scheduler bridge dependencies if all are present.
+    fn scheduler_bridge_deps(&self) -> Option<(Arc<TaskManager>, Arc<QueueManager>, Arc<State>)> {
+        Some((
+            self.task_manager.clone()?,
+            self.queue_manager.clone()?,
+            self.state.clone()?,
+        ))
+    }
+
+    fn requires_remote_dispatch_hint(hints: &[RuntimeNodeRoutingHint]) -> bool {
+        hints.iter().any(|hint| {
+            matches!(
+                hint.placement,
+                Some(NodePlacement::Remote { .. })
+            )
+        })
+    }
+
+    fn scheduler_dispatch_failed_result(
+        &self,
+        path: &'static str,
+        err: &DagError,
+    ) -> ProcessorResult<SyncBoxStream<'static, ()>> {
+        counter!("mocra_scheduler_ingress_total", "path" => path, "result" => "scheduler_error")
+            .increment(1);
+        self.record_scheduler_ingress_result(path, "scheduler_error");
+        self.record_scheduler_ingress_error(path, "scheduler_error");
+        ProcessorResult::RetryableFailure(
+            RetryPolicy::default().with_reason(format!(
+                "scheduler {path} execution failed: {err}"
+            )),
+        )
+    }
+
+    fn scheduler_task_module_not_found_result(
+        &self,
+        path: &'static str,
+        module_name: &str,
+        node_id: &str,
+    ) -> ProcessorResult<SyncBoxStream<'static, ()>> {
+        ProcessorResult::RetryableFailure(
+            RetryPolicy::default().with_reason(format!(
+                "scheduler {path} execution failed: reconstructed task does not contain module '{module_name}' for node '{node_id}'"
+            )),
+        )
+    }
+
+    fn scheduler_dag_missing_result(
+        &self,
+        path: &'static str,
+        module_name: &str,
+    ) -> ProcessorResult<SyncBoxStream<'static, ()>> {
+        ProcessorResult::RetryableFailure(
+            RetryPolicy::default().with_reason(format!(
+                "scheduler {path} execution failed: precompiled DAG missing for module '{module_name}'"
+            )),
+        )
+    }
+
+    fn scheduler_bridge_missing_result(
+        &self,
+        path: &'static str,
+        module_name: &str,
+    ) -> ProcessorResult<SyncBoxStream<'static, ()>> {
+        ProcessorResult::RetryableFailure(
+            RetryPolicy::default().with_reason(format!(
+                "scheduler {path} execution failed: scheduler bridge not attached for module '{module_name}'"
+            )),
+        )
+    }
+
+    fn scheduler_missing_target_result(
+        &self,
+        path: &'static str,
+        field: &'static str,
+        module_name: &str,
+    ) -> ProcessorResult<SyncBoxStream<'static, ()>> {
+        ProcessorResult::RetryableFailure(
+            RetryPolicy::default().with_reason(format!(
+                "scheduler {path} execution failed: required {field} is missing from parser/error transport for module '{module_name}'"
+            )),
+        )
+    }
+
+    /// Resolution order is strictly typed context -> transport envelope.
+    fn resolve_parser_node_id(
+        &self,
+        dispatch: &NodeDispatchEnvelope,
+        parser_ctx: Option<&ParserDispatchContext>,
+    ) -> Option<String> {
+        parser_ctx
+            .and_then(|ctx| ctx.context.node_id.clone())
+            .or_else(|| (!dispatch.dispatch.target_node.is_empty()).then(|| dispatch.dispatch.target_node.clone()))
+            .or_else(|| {
+                (!dispatch.dispatch.input.target_node.is_empty())
+                    .then(|| dispatch.dispatch.input.target_node.clone())
+            })
+    }
+
+    /// Resolution order is strictly typed context -> transport envelope.
+    fn resolve_parser_module_name(
+        &self,
+        dispatch: &NodeDispatchEnvelope,
+        parser_ctx: Option<&ParserDispatchContext>,
+    ) -> Option<String> {
+        parser_ctx
+            .and_then(|ctx| ctx.modules.as_ref().and_then(|mods| mods.first().cloned()))
+            .or_else(|| (!dispatch.routing.module.is_empty()).then(|| dispatch.routing.module.clone()))
+    }
+
+    /// Metadata stays on the typed context path when present.
+    fn resolve_parser_metadata(
+        &self,
+        parser_ctx: Option<&ParserDispatchContext>,
+    ) -> Option<serde_json::Map<String, serde_json::Value>> {
+        parser_ctx.map(|ctx| ctx.metadata.clone())
+    }
+
+    /// Prefix request follows the typed context first, then transport parent pointer.
+    fn resolve_parser_prefix_request(
+        &self,
+        dispatch: &NodeDispatchEnvelope,
+        parser_ctx: Option<&ParserDispatchContext>,
+    ) -> Option<Uuid> {
+        parser_ctx
+            .and_then(|ctx| ctx.prefix_request_id)
+            .or(dispatch.routing.parent_request_id)
+    }
+
+    /// Resolution order is strictly typed context -> transport envelope.
+    fn resolve_error_node_id(
+        &self,
+        envelope: &NodeErrorEnvelope,
+        error_ctx: Option<&ErrorDispatchContext>,
+    ) -> Option<String> {
+        error_ctx
+            .and_then(|ctx| ctx.context.node_id.clone())
+            .or_else(|| (!envelope.routing.node_key.is_empty()).then(|| envelope.routing.node_key.clone()))
+    }
+
+    /// Resolution order is strictly typed context -> transport envelope.
+    fn resolve_error_module_name(
+        &self,
+        envelope: &NodeErrorEnvelope,
+        error_ctx: Option<&ErrorDispatchContext>,
+    ) -> Option<String> {
+        error_ctx
+            .and_then(|ctx| ctx.modules.as_ref().and_then(|mods| mods.first().cloned()))
+            .or_else(|| (!envelope.routing.module.is_empty()).then(|| envelope.routing.module.clone()))
+    }
+
+    /// Metadata stays on the typed context path when present.
+    fn resolve_error_metadata(
+        &self,
+        error_ctx: Option<&ErrorDispatchContext>,
+    ) -> Option<serde_json::Map<String, serde_json::Value>> {
+        error_ctx.map(|ctx| ctx.metadata.clone())
+    }
+
+    /// Prefix request follows the typed context first, then transport parent pointer.
+    fn resolve_error_prefix_request(
+        &self,
+        envelope: &NodeErrorEnvelope,
+        error_ctx: Option<&ErrorDispatchContext>,
+    ) -> Option<Uuid> {
+        error_ctx
+            .and_then(|ctx| ctx.prefix_request_id)
+            .or(envelope.routing.parent_request_id)
+    }
+
+    fn build_scheduler_generate_runtime_input(
+        module_id: &str,
+        profile: Option<&crate::common::model::TaskProfileSnapshot>,
+        routing: &RoutingMeta,
+        module_name: &str,
+        node_id: &str,
+        metadata: serde_json::Map<String, serde_json::Value>,
+        login_info: Option<crate::common::model::login_info::LoginInfo>,
+        prefix_request: Option<Uuid>,
+    ) -> Result<SchedulerNodeGenerateRuntimeInput> {
+        let _ = module_id;
+        let profile = profile.ok_or_else(|| {
+            ModuleError::Model(
+                std::io::Error::other(format!(
+                    "scheduler ingress requires loaded profile for node '{}' in module '{}'",
+                    node_id, module_name
+                ))
+                .into(),
+            )
+        })?;
+        let Some(resolved_config) = profile.resolve_node_config(node_id) else {
+            return Err(ModuleError::Model(
+                std::io::Error::other(format!(
+                    "profile node config missing for scheduler ingress node '{}'",
+                    node_id
+                ))
+                .into(),
+            )
+            .into());
+        };
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as i64;
+        Ok(SchedulerNodeGenerateRuntimeInput {
+            routing: RoutingMeta {
+                namespace: routing.namespace.clone(),
+                account: routing.account.clone(),
+                platform: routing.platform.clone(),
+                module: module_name.to_string(),
+                node_key: node_id.to_string(),
+                run_id: routing.run_id,
+                request_id: Uuid::now_v7(),
+                parent_request_id: prefix_request,
+                priority: routing.priority,
+            },
+            exec: ExecutionMeta {
+                profile_version: resolved_config.profile_version,
+                created_at_ms: now_ms,
+                updated_at_ms: now_ms,
+                ..ExecutionMeta::default()
+            },
+            config: resolved_config,
+            input: NodeInput::new(
+                node_id,
+                TypedEnvelope::new(
+                    "mocra.node_input.v1",
+                    1,
+                    PayloadCodec::Json,
+                    serde_json::to_vec(&serde_json::Value::Object(metadata)).unwrap_or_default(),
+                ),
+            ),
+            login_info,
+        })
+    }
+
+    fn record_scheduler_ingress_fallback(
+        &self,
+        path: &'static str,
+        reason: &'static str,
+        module: Option<&str>,
+    ) {
+        let module = module
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("unknown")
+            .to_string();
+        counter!(
+            "mocra_scheduler_ingress_total",
+            "path" => path,
+            "result" => "fallback",
+            "reason" => reason,
+            "module" => module
+        )
+        .increment(1);
+        self.record_scheduler_ingress_result(path, &format!("fallback_{reason}"));
+        if Self::scheduler_ingress_fallback_counts_as_error(reason) {
+            self.record_scheduler_ingress_error(path, reason);
+        }
+    }
+
+    fn scheduler_ingress_fallback_counts_as_error(reason: &'static str) -> bool {
+        !matches!(
+            reason,
+            Self::FALLBACK_GRAY_GATE_BLOCKED | Self::FALLBACK_FAILURE_GATE_BLOCKED
+        )
+    }
+
+    fn record_scheduler_ingress_result(&self, path: &'static str, result: &str) {
+        metrics_facade::inc_throughput("engine", "scheduler_ingress", path, result, 1);
+    }
+
+    fn record_scheduler_ingress_error(&self, path: &'static str, code: &str) {
+        metrics_facade::inc_error("engine", "scheduler_ingress", path, code, 1);
+    }
+
+    async fn scheduler_cutover_gate_fallback_reason(
+        &self,
+        task_manager: &TaskManager,
+        module_name: &str,
+        run_id: Uuid,
+    ) -> Option<&'static str> {
+        let gate = self.scheduler_cutover_gate_config().await;
+        if !Self::allow_scheduler_cutover_by_gray_ratio(run_id, gate.gray_ratio) {
+            return Some(Self::FALLBACK_GRAY_GATE_BLOCKED);
+        }
+
+        if !task_manager.should_allow_module_dag_cutover(
+            module_name,
+            gate.failure_threshold,
+            gate.recovery_window_secs,
+        ) {
+            return Some(Self::FALLBACK_FAILURE_GATE_BLOCKED);
+        }
+
+        None
+    }
+
+    async fn scheduler_cutover_gate_config(
+        &self,
+    ) -> crate::common::model::config::SchedulerIngressCutoverGateConfigResolved {
+        match self.state.as_ref() {
+            Some(state) => {
+                let config = state.config.read().await;
+                config.crawler.scheduler_ingress_cutover_gate_config()
+            }
+            None => crate::common::model::config::SchedulerIngressCutoverGateConfigResolved::default(),
+        }
+    }
+
+    fn allow_scheduler_cutover_by_gray_ratio(run_id: Uuid, gray_ratio: f64) -> bool {
+        if gray_ratio <= 0.0 {
+            return false;
+        }
+        if gray_ratio >= 1.0 {
+            return true;
+        }
+
+        let slot = run_id.as_u128() % 10_000;
+        let allowed = (gray_ratio * 10_000.0).floor() as u128;
+        slot < allowed
     }
 }
 
@@ -1812,7 +2960,7 @@ impl UnifiedTaskIngressChain {
 ///
 /// The resulting chain set handles three inputs:
 /// - `TaskModel` (initial tasks),
-/// - `ParserTaskModel` (parser-produced tasks),
+/// - parser-dispatch envelopes (parser-produced tasks),
 /// - `ErrorTaskModel` (retry/threshold-controlled tasks).
 pub async fn create_unified_task_ingress_chain(
     task_manager: Arc<TaskManager>,
@@ -1821,7 +2969,14 @@ pub async fn create_unified_task_ingress_chain(
     state: Arc<State>,
     lua_registry: Option<Arc<LuaScriptRegistry>>,
 ) -> UnifiedTaskIngressChain {
-    let task_concurrency = state.config.read().await.crawler.task_concurrency.unwrap_or(1024);
+    let ingress_namespace = queue_manager.namespace.clone();
+    let task_concurrency = state
+        .config
+        .read()
+        .await
+        .crawler
+        .task_concurrency
+        .unwrap_or(1024);
     let parser_concurrency = {
         let cfg = state.config.read().await;
         cfg.crawler
@@ -1837,9 +2992,27 @@ pub async fn create_unified_task_ingress_chain(
             .or(cfg.crawler.task_concurrency)
             .unwrap_or(4)
     };
-    let task_publish_concurrency = state.config.read().await.crawler.publish_concurrency.unwrap_or(1024);
-    let parser_publish_concurrency = state.config.read().await.crawler.publish_concurrency.unwrap_or(256);
-    let error_publish_concurrency = state.config.read().await.crawler.publish_concurrency.unwrap_or(32);
+    let task_publish_concurrency = state
+        .config
+        .read()
+        .await
+        .crawler
+        .publish_concurrency
+        .unwrap_or(1024);
+    let parser_publish_concurrency = state
+        .config
+        .read()
+        .await
+        .crawler
+        .publish_concurrency
+        .unwrap_or(256);
+    let error_publish_concurrency = state
+        .config
+        .read()
+        .await
+        .crawler
+        .publish_concurrency
+        .unwrap_or(32);
 
     let task_deduplicator = build_request_deduplicator(&state).await;
     let task_chain = Arc::new(
@@ -1866,12 +3039,14 @@ pub async fn create_unified_task_ingress_chain(
                 ErrorStrategy::Skip,
             )
             .then_one_shot(FlattenStreamProcessor::new())
-            .then_one_shot(StreamLoggerProcessor::new("AfterFlatten").with_logger(|req: &Request| {
-                info!(
-                    "[FlattenStreamProcessor] yielding request: request_id={}",
-                    req.id
-                );
-            }))
+            .then_one_shot(StreamLoggerProcessor::new("AfterFlatten").with_logger(
+                |req: &Request| {
+                    info!(
+                        "[FlattenStreamProcessor] yielding request: request_id={}",
+                        req.id
+                    );
+                },
+            ))
             .then_map_stream_in_with_strategy::<(), _>(
                 RequestPublish {
                     queue_manager: queue_manager.clone(),
@@ -1885,7 +3060,7 @@ pub async fn create_unified_task_ingress_chain(
 
     let parser_deduplicator = build_request_deduplicator(&state).await;
     let parser_chain = Arc::new(
-        EventAwareTypedChain::<TaskParserEvent, TaskParserEvent>::new(event_bus.clone())
+        EventAwareTypedChain::<NodeDispatchEnvelope, NodeDispatchEnvelope>::new(event_bus.clone())
             .then::<Task, _>(TaskModelProcessor {
                 task_manager: task_manager.clone(),
                 state: state.clone(),
@@ -1919,9 +3094,13 @@ pub async fn create_unified_task_ingress_chain(
             ),
     );
 
+    let scheduler_task_manager = task_manager.clone();
+    let scheduler_queue_manager = queue_manager.clone();
+    let scheduler_state = state.clone();
+
     let error_deduplicator = build_request_deduplicator(&state).await;
     let error_chain = Arc::new(
-        EventAwareTypedChain::<TaskErrorEvent, TaskErrorEvent>::new(event_bus)
+        EventAwareTypedChain::<NodeErrorEnvelope, NodeErrorEnvelope>::new(event_bus)
             .then::<Task, _>(TaskModelProcessor {
                 task_manager: task_manager.clone(),
                 state: state.clone(),
@@ -1955,5 +3134,1649 @@ pub async fn create_unified_task_ingress_chain(
             ),
     );
 
-    UnifiedTaskIngressChain::new(task_chain, parser_chain, error_chain)
+    UnifiedTaskIngressChain::new(task_chain, parser_chain, error_chain, ingress_namespace)
+        .with_scheduler_bridge(scheduler_task_manager, scheduler_queue_manager, scheduler_state)
+}
+
+#[cfg(test)]
+mod scheduler_ingress_tests {
+    use std::net::TcpListener;
+    use std::time::Duration;
+    use std::collections::BTreeMap;
+    use std::sync::{Arc, Mutex};
+
+    use super::*;
+    use crate::cacheable::CacheService;
+    use crate::common::interface::{
+        ModuleNodeTrait, ModuleTrait, NodeGenerateContext, NodeParseContext, ToSyncBoxStream,
+    };
+    use crate::common::model::config::{
+        BlobStorageConfig, CacheConfig, ChannelConfig, Config, CrawlerConfig, DatabaseConfig,
+        DownloadConfig, SchedulerIngressCutoverGateConfig,
+    };
+    use crate::common::model::message::{TaskEvent, UnifiedTaskInput};
+    use crate::common::model::{
+        ErrorDispatchContext, ExecutionMark, ExecutionMeta, NodeDispatch, NodeDispatchEnvelope,
+        NodeErrorEnvelope, NodeInput, NodeParseOutput, ParserDispatchContext, PayloadCodec,
+        PipelineStage, Request, Response, RoutingMeta, TaskProfileSnapshot, TypedEnvelope,
+    };
+    use crate::common::state::State as AppState;
+    use crate::common::status_tracker::{ErrorTrackerConfig, StatusTracker};
+    use crate::engine::api::profile_store::ProfileControlPlaneStore;
+    use crate::engine::task::request_response_adapter::decode_request_dispatch;
+    use crate::engine::task::task_manager::TaskManager;
+    use crate::queue::QueueManager;
+    use crate::utils::connector::create_redis_pool;
+    use sea_orm::{ConnectionTrait, DbBackend, Statement};
+    use tokio::sync::RwLock;
+
+    fn make_routing(module: &str) -> RoutingMeta {
+        RoutingMeta {
+            namespace: "test".into(),
+            account: "acc".into(),
+            platform: "plt".into(),
+            module: module.into(),
+            node_key: "step_0".into(),
+            run_id: Uuid::now_v7(),
+            request_id: Uuid::now_v7(),
+            parent_request_id: None,
+            priority: Default::default(),
+        }
+    }
+
+    fn make_dispatch_envelope(
+        module: &str,
+        node_id: Option<&str>,
+    ) -> NodeDispatchEnvelope {
+        let routing = make_routing(module);
+        let payload = TypedEnvelope::new(
+            "transport.parser_dispatch",
+            1,
+            PayloadCodec::Json,
+            b"{}".to_vec(),
+        );
+        let mut envelope = NodeDispatchEnvelope::new(
+            routing,
+            ExecutionMeta::default(),
+            NodeDispatch::new("step_0", NodeInput::new("step_0", payload)),
+        );
+        if let Some(nid) = node_id {
+            envelope = envelope.with_parser_context(ParserDispatchContext {
+                modules: Some(vec![module.to_string()]),
+                metadata: Default::default(),
+                context: ExecutionMark {
+                    module_id: Some(format!("acc-plt-{}", module)),
+                    node_id: Some(nid.to_string()),
+                    ..Default::default()
+                },
+                prefix_request_id: None,
+                runtime_node: None,
+            });
+        }
+        envelope
+    }
+
+    fn make_error_envelope(
+        module: &str,
+        node_id: Option<&str>,
+    ) -> NodeErrorEnvelope {
+        let routing = make_routing(module);
+        let mut envelope = NodeErrorEnvelope::new(
+            routing,
+            ExecutionMeta::default(),
+            PipelineStage::ParserTask,
+            "test error",
+        );
+        if let Some(nid) = node_id {
+            envelope = envelope.with_error_context(ErrorDispatchContext {
+                modules: Some(vec![module.to_string()]),
+                metadata: Default::default(),
+                context: ExecutionMark {
+                    module_id: Some(format!("acc-plt-{}", module)),
+                    node_id: Some(nid.to_string()),
+                    ..Default::default()
+                },
+                prefix_request_id: None,
+                runtime_node: None,
+            });
+        }
+        envelope
+    }
+
+    fn make_profile(module: &str, node_id: &str, version: u64) -> TaskProfileSnapshot {
+        TaskProfileSnapshot {
+            namespace: "test".into(),
+            account: "acc".into(),
+            platform: "plt".into(),
+            module: module.into(),
+            version,
+            node_configs: BTreeMap::from([(
+                node_id.to_string(),
+                TypedEnvelope::new("typed.node_config", 1, PayloadCodec::Json, b"{}".to_vec()),
+            )]),
+            ..TaskProfileSnapshot::default()
+        }
+    }
+
+    /// Constructs a chain without scheduler bridge by building a minimal but
+    /// type-correct ingress chain using `UnifiedTaskIngressChain::new()`.
+    fn make_ingress_chain_no_bridge() -> UnifiedTaskIngressChain {
+        // Build type-correct dummy chains via `.then()` — the processors will
+        // never execute, so returning FatalFailure is fine.
+        let task_chain = Arc::new(
+            EventAwareTypedChain::<TaskEvent, TaskEvent>::new(None)
+                .then::<SyncBoxStream<'static, ()>, _>(StubTerminalProcessor),
+        );
+        let parser_chain = Arc::new(
+            EventAwareTypedChain::<NodeDispatchEnvelope, NodeDispatchEnvelope>::new(None)
+                .then::<SyncBoxStream<'static, ()>, _>(StubTerminalProcessor),
+        );
+        let error_chain = Arc::new(
+            EventAwareTypedChain::<NodeErrorEnvelope, NodeErrorEnvelope>::new(None)
+                .then::<SyncBoxStream<'static, ()>, _>(StubTerminalProcessor),
+        );
+        UnifiedTaskIngressChain::new(task_chain, parser_chain, error_chain, "test".into())
+    }
+
+    fn make_ingress_chain_with_recorders(
+        parser_seen: Arc<Mutex<Vec<NodeDispatchEnvelope>>>,
+        error_seen: Arc<Mutex<Vec<NodeErrorEnvelope>>>,
+    ) -> UnifiedTaskIngressChain {
+        let task_chain = Arc::new(
+            EventAwareTypedChain::<TaskEvent, TaskEvent>::new(None)
+                .then::<SyncBoxStream<'static, ()>, _>(StubTerminalProcessor),
+        );
+        let parser_chain = Arc::new(
+            EventAwareTypedChain::<NodeDispatchEnvelope, NodeDispatchEnvelope>::new(None)
+                .then::<SyncBoxStream<'static, ()>, _>(RecordingParserTerminalProcessor {
+                    seen: parser_seen,
+                }),
+        );
+        let error_chain = Arc::new(
+            EventAwareTypedChain::<NodeErrorEnvelope, NodeErrorEnvelope>::new(None)
+                .then::<SyncBoxStream<'static, ()>, _>(RecordingErrorTerminalProcessor {
+                    seen: error_seen,
+                }),
+        );
+        UnifiedTaskIngressChain::new(task_chain, parser_chain, error_chain, "test".into())
+    }
+
+    fn scheduler_test_config(
+        scheduler_ingress_cutover_gate: Option<SchedulerIngressCutoverGateConfig>,
+    ) -> Config {
+        Config {
+            name: "test".to_string(),
+            db: DatabaseConfig {
+                url: None,
+                database_schema: None,
+                pool_size: None,
+                tls: None,
+            },
+            download_config: DownloadConfig {
+                downloader_expire: 60,
+                timeout: 30,
+                rate_limit: 5.0,
+                enable_session: true,
+                enable_locker: false,
+                enable_rate_limit: true,
+                cache_ttl: 60,
+                wss_timeout: 30,
+                pool_size: None,
+                max_response_size: None,
+            },
+            cache: CacheConfig {
+                backend: None,
+                ttl: 60,
+                redis: None,
+                compression_threshold: None,
+                enable_l1: Some(false),
+                l1_ttl_secs: None,
+                l1_max_entries: None,
+            },
+            crawler: CrawlerConfig {
+                request_max_retries: 3,
+                task_max_errors: 5,
+                module_max_errors: 5,
+                module_locker_ttl: 60,
+                node_id: None,
+                task_concurrency: None,
+                publish_concurrency: None,
+                parser_concurrency: None,
+                error_task_concurrency: None,
+                backpressure_retry_delay_ms: None,
+                dedup_ttl_secs: None,
+                idle_stop_secs: None,
+                scheduler_ingress_cutover_gate,
+            },
+            scheduler: None,
+            sync: None,
+            cookie: None,
+            channel_config: ChannelConfig {
+                blob_storage: Some(BlobStorageConfig { path: None }),
+                redis: None,
+                kafka: None,
+                compensator: None,
+                minid_time: 0,
+                capacity: 16,
+                queue_codec: None,
+                batch_concurrency: None,
+                compression_threshold: None,
+                nack_max_retries: None,
+                nack_backoff_ms: None,
+                federation_request_namespaces: Vec::new(),
+                federation_response_cache_api_endpoints: Default::default(),
+            },
+            proxy: None,
+            api: None,
+            event_bus: None,
+            logger: None,
+            policy: None,
+            raft: None,
+        }
+    }
+
+    fn cache_service_with_unreachable_redis_endpoint(namespace: &str) -> Arc<CacheService> {
+        let closed_listener =
+            TcpListener::bind("127.0.0.1:0").expect("ephemeral local port should bind");
+        let closed_port = closed_listener
+            .local_addr()
+            .expect("ephemeral local addr should resolve")
+            .port();
+        drop(closed_listener);
+
+        let pool = create_redis_pool(
+            "127.0.0.1",
+            closed_port,
+            0,
+            &None,
+            &None,
+            Some(2),
+            false,
+        )
+        .expect("redis pool should build for unreachable local endpoint");
+
+        Arc::new(CacheService::new(
+            Some(pool),
+            namespace.to_string(),
+            Some(Duration::from_secs(60)),
+            None,
+        ))
+    }
+
+    async fn build_scheduler_test_state_with_cache_service(
+        cache_service: Arc<CacheService>,
+        scheduler_ingress_cutover_gate: Option<SchedulerIngressCutoverGateConfig>,
+    ) -> Arc<AppState> {
+        let db = sea_orm::Database::connect("sqlite::memory:")
+            .await
+            .expect("in-memory sqlite should connect");
+        let profile_store = Arc::new(ProfileControlPlaneStore::open_temp("scheduler-ingress").unwrap());
+        Arc::new(AppState {
+            db: Arc::new(db),
+            config: Arc::new(RwLock::new(scheduler_test_config(
+                scheduler_ingress_cutover_gate,
+            ))),
+            cache_service,
+            cookie_service: None,
+            locker: Arc::new(crate::utils::redis_lock::DistributedLockManager::new(
+                None, "test",
+            )),
+            limiter: Arc::new(
+                crate::utils::distributed_rate_limit::DistributedSlidingWindowRateLimiter::new(
+                    None,
+                    Arc::new(crate::utils::redis_lock::DistributedLockManager::new(
+                        None, "test",
+                    )),
+                    "test",
+                    crate::utils::distributed_rate_limit::RateLimitConfig {
+                        max_requests_per_second: 5.0,
+                        window_size_millis: 1000,
+                        base_max_requests_per_second: Some(5.0),
+                    },
+                ),
+            ),
+            api_limiter: None,
+            status_tracker: Arc::new(StatusTracker::new(
+                ErrorTrackerConfig {
+                    task_max_errors: 5,
+                    module_max_errors: 5,
+                    request_max_retries: 3,
+                    parse_max_retries: 3,
+                    enable_success_decay: true,
+                    success_decay_amount: 1,
+                    enable_time_window: false,
+                    time_window_seconds: 3600,
+                    consecutive_error_threshold: 3,
+                    error_ttl: 60,
+                },
+                profile_store.clone(),
+            )),
+            profile_store,
+            raft_runtime_config: None,
+            raft_runtime: None,
+            redis: None,
+        })
+    }
+
+    async fn build_scheduler_test_state(
+        scheduler_ingress_cutover_gate: Option<SchedulerIngressCutoverGateConfig>,
+    ) -> Arc<AppState> {
+        build_scheduler_test_state_with_cache_service(
+            Arc::new(CacheService::new(
+                None,
+                "test:cache".to_string(),
+                Some(Duration::from_secs(60)),
+                None,
+            )),
+            scheduler_ingress_cutover_gate,
+        )
+        .await
+    }
+
+    async fn make_ingress_chain_with_scheduler_bridge_and_recorders(
+        parser_seen: Arc<Mutex<Vec<NodeDispatchEnvelope>>>,
+        error_seen: Arc<Mutex<Vec<NodeErrorEnvelope>>>,
+        scheduler_ingress_cutover_gate: Option<SchedulerIngressCutoverGateConfig>,
+    ) -> (UnifiedTaskIngressChain, Arc<TaskManager>) {
+        let chain = make_ingress_chain_with_recorders(parser_seen, error_seen);
+        let state = build_scheduler_test_state(scheduler_ingress_cutover_gate).await;
+        let task_manager = Arc::new(TaskManager::new(state.clone()));
+        let queue_manager = Arc::new(QueueManager::new(None, 16));
+        (
+            chain.with_scheduler_bridge(task_manager.clone(), queue_manager, state),
+            task_manager,
+        )
+    }
+
+    struct FastPathSuccessNode;
+
+    #[async_trait]
+    impl ModuleNodeTrait for FastPathSuccessNode {
+        async fn generate(
+            &self,
+            _ctx: NodeGenerateContext<'_>,
+        ) -> crate::errors::Result<SyncBoxStream<'static, Request>> {
+            Ok(vec![Request::new("https://example.com/fast-path", "GET")].to_stream())
+        }
+
+        async fn parser(
+            &self,
+            _response: Response,
+            _ctx: NodeParseContext<'_>,
+        ) -> crate::errors::Result<NodeParseOutput> {
+            Ok(NodeParseOutput::default())
+        }
+
+        fn stable_node_key(&self) -> &'static str {
+            "step_0"
+        }
+    }
+
+    struct FastPathSuccessModule;
+
+    #[async_trait]
+    impl ModuleTrait for FastPathSuccessModule {
+        fn name(&self) -> &'static str {
+            "fast_path_mod"
+        }
+
+        fn version(&self) -> i32 {
+            1
+        }
+
+        fn default_arc() -> Arc<dyn ModuleTrait>
+        where
+            Self: Sized,
+        {
+            Arc::new(Self)
+        }
+
+        async fn add_step(&self) -> Vec<Arc<dyn ModuleNodeTrait>> {
+            vec![Arc::new(FastPathSuccessNode)]
+        }
+    }
+
+    async fn seed_scheduler_task_factory_state(
+        state: &AppState,
+        module_name: &str,
+        account: &str,
+        platform: &str,
+    ) {
+        let attach_result = state
+            .db
+            .execute(Statement::from_string(
+                DbBackend::Sqlite,
+                "ATTACH DATABASE ':memory:' AS base".to_string(),
+            ))
+            .await;
+        if let Err(err) = attach_result {
+            let msg = err.to_string();
+            assert!(
+                msg.contains("database base is already in use"),
+                "unexpected sqlite attach error: {msg}"
+            );
+        }
+
+        let statements = [
+            "CREATE TABLE IF NOT EXISTS base.module (id INTEGER PRIMARY KEY AUTOINCREMENT, name VARCHAR(255) UNIQUE NOT NULL, enabled BOOLEAN NOT NULL DEFAULT 1, config TEXT NOT NULL DEFAULT '{}', priority INTEGER NOT NULL DEFAULT 0, created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, version INTEGER NOT NULL DEFAULT 1)",
+            "CREATE TABLE IF NOT EXISTS base.data_middleware (id INTEGER PRIMARY KEY AUTOINCREMENT, name VARCHAR(255) UNIQUE NOT NULL, enabled BOOLEAN NOT NULL DEFAULT 1, config TEXT NOT NULL DEFAULT '{}', created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)",
+            "CREATE TABLE IF NOT EXISTS base.rel_module_data_middleware (module_id INTEGER NOT NULL REFERENCES module(id) ON DELETE CASCADE, data_middleware_id INTEGER NOT NULL REFERENCES data_middleware(id) ON DELETE CASCADE, priority INTEGER NOT NULL DEFAULT 0, enabled BOOLEAN NOT NULL DEFAULT 1, config TEXT NOT NULL DEFAULT '{}', created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY (module_id, data_middleware_id))",
+            "CREATE TABLE IF NOT EXISTS base.download_middleware (id INTEGER PRIMARY KEY AUTOINCREMENT, name VARCHAR(255) UNIQUE NOT NULL, enabled BOOLEAN NOT NULL DEFAULT 1, config TEXT NOT NULL DEFAULT '{}', created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)",
+            "CREATE TABLE IF NOT EXISTS base.rel_module_download_middleware (module_id INTEGER NOT NULL REFERENCES module(id) ON DELETE CASCADE, download_middleware_id INTEGER NOT NULL REFERENCES download_middleware(id) ON DELETE CASCADE, priority INTEGER NOT NULL DEFAULT 0, enabled BOOLEAN NOT NULL DEFAULT 1, config TEXT NOT NULL DEFAULT '{}', created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY (module_id, download_middleware_id))",
+            "CREATE TABLE IF NOT EXISTS base.account (id INTEGER PRIMARY KEY AUTOINCREMENT, name VARCHAR(255) UNIQUE NOT NULL, modules TEXT NOT NULL DEFAULT '{}', enabled BOOLEAN NOT NULL DEFAULT 1, config TEXT NOT NULL DEFAULT '{}', priority INTEGER NOT NULL DEFAULT 0, created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)",
+            "CREATE TABLE IF NOT EXISTS base.platform (id INTEGER PRIMARY KEY AUTOINCREMENT, name VARCHAR(255) UNIQUE NOT NULL, description TEXT, base_url VARCHAR(255), enabled BOOLEAN NOT NULL DEFAULT 1, config TEXT NOT NULL DEFAULT '{}', created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)",
+            "CREATE TABLE IF NOT EXISTS base.rel_account_platform (account_id INTEGER NOT NULL REFERENCES account(id) ON DELETE CASCADE, platform_id INTEGER NOT NULL REFERENCES platform(id) ON DELETE CASCADE, enabled BOOLEAN NOT NULL DEFAULT 1, config TEXT NOT NULL DEFAULT '{}', created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY (account_id, platform_id))",
+            "CREATE TABLE IF NOT EXISTS base.rel_module_account (module_id INTEGER NOT NULL REFERENCES module(id) ON DELETE CASCADE, account_id INTEGER NOT NULL REFERENCES account(id) ON DELETE CASCADE, priority INTEGER NOT NULL DEFAULT 0, enabled BOOLEAN NOT NULL DEFAULT 1, config TEXT NOT NULL DEFAULT '{}', created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY (module_id, account_id))",
+            "CREATE TABLE IF NOT EXISTS base.rel_module_platform (module_id INTEGER NOT NULL REFERENCES module(id) ON DELETE CASCADE, platform_id INTEGER NOT NULL REFERENCES platform(id) ON DELETE CASCADE, priority INTEGER NOT NULL DEFAULT 0, enabled BOOLEAN NOT NULL DEFAULT 1, config TEXT NOT NULL DEFAULT '{}', created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY (module_id, platform_id))",
+            &format!("INSERT OR IGNORE INTO base.module (name, version, priority, enabled) VALUES ('{module_name}', 1, 5, 1)"),
+            &format!("INSERT OR IGNORE INTO base.account (name, enabled, priority) VALUES ('{account}', 1, 5)"),
+            &format!("INSERT OR IGNORE INTO base.platform (name, description, enabled) VALUES ('{platform}', 'scheduler ingress test', 1)"),
+            &format!("INSERT OR IGNORE INTO base.rel_module_account (module_id, account_id, priority, enabled) SELECT m.id, a.id, 5, 1 FROM base.module m, base.account a WHERE m.name = '{module_name}' AND a.name = '{account}'"),
+            &format!("INSERT OR IGNORE INTO base.rel_module_platform (module_id, platform_id, priority, enabled) SELECT m.id, p.id, 5, 1 FROM base.module m, base.platform p WHERE m.name = '{module_name}' AND p.name = '{platform}'"),
+            &format!("INSERT OR IGNORE INTO base.rel_account_platform (account_id, platform_id, enabled) SELECT a.id, p.id, 1 FROM base.account a, base.platform p WHERE a.name = '{account}' AND p.name = '{platform}'"),
+        ];
+
+        for sql in statements {
+            state
+                .db
+                .execute(Statement::from_string(DbBackend::Sqlite, sql.to_string()))
+                .await
+                .unwrap_or_else(|err| panic!("failed to seed scheduler ingress sqlite state: {err}; sql={sql}"));
+        }
+    }
+
+    async fn make_seeded_scheduler_bridge_chain(
+        parser_seen: Arc<Mutex<Vec<NodeDispatchEnvelope>>>,
+        error_seen: Arc<Mutex<Vec<NodeErrorEnvelope>>>,
+    ) -> (UnifiedTaskIngressChain, Arc<TaskManager>, Arc<QueueManager>) {
+        let chain = make_ingress_chain_with_recorders(parser_seen, error_seen);
+        let state = build_scheduler_test_state(Some(SchedulerIngressCutoverGateConfig {
+            failure_threshold: Some(3),
+            recovery_window_secs: Some(60),
+            gray_ratio: Some(1.0),
+            legacy_scheduler_ingress_fallback_enabled: None,
+        }))
+        .await;
+        seed_scheduler_task_factory_state(&state, "fast_path_mod", "acc", "plt").await;
+        let task_manager = Arc::new(TaskManager::new(state.clone()));
+        task_manager.add_module(Arc::new(FastPathSuccessModule)).await;
+        let queue_manager = Arc::new(QueueManager::new(None, 16));
+        (
+            chain.with_scheduler_bridge(task_manager.clone(), queue_manager.clone(), state),
+            task_manager,
+            queue_manager,
+        )
+    }
+
+    async fn make_seeded_scheduler_bridge_chain_with_cache_service(
+        parser_seen: Arc<Mutex<Vec<NodeDispatchEnvelope>>>,
+        error_seen: Arc<Mutex<Vec<NodeErrorEnvelope>>>,
+        cache_service: Arc<CacheService>,
+    ) -> (UnifiedTaskIngressChain, Arc<TaskManager>, Arc<QueueManager>) {
+        let chain = make_ingress_chain_with_recorders(parser_seen, error_seen);
+        let state = build_scheduler_test_state_with_cache_service(
+            cache_service,
+            Some(SchedulerIngressCutoverGateConfig {
+                failure_threshold: Some(3),
+                recovery_window_secs: Some(60),
+                gray_ratio: Some(1.0),
+                legacy_scheduler_ingress_fallback_enabled: None,
+            }),
+        )
+        .await;
+        seed_scheduler_task_factory_state(&state, "fast_path_mod", "acc", "plt").await;
+        let task_manager = Arc::new(TaskManager::new(state.clone()));
+        task_manager.add_module(Arc::new(FastPathSuccessModule)).await;
+        let queue_manager = Arc::new(QueueManager::new(None, 16));
+        (
+            chain.with_scheduler_bridge(task_manager.clone(), queue_manager.clone(), state),
+            task_manager,
+            queue_manager,
+        )
+    }
+
+    #[test]
+    fn scheduler_generate_runtime_input_prefers_profile_node_config() {
+        let routing = make_routing("catalog");
+        let runtime_input = UnifiedTaskIngressChain::build_scheduler_generate_runtime_input(
+            "acc-plt-catalog",
+            Some(&make_profile("catalog", "step_0", 17)),
+            &routing,
+            "catalog",
+            "step_0",
+            Default::default(),
+            None,
+            None,
+        )
+        .expect("typed scheduler runtime input should build");
+
+        assert_eq!(runtime_input.routing.namespace, "test");
+        assert_eq!(runtime_input.routing.module, "catalog");
+        assert_eq!(runtime_input.routing.node_key, "step_0");
+        assert_eq!(runtime_input.config.profile_version, 17);
+        assert_eq!(runtime_input.config.node_config.schema_id, "typed.node_config");
+        assert_eq!(runtime_input.exec.profile_version, 17);
+    }
+
+    #[test]
+    fn scheduler_generate_runtime_input_errors_when_profile_missing() {
+        let routing = make_routing("catalog");
+        let err = UnifiedTaskIngressChain::build_scheduler_generate_runtime_input(
+            "acc-plt-catalog",
+            None,
+            &routing,
+            "catalog",
+            "step_0",
+            Default::default(),
+            None,
+            None,
+        )
+        .expect_err("missing scheduler ingress profile should fail closed");
+
+        assert!(
+            err.to_string()
+                .contains("scheduler ingress requires loaded profile for node 'step_0'"),
+            "unexpected error message: {err}"
+        );
+    }
+
+    #[test]
+    fn scheduler_generate_runtime_input_errors_when_profile_node_config_missing() {
+        let routing = make_routing("catalog");
+        let err = UnifiedTaskIngressChain::build_scheduler_generate_runtime_input(
+            "acc-plt-catalog",
+            Some(&make_profile("catalog", "other", 17)),
+            &routing,
+            "catalog",
+            "step_0",
+            Default::default(),
+            None,
+            None,
+        )
+        .expect_err("missing profile node config should fail closed");
+
+        assert!(
+            err.to_string()
+                .contains("profile node config missing for scheduler ingress node 'step_0'"),
+            "unexpected error message: {err}"
+        );
+    }
+
+    /// Stub processor that always returns a fatal error — used only to satisfy
+    /// the chain type signature (In → SyncBoxStream) in tests.
+    struct StubTerminalProcessor;
+
+    #[async_trait]
+    impl<T: Send + 'static> ProcessorTrait<T, SyncBoxStream<'static, ()>> for StubTerminalProcessor {
+        fn name(&self) -> &'static str {
+            "StubTerminal"
+        }
+        async fn process(
+            &self,
+            _input: T,
+            _context: ProcessorContext,
+        ) -> ProcessorResult<SyncBoxStream<'static, ()>> {
+            ProcessorResult::FatalFailure(
+                crate::errors::ModuleError::ModuleNotFound("stub".into()).into(),
+            )
+        }
+    }
+
+    #[async_trait]
+    impl<T: Send + Sync + Clone + 'static> EventProcessorTrait<T, SyncBoxStream<'static, ()>> for StubTerminalProcessor {
+        fn pre_status(&self, _: &T) -> Option<EventEnvelope> { None }
+        fn finish_status(&self, _: &T, _: &SyncBoxStream<'static, ()>) -> Option<EventEnvelope> { None }
+        fn working_status(&self, _: &T) -> Option<EventEnvelope> { None }
+        fn error_status(&self, _: &T, _: &Error) -> Option<EventEnvelope> { None }
+        fn retry_status(&self, _: &T, _: &RetryPolicy) -> Option<EventEnvelope> { None }
+    }
+
+    struct RecordingParserTerminalProcessor {
+        seen: Arc<Mutex<Vec<NodeDispatchEnvelope>>>,
+    }
+
+    #[async_trait]
+    impl ProcessorTrait<NodeDispatchEnvelope, SyncBoxStream<'static, ()>>
+        for RecordingParserTerminalProcessor
+    {
+        fn name(&self) -> &'static str {
+            "RecordingParserTerminal"
+        }
+
+        async fn process(
+            &self,
+            input: NodeDispatchEnvelope,
+            _context: ProcessorContext,
+        ) -> ProcessorResult<SyncBoxStream<'static, ()>> {
+            self.seen.lock().expect("parser recorder mutex poisoned").push(input);
+            ProcessorResult::Success(Box::pin(futures::stream::empty()))
+        }
+    }
+
+    #[async_trait]
+    impl EventProcessorTrait<NodeDispatchEnvelope, SyncBoxStream<'static, ()>>
+        for RecordingParserTerminalProcessor
+    {
+        fn pre_status(&self, _: &NodeDispatchEnvelope) -> Option<EventEnvelope> { None }
+        fn finish_status(
+            &self,
+            _: &NodeDispatchEnvelope,
+            _: &SyncBoxStream<'static, ()>,
+        ) -> Option<EventEnvelope> {
+            None
+        }
+        fn working_status(&self, _: &NodeDispatchEnvelope) -> Option<EventEnvelope> { None }
+        fn error_status(&self, _: &NodeDispatchEnvelope, _: &Error) -> Option<EventEnvelope> {
+            None
+        }
+        fn retry_status(
+            &self,
+            _: &NodeDispatchEnvelope,
+            _: &RetryPolicy,
+        ) -> Option<EventEnvelope> {
+            None
+        }
+    }
+
+    struct RecordingErrorTerminalProcessor {
+        seen: Arc<Mutex<Vec<NodeErrorEnvelope>>>,
+    }
+
+    #[async_trait]
+    impl ProcessorTrait<NodeErrorEnvelope, SyncBoxStream<'static, ()>>
+        for RecordingErrorTerminalProcessor
+    {
+        fn name(&self) -> &'static str {
+            "RecordingErrorTerminal"
+        }
+
+        async fn process(
+            &self,
+            input: NodeErrorEnvelope,
+            _context: ProcessorContext,
+        ) -> ProcessorResult<SyncBoxStream<'static, ()>> {
+            self.seen.lock().expect("error recorder mutex poisoned").push(input);
+            ProcessorResult::Success(Box::pin(futures::stream::empty()))
+        }
+    }
+
+    #[async_trait]
+    impl EventProcessorTrait<NodeErrorEnvelope, SyncBoxStream<'static, ()>>
+        for RecordingErrorTerminalProcessor
+    {
+        fn pre_status(&self, _: &NodeErrorEnvelope) -> Option<EventEnvelope> { None }
+        fn finish_status(
+            &self,
+            _: &NodeErrorEnvelope,
+            _: &SyncBoxStream<'static, ()>,
+        ) -> Option<EventEnvelope> {
+            None
+        }
+        fn working_status(&self, _: &NodeErrorEnvelope) -> Option<EventEnvelope> { None }
+        fn error_status(&self, _: &NodeErrorEnvelope, _: &Error) -> Option<EventEnvelope> {
+            None
+        }
+        fn retry_status(
+            &self,
+            _: &NodeErrorEnvelope,
+            _: &RetryPolicy,
+        ) -> Option<EventEnvelope> {
+            None
+        }
+    }
+
+    #[tokio::test]
+    async fn parser_dispatch_without_bridge_is_retryable_and_fail_closed() {
+        let chain = make_ingress_chain_no_bridge();
+        let dispatch = make_dispatch_envelope("my_mod", Some("node_a"));
+        let result = chain.try_scheduler_parser_dispatch(&dispatch).await;
+        match result {
+            Some(ProcessorResult::RetryableFailure(policy)) => {
+                let reason = policy.reason.expect("retry policy reason should exist");
+                assert!(
+                    reason.contains("scheduler parser execution failed"),
+                    "unexpected reason: {reason}"
+                );
+                assert!(
+                    reason.contains("scheduler bridge not attached"),
+                    "unexpected reason: {reason}"
+                );
+                assert!(reason.contains("my_mod"), "unexpected reason: {reason}");
+            }
+            _ => panic!("expected retryable failure"),
+        }
+    }
+
+    #[tokio::test]
+    async fn parser_dispatch_with_attached_bridge_falls_back_when_gray_gate_blocks() {
+        let parser_seen = Arc::new(Mutex::new(Vec::new()));
+        let error_seen = Arc::new(Mutex::new(Vec::new()));
+        let (chain, _task_manager) = make_ingress_chain_with_scheduler_bridge_and_recorders(
+            parser_seen.clone(),
+            error_seen.clone(),
+            Some(SchedulerIngressCutoverGateConfig {
+                failure_threshold: Some(3),
+                recovery_window_secs: Some(60),
+                gray_ratio: Some(0.0),
+                legacy_scheduler_ingress_fallback_enabled: Some(true),
+            }),
+        )
+        .await;
+        let dispatch = make_dispatch_envelope("my_mod", Some("node_a"));
+
+        let result = chain
+            .execute(
+                UnifiedTaskInput::ParserDispatch(dispatch.clone()),
+                ProcessorContext::default(),
+            )
+            .await;
+
+        assert!(matches!(result, ProcessorResult::Success(_)));
+        assert_eq!(parser_seen.lock().unwrap().len(), 1);
+        assert_eq!(error_seen.lock().unwrap().len(), 0);
+        assert_eq!(parser_seen.lock().unwrap()[0].routing.request_id, dispatch.routing.request_id);
+    }
+
+    #[tokio::test]
+    async fn error_envelope_with_attached_bridge_falls_back_when_failure_gate_blocks() {
+        let parser_seen = Arc::new(Mutex::new(Vec::new()));
+        let error_seen = Arc::new(Mutex::new(Vec::new()));
+        let (chain, task_manager) = make_ingress_chain_with_scheduler_bridge_and_recorders(
+            parser_seen.clone(),
+            error_seen.clone(),
+            Some(SchedulerIngressCutoverGateConfig {
+                failure_threshold: Some(1),
+                recovery_window_secs: Some(60),
+                gray_ratio: Some(1.0),
+                legacy_scheduler_ingress_fallback_enabled: Some(true),
+            }),
+        )
+        .await;
+        task_manager.record_module_dag_cutover_failure("my_mod");
+        let envelope = make_error_envelope("my_mod", Some("node_a"));
+
+        let result = chain
+            .execute(
+                UnifiedTaskInput::ErrorEnvelope(envelope.clone()),
+                ProcessorContext::default(),
+            )
+            .await;
+
+        assert!(matches!(result, ProcessorResult::Success(_)));
+        assert_eq!(parser_seen.lock().unwrap().len(), 0);
+        assert_eq!(error_seen.lock().unwrap().len(), 1);
+        assert_eq!(error_seen.lock().unwrap()[0].routing.request_id, envelope.routing.request_id);
+    }
+
+    #[tokio::test]
+    async fn parser_dispatch_gate_blocked_defaults_to_fail_closed_without_legacy_fallback() {
+        let parser_seen = Arc::new(Mutex::new(Vec::new()));
+        let error_seen = Arc::new(Mutex::new(Vec::new()));
+        let (chain, _task_manager) = make_ingress_chain_with_scheduler_bridge_and_recorders(
+            parser_seen.clone(),
+            error_seen.clone(),
+            Some(SchedulerIngressCutoverGateConfig {
+                failure_threshold: Some(3),
+                recovery_window_secs: Some(60),
+                gray_ratio: Some(0.0),
+                legacy_scheduler_ingress_fallback_enabled: None, // default: false
+            }),
+        )
+        .await;
+        let dispatch = make_dispatch_envelope("my_mod", Some("node_a"));
+
+        let result = chain
+            .execute(
+                UnifiedTaskInput::ParserDispatch(dispatch),
+                ProcessorContext::default(),
+            )
+            .await;
+
+        assert!(
+            matches!(result, ProcessorResult::RetryableFailure(_)),
+            "gate-blocked parser dispatch must fail-closed by default"
+        );
+        assert_eq!(parser_seen.lock().unwrap().len(), 0);
+        assert_eq!(error_seen.lock().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn error_envelope_gate_blocked_defaults_to_fail_closed_without_legacy_fallback() {
+        let parser_seen = Arc::new(Mutex::new(Vec::new()));
+        let error_seen = Arc::new(Mutex::new(Vec::new()));
+        let (chain, task_manager) = make_ingress_chain_with_scheduler_bridge_and_recorders(
+            parser_seen.clone(),
+            error_seen.clone(),
+            Some(SchedulerIngressCutoverGateConfig {
+                failure_threshold: Some(1),
+                recovery_window_secs: Some(60),
+                gray_ratio: Some(1.0),
+                legacy_scheduler_ingress_fallback_enabled: None, // default: false
+            }),
+        )
+        .await;
+        task_manager.record_module_dag_cutover_failure("my_mod");
+        let envelope = make_error_envelope("my_mod", Some("node_a"));
+
+        let result = chain
+            .execute(
+                UnifiedTaskInput::ErrorEnvelope(envelope),
+                ProcessorContext::default(),
+            )
+            .await;
+
+        assert!(
+            matches!(result, ProcessorResult::RetryableFailure(_)),
+            "gate-blocked error envelope must fail-closed by default"
+        );
+        assert_eq!(parser_seen.lock().unwrap().len(), 0);
+        assert_eq!(error_seen.lock().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn parser_dispatch_with_attached_bridge_fast_path_publishes_request_when_gate_allows() {
+        let parser_seen = Arc::new(Mutex::new(Vec::new()));
+        let error_seen = Arc::new(Mutex::new(Vec::new()));
+        let (chain, _task_manager, queue_manager) =
+            make_seeded_scheduler_bridge_chain(parser_seen.clone(), error_seen.clone()).await;
+        let dispatch = make_dispatch_envelope("fast_path_mod", Some("step_0"));
+
+        let result = chain
+            .execute(
+                UnifiedTaskInput::ParserDispatch(dispatch),
+                ProcessorContext::default(),
+            )
+            .await;
+
+        assert!(matches!(result, ProcessorResult::Success(_)));
+        assert!(parser_seen.lock().unwrap().is_empty());
+        assert!(error_seen.lock().unwrap().is_empty());
+
+        let queued = queue_manager
+            .get_request_pop_channel()
+            .lock()
+            .await
+            .try_recv()
+            .expect("scheduler parser fast-path should publish one request");
+        let request = decode_request_dispatch(queued.inner)
+            .expect("queued parser fast-path payload should decode as request dispatch");
+        assert_eq!(request.url, "https://example.com/fast-path");
+    }
+
+    #[tokio::test]
+    async fn error_envelope_with_attached_bridge_fast_path_publishes_request_when_gate_allows() {
+        let parser_seen = Arc::new(Mutex::new(Vec::new()));
+        let error_seen = Arc::new(Mutex::new(Vec::new()));
+        let (chain, _task_manager, queue_manager) =
+            make_seeded_scheduler_bridge_chain(parser_seen.clone(), error_seen.clone()).await;
+        let envelope = make_error_envelope("fast_path_mod", Some("step_0"));
+
+        let result = chain
+            .execute(
+                UnifiedTaskInput::ErrorEnvelope(envelope),
+                ProcessorContext::default(),
+            )
+            .await;
+
+        assert!(matches!(result, ProcessorResult::Success(_)));
+        assert!(parser_seen.lock().unwrap().is_empty());
+        assert!(error_seen.lock().unwrap().is_empty());
+
+        let queued = queue_manager
+            .get_request_pop_channel()
+            .lock()
+            .await
+            .try_recv()
+            .expect("scheduler error fast-path should publish one request");
+        let request = decode_request_dispatch(queued.inner)
+            .expect("queued error fast-path payload should decode as request dispatch");
+        assert_eq!(request.url, "https://example.com/fast-path");
+    }
+
+    #[tokio::test]
+    async fn parser_dispatch_with_attached_bridge_remote_hint_dispatcher_backend_failure_is_retryable_and_fail_closed() {
+        let parser_seen = Arc::new(Mutex::new(Vec::new()));
+        let error_seen = Arc::new(Mutex::new(Vec::new()));
+        let (chain, _task_manager, queue_manager) =
+            make_seeded_scheduler_bridge_chain(parser_seen.clone(), error_seen.clone()).await;
+        let mut dispatch = make_dispatch_envelope("fast_path_mod", Some("step_0"));
+        dispatch.parser_context.as_mut().unwrap().runtime_node = Some(
+            RuntimeNodeRoutingHint::new("step_0")
+                .with_placement(crate::schedule::dag::NodePlacement::remote("wg-test")),
+        );
+
+        let result = chain
+            .execute(
+                UnifiedTaskInput::ParserDispatch(dispatch),
+                ProcessorContext::default(),
+            )
+            .await;
+
+        match result {
+            ProcessorResult::RetryableFailure(policy) => {
+                let reason = policy.reason.expect("retry policy reason should exist");
+                assert!(
+                    reason.contains("scheduler parser execution failed"),
+                    "unexpected reason: {reason}"
+                );
+                assert!(
+                    reason.contains("enqueue remote request"),
+                    "unexpected reason: {reason}"
+                );
+                assert!(
+                    reason.contains("Lua scripts require a cache-backed Redis backend"),
+                    "unexpected reason: {reason}"
+                );
+            }
+            _ => panic!("expected retryable failure"),
+        }
+
+        assert!(parser_seen.lock().unwrap().is_empty());
+        assert!(error_seen.lock().unwrap().is_empty());
+        assert!(queue_manager
+            .get_request_pop_channel()
+            .lock()
+            .await
+            .try_recv()
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn error_envelope_with_attached_bridge_remote_hint_dispatcher_backend_failure_is_retryable_and_fail_closed() {
+        let parser_seen = Arc::new(Mutex::new(Vec::new()));
+        let error_seen = Arc::new(Mutex::new(Vec::new()));
+        let (chain, _task_manager, queue_manager) =
+            make_seeded_scheduler_bridge_chain(parser_seen.clone(), error_seen.clone()).await;
+        let mut envelope = make_error_envelope("fast_path_mod", Some("step_0"));
+        envelope.error_context.as_mut().unwrap().runtime_node = Some(
+            RuntimeNodeRoutingHint::new("step_0")
+                .with_placement(crate::schedule::dag::NodePlacement::remote("wg-test")),
+        );
+
+        let result = chain
+            .execute(
+                UnifiedTaskInput::ErrorEnvelope(envelope),
+                ProcessorContext::default(),
+            )
+            .await;
+
+        match result {
+            ProcessorResult::RetryableFailure(policy) => {
+                let reason = policy.reason.expect("retry policy reason should exist");
+                assert!(
+                    reason.contains("scheduler error execution failed"),
+                    "unexpected reason: {reason}"
+                );
+                assert!(
+                    reason.contains("enqueue remote request"),
+                    "unexpected reason: {reason}"
+                );
+                assert!(
+                    reason.contains("Lua scripts require a cache-backed Redis backend"),
+                    "unexpected reason: {reason}"
+                );
+            }
+            _ => panic!("expected retryable failure"),
+        }
+
+        assert!(parser_seen.lock().unwrap().is_empty());
+        assert!(error_seen.lock().unwrap().is_empty());
+        assert!(queue_manager
+            .get_request_pop_channel()
+            .lock()
+            .await
+            .try_recv()
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn parser_dispatch_with_attached_bridge_remote_hint_network_failure_is_retryable_and_fail_closed() {
+        let parser_seen = Arc::new(Mutex::new(Vec::new()));
+        let error_seen = Arc::new(Mutex::new(Vec::new()));
+        let (chain, _task_manager, queue_manager) = make_seeded_scheduler_bridge_chain_with_cache_service(
+            parser_seen.clone(),
+            error_seen.clone(),
+            cache_service_with_unreachable_redis_endpoint("test:cache:network-fail:parser"),
+        )
+        .await;
+        let mut dispatch = make_dispatch_envelope("fast_path_mod", Some("step_0"));
+        dispatch.parser_context.as_mut().unwrap().runtime_node = Some(
+            RuntimeNodeRoutingHint::new("step_0")
+                .with_placement(crate::schedule::dag::NodePlacement::remote("wg-test")),
+        );
+
+        let result = chain
+            .execute(
+                UnifiedTaskInput::ParserDispatch(dispatch),
+                ProcessorContext::default(),
+            )
+            .await;
+
+        match result {
+            ProcessorResult::RetryableFailure(policy) => {
+                let reason = policy.reason.expect("retry policy reason should exist");
+                assert!(
+                    reason.contains("scheduler parser execution failed"),
+                    "unexpected reason: {reason}"
+                );
+                assert!(
+                    reason.contains("enqueue remote request"),
+                    "unexpected reason: {reason}"
+                );
+                assert!(
+                    !reason.contains("Lua scripts require a cache-backed Redis backend"),
+                    "unexpected reason: {reason}"
+                );
+            }
+            _ => panic!("expected retryable failure"),
+        }
+
+        assert!(parser_seen.lock().unwrap().is_empty());
+        assert!(error_seen.lock().unwrap().is_empty());
+        assert!(queue_manager
+            .get_request_pop_channel()
+            .lock()
+            .await
+            .try_recv()
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn error_envelope_with_attached_bridge_remote_hint_network_failure_is_retryable_and_fail_closed() {
+        let parser_seen = Arc::new(Mutex::new(Vec::new()));
+        let error_seen = Arc::new(Mutex::new(Vec::new()));
+        let (chain, _task_manager, queue_manager) = make_seeded_scheduler_bridge_chain_with_cache_service(
+            parser_seen.clone(),
+            error_seen.clone(),
+            cache_service_with_unreachable_redis_endpoint("test:cache:network-fail:error"),
+        )
+        .await;
+        let mut envelope = make_error_envelope("fast_path_mod", Some("step_0"));
+        envelope.error_context.as_mut().unwrap().runtime_node = Some(
+            RuntimeNodeRoutingHint::new("step_0")
+                .with_placement(crate::schedule::dag::NodePlacement::remote("wg-test")),
+        );
+
+        let result = chain
+            .execute(
+                UnifiedTaskInput::ErrorEnvelope(envelope),
+                ProcessorContext::default(),
+            )
+            .await;
+
+        match result {
+            ProcessorResult::RetryableFailure(policy) => {
+                let reason = policy.reason.expect("retry policy reason should exist");
+                assert!(
+                    reason.contains("scheduler error execution failed"),
+                    "unexpected reason: {reason}"
+                );
+                assert!(
+                    reason.contains("enqueue remote request"),
+                    "unexpected reason: {reason}"
+                );
+                assert!(
+                    !reason.contains("Lua scripts require a cache-backed Redis backend"),
+                    "unexpected reason: {reason}"
+                );
+            }
+            _ => panic!("expected retryable failure"),
+        }
+
+        assert!(parser_seen.lock().unwrap().is_empty());
+        assert!(error_seen.lock().unwrap().is_empty());
+        assert!(queue_manager
+            .get_request_pop_channel()
+            .lock()
+            .await
+            .try_recv()
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn parser_dispatch_without_typed_context_is_retryable_and_fail_closed() {
+        let chain = make_ingress_chain_no_bridge();
+        let dispatch = make_dispatch_envelope("my_mod", None);
+        let mut dispatch = dispatch;
+        dispatch.routing.module.clear();
+        dispatch.dispatch.target_node.clear();
+        dispatch.dispatch.input.target_node.clear();
+        let result = chain.try_scheduler_parser_dispatch(&dispatch).await;
+        match result {
+            Some(ProcessorResult::RetryableFailure(policy)) => {
+                let reason = policy.reason.expect("retry policy reason should exist");
+                assert!(
+                    reason.contains("required node_id is missing"),
+                    "unexpected reason: {reason}"
+                );
+            }
+            _ => panic!("expected retryable failure"),
+        }
+    }
+
+    #[tokio::test]
+    async fn error_dispatch_without_bridge_is_retryable_and_fail_closed() {
+        let chain = make_ingress_chain_no_bridge();
+        let envelope = make_error_envelope("my_mod", Some("node_a"));
+        let result = chain.try_scheduler_error_dispatch(&envelope).await;
+        match result {
+            Some(ProcessorResult::RetryableFailure(policy)) => {
+                let reason = policy.reason.expect("retry policy reason should exist");
+                assert!(
+                    reason.contains("scheduler error execution failed"),
+                    "unexpected reason: {reason}"
+                );
+                assert!(
+                    reason.contains("scheduler bridge not attached"),
+                    "unexpected reason: {reason}"
+                );
+                assert!(reason.contains("my_mod"), "unexpected reason: {reason}");
+            }
+            _ => panic!("expected retryable failure"),
+        }
+    }
+
+    #[tokio::test]
+    async fn error_dispatch_without_typed_context_is_retryable_and_fail_closed() {
+        let chain = make_ingress_chain_no_bridge();
+        let envelope = make_error_envelope("my_mod", None);
+        let mut envelope = envelope;
+        envelope.routing.module.clear();
+        envelope.routing.node_key.clear();
+        let result = chain.try_scheduler_error_dispatch(&envelope).await;
+        match result {
+            Some(ProcessorResult::RetryableFailure(policy)) => {
+                let reason = policy.reason.expect("retry policy reason should exist");
+                assert!(
+                    reason.contains("required node_id is missing"),
+                    "unexpected reason: {reason}"
+                );
+            }
+            _ => panic!("expected retryable failure"),
+        }
+    }
+
+    #[tokio::test]
+    async fn parser_dispatch_with_empty_node_id_is_retryable_and_fail_closed() {
+        let chain = make_ingress_chain_no_bridge();
+        let mut dispatch = make_dispatch_envelope("my_mod", Some("node_a"));
+        if let Some(ctx) = dispatch.parser_context.as_mut() {
+            ctx.context.node_id = Some(String::new());
+        }
+        dispatch.dispatch.target_node.clear();
+        dispatch.dispatch.input.target_node.clear();
+        let result = chain.try_scheduler_parser_dispatch(&dispatch).await;
+        match result {
+            Some(ProcessorResult::RetryableFailure(policy)) => {
+                let reason = policy.reason.expect("retry policy reason should exist");
+                assert!(
+                    reason.contains("required node_id is missing"),
+                    "unexpected reason: {reason}"
+                );
+            }
+            _ => panic!("expected retryable failure"),
+        }
+    }
+
+    #[tokio::test]
+    async fn parser_dispatch_without_module_name_is_retryable_and_fail_closed() {
+        let chain = make_ingress_chain_no_bridge();
+        let mut dispatch = make_dispatch_envelope("my_mod", Some("node_a"));
+        if let Some(ctx) = dispatch.parser_context.as_mut() {
+            ctx.modules = None;
+        }
+        dispatch.routing.module.clear();
+        let result = chain.try_scheduler_parser_dispatch(&dispatch).await;
+        match result {
+            Some(ProcessorResult::RetryableFailure(policy)) => {
+                let reason = policy.reason.expect("retry policy reason should exist");
+                assert!(
+                    reason.contains("required module_name is missing"),
+                    "unexpected reason: {reason}"
+                );
+            }
+            _ => panic!("expected retryable failure"),
+        }
+    }
+
+    #[tokio::test]
+    async fn parser_dispatch_without_modules_list_is_retryable_and_fail_closed() {
+        let chain = make_ingress_chain_no_bridge();
+        let mut dispatch = make_dispatch_envelope("my_mod", Some("node_a"));
+        if let Some(ctx) = dispatch.parser_context.as_mut() {
+            ctx.modules = None;
+        }
+        dispatch.routing.module.clear();
+        let result = chain.try_scheduler_parser_dispatch(&dispatch).await;
+        match result {
+            Some(ProcessorResult::RetryableFailure(policy)) => {
+                let reason = policy.reason.expect("retry policy reason should exist");
+                assert!(
+                    reason.contains("required module_name is missing"),
+                    "unexpected reason: {reason}"
+                );
+            }
+            _ => panic!("expected retryable failure"),
+        }
+    }
+
+    #[tokio::test]
+    async fn error_dispatch_without_module_name_is_retryable_and_fail_closed() {
+        let chain = make_ingress_chain_no_bridge();
+        let mut envelope = make_error_envelope("my_mod", Some("node_a"));
+        if let Some(ctx) = envelope.error_context.as_mut() {
+            ctx.modules = None;
+        }
+        envelope.routing.module.clear();
+        let result = chain.try_scheduler_error_dispatch(&envelope).await;
+        match result {
+            Some(ProcessorResult::RetryableFailure(policy)) => {
+                let reason = policy.reason.expect("retry policy reason should exist");
+                assert!(
+                    reason.contains("required module_name is missing"),
+                    "unexpected reason: {reason}"
+                );
+            }
+            _ => panic!("expected retryable failure"),
+        }
+    }
+
+    #[tokio::test]
+    async fn error_dispatch_without_modules_list_is_retryable_and_fail_closed() {
+        let chain = make_ingress_chain_no_bridge();
+        let mut envelope = make_error_envelope("my_mod", Some("node_a"));
+        if let Some(ctx) = envelope.error_context.as_mut() {
+            ctx.modules = None;
+        }
+        envelope.routing.module.clear();
+        let result = chain.try_scheduler_error_dispatch(&envelope).await;
+        match result {
+            Some(ProcessorResult::RetryableFailure(policy)) => {
+                let reason = policy.reason.expect("retry policy reason should exist");
+                assert!(
+                    reason.contains("required module_name is missing"),
+                    "unexpected reason: {reason}"
+                );
+            }
+            _ => panic!("expected retryable failure"),
+        }
+    }
+
+    #[test]
+    fn resolve_parser_targets_require_typed_context_or_transport_fields() {
+        let chain = make_ingress_chain_no_bridge();
+        let mut dispatch = make_dispatch_envelope("my_mod", None);
+        dispatch.routing.module.clear();
+        dispatch.dispatch.target_node.clear();
+        dispatch.dispatch.input.target_node.clear();
+        assert_eq!(chain.resolve_parser_node_id(&dispatch, None), None);
+        assert_eq!(chain.resolve_parser_module_name(&dispatch, None), None);
+    }
+
+    #[test]
+    fn resolve_error_targets_require_typed_context_or_transport_fields() {
+        let chain = make_ingress_chain_no_bridge();
+        let mut envelope = make_error_envelope("my_mod", None);
+        envelope.routing.module.clear();
+        envelope.routing.node_key.clear();
+        assert_eq!(chain.resolve_error_node_id(&envelope, None), None);
+        assert_eq!(chain.resolve_error_module_name(&envelope, None), None);
+    }
+
+    #[test]
+    fn resolve_parser_targets_can_use_transport_fields_without_seed() {
+        let chain = make_ingress_chain_no_bridge();
+        let dispatch = make_dispatch_envelope("transport_mod", None);
+
+        assert_eq!(
+            chain
+                .resolve_parser_node_id(&dispatch, None)
+                .as_deref(),
+            Some("step_0")
+        );
+        assert_eq!(
+            chain
+                .resolve_parser_module_name(&dispatch, None)
+                .as_deref(),
+            Some("transport_mod")
+        );
+    }
+
+    #[test]
+    fn resolve_parser_targets_ignore_malformed_legacy_payload_when_transport_is_complete() {
+        let chain = make_ingress_chain_no_bridge();
+        let mut dispatch = make_dispatch_envelope("transport_mod", None);
+        dispatch.dispatch.input.payload.bytes = b"not-valid-legacy-seed".to_vec();
+
+        assert_eq!(
+            chain
+                .resolve_parser_node_id(&dispatch, None)
+                .as_deref(),
+            Some("step_0")
+        );
+        assert_eq!(
+            chain
+                .resolve_parser_module_name(&dispatch, None)
+                .as_deref(),
+            Some("transport_mod")
+        );
+    }
+
+    #[test]
+    fn resolve_error_targets_can_use_transport_fields_without_seed() {
+        let chain = make_ingress_chain_no_bridge();
+        let envelope = make_error_envelope("transport_mod", None);
+
+        assert_eq!(
+            chain
+                .resolve_error_node_id(&envelope, None)
+                .as_deref(),
+            Some("step_0")
+        );
+        assert_eq!(
+            chain
+                .resolve_error_module_name(&envelope, None)
+                .as_deref(),
+            Some("transport_mod")
+        );
+    }
+
+    #[test]
+    fn resolve_parser_metadata_and_prefix_prefer_typed_context() {
+        let chain = make_ingress_chain_no_bridge();
+        let mut dispatch = make_dispatch_envelope("my_mod", Some("node_a"));
+        let typed_prefix = Uuid::now_v7();
+        let transport_prefix = Uuid::now_v7();
+        dispatch.routing.parent_request_id = Some(transport_prefix);
+        if let Some(ctx) = dispatch.parser_context.as_mut() {
+            ctx.metadata.insert("typed".to_string(), serde_json::Value::from(1));
+            ctx.prefix_request_id = Some(typed_prefix);
+        }
+
+        let metadata = chain
+            .resolve_parser_metadata(dispatch.parser_context.as_ref())
+            .expect("typed parser metadata should exist");
+        let prefix = chain.resolve_parser_prefix_request(
+            &dispatch,
+            dispatch.parser_context.as_ref(),
+        );
+
+        assert_eq!(metadata.get("typed"), Some(&serde_json::Value::from(1)));
+        assert_eq!(prefix, Some(typed_prefix));
+    }
+
+    #[test]
+    fn resolve_parser_metadata_and_prefix_fallback_to_transport_only() {
+        let chain = make_ingress_chain_no_bridge();
+        let mut dispatch = make_dispatch_envelope("my_mod", None);
+        let transport_parent = Uuid::now_v7();
+        dispatch.routing.parent_request_id = Some(transport_parent);
+        let metadata = chain.resolve_parser_metadata(None);
+        let prefix = chain.resolve_parser_prefix_request(&dispatch, None);
+
+        assert!(metadata.is_none());
+        assert_eq!(prefix, Some(transport_parent));
+
+        dispatch.routing.parent_request_id = None;
+        let prefix_from_transport = chain.resolve_parser_prefix_request(&dispatch, None);
+        assert_eq!(prefix_from_transport, None);
+    }
+
+    #[test]
+    fn resolve_error_metadata_and_prefix_prefer_typed_context() {
+        let chain = make_ingress_chain_no_bridge();
+        let mut envelope = make_error_envelope("my_mod", Some("node_a"));
+        let typed_prefix = Uuid::now_v7();
+        let transport_prefix = Uuid::now_v7();
+        envelope.routing.parent_request_id = Some(transport_prefix);
+        if let Some(ctx) = envelope.error_context.as_mut() {
+            ctx.metadata.insert("typed".to_string(), serde_json::Value::from(1));
+            ctx.prefix_request_id = Some(typed_prefix);
+        }
+
+        let metadata = chain
+            .resolve_error_metadata(envelope.error_context.as_ref())
+            .expect("typed error metadata should exist");
+        let prefix = chain.resolve_error_prefix_request(
+            &envelope,
+            envelope.error_context.as_ref(),
+        );
+
+        assert_eq!(metadata.get("typed"), Some(&serde_json::Value::from(1)));
+        assert_eq!(prefix, Some(typed_prefix));
+    }
+
+    #[test]
+    fn resolve_error_metadata_and_prefix_fallback_to_transport_only() {
+        let chain = make_ingress_chain_no_bridge();
+        let mut envelope = make_error_envelope("my_mod", None);
+        let transport_parent = Uuid::now_v7();
+        envelope.routing.parent_request_id = Some(transport_parent);
+        let metadata = chain.resolve_error_metadata(None);
+        let prefix = chain.resolve_error_prefix_request(&envelope, None);
+
+        assert!(metadata.is_none());
+        assert_eq!(prefix, Some(transport_parent));
+
+        envelope.routing.parent_request_id = None;
+        let prefix_from_transport = chain.resolve_error_prefix_request(&envelope, None);
+        assert_eq!(prefix_from_transport, None);
+    }
+
+    #[test]
+    fn parser_dispatcher_failure_is_retryable_and_fail_closed() {
+        let chain = make_ingress_chain_no_bridge();
+        let result = chain.scheduler_dispatch_failed_result(
+            "parser",
+            &DagError::NodeExecutionFailed {
+                node_id: "page".to_string(),
+                reason: "forced scheduler bridge failure".to_string(),
+            },
+        );
+
+        match result {
+            ProcessorResult::RetryableFailure(policy) => {
+                let reason = policy.reason.expect("retry policy reason should exist");
+                assert!(
+                    reason.contains("scheduler parser execution failed"),
+                    "unexpected reason: {reason}"
+                );
+                assert!(
+                    reason.contains("forced scheduler bridge failure"),
+                    "unexpected reason: {reason}"
+                );
+            }
+            _ => panic!("expected retryable failure"),
+        }
+    }
+
+    #[test]
+    fn error_dispatcher_failure_is_retryable_and_fail_closed() {
+        let chain = make_ingress_chain_no_bridge();
+        let result = chain.scheduler_dispatch_failed_result(
+            "error",
+            &DagError::NodeExecutionFailed {
+                node_id: "page".to_string(),
+                reason: "network timeout while dispatching remote node".to_string(),
+            },
+        );
+
+        match result {
+            ProcessorResult::RetryableFailure(policy) => {
+                let reason = policy.reason.expect("retry policy reason should exist");
+                assert!(
+                    reason.contains("scheduler error execution failed"),
+                    "unexpected reason: {reason}"
+                );
+                assert!(
+                    reason.contains("network timeout while dispatching remote node"),
+                    "unexpected reason: {reason}"
+                );
+            }
+            _ => panic!("expected retryable failure"),
+        }
+    }
+
+    #[test]
+    fn gray_gate_blocked_fallback_does_not_count_as_stage_error() {
+        assert!(!UnifiedTaskIngressChain::scheduler_ingress_fallback_counts_as_error(
+            UnifiedTaskIngressChain::FALLBACK_GRAY_GATE_BLOCKED,
+        ));
+    }
+
+    #[test]
+    fn failure_gate_blocked_fallback_does_not_count_as_stage_error() {
+        assert!(!UnifiedTaskIngressChain::scheduler_ingress_fallback_counts_as_error(
+            UnifiedTaskIngressChain::FALLBACK_FAILURE_GATE_BLOCKED,
+        ));
+    }
+
+    #[test]
+    fn parser_missing_target_result_is_retryable_and_fail_closed() {
+        let chain = make_ingress_chain_no_bridge();
+        let result = chain.scheduler_missing_target_result("parser", "node_id", "catalog");
+
+        match result {
+            ProcessorResult::RetryableFailure(policy) => {
+                let reason = policy.reason.expect("retry policy reason should exist");
+                assert!(
+                    reason.contains("scheduler parser execution failed"),
+                    "unexpected reason: {reason}"
+                );
+                assert!(
+                    reason.contains("required node_id is missing"),
+                    "unexpected reason: {reason}"
+                );
+                assert!(reason.contains("catalog"), "unexpected reason: {reason}");
+            }
+            _ => panic!("expected retryable failure"),
+        }
+    }
+
+    #[test]
+    fn parser_task_module_not_found_is_retryable_and_fail_closed() {
+        let chain = make_ingress_chain_no_bridge();
+        let result = chain.scheduler_task_module_not_found_result(
+            "parser",
+            "catalog",
+            "step_0",
+        );
+
+        match result {
+            ProcessorResult::RetryableFailure(policy) => {
+                let reason = policy.reason.expect("retry policy reason should exist");
+                assert!(
+                    reason.contains("scheduler parser execution failed"),
+                    "unexpected reason: {reason}"
+                );
+                assert!(
+                    reason.contains("catalog"),
+                    "unexpected reason: {reason}"
+                );
+                assert!(
+                    reason.contains("step_0"),
+                    "unexpected reason: {reason}"
+                );
+            }
+            _ => panic!("expected retryable failure"),
+        }
+    }
+
+    #[test]
+    fn error_task_module_not_found_is_retryable_and_fail_closed() {
+        let chain = make_ingress_chain_no_bridge();
+        let result = chain.scheduler_task_module_not_found_result(
+            "error",
+            "catalog",
+            "step_0",
+        );
+
+        match result {
+            ProcessorResult::RetryableFailure(policy) => {
+                let reason = policy.reason.expect("retry policy reason should exist");
+                assert!(
+                    reason.contains("scheduler error execution failed"),
+                    "unexpected reason: {reason}"
+                );
+                assert!(
+                    reason.contains("catalog"),
+                    "unexpected reason: {reason}"
+                );
+                assert!(
+                    reason.contains("step_0"),
+                    "unexpected reason: {reason}"
+                );
+            }
+            _ => panic!("expected retryable failure"),
+        }
+    }
+
+    #[test]
+    fn parser_dag_missing_is_retryable_and_fail_closed() {
+        let chain = make_ingress_chain_no_bridge();
+        let result = chain.scheduler_dag_missing_result("parser", "catalog");
+
+        match result {
+            ProcessorResult::RetryableFailure(policy) => {
+                let reason = policy.reason.expect("retry policy reason should exist");
+                assert!(
+                    reason.contains("scheduler parser execution failed"),
+                    "unexpected reason: {reason}"
+                );
+                assert!(
+                    reason.contains("precompiled DAG missing"),
+                    "unexpected reason: {reason}"
+                );
+                assert!(
+                    reason.contains("catalog"),
+                    "unexpected reason: {reason}"
+                );
+            }
+            _ => panic!("expected retryable failure"),
+        }
+    }
+
+    #[test]
+    fn error_dag_missing_is_retryable_and_fail_closed() {
+        let chain = make_ingress_chain_no_bridge();
+        let result = chain.scheduler_dag_missing_result("error", "catalog");
+
+        match result {
+            ProcessorResult::RetryableFailure(policy) => {
+                let reason = policy.reason.expect("retry policy reason should exist");
+                assert!(
+                    reason.contains("scheduler error execution failed"),
+                    "unexpected reason: {reason}"
+                );
+                assert!(
+                    reason.contains("precompiled DAG missing"),
+                    "unexpected reason: {reason}"
+                );
+                assert!(
+                    reason.contains("catalog"),
+                    "unexpected reason: {reason}"
+                );
+            }
+            _ => panic!("expected retryable failure"),
+        }
+    }
+
+    #[test]
+    fn requires_remote_dispatch_hint_detects_remote_placement() {
+        let hints = vec![RuntimeNodeRoutingHint::new("node_a").with_placement(
+            crate::schedule::dag::NodePlacement::remote("wg-test"),
+        )];
+        assert!(UnifiedTaskIngressChain::requires_remote_dispatch_hint(&hints));
+    }
+
+    #[test]
+    fn requires_remote_dispatch_hint_ignores_local_or_empty_hints() {
+        let local_hints = vec![RuntimeNodeRoutingHint::new("node_a").with_placement(
+            crate::schedule::dag::NodePlacement::local(),
+        )];
+        let empty_hints: Vec<RuntimeNodeRoutingHint> = vec![];
+
+        assert!(!UnifiedTaskIngressChain::requires_remote_dispatch_hint(&local_hints));
+        assert!(!UnifiedTaskIngressChain::requires_remote_dispatch_hint(&empty_hints));
+    }
 }

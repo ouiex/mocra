@@ -1,8 +1,8 @@
 use super::backend::CacheBackend;
+use crate::errors::CacheError;
+use deadpool_redis::Pool;
 use deadpool_redis::redis::AsyncCommands;
 use deadpool_redis::redis::Value as RedisValue;
-use deadpool_redis::Pool;
-use crate::errors::CacheError;
 use std::time::Duration;
 
 pub struct RedisBackend {
@@ -66,7 +66,11 @@ impl RedisBackend {
 #[async_trait::async_trait]
 impl CacheBackend for RedisBackend {
     async fn zadd(&self, key: &str, score: f64, member: &[u8]) -> Result<i64, CacheError> {
-        let mut conn = self.pool.get().await.map_err(|e| CacheError::Pool(e.to_string()))?;
+        let mut conn = self
+            .pool
+            .get()
+            .await
+            .map_err(|e| CacheError::Pool(e.to_string()))?;
         let result: i64 = deadpool_redis::redis::cmd("ZADD")
             .arg(key)
             .arg(score)
@@ -77,10 +81,27 @@ impl CacheBackend for RedisBackend {
         Ok(result)
     }
 
-    async fn zrangebyscore(&self, key: &str, min: f64, max: f64) -> Result<Vec<Vec<u8>>, CacheError> {
-        let mut conn = self.pool.get().await.map_err(|e| CacheError::Pool(e.to_string()))?;
-        let min_str = if min == f64::NEG_INFINITY { "-inf".to_string() } else { min.to_string() };
-        let max_str = if max == f64::INFINITY { "+inf".to_string() } else { max.to_string() };
+    async fn zrangebyscore(
+        &self,
+        key: &str,
+        min: f64,
+        max: f64,
+    ) -> Result<Vec<Vec<u8>>, CacheError> {
+        let mut conn = self
+            .pool
+            .get()
+            .await
+            .map_err(|e| CacheError::Pool(e.to_string()))?;
+        let min_str = if min == f64::NEG_INFINITY {
+            "-inf".to_string()
+        } else {
+            min.to_string()
+        };
+        let max_str = if max == f64::INFINITY {
+            "+inf".to_string()
+        } else {
+            max.to_string()
+        };
 
         let result: Vec<Vec<u8>> = deadpool_redis::redis::cmd("ZRANGEBYSCORE")
             .arg(key)
@@ -93,9 +114,21 @@ impl CacheBackend for RedisBackend {
     }
 
     async fn zremrangebyscore(&self, key: &str, min: f64, max: f64) -> Result<i64, CacheError> {
-        let mut conn = self.pool.get().await.map_err(|e| CacheError::Pool(e.to_string()))?;
-        let min_str = if min == f64::NEG_INFINITY { "-inf".to_string() } else { min.to_string() };
-        let max_str = if max == f64::INFINITY { "+inf".to_string() } else { max.to_string() };
+        let mut conn = self
+            .pool
+            .get()
+            .await
+            .map_err(|e| CacheError::Pool(e.to_string()))?;
+        let min_str = if min == f64::NEG_INFINITY {
+            "-inf".to_string()
+        } else {
+            min.to_string()
+        };
+        let max_str = if max == f64::INFINITY {
+            "+inf".to_string()
+        } else {
+            max.to_string()
+        };
 
         let result: i64 = deadpool_redis::redis::cmd("ZREMRANGEBYSCORE")
             .arg(key)
@@ -108,7 +141,11 @@ impl CacheBackend for RedisBackend {
     }
 
     async fn get(&self, key: &str) -> Result<Option<Vec<u8>>, CacheError> {
-        let mut conn = self.pool.get().await.map_err(|e| CacheError::Pool(e.to_string()))?;
+        let mut conn = self
+            .pool
+            .get()
+            .await
+            .map_err(|e| CacheError::Pool(e.to_string()))?;
         let result: Option<Vec<u8>> = conn.get(key).await.map_err(CacheError::Redis)?;
 
         if let Some(bytes) = result {
@@ -138,20 +175,31 @@ impl CacheBackend for RedisBackend {
             value.to_vec()
         };
 
-        let mut conn = self.pool.get().await.map_err(|e| CacheError::Pool(e.to_string()))?;
+        let mut conn = self
+            .pool
+            .get()
+            .await
+            .map_err(|e| CacheError::Pool(e.to_string()))?;
         if let Some(duration) = ttl {
             let _: () = conn
                 .set_ex(key, final_value, duration.as_secs())
                 .await
                 .map_err(CacheError::Redis)?;
         } else {
-            let _: () = conn.set(key, final_value).await.map_err(CacheError::Redis)?;
+            let _: () = conn
+                .set(key, final_value)
+                .await
+                .map_err(CacheError::Redis)?;
         }
         Ok(())
     }
 
     async fn del(&self, key: &str) -> Result<(), CacheError> {
-        let mut conn = self.pool.get().await.map_err(|e| CacheError::Pool(e.to_string()))?;
+        let mut conn = self
+            .pool
+            .get()
+            .await
+            .map_err(|e| CacheError::Pool(e.to_string()))?;
         conn.del(key).await.map_err(CacheError::Redis)
     }
 
@@ -159,14 +207,21 @@ impl CacheBackend for RedisBackend {
         if keys.is_empty() {
             return Ok(0);
         }
-        let mut conn = self.pool.get().await.map_err(|e| CacheError::Pool(e.to_string()))?;
+        let mut conn = self
+            .pool
+            .get()
+            .await
+            .map_err(|e| CacheError::Pool(e.to_string()))?;
 
         let mut pipe = deadpool_redis::redis::pipe();
         for key in keys {
             pipe.del(*key);
         }
 
-        let results: Vec<i64> = pipe.query_async(&mut conn).await.map_err(CacheError::Redis)?;
+        let results: Vec<i64> = pipe
+            .query_async(&mut conn)
+            .await
+            .map_err(CacheError::Redis)?;
         Ok(results.iter().sum::<i64>() as u64)
     }
 
@@ -174,8 +229,16 @@ impl CacheBackend for RedisBackend {
         self.keys_with_limit(pattern, usize::MAX).await
     }
 
-    async fn keys_with_limit(&self, pattern: &str, limit: usize) -> Result<Vec<String>, CacheError> {
-        let mut conn = self.pool.get().await.map_err(|e| CacheError::Pool(e.to_string()))?;
+    async fn keys_with_limit(
+        &self,
+        pattern: &str,
+        limit: usize,
+    ) -> Result<Vec<String>, CacheError> {
+        let mut conn = self
+            .pool
+            .get()
+            .await
+            .map_err(|e| CacheError::Pool(e.to_string()))?;
 
         let mut keys: Vec<String> = Vec::new();
         let mut cursor: u64 = 0;
@@ -207,8 +270,17 @@ impl CacheBackend for RedisBackend {
         Ok(keys)
     }
 
-    async fn set_nx(&self, key: &str, value: &[u8], ttl: Option<Duration>) -> Result<bool, CacheError> {
-        let mut conn = self.pool.get().await.map_err(|e| CacheError::Pool(e.to_string()))?;
+    async fn set_nx(
+        &self,
+        key: &str,
+        value: &[u8],
+        ttl: Option<Duration>,
+    ) -> Result<bool, CacheError> {
+        let mut conn = self
+            .pool
+            .get()
+            .await
+            .map_err(|e| CacheError::Pool(e.to_string()))?;
 
         let result: Option<String> = if let Some(ttl) = ttl {
             deadpool_redis::redis::cmd("SET")
@@ -232,8 +304,17 @@ impl CacheBackend for RedisBackend {
         Ok(result.is_some())
     }
 
-    async fn set_nx_batch(&self, keys: &[&str], value: &[u8], ttl: Option<Duration>) -> Result<Vec<bool>, CacheError> {
-        let mut conn = self.pool.get().await.map_err(|e| CacheError::Pool(e.to_string()))?;
+    async fn set_nx_batch(
+        &self,
+        keys: &[&str],
+        value: &[u8],
+        ttl: Option<Duration>,
+    ) -> Result<Vec<bool>, CacheError> {
+        let mut conn = self
+            .pool
+            .get()
+            .await
+            .map_err(|e| CacheError::Pool(e.to_string()))?;
 
         let mut pipe = deadpool_redis::redis::pipe();
 
@@ -247,7 +328,10 @@ impl CacheBackend for RedisBackend {
             pipe.add_command(cmd);
         }
 
-        let results: Vec<Option<String>> = pipe.query_async(&mut conn).await.map_err(CacheError::Redis)?;
+        let results: Vec<Option<String>> = pipe
+            .query_async(&mut conn)
+            .await
+            .map_err(CacheError::Redis)?;
 
         Ok(results.into_iter().map(|r| r.is_some()).collect())
     }
@@ -256,7 +340,11 @@ impl CacheBackend for RedisBackend {
         if keys.is_empty() {
             return Ok(Vec::new());
         }
-        let mut conn = self.pool.get().await.map_err(|e| CacheError::Pool(e.to_string()))?;
+        let mut conn = self
+            .pool
+            .get()
+            .await
+            .map_err(|e| CacheError::Pool(e.to_string()))?;
 
         let values: Vec<Option<Vec<u8>>> = deadpool_redis::redis::cmd("MGET")
             .arg(keys)
@@ -264,9 +352,10 @@ impl CacheBackend for RedisBackend {
             .await
             .map_err(CacheError::Redis)?;
 
-        let has_compressed = values
-            .iter()
-            .any(|val| val.as_ref().is_some_and(|bytes| is_gzip(bytes) || is_zstd(bytes)));
+        let has_compressed = values.iter().any(|val| {
+            val.as_ref()
+                .is_some_and(|bytes| is_gzip(bytes) || is_zstd(bytes))
+        });
         if !has_compressed {
             return Ok(values);
         }
@@ -284,7 +373,11 @@ impl CacheBackend for RedisBackend {
     }
 
     async fn incr(&self, key: &str, delta: i64) -> Result<i64, CacheError> {
-        let mut conn = self.pool.get().await.map_err(|e| CacheError::Pool(e.to_string()))?;
+        let mut conn = self
+            .pool
+            .get()
+            .await
+            .map_err(|e| CacheError::Pool(e.to_string()))?;
 
         deadpool_redis::redis::cmd("INCRBY")
             .arg(key)
@@ -295,7 +388,11 @@ impl CacheBackend for RedisBackend {
     }
 
     async fn ping(&self) -> Result<(), CacheError> {
-        let mut conn = self.pool.get().await.map_err(|e| CacheError::Pool(e.to_string()))?;
+        let mut conn = self
+            .pool
+            .get()
+            .await
+            .map_err(|e| CacheError::Pool(e.to_string()))?;
         let _: String = deadpool_redis::redis::cmd("PING")
             .query_async(&mut conn)
             .await
@@ -304,7 +401,11 @@ impl CacheBackend for RedisBackend {
     }
 
     async fn script_load(&self, script: &str) -> Result<String, CacheError> {
-        let mut conn = self.pool.get().await.map_err(|e| CacheError::Pool(e.to_string()))?;
+        let mut conn = self
+            .pool
+            .get()
+            .await
+            .map_err(|e| CacheError::Pool(e.to_string()))?;
         let sha: String = deadpool_redis::redis::cmd("SCRIPT")
             .arg("LOAD")
             .arg(script)
@@ -314,8 +415,17 @@ impl CacheBackend for RedisBackend {
         Ok(sha)
     }
 
-    async fn evalsha(&self, sha: &str, keys: &[&str], args: &[&str]) -> Result<RedisValue, CacheError> {
-        let mut conn = self.pool.get().await.map_err(|e| CacheError::Pool(e.to_string()))?;
+    async fn evalsha(
+        &self,
+        sha: &str,
+        keys: &[&str],
+        args: &[&str],
+    ) -> Result<RedisValue, CacheError> {
+        let mut conn = self
+            .pool
+            .get()
+            .await
+            .map_err(|e| CacheError::Pool(e.to_string()))?;
         let mut cmd = deadpool_redis::redis::cmd("EVALSHA");
         cmd.arg(sha).arg(keys.len());
         for key in keys {
@@ -324,12 +434,24 @@ impl CacheBackend for RedisBackend {
         for arg in args {
             cmd.arg(*arg);
         }
-        let value: RedisValue = cmd.query_async(&mut conn).await.map_err(CacheError::Redis)?;
+        let value: RedisValue = cmd
+            .query_async(&mut conn)
+            .await
+            .map_err(CacheError::Redis)?;
         Ok(value)
     }
 
-    async fn eval_lua(&self, script: &str, keys: &[&str], args: &[&str]) -> Result<RedisValue, CacheError> {
-        let mut conn = self.pool.get().await.map_err(|e| CacheError::Pool(e.to_string()))?;
+    async fn eval_lua(
+        &self,
+        script: &str,
+        keys: &[&str],
+        args: &[&str],
+    ) -> Result<RedisValue, CacheError> {
+        let mut conn = self
+            .pool
+            .get()
+            .await
+            .map_err(|e| CacheError::Pool(e.to_string()))?;
         let mut cmd = deadpool_redis::redis::cmd("EVAL");
         cmd.arg(script).arg(keys.len());
         for key in keys {
@@ -338,7 +460,14 @@ impl CacheBackend for RedisBackend {
         for arg in args {
             cmd.arg(*arg);
         }
-        let value: RedisValue = cmd.query_async(&mut conn).await.map_err(CacheError::Redis)?;
+        let value: RedisValue = cmd
+            .query_async(&mut conn)
+            .await
+            .map_err(CacheError::Redis)?;
         Ok(value)
+    }
+
+    fn supports_lua(&self) -> bool {
+        true
     }
 }

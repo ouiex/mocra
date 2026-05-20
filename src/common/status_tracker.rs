@@ -7,13 +7,13 @@
 /// - Parse failures use independent counters.
 /// - Success clears request-local cached state and does not rewrite historical task/module failures.
 /// - Thresholds can lead to `Skip` (request) or `Terminate` (module/task).
-use crate::cacheable::{CacheAble, CacheService};
-use crate::errors::{CacheError, Error, Result};
+use crate::errors::{Error, Result};
+use crate::engine::api::profile_store::ProfileControlPlaneStore;
+use crate::common::model::{PipelineStage, StatusEntry, TaskStatus};
 use log::warn;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH, Instant};
-use crate::utils::redis_lock::DistributedLockManager;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// High-level category assigned to an error record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -41,20 +41,6 @@ pub enum ErrorSeverity {
     Fatal,
 }
 
-/// Immutable single error entry.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ErrorRecord {
-    pub timestamp: u64,
-    pub category: ErrorCategory,
-    pub severity: ErrorSeverity,
-    pub message: String,
-    pub retry_count: usize,
-}
-impl CacheAble for ErrorRecord {
-    fn field() -> impl AsRef<str> {
-        "error_record".to_string()
-    }
-}
 /// Aggregated counters and state flags for an error key.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ErrorStats {
@@ -72,12 +58,6 @@ pub struct ErrorStats {
     pub last_success_time: Option<u64>,
     pub is_task_terminated: bool,
     pub is_module_terminated: bool,
-}
-
-impl CacheAble for ErrorStats {
-    fn field() -> impl AsRef<str> {
-        "error_stats".to_string()
-    }
 }
 
 impl ErrorStats {
@@ -112,16 +92,6 @@ impl ErrorStats {
         let error_rate = self.error_rate();
         let consecutive_penalty = (self.consecutive_errors as f64 * 0.1).min(0.5);
         (1.0 - error_rate - consecutive_penalty).max(0.0)
-    }
-}
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct ModuleLocker {
-    pub is_locker: bool,
-    pub ts: u64,
-}
-impl CacheAble for ModuleLocker {
-    fn field() -> impl AsRef<str> {
-        "module_locker".to_string()
     }
 }
 /// Execution decision made after recording or checking errors.
@@ -188,22 +158,19 @@ use dashmap::DashMap;
 /// Tracks and evaluates failures across request/module/task levels.
 #[derive(Clone)]
 pub struct StatusTracker {
-    cache_service: Arc<CacheService>,
     config: ErrorTrackerConfig,
-    locker: Arc<DistributedLockManager>,
+    profile_store: Arc<ProfileControlPlaneStore>,
     cache: Arc<DashMap<String, (ErrorStats, Instant)>>,
 }
 
 impl StatusTracker {
     pub fn new(
-        cache_service: Arc<CacheService>,
         config: ErrorTrackerConfig,
-        locker: Arc<DistributedLockManager>,
+        profile_store: Arc<ProfileControlPlaneStore>,
     ) -> Self {
         Self {
-            cache_service,
             config,
-            locker,
+            profile_store,
             cache: Arc::new(DashMap::new()),
         }
     }
@@ -280,12 +247,12 @@ impl StatusTracker {
     /// This intentionally does not decrement historical module/task counters.
     pub async fn record_download_success(&self, request_id: &str) -> Result<()> {
         let request_key = format!("request:{}:download", request_id);
-        
+
         // [OPTIMIZATION]
         // If the request succeeded, we don't need to load stats from Redis just to update an in-memory object we throw away.
         // We only need to clear any cached error state for this request.
         // If there were errors in Redis, they will expire naturally (TTL).
-        
+
         if self.cache.contains_key(&request_key) {
             self.cache.remove(&request_key);
         }
@@ -370,7 +337,7 @@ impl StatusTracker {
     /// Records a parse success by clearing request-local cached parse state.
     pub async fn record_parse_success(&self, request_id: &str) -> Result<()> {
         let request_key = format!("request:{}:parse", request_id);
-        
+
         // [OPTIMIZATION] Skip loading stats from Redis. Just clear local cache.
         if self.cache.contains_key(&request_key) {
             self.cache.remove(&request_key);
@@ -469,7 +436,7 @@ impl StatusTracker {
         }
 
         let task_key = format!("task:{}:total", task_id);
-        
+
         let (terminated_res, count_res) = tokio::join!(
             self.is_task_terminated(task_id),
             self.get_error_count(&task_key)
@@ -498,115 +465,66 @@ impl StatusTracker {
         }
     }
 
-    /// Loads stats from in-memory cache first, then storage.
-    pub async fn get_stats(&self, key: &str) -> Result<ErrorStats> {
-         if let Some(entry) = self.cache.get(key) {
-            let (stats, expires_at) = entry.value();
-            if Instant::now() < *expires_at {
-                // log::debug!("[StatusTracker] Cache HIT for {}", key);
-                return Ok(stats.clone());
-            } else {
-                // log::debug!("[StatusTracker] Cache EXPIRED for {}", key);
-            }
-        } else {
-            // log::debug!("[StatusTracker] Cache MISS for {}", key);
-        }
-        self.get_stats_no_cache(key).await
-    }
-
-    pub async fn get_stats_no_cache(&self, key: &str) -> Result<ErrorStats> {
-        let stats_res = ErrorStats::sync(key, &self.cache_service).await;
-        
-        match stats_res {
-            Ok(Some(stats)) => {
-                self.cache.insert(key.to_string(), (stats.clone(), Instant::now() + Duration::from_secs(10)));
-                Ok(stats)
-            }
-            Ok(None) => {
-                // [OPTIMIZATION] Cache default (empty) stats to prevent Redis penetration for non-existent keys
-                // This is critical for "is_terminated" checks which query random/empty keys frequently
-                let stats = ErrorStats::default();
-                self.cache.insert(key.to_string(), (stats.clone(), Instant::now() + Duration::from_secs(5)));
-                Ok(stats)
-            }
-            Err(e) => Err(Error::from(e))
-        }
-    }
-
     /// Marks a task as terminated.
     pub async fn mark_task_terminated(&self, task_id: &str) -> Result<()> {
-        let cache_id = ErrorStats::cache_id(task_id, &self.cache_service);
-        self.locker
-            .with_lock(&cache_id, 10, Duration::from_secs(10), async {
-                let mut error_stats = self.get_stats_no_cache(task_id).await.unwrap_or_default();
-                error_stats.is_task_terminated = true;
-                error_stats.send(task_id, &self.cache_service).await
-            })
+        self.profile_store
+            .mark_task_terminated(task_id, Self::now())
             .await
-            .ok();
+            .map_err(|e| Error::new(crate::errors::ErrorKind::CacheService, Some(e)))?;
+
+        let mut stats = self.cached_stats(task_id).unwrap_or_default();
+        stats.is_task_terminated = true;
+        self.cache.insert(
+            task_id.to_string(),
+            (stats, Instant::now() + Duration::from_secs(10)),
+        );
 
         Ok(())
     }
 
     /// Returns whether a task is marked as terminated.
     pub async fn is_task_terminated(&self, task_id: &str) -> Result<bool> {
-        match self.get_stats(task_id).await {
-            Ok(stats) => Ok(stats.is_task_terminated),
-            Err(e) => {
-                // NotFound means no record exists yet; treat as not terminated.
-                if let Some(cache_err) = e
-                    .inner
-                    .source
-                    .as_ref()
-                    .and_then(|s| s.downcast_ref::<CacheError>())
-                    && matches!(cache_err, CacheError::NotFound) {
-                        return Ok(false);
-                    }
-                warn!(
-                    "[ErrorTracker] task terminated check failed: task_id={}, error: {}",
-                    task_id, e
-                );
-                Err(e)
-            }
+        let terminated = self.profile_store.is_task_terminated(task_id);
+        if terminated {
+            let mut stats = self.cached_stats(task_id).unwrap_or_default();
+            stats.is_task_terminated = true;
+            self.cache.insert(
+                task_id.to_string(),
+                (stats, Instant::now() + Duration::from_secs(10)),
+            );
         }
+        Ok(terminated)
     }
 
     /// Marks a module as terminated.
     pub async fn mark_module_terminated(&self, module_id: &str) -> Result<()> {
-        let cache_id = ErrorStats::cache_id(module_id, &self.cache_service);
-        self.locker
-            .with_lock(&cache_id, 10, Duration::from_secs(10), async {
-                let mut error_stats = self.get_stats_no_cache(module_id).await.unwrap_or_default();
-                error_stats.is_module_terminated = true;
-                error_stats.send(module_id, &self.cache_service).await
-            })
+        self.profile_store
+            .mark_module_terminated(module_id, Self::now())
             .await
-            .ok();
+            .map_err(|e| Error::new(crate::errors::ErrorKind::CacheService, Some(e)))?;
+
+        let mut stats = self.cached_stats(module_id).unwrap_or_default();
+        stats.is_module_terminated = true;
+        self.cache.insert(
+            module_id.to_string(),
+            (stats, Instant::now() + Duration::from_secs(10)),
+        );
 
         Ok(())
     }
 
     /// Returns whether a module is marked as terminated.
     pub async fn is_module_terminated(&self, module_id: &str) -> Result<bool> {
-        match self.get_stats(module_id).await {
-            Ok(stats) => Ok(stats.is_module_terminated),
-            Err(e) => {
-                // NotFound means no record exists yet; treat as not terminated.
-                if let Some(cache_err) = e
-                    .inner
-                    .source
-                    .as_ref()
-                    .and_then(|s| s.downcast_ref::<CacheError>())
-                    && matches!(cache_err, CacheError::NotFound) {
-                        return Ok(false);
-                    }
-                warn!(
-                    "[ErrorTracker] module terminated check failed: module_id={}, error: {}",
-                    module_id, e
-                );
-                Err(e)
-            }
+        let terminated = self.profile_store.is_module_terminated(module_id);
+        if terminated {
+            let mut stats = self.cached_stats(module_id).unwrap_or_default();
+            stats.is_module_terminated = true;
+            self.cache.insert(
+                module_id.to_string(),
+                (stats, Instant::now() + Duration::from_secs(10)),
+            );
         }
+        Ok(terminated)
     }
 
     // Private helpers.
@@ -618,88 +536,54 @@ impl StatusTracker {
         category: ErrorCategory,
         _severity: ErrorSeverity,
     ) -> Result<usize> {
-        // Request level: pure in-memory/cache simple update (as before)
-        if key.starts_with("request:") {
-            // For requests, we can just skip persistence for max performance or use short TTL
-            // Simple INCR is fine
-            let count_key = format!("{}:total_errors", key);
-            // Use 1 hour TTL for request stats
-            let total = self.cache_service.incr(&count_key, 1).await? as usize;
-            return Ok(total);
-        }
+        let total = self
+            .profile_store
+            .increment_status_counter(&format!("{}:total_errors", key), 1)
+            .await
+            .map_err(|e| Error::new(crate::errors::ErrorKind::CacheService, Some(e)))?
+            as usize;
 
-        // Global level (Task/Module): Use Atomic INCR to avoid locks
-        // Optimization: Use separate keys for counters to avoid read-modify-write cycle of big JSON
-        let count_key = format!("{}:total_errors", key);
-        let total = self.cache_service.incr(&count_key, 1).await? as usize;
-        
-        let consecutive_key = format!("{}:consecutive_errors", key);
-        let _ = self.cache_service.incr(&consecutive_key, 1).await;
+        let _ = self
+            .profile_store
+            .increment_status_counter(&format!("{}:consecutive_errors", key), 1)
+            .await
+            .map_err(|e| Error::new(crate::errors::ErrorKind::CacheService, Some(e)));
 
         // SKIP UPDATING BIG JSON.
         // We sacrifice "errors_by_category" visibility in Redis for speed.
-        
+
         Ok(total)
     }
 
     /// Decrements total error counters.
     async fn decrement_error(&self, key: &str, amount: usize) -> Result<()> {
-        let count_key = format!("{}:total_errors", key);
-        // Atomic Decrement
-        let _ = self.cache_service.incr(&count_key, -(amount as i64)).await;
+        let _ = self
+            .profile_store
+            .increment_status_counter(&format!("{}:total_errors", key), -(amount as i64))
+            .await
+            .map_err(|e| Error::new(crate::errors::ErrorKind::CacheService, Some(e)))?;
+        self.profile_store
+            .set_status_counter(&format!("{}:consecutive_errors", key), 0)
+            .await
+            .map_err(|e| Error::new(crate::errors::ErrorKind::CacheService, Some(e)))?;
 
-        let consecutive_key = format!("{}:consecutive_errors", key);
-         // Reset consecutive errors
-        let _ = self.cache_service.set(&consecutive_key, b"0", None).await;
-
-        Ok(())
-    }
-    
-
-    /// Increments success counters.
-    async fn increment_success(&self, key: &str) -> Result<()> {
-        let mut stats = self.get_stats(key).await.unwrap_or_default();
-        stats.success_count += 1;
-        stats.last_success_time = Some(Self::now());
-        self.save_stats_with_ttl(key, &stats).await.ok();
         Ok(())
     }
 
     /// Resets consecutive error counters.
     async fn reset_consecutive_errors(&self, key: &str) -> Result<()> {
-        let mut stats = self.get_stats(key).await.unwrap_or_default();
-        stats.consecutive_errors = 0;
-        self.save_stats_with_ttl(key, &stats).await.ok();
+        self.profile_store
+            .set_status_counter(&format!("{}:consecutive_errors", key), 0)
+            .await
+            .map_err(|e| Error::new(crate::errors::ErrorKind::CacheService, Some(e)))?;
         Ok(())
     }
 
     /// Reads the total error count for a key.
     async fn get_error_count(&self, key: &str) -> Result<usize> {
-        let count_key = format!("{}:total_errors", key);
-        if let Some(val) = self.cache_service.get(&count_key).await? {
-            // Redis returns string for INCR
-            let s = String::from_utf8(val).unwrap_or_default();
-            let count = s.parse::<usize>().unwrap_or(0);
-            return Ok(count);
-        }
-        
-        // Fallback: If not found in atomic counter, check maybe it's in old JSON format (migration support)
-        // Or just return 0. Returning 0 is safer/faster.
-        Ok(0)
-    }
-
-    /// Saves stats using default TTL behavior.
-    async fn save_stats(&self, key: &str, stats: &ErrorStats) -> Result<()> {
-        self.save_stats_with_ttl(key, stats).await
-    }
-
-    /// Saves stats and refreshes short-lived in-memory cache.
-    async fn save_stats_with_ttl(&self, key: &str, stats: &ErrorStats) -> Result<()> {
-        self.cache.insert(key.to_string(), (stats.clone(), Instant::now() + Duration::from_secs(10)));
-        stats
-            .send(key, &self.cache_service)
-            .await
-            .map_err(Error::from)
+        Ok(self
+            .profile_store
+            .get_status_counter(&format!("{}:total_errors", key)) as usize)
     }
 
     /// Classifies raw error text into severity tiers.
@@ -727,43 +611,73 @@ impl StatusTracker {
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap()
             .as_secs();
-        let module_locker = ModuleLocker {
-            is_locker: true,
-            ts,
-        };
-        module_locker
-            .send(module_id, &self.cache_service)
-            .await
-            .ok();
+        self.profile_store.set_module_lock(module_id, ts).await.ok();
     }
+
     pub async fn is_module_locker(&self, module_id: &str, ttl: u64) -> bool {
-        ModuleLocker::sync(module_id, &self.cache_service)
-            .await
-            .ok()
-            .flatten()
-            .is_some_and(|locker| {
-                if locker.is_locker {
-                    let now = SystemTime::now()
-                        .duration_since(SystemTime::UNIX_EPOCH)
-                        .unwrap()
-                        .as_secs();
-                    now - locker.ts <= ttl
-                } else {
-                    false
-                }
-            })
+        self.profile_store.get_module_lock(module_id).is_some_and(|locker| {
+            let now = SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+            now.saturating_sub(locker.locked_at) <= ttl
+        })
     }
+
     pub async fn release_module_locker(&self, module_id: &str) {
-        ModuleLocker::delete(module_id, &self.cache_service)
+        self.profile_store.release_module_lock(module_id).await.ok();
+    }
+
+    pub async fn update_status(
+        &self,
+        task_id: &str,
+        stage: PipelineStage,
+        status: TaskStatus,
+        retry_count: u32,
+        node_id: &str,
+        error_msg: Option<String>,
+    ) -> Result<()> {
+        let mut cached = self.cached_stats(task_id).unwrap_or_default();
+        cached.is_task_terminated = self.profile_store.is_task_terminated(task_id);
+        cached.is_module_terminated = cached.is_module_terminated;
+        self.cache.insert(
+            task_id.to_string(),
+            (cached, Instant::now() + Duration::from_secs(10)),
+        );
+
+        self.profile_store
+            .upsert_status_entry(StatusEntry {
+                task_id: task_id.to_string(),
+                stage,
+                status,
+                retry_count,
+                node_id: node_id.to_string(),
+                updated_at: 0,
+                error_msg,
+            })
             .await
-            .ok();
+            .map(|_| ())
+            .map_err(|e| Error::new(crate::errors::ErrorKind::CacheService, Some(e)))
+    }
+
+    fn cached_stats(&self, key: &str) -> Option<ErrorStats> {
+        self.cache.get(key).and_then(|entry| {
+            let (stats, expires_at) = entry.value();
+            if Instant::now() < *expires_at {
+                Some(stats.clone())
+            } else {
+                None
+            }
+        })
     }
 }
-
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::api::profile_store::ProfileControlPlaneStore;
+    use crate::errors::ErrorKind;
+    use std::sync::Arc;
 
     #[test]
     fn test_error_stats_calculations() {
@@ -776,5 +690,39 @@ mod tests {
 
         stats.consecutive_errors = 5;
         assert!(stats.health_score() < 0.5);
+    }
+
+    #[tokio::test]
+    async fn request_module_and_task_errors_persist_to_control_plane_store() {
+        let store = Arc::new(ProfileControlPlaneStore::open_temp("demo").expect("open temp store"));
+        let tracker = StatusTracker::new(
+            ErrorTrackerConfig {
+                request_max_retries: 5,
+                parse_max_retries: 5,
+                ..ErrorTrackerConfig::default()
+            },
+            store.clone(),
+        );
+
+        let error = Error::new(
+            ErrorKind::Download,
+            Some(std::io::Error::other("request failed")),
+        );
+
+        let decision = tracker
+            .record_download_error("task-1", "module-1", "request-1", &error)
+            .await
+            .expect("record error");
+
+        assert!(matches!(decision, ErrorDecision::RetryAfter(_)));
+        assert_eq!(
+            store.get_status_counter("request:request-1:download:total_errors"),
+            1
+        );
+        assert_eq!(
+            store.get_status_counter("module:module-1:download:total_errors"),
+            1
+        );
+        assert_eq!(store.get_status_counter("task:task-1:total:total_errors"), 1);
     }
 }

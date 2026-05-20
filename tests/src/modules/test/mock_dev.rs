@@ -1,13 +1,13 @@
 use async_trait::async_trait;
 
-use mocra::common::interface::{ModuleTrait, ModuleNodeTrait, SyncBoxStream, ToSyncBoxStream};
-use mocra::common::model::{ModuleConfig, Request, Response};
-use mocra::common::model::login_info::LoginInfo;
+use mocra::common::interface::{
+    ModuleNodeTrait, ModuleTrait, NodeGenerateContext, NodeParseContext, SyncBoxStream,
+    ToSyncBoxStream,
+};
+use mocra::common::model::{NodeParseOutput, Request, Response};
 use mocra::common::model::request::RequestMethod;
-use mocra::common::model::message::ParserData;
 use mocra::errors::Result;
 
-use serde_json::{Map, Value};
 use std::sync::Arc;
 
 pub struct MockDevModule {}
@@ -18,8 +18,8 @@ impl ModuleTrait for MockDevModule {
         false
     }
 
-    fn name(&self) -> String {
-        "mock.dev".to_string()
+    fn name(&self) -> &'static str {
+        "mock.dev"
     }
 
     fn version(&self) -> i32 {
@@ -53,9 +53,7 @@ struct MockDevNode {
 impl ModuleNodeTrait for MockDevNode {
     async fn generate(
         &self,
-        _config: Arc<ModuleConfig>,
-        _params: Map<String, Value>,
-        _login_info: Option<LoginInfo>,
+        _ctx: NodeGenerateContext<'_>,
     ) -> Result<SyncBoxStream<'static, Request>> {
         let mut requests = Vec::with_capacity(self.request_count);
         for i in 0..self.request_count {
@@ -72,8 +70,8 @@ impl ModuleNodeTrait for MockDevNode {
     async fn parser(
         &self,
         _response: Response,
-        _config: Option<Arc<ModuleConfig>>,
-    ) -> Result<ParserData> {
-        Ok(ParserData::default())
+        _ctx: NodeParseContext<'_>,
+    ) -> Result<NodeParseOutput> {
+        Ok(NodeParseOutput::default())
     }
 }

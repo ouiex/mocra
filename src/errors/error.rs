@@ -1,10 +1,10 @@
 #![allow(unused)]
+use serde::{Deserialize, Serialize};
 use std::error::Error as StdError;
 use std::fmt;
 use std::num::ParseIntError;
 use std::str::ParseBoolError;
 use thiserror::Error;
-use serde::{Deserialize, Serialize};
 /// 通用错误详情类型
 pub type BoxError = Box<dyn StdError + Send + Sync + 'static>;
 

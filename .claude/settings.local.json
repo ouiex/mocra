@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cargo test *)",
+      "Bash(git *)",
+      "Bash(cargo build *)",
+      "Bash(grep -v \"//\")",
+      "Bash(bash *)",
+      "Bash(echo \"EXIT: $?\")",
+      "Bash(cargo check *)",
+      "Bash(grep \"missing field \\\\`backend\\\\`\")",
+      "Bash(grep -n \"missing field \\\\`backend\\\\`\")"
+    ]
+  }
+}

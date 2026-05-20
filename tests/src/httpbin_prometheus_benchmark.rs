@@ -95,7 +95,7 @@ async fn main() {
     let engine = Engine::new(Arc::clone(&state), None).await;
     let api_port = {
         let cfg = state.config.read().await;
-        cfg.api.as_ref().map(|a| a.port).unwrap_or(8905)
+        cfg.api.as_ref().map(|a| a.port).unwrap_or(8805)
     };
     engine.start_api(api_port).await;
 

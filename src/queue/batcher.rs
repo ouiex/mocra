@@ -1,7 +1,7 @@
-use tokio::sync::mpsc::Receiver;
-use tokio::sync::Semaphore;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::Semaphore;
+use tokio::sync::mpsc::Receiver;
 
 pub struct Batcher;
 
@@ -37,7 +37,7 @@ impl Batcher {
                                 let items = std::mem::replace(&mut batch, Vec::with_capacity(batch_size));
                                 let processor = processor.clone();
                                 let semaphore = semaphore.clone();
-                                
+
                                 tokio::spawn(async move {
                                     if let Ok(_permit) = semaphore.acquire_owned().await {
                                         processor(items).await;
@@ -50,7 +50,7 @@ impl Batcher {
                                 let items = std::mem::take(&mut batch);
                                 let processor = processor.clone();
                                 let semaphore = semaphore.clone();
-                                
+
                                 tokio::spawn(async move {
                                     if let Ok(_permit) = semaphore.acquire_owned().await {
                                         processor(items).await;
@@ -66,7 +66,7 @@ impl Batcher {
                          let items = std::mem::replace(&mut batch, Vec::with_capacity(batch_size));
                          let processor = processor.clone();
                          let semaphore = semaphore.clone();
-                         
+
                          tokio::spawn(async move {
                              if let Ok(_permit) = semaphore.acquire_owned().await {
                                  processor(items).await;

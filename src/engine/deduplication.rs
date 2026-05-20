@@ -1,14 +1,17 @@
 use crate::errors::Result;
-use deadpool_redis::{redis::{AsyncCommands, SetOptions, ExistenceCheck, SetExpiry}, Pool};
-use log::{error, info};
+use bloomfilter::Bloom;
+use chrono::Utc;
 use dashmap::DashMap;
+use deadpool_redis::{
+    Pool,
+    redis::{AsyncCommands, ExistenceCheck, SetExpiry, SetOptions},
+};
+use log::{error, info};
+use metrics::{counter, histogram};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
-use tokio::time::{self, Duration};
 use tokio::sync::RwLock;
-use chrono::Utc;
-use bloomfilter::Bloom;
-use metrics::{counter, histogram};
+use tokio::time::{self, Duration};
 
 /// Three-layer deduplication pipeline.
 ///
@@ -50,28 +53,31 @@ impl Deduplicator {
     ) -> Self {
         let local_cache = Arc::new(DashMap::new());
         let cache_clone = local_cache.clone();
-        
+
         // Initialize Bloom filter (e.g. ~12 MB at 10M entries / 1% FP).
         let bloom = Arc::new(RwLock::new(
             Bloom::new_for_fp_rate(bloom_capacity, bloom_fp_rate)
                 .expect("Failed to create Bloom filter"),
         ));
         let bloom_clone = bloom.clone();
-        
+
         info!(
             "Initialized Bloom Filter deduplicator: capacity={}, fp_rate={}, estimated_memory={}MB",
             bloom_capacity,
             bloom_fp_rate,
-            (bloom_capacity as f64 * (-bloom_fp_rate.ln() / (2.0_f64.ln().powi(2)))) / 8.0 / 1024.0 / 1024.0
+            (bloom_capacity as f64 * (-bloom_fp_rate.ln() / (2.0_f64.ln().powi(2))))
+                / 8.0
+                / 1024.0
+                / 1024.0
         );
-        
+
         // Background cleanup for L1 cache and Bloom reset.
         tokio::spawn(async move {
             let mut interval = time::interval(Duration::from_secs(60));
             loop {
                 interval.tick().await;
                 let now = Utc::now().timestamp();
-                
+
                 // Clean L1 cache.
                 if cache_clone.len() > 1_000_000 {
                     info!("Deduplicator L1 cache exceeded 1M entries, clearing all to prevent OOM");
@@ -79,20 +85,29 @@ impl Deduplicator {
                 } else {
                     cache_clone.retain(|_, &mut expire_at| expire_at > now);
                 }
-                
+
                 // Periodically reset Bloom filter to avoid saturation drift.
                 let bloom_size = {
                     let bloom_guard = bloom_clone.read().await;
                     bloom_guard.number_of_hash_functions()
                 };
-                
+
                 if bloom_size > 0 {
                     static LAST_RESET: AtomicI64 = AtomicI64::new(0);
                     let last = LAST_RESET.load(Ordering::Relaxed);
                     if last == 0 {
-                        let _ = LAST_RESET.compare_exchange(0, now, Ordering::Relaxed, Ordering::Relaxed);
-                    } else if now - last > 600 { // 10 minutes
-                        if LAST_RESET.compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed).is_ok() {
+                        let _ = LAST_RESET.compare_exchange(
+                            0,
+                            now,
+                            Ordering::Relaxed,
+                            Ordering::Relaxed,
+                        );
+                    } else if now - last > 600 {
+                        // 10 minutes
+                        if LAST_RESET
+                            .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
+                            .is_ok()
+                        {
                             let mut bloom_guard = bloom_clone.write().await;
                             bloom_guard.clear();
                             info!("Reset Bloom Filter to prevent saturation");
@@ -117,30 +132,32 @@ impl Deduplicator {
         let start = std::time::Instant::now();
         let now = Utc::now().timestamp();
         let hash_owned = hash.to_string();
-        
+
         // L0: Bloom filter pre-check.
         let bloom_says_exists = {
             let bloom_guard = self.bloom.read().await;
             bloom_guard.check(&hash_owned)
         };
-        
+
         if bloom_says_exists {
             // Might exist, continue to L1/L2 verification.
             counter!("mocra_dedup_bloom_hits", "result" => "maybe_exists").increment(1);
         } else {
             // Definitely new under Bloom semantics; still persist in Redis.
             counter!("mocra_dedup_bloom_hits", "result" => "definitely_new").increment(1);
-            
+
             {
                 let mut bloom_guard = self.bloom.write().await;
                 bloom_guard.set(&hash_owned);
             }
-            
+
             let mut conn = match self.pool.get().await {
                 Ok(c) => c,
                 Err(e) => {
                     error!("Deduplicator: Failed to get Redis connection: {}", e);
-                    return Err(crate::errors::Error::from(crate::errors::CacheError::Pool(e.to_string())));
+                    return Err(crate::errors::Error::from(crate::errors::CacheError::Pool(
+                        e.to_string(),
+                    )));
                 }
             };
 
@@ -149,24 +166,29 @@ impl Deduplicator {
             } else {
                 format!("{}:dedup:{hash}", self.namespace)
             };
-            
+
             let opts = SetOptions::default()
                 .conditional_set(ExistenceCheck::NX)
                 .with_expiration(SetExpiry::EX(self.ttl as u64));
 
-            let _: Option<String> = conn.set_options(&key, "1", opts).await
+            let _: Option<String> = conn
+                .set_options(&key, "1", opts)
+                .await
                 .map_err(|e| crate::errors::Error::from(crate::errors::CacheError::Redis(e)))?;
-            
-            self.local_cache.insert(hash_owned.clone(), now + self.ttl as i64);
-            
-            histogram!("mocra_dedup_check_latency_us", "path" => "bloom_new").record(start.elapsed().as_micros() as f64);
+
+            self.local_cache
+                .insert(hash_owned.clone(), now + self.ttl as i64);
+
+            histogram!("mocra_dedup_check_latency_us", "path" => "bloom_new")
+                .record(start.elapsed().as_micros() as f64);
             return Ok(true);
         }
-        
+
         // L1: Check local cache.
         if let Some(expire_at) = self.local_cache.get(&hash_owned) {
             if *expire_at > now {
-                histogram!("mocra_dedup_check_latency_us", "path" => "l1_hit").record(start.elapsed().as_micros() as f64);
+                histogram!("mocra_dedup_check_latency_us", "path" => "l1_hit")
+                    .record(start.elapsed().as_micros() as f64);
                 counter!("mocra_dedup_l1_hits").increment(1);
                 return Ok(false);
             } else {
@@ -174,13 +196,15 @@ impl Deduplicator {
                 self.local_cache.remove(&hash_owned);
             }
         }
-        
+
         // L2: Redis authoritative check.
         let mut conn = match self.pool.get().await {
             Ok(c) => c,
             Err(e) => {
                 error!("Deduplicator: Failed to get Redis connection: {}", e);
-                return Err(crate::errors::Error::from(crate::errors::CacheError::Pool(e.to_string())));
+                return Err(crate::errors::Error::from(crate::errors::CacheError::Pool(
+                    e.to_string(),
+                )));
             }
         };
 
@@ -189,25 +213,30 @@ impl Deduplicator {
         } else {
             format!("{}:dedup:{hash}", self.namespace)
         };
-        
+
         let opts = SetOptions::default()
             .conditional_set(ExistenceCheck::NX)
             .with_expiration(SetExpiry::EX(self.ttl as u64));
 
-        let result: Option<String> = conn.set_options(&key, "1", opts).await
+        let result: Option<String> = conn
+            .set_options(&key, "1", opts)
+            .await
             .map_err(|e| crate::errors::Error::from(crate::errors::CacheError::Redis(e)))?;
 
         let is_new = result.is_some();
-        
+
         if !is_new {
-            self.local_cache.insert(hash_owned.clone(), now + self.ttl as i64);
+            self.local_cache
+                .insert(hash_owned.clone(), now + self.ttl as i64);
             counter!("mocra_dedup_l2_hits").increment(1);
         } else {
-            self.local_cache.insert(hash_owned.clone(), now + self.ttl as i64);
+            self.local_cache
+                .insert(hash_owned.clone(), now + self.ttl as i64);
             counter!("mocra_dedup_l2_new").increment(1);
         }
 
-        histogram!("mocra_dedup_check_latency_us", "path" => "redis").record(start.elapsed().as_micros() as f64);
+        histogram!("mocra_dedup_check_latency_us", "path" => "redis")
+            .record(start.elapsed().as_micros() as f64);
         Ok(is_new)
     }
 
@@ -227,9 +256,12 @@ impl Deduplicator {
         // L0: Check Bloom Filter (batch read)
         let bloom_results = {
             let bloom_guard = self.bloom.read().await;
-            hashes.iter().map(|h| bloom_guard.check(h)).collect::<Vec<bool>>()
+            hashes
+                .iter()
+                .map(|h| bloom_guard.check(h))
+                .collect::<Vec<bool>>()
         };
-        
+
         let mut definitely_new_indices = Vec::new();
         for (i, &bloom_exists) in bloom_results.iter().enumerate() {
             if !bloom_exists {
@@ -238,7 +270,7 @@ impl Deduplicator {
                 results[i] = true; // Mark as new immediately
             }
         }
-        
+
         // Add definitely new items to Bloom Filter
         if !definitely_new_indices.is_empty() {
             let mut bloom_guard = self.bloom.write().await;
@@ -253,7 +285,7 @@ impl Deduplicator {
             if results[i] {
                 continue; // Already determined as new by Bloom
             }
-            
+
             if let Some(expire_at) = self.local_cache.get(hash) {
                 if *expire_at > now {
                     results[i] = false; // Duplicate
@@ -267,13 +299,15 @@ impl Deduplicator {
 
         if indices_to_check.is_empty() {
             // All requests were handled by Bloom + L1
-            histogram!("mocra_dedup_batch_latency_us", "path" => "bloom_l1").record(start.elapsed().as_micros() as f64);
-            
+            histogram!("mocra_dedup_batch_latency_us", "path" => "bloom_l1")
+                .record(start.elapsed().as_micros() as f64);
+
             // Still need to set the definitely_new ones in Redis
             if !definitely_new_indices.is_empty() {
-                self.set_batch_in_redis(hashes, &definitely_new_indices, now).await?;
+                self.set_batch_in_redis(hashes, &definitely_new_indices, now)
+                    .await?;
             }
-            
+
             return Ok(results);
         }
 
@@ -282,12 +316,14 @@ impl Deduplicator {
             Ok(c) => c,
             Err(e) => {
                 error!("Deduplicator: Failed to get Redis connection: {}", e);
-                return Err(crate::errors::Error::from(crate::errors::CacheError::Pool(e.to_string())));
+                return Err(crate::errors::Error::from(crate::errors::CacheError::Pool(
+                    e.to_string(),
+                )));
             }
         };
 
         let mut pipe = deadpool_redis::redis::pipe();
-        
+
         let prefix = if self.namespace.is_empty() {
             "dedup:".to_string()
         } else {
@@ -297,14 +333,21 @@ impl Deduplicator {
         // Build pipeline for Redis SET NX operations
         let mut all_redis_indices = indices_to_check.clone();
         all_redis_indices.extend(&definitely_new_indices);
-        
+
         for &idx in &all_redis_indices {
             let hash = &hashes[idx];
             let key = format!("{prefix}{hash}");
-            pipe.cmd("SET").arg(key).arg("1").arg("NX").arg("EX").arg(self.ttl);
+            pipe.cmd("SET")
+                .arg(key)
+                .arg("1")
+                .arg("NX")
+                .arg("EX")
+                .arg(self.ttl);
         }
 
-        let pipe_results: Vec<Option<String>> = pipe.query_async(&mut conn).await
+        let pipe_results: Vec<Option<String>> = pipe
+            .query_async(&mut conn)
+            .await
             .map_err(|e| crate::errors::Error::from(crate::errors::CacheError::Redis(e)))?;
 
         // Process results
@@ -312,10 +355,11 @@ impl Deduplicator {
             let original_idx = all_redis_indices[pipe_idx];
             let is_new = result.is_some();
             results[original_idx] = is_new;
-            
+
             // Update L1 cache
-            self.local_cache.insert(hashes[original_idx].clone(), now + self.ttl as i64);
-            
+            self.local_cache
+                .insert(hashes[original_idx].clone(), now + self.ttl as i64);
+
             if is_new {
                 counter!("mocra_dedup_l2_batch_new").increment(1);
             } else {
@@ -323,20 +367,28 @@ impl Deduplicator {
             }
         }
 
-        histogram!("mocra_dedup_batch_latency_us", "path" => "full").record(start.elapsed().as_micros() as f64);
+        histogram!("mocra_dedup_batch_latency_us", "path" => "full")
+            .record(start.elapsed().as_micros() as f64);
         Ok(results)
     }
-    
-    async fn set_batch_in_redis(&self, hashes: &[String], indices: &[usize], now: i64) -> Result<()> {
+
+    async fn set_batch_in_redis(
+        &self,
+        hashes: &[String],
+        indices: &[usize],
+        now: i64,
+    ) -> Result<()> {
         if indices.is_empty() {
             return Ok(());
         }
-        
+
         let mut conn = match self.pool.get().await {
             Ok(c) => c,
             Err(e) => {
                 error!("Deduplicator: Failed to get Redis connection: {}", e);
-                return Err(crate::errors::Error::from(crate::errors::CacheError::Pool(e.to_string())));
+                return Err(crate::errors::Error::from(crate::errors::CacheError::Pool(
+                    e.to_string(),
+                )));
             }
         };
 
@@ -349,15 +401,23 @@ impl Deduplicator {
         let mut pipe = deadpool_redis::redis::pipe();
         for &idx in indices {
             let key = format!("{}{}", prefix, &hashes[idx]);
-            pipe.cmd("SET").arg(key).arg("1").arg("NX").arg("EX").arg(self.ttl);
-            
+            pipe.cmd("SET")
+                .arg(key)
+                .arg("1")
+                .arg("NX")
+                .arg("EX")
+                .arg(self.ttl);
+
             // Update L1 cache
-            self.local_cache.insert(hashes[idx].clone(), now + self.ttl as i64);
+            self.local_cache
+                .insert(hashes[idx].clone(), now + self.ttl as i64);
         }
 
-        let _: Vec<Option<String>> = pipe.query_async(&mut conn).await
+        let _: Vec<Option<String>> = pipe
+            .query_async(&mut conn)
+            .await
             .map_err(|e| crate::errors::Error::from(crate::errors::CacheError::Redis(e)))?;
-        
+
         Ok(())
     }
 }

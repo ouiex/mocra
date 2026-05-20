@@ -23,6 +23,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use serde_json::json;
 use mocra::cacheable::CacheAble;
 use mocra::common::model::ModuleConfig;
+use mocra::common::model::workflow_profile::TaskProfileSnapshot;
 use mocra::downloader::Downloader;
 use mocra::common::model::Response;
 use mocra::common::model::download_config::DownloadConfig;
@@ -153,7 +154,7 @@ impl DownloadMiddleware for CounterDownloadMiddleware {
         "counter_download_middleware".to_string()
     }
 
-    async fn after_response(&mut self, response: Response, _config: &Option<ModuleConfig>) -> Option<Response> {
+    async fn after_response(&mut self, response: Response, _profile: &TaskProfileSnapshot) -> Option<Response> {
         self.counter.fetch_add(1, Ordering::Relaxed);
         Some(response)
     }

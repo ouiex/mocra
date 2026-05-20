@@ -52,7 +52,7 @@ async fn test_local_isolation() {
     // If we have a shared store, namespace should separate them.
     // But `SyncService` doesn't allow changing namespace on a clone (it's immutable).
     //
-    // So for Local Mode, the namespace is mostly for consistency with Distributed Mode 
+    // So for local mode, the namespace is mostly for consistency with backend-enabled mode
     // or if we ever made the store static/global.
     //
     // Let's proceed with the test anyway, as it validates the API contract.
@@ -75,11 +75,11 @@ async fn test_local_isolation() {
     
     assert_ne!(fetched1, fetched2);
 
-    println!("Local Mode Isolation: PASSED");
+    println!("Local mode isolation: PASSED");
 }
 
 async fn test_distributed_isolation() {
-    println!("\n--- Testing Distributed Mode Isolation ---");
+    println!("\n--- Testing backend-enabled isolation ---");
     const REDIS_URL: &str = "redis://:Qaz.123456@localhost:6379";
     
     // Use the same backend connection pool to prove isolation happens at key level
@@ -119,5 +119,5 @@ async fn test_distributed_isolation() {
     let fetched1_after = service1.fetch_latest::<TestState>().await.unwrap();
     assert_eq!(fetched1_after.unwrap().val, "dist_updated_1");
 
-    println!("Distributed Mode Isolation: PASSED");
+    println!("Backend-enabled isolation: PASSED");
 }

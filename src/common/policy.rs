@@ -118,9 +118,7 @@ pub struct PolicyResolver {
 impl PolicyResolver {
     /// Creates a resolver from optional config.
     pub fn new(config: Option<&PolicyConfig>) -> Self {
-        let overrides = config
-            .map(|cfg| cfg.overrides.clone())
-            .unwrap_or_default();
+        let overrides = config.map(|cfg| cfg.overrides.clone()).unwrap_or_default();
         Self { overrides }
     }
 
@@ -162,21 +160,14 @@ impl PolicyResolver {
         kind: ErrorKind,
     ) -> Decision {
         let policy = default_policy(domain, event_type, phase, &kind);
-        let policy = apply_overrides(
-            policy,
-            &self.overrides,
-            domain,
-            event_type,
-            phase,
-            &kind,
-        );
+        let policy = apply_overrides(policy, &self.overrides, domain, event_type, phase, &kind);
         Decision {
             policy,
             reason: format!(
                 "{}/{}/{}/{:?}",
                 normalize(domain),
-                normalize_opt(event_type).unwrap_or("-") ,
-                normalize_opt(phase).unwrap_or("-") ,
+                normalize_opt(event_type).unwrap_or("-"),
+                normalize_opt(phase).unwrap_or("-"),
                 kind
             ),
         }
@@ -198,14 +189,17 @@ fn default_policy(
     kind: &ErrorKind,
 ) -> Policy {
     let domain = normalize(domain).to_ascii_lowercase();
-    let event_type = normalize_opt(event_type)
-        .unwrap_or("")
-        .to_ascii_lowercase();
+    let event_type = normalize_opt(event_type).unwrap_or("").to_ascii_lowercase();
     let phase = normalize_opt(phase).unwrap_or("").to_ascii_lowercase();
 
     let is_failed_or_retry = phase == "failed" || phase == "retry";
 
-    match (domain.as_str(), event_type.as_str(), is_failed_or_retry, kind) {
+    match (
+        domain.as_str(),
+        event_type.as_str(),
+        is_failed_or_retry,
+        kind,
+    ) {
         ("engine", "task_model", true, ErrorKind::Task | ErrorKind::Module) => Policy {
             backoff: BackoffPolicy::Exponential {
                 base_ms: 500,
@@ -217,17 +211,19 @@ fn default_policy(
             backoff_ms: 500,
             retryable: true,
         },
-        ("engine", "parser_task_model", true, ErrorKind::Parser | ErrorKind::ProcessorChain) => Policy {
-            backoff: BackoffPolicy::Exponential {
-                base_ms: 500,
-                max_ms: 30_000,
-            },
-            dlq: DlqPolicy::OnExhausted,
-            alert: AlertLevel::Warn,
-            max_retries: 3,
-            backoff_ms: 500,
-            retryable: true,
-        },
+        ("engine", "parser_task_model", true, ErrorKind::Parser | ErrorKind::ProcessorChain) => {
+            Policy {
+                backoff: BackoffPolicy::Exponential {
+                    base_ms: 500,
+                    max_ms: 30_000,
+                },
+                dlq: DlqPolicy::OnExhausted,
+                alert: AlertLevel::Warn,
+                max_retries: 3,
+                backoff_ms: 500,
+                retryable: true,
+            }
+        }
         ("engine", "request_publish", true, ErrorKind::Queue) => Policy {
             backoff: BackoffPolicy::Exponential {
                 base_ms: 500,
@@ -239,15 +235,22 @@ fn default_policy(
             backoff_ms: 500,
             retryable: true,
         },
-        ("engine", "request_middleware", _, ErrorKind::Request | ErrorKind::ProcessorChain) => Policy {
-            retryable: false,
-            backoff: BackoffPolicy::None,
-            dlq: DlqPolicy::Always,
-            alert: AlertLevel::Error,
-            max_retries: 0,
-            backoff_ms: 0,
-        },
-        ("engine", "download", true, ErrorKind::Download | ErrorKind::Proxy | ErrorKind::RateLimit) => Policy {
+        ("engine", "request_middleware", _, ErrorKind::Request | ErrorKind::ProcessorChain) => {
+            Policy {
+                retryable: false,
+                backoff: BackoffPolicy::None,
+                dlq: DlqPolicy::Always,
+                alert: AlertLevel::Error,
+                max_retries: 0,
+                backoff_ms: 0,
+            }
+        }
+        (
+            "engine",
+            "download",
+            true,
+            ErrorKind::Download | ErrorKind::Proxy | ErrorKind::RateLimit,
+        ) => Policy {
             backoff: BackoffPolicy::Exponential {
                 base_ms: 500,
                 max_ms: 60_000,
@@ -258,14 +261,16 @@ fn default_policy(
             backoff_ms: 500,
             retryable: true,
         },
-        ("engine", "response_middleware", _, ErrorKind::Response | ErrorKind::ProcessorChain) => Policy {
-            retryable: false,
-            backoff: BackoffPolicy::None,
-            dlq: DlqPolicy::Always,
-            alert: AlertLevel::Error,
-            max_retries: 0,
-            backoff_ms: 0,
-        },
+        ("engine", "response_middleware", _, ErrorKind::Response | ErrorKind::ProcessorChain) => {
+            Policy {
+                retryable: false,
+                backoff: BackoffPolicy::None,
+                dlq: DlqPolicy::Always,
+                alert: AlertLevel::Error,
+                max_retries: 0,
+                backoff_ms: 0,
+            }
+        }
         ("engine", "response_publish", true, ErrorKind::Queue) => Policy {
             backoff: BackoffPolicy::Exponential {
                 base_ms: 500,
@@ -339,9 +344,7 @@ fn apply_overrides(
     kind: &ErrorKind,
 ) -> Policy {
     let domain = normalize(domain).to_ascii_lowercase();
-    let event_type = normalize_opt(event_type)
-        .unwrap_or("")
-        .to_ascii_lowercase();
+    let event_type = normalize_opt(event_type).unwrap_or("").to_ascii_lowercase();
     let phase = normalize_opt(phase).unwrap_or("").to_ascii_lowercase();
 
     let mut best_score = -1_i32;
@@ -418,12 +421,8 @@ mod tests {
     #[test]
     fn default_policy_parser_failed_is_not_retryable() {
         let resolver = PolicyResolver::new(None);
-        let decision = resolver.resolve_with_kind(
-            "engine",
-            Some("parser"),
-            Some("failed"),
-            ErrorKind::Parser,
-        );
+        let decision =
+            resolver.resolve_with_kind("engine", Some("parser"), Some("failed"), ErrorKind::Parser);
         assert!(!decision.policy.retryable);
         assert_eq!(decision.policy.dlq, DlqPolicy::Always);
     }

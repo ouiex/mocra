@@ -1,11 +1,12 @@
+use crate::common::model::{
+    NodeDispatchEnvelope, NodeErrorEnvelope, RequestDispatchEnvelope, ResponseDispatchEnvelope,
+    TaskDispatchEnvelope,
+};
 use crate::queue::QueuedItem;
-use crate::common::model::message::TaskEvent;
-use crate::common::model::message::{TaskErrorEvent, TaskParserEvent};
-use crate::common::model::{Request, Response};
+use crate::utils::logger::LogModel;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::sync::mpsc::{Receiver, Sender, channel};
-use crate::utils::logger::LogModel;
 
 /// 消息队列通道管理器
 ///
@@ -17,30 +18,30 @@ pub struct Channel {
     // --- 1. 初始任务队列 (Task Queue) ---
     // 生产者: 外部API / 种子生成器
     // 消费者: 任务处理器 (TaskProcessor) -> 生成 Request
-    pub task_sender: Sender<QueuedItem<TaskEvent>>,
-    pub task_receiver: Arc<Mutex<Receiver<QueuedItem<TaskEvent>>>>,
+    pub task_sender: Sender<QueuedItem<TaskDispatchEnvelope>>,
+    pub task_receiver: Arc<Mutex<Receiver<QueuedItem<TaskDispatchEnvelope>>>>,
 
     // --- 2. 请求队列 (Request Queue) ---
     // 生产者: 任务处理器 / 响应处理器 (解析结果)
     // 消费者: 下载器 (Downloader) -> 执行下载 -> 生成 Response
-    pub request_sender: Sender<QueuedItem<Request>>,
-    pub request_receiver: Arc<Mutex<Receiver<QueuedItem<Request>>>>,
+    pub request_sender: Sender<QueuedItem<RequestDispatchEnvelope>>,
+    pub request_receiver: Arc<Mutex<Receiver<QueuedItem<RequestDispatchEnvelope>>>>,
 
     // (可选) 下载专用队列，用于区分调度前后的请求
-    pub download_request_sender: Sender<QueuedItem<Request>>,
-    pub download_request_receiver: Arc<Mutex<Receiver<QueuedItem<Request>>>>,
+    pub download_request_sender: Sender<QueuedItem<RequestDispatchEnvelope>>,
+    pub download_request_receiver: Arc<Mutex<Receiver<QueuedItem<RequestDispatchEnvelope>>>>,
 
     // --- 3. 响应队列 (Response Queue) ---
     // 生产者: 下载器 (Downloader)
     // 消费者: 响应处理器 (ResponseProcessor) -> 解析数据 -> (存储 / 生成新 Request)
-    pub response_sender: Sender<QueuedItem<Response>>,
-    pub response_receiver: Arc<Mutex<Receiver<QueuedItem<Response>>>>,
+    pub response_sender: Sender<QueuedItem<ResponseDispatchEnvelope>>,
+    pub response_receiver: Arc<Mutex<Receiver<QueuedItem<ResponseDispatchEnvelope>>>>,
 
     // --- 4. 辅助队列 (Auxiliary Queues) ---
 
     // 错误处理
-    pub error_sender: Sender<QueuedItem<TaskErrorEvent>>,
-    pub error_receiver: Arc<Mutex<Receiver<QueuedItem<TaskErrorEvent>>>>,
+    pub error_sender: Sender<QueuedItem<NodeErrorEnvelope>>,
+    pub error_receiver: Arc<Mutex<Receiver<QueuedItem<NodeErrorEnvelope>>>>,
 
     // 日志处理
     pub log_sender: Sender<QueuedItem<LogModel>>,
@@ -49,22 +50,22 @@ pub struct Channel {
     // --- 5. 其他/扩展队列 (Others) ---
 
     // 解析任务队列 (如果解析独立于响应处理)
-    pub parser_task_sender: Sender<QueuedItem<TaskParserEvent>>,
-    pub parser_task_receiver: Arc<Mutex<Receiver<QueuedItem<TaskParserEvent>>>>,
+    pub parser_task_sender: Sender<QueuedItem<NodeDispatchEnvelope>>,
+    pub parser_task_receiver: Arc<Mutex<Receiver<QueuedItem<NodeDispatchEnvelope>>>>,
 
     // 远程/分布式节点通信队列
-    pub remote_response_sender: Sender<QueuedItem<Response>>,
-    pub remote_response_receiver: Arc<Mutex<Receiver<QueuedItem<Response>>>>,
+    pub remote_response_sender: Sender<QueuedItem<ResponseDispatchEnvelope>>,
+    pub remote_response_receiver: Arc<Mutex<Receiver<QueuedItem<ResponseDispatchEnvelope>>>>,
 
-    pub remote_parser_task_sender: Sender<QueuedItem<TaskParserEvent>>,
-    pub remote_parser_task_receiver: Arc<Mutex<Receiver<QueuedItem<TaskParserEvent>>>>,
+    pub remote_parser_task_sender: Sender<QueuedItem<NodeDispatchEnvelope>>,
+    pub remote_parser_task_receiver: Arc<Mutex<Receiver<QueuedItem<NodeDispatchEnvelope>>>>,
 
-    pub remote_error_sender: Sender<QueuedItem<TaskErrorEvent>>,
-    pub remote_error_receiver: Arc<Mutex<Receiver<QueuedItem<TaskErrorEvent>>>>,
+    pub remote_error_sender: Sender<QueuedItem<NodeErrorEnvelope>>,
+    pub remote_error_receiver: Arc<Mutex<Receiver<QueuedItem<NodeErrorEnvelope>>>>,
 
     // Distributed Task Queue (Outbound)
-    pub remote_task_sender: Sender<QueuedItem<TaskEvent>>,
-    pub remote_task_receiver: Arc<Mutex<Receiver<QueuedItem<TaskEvent>>>>,
+    pub remote_task_sender: Sender<QueuedItem<TaskDispatchEnvelope>>,
+    pub remote_task_receiver: Arc<Mutex<Receiver<QueuedItem<TaskDispatchEnvelope>>>>,
 }
 impl Clone for Channel {
     fn clone(&self) -> Self {

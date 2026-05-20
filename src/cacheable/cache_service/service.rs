@@ -1,10 +1,13 @@
 use super::backend::CacheBackend;
 use super::local_backend::LocalBackend;
+use super::raft_backend::RaftRocksDbCacheBackend;
 use super::redis_backend::RedisBackend;
 use super::two_level_backend::TwoLevelCacheBackend;
-use deadpool_redis::redis::Value as RedisValue;
-use deadpool_redis::Pool;
+use crate::common::model::config::CacheBackendKind;
+use crate::engine::api::profile_store::ProfileControlPlaneStore;
 use crate::errors::CacheError;
+use deadpool_redis::Pool;
+use deadpool_redis::redis::Value as RedisValue;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -22,7 +25,15 @@ impl CacheService {
         default_ttl: Option<Duration>,
         compression_threshold: Option<usize>,
     ) -> Self {
-        Self::new_with_l1_config(pool, namespace, default_ttl, compression_threshold, false, 30, 10000)
+        Self::new_with_l1_config(
+            pool,
+            namespace,
+            default_ttl,
+            compression_threshold,
+            false,
+            30,
+            10000,
+        )
     }
 
     pub fn new_with_l1_config(
@@ -39,7 +50,12 @@ impl CacheService {
         let backend: Arc<dyn CacheBackend> = match pool {
             Some(p) => {
                 if enable_l1 {
-                    Arc::new(TwoLevelCacheBackend::new(p, threshold, l1_ttl_secs, l1_max_entries))
+                    Arc::new(TwoLevelCacheBackend::new(
+                        p,
+                        threshold,
+                        l1_ttl_secs,
+                        l1_max_entries,
+                    ))
                 } else {
                     Arc::new(RedisBackend::new(p, threshold))
                 }
@@ -55,7 +71,65 @@ impl CacheService {
         }
     }
 
-    pub async fn set_nx(&self, key: &str, value: &[u8], ttl: Option<Duration>) -> Result<bool, CacheError> {
+    /// Construct a `CacheService` with explicit backend kind selection.
+    pub fn new_with_backend_kind(
+        pool: Option<Pool>,
+        namespace: String,
+        default_ttl: Option<Duration>,
+        compression_threshold: Option<usize>,
+        enable_l1: bool,
+        l1_ttl_secs: u64,
+        l1_max_entries: usize,
+        backend_kind: Option<CacheBackendKind>,
+        profile_store: Option<Arc<ProfileControlPlaneStore>>,
+    ) -> Self {
+        let threshold = compression_threshold.unwrap_or(1024);
+
+        let backend: Arc<dyn CacheBackend> = match backend_kind {
+            Some(CacheBackendKind::Local) => Arc::new(LocalBackend::new()),
+            Some(CacheBackendKind::RaftRocksdb) => {
+                let store = profile_store
+                    .expect("ProfileControlPlaneStore required for raft_rocksdb backend");
+                Arc::new(RaftRocksDbCacheBackend::new(store, namespace.clone(), default_ttl))
+            }
+            Some(CacheBackendKind::Redis) | Some(CacheBackendKind::TwoLevel) => {
+                let p = pool.expect("Redis pool required for redis/two_level backend");
+                if enable_l1 || matches!(backend_kind, Some(CacheBackendKind::TwoLevel)) {
+                    Arc::new(TwoLevelCacheBackend::new(
+                        p, threshold, l1_ttl_secs, l1_max_entries,
+                    ))
+                } else {
+                    Arc::new(RedisBackend::new(p, threshold))
+                }
+            }
+            None => match pool {
+                Some(p) => {
+                    if enable_l1 {
+                        Arc::new(TwoLevelCacheBackend::new(
+                            p, threshold, l1_ttl_secs, l1_max_entries,
+                        ))
+                    } else {
+                        Arc::new(RedisBackend::new(p, threshold))
+                    }
+                }
+                None => Arc::new(LocalBackend::new()),
+            },
+        };
+
+        CacheService {
+            backend,
+            namespace,
+            default_ttl,
+            serialize_blocking_threshold: 64 * 1024,
+        }
+    }
+
+    pub async fn set_nx(
+        &self,
+        key: &str,
+        value: &[u8],
+        ttl: Option<Duration>,
+    ) -> Result<bool, CacheError> {
         self.backend.set_nx(key, value, ttl).await
     }
 
@@ -63,11 +137,20 @@ impl CacheService {
         &self.namespace
     }
 
+    pub fn supports_lua(&self) -> bool {
+        self.backend.supports_lua()
+    }
+
     pub async fn zadd(&self, key: &str, score: f64, member: &[u8]) -> Result<i64, CacheError> {
         self.backend.zadd(key, score, member).await
     }
 
-    pub async fn zrangebyscore(&self, key: &str, min: f64, max: f64) -> Result<Vec<Vec<u8>>, CacheError> {
+    pub async fn zrangebyscore(
+        &self,
+        key: &str,
+        min: f64,
+        max: f64,
+    ) -> Result<Vec<Vec<u8>>, CacheError> {
         self.backend.zrangebyscore(key, min, max).await
     }
 
@@ -75,7 +158,12 @@ impl CacheService {
         self.backend.zremrangebyscore(key, min, max).await
     }
 
-    pub async fn set_nx_batch(&self, keys: &[&str], value: &[u8], ttl: Option<Duration>) -> Result<Vec<bool>, CacheError> {
+    pub async fn set_nx_batch(
+        &self,
+        keys: &[&str],
+        value: &[u8],
+        ttl: Option<Duration>,
+    ) -> Result<Vec<bool>, CacheError> {
         self.backend.set_nx_batch(keys, value, ttl).await
     }
 
@@ -87,7 +175,12 @@ impl CacheService {
         self.backend.incr(key, delta).await
     }
 
-    pub async fn set(&self, key: &str, value: &[u8], ttl: Option<Duration>) -> Result<(), CacheError> {
+    pub async fn set(
+        &self,
+        key: &str,
+        value: &[u8],
+        ttl: Option<Duration>,
+    ) -> Result<(), CacheError> {
         self.backend.set(key, value, ttl).await
     }
 
@@ -103,7 +196,11 @@ impl CacheService {
         self.backend.keys(pattern).await
     }
 
-    pub async fn keys_with_limit(&self, pattern: &str, limit: usize) -> Result<Vec<String>, CacheError> {
+    pub async fn keys_with_limit(
+        &self,
+        pattern: &str,
+        limit: usize,
+    ) -> Result<Vec<String>, CacheError> {
         self.backend.keys_with_limit(pattern, limit).await
     }
 
@@ -119,11 +216,21 @@ impl CacheService {
         self.backend.script_load(script).await
     }
 
-    pub async fn evalsha(&self, sha: &str, keys: &[&str], args: &[&str]) -> Result<RedisValue, CacheError> {
+    pub async fn evalsha(
+        &self,
+        sha: &str,
+        keys: &[&str],
+        args: &[&str],
+    ) -> Result<RedisValue, CacheError> {
         self.backend.evalsha(sha, keys, args).await
     }
 
-    pub async fn eval_lua(&self, script: &str, keys: &[&str], args: &[&str]) -> Result<RedisValue, CacheError> {
+    pub async fn eval_lua(
+        &self,
+        script: &str,
+        keys: &[&str],
+        args: &[&str],
+    ) -> Result<RedisValue, CacheError> {
         self.backend.eval_lua(script, keys, args).await
     }
 

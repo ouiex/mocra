@@ -7,10 +7,10 @@
 //! - websocket download flow (`stream_chain`).
 
 pub mod backpressure;
-pub mod task_model_chain;
 pub mod download_chain;
 pub mod parser_chain;
 pub mod stream_chain;
+pub mod task_model_chain;
 
 pub use download_chain::*;
 pub use parser_chain::*;

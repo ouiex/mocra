@@ -1,6 +1,6 @@
+use crate::common::model::{Request, Response};
 use crate::errors::{Error, Result};
 use futures_util::{SinkExt, StreamExt};
-use crate::common::model::{Request, Response};
 use log::{error, info, warn};
 use reqwest::{Client, Proxy};
 use std::collections::HashMap;

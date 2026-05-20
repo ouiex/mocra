@@ -3,8 +3,8 @@ use crate::common::model::entity::{AccountModel, PlatformModel};
 use crate::common::model::{Request, login_info::LoginInfo};
 use crate::engine::task::module::Module;
 use crate::errors::Result;
-use uuid::Uuid;
 use futures::StreamExt;
+use uuid::Uuid;
 
 /// Runtime task aggregate for one account-platform execution scope.
 #[derive(Clone)]
@@ -14,10 +14,9 @@ pub struct Task {
     pub login_info: Option<LoginInfo>,
     pub modules: Vec<Module>,
     pub metadata: serde_json::Map<String, serde_json::Value>,
-    pub run_id:Uuid,
-    pub prefix_request:Uuid
+    pub run_id: Uuid,
+    pub prefix_request: Uuid,
 }
-
 
 impl Task {
     /// Returns stable task id in account-platform format.
@@ -56,7 +55,7 @@ impl Task {
     }
 
     /// Returns true when task has no runnable modules.
-    pub fn is_empty(&self)->bool{
+    pub fn is_empty(&self) -> bool {
         self.modules.is_empty()
     }
 }

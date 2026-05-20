@@ -1,24 +1,51 @@
 use super::*;
+use crate::common::model::{PipelineStage, TaskStatus};
+use crate::engine::task::task_dispatch_adapter::{
+    decode_task_dispatch, processor_context_from_dispatch,
+};
+use crate::engine::task::request_response_adapter::{
+    decode_request_dispatch, decode_response_dispatch,
+};
+use crate::engine::task::parser_error_adapter::{
+    extract_error_envelope_seed, extract_parser_dispatch_seed,
+};
 
 impl Engine {
     /// Sends periodic cluster heartbeat updates until shutdown.
-    pub(super) async fn start_node_registry(&self) {
-        info!("Starting node registry heartbeat");
-        let registry = self.node_registry.clone();
+    pub(super) async fn start_node_heartbeat(&self) {
+        info!("Starting control-plane node heartbeat");
+        let profile_store = self.state.profile_store.clone();
         let mut shutdown = self.shutdown_tx.subscribe();
-        let mut interval = tokio::time::interval(Duration::from_secs(Self::NODE_HEARTBEAT_INTERVAL_SECS));
+        let mut interval =
+            tokio::time::interval(Duration::from_secs(Self::NODE_HEARTBEAT_INTERVAL_SECS));
 
-        let hostname = std::env::var("COMPUTERNAME").or(std::env::var("HOSTNAME")).unwrap_or("unknown".to_string());
-        let ip = get_primary_local_ip().map(|ip| ip.to_string()).unwrap_or_else(|_| "127.0.0.1".to_string());
+        let hostname = std::env::var("COMPUTERNAME")
+            .or(std::env::var("HOSTNAME"))
+            .unwrap_or("unknown".to_string());
+        let ip = get_primary_local_ip()
+            .map(|ip| ip.to_string())
+            .unwrap_or_else(|_| "127.0.0.1".to_string());
+        let api_port = self.state.config.read().await.api.as_ref().map(|api| api.port);
 
         loop {
             tokio::select! {
                _ = shutdown.recv() => {
-                   info!("Node registry heartbeat received shutdown signal");
+                   info!("Node heartbeat received shutdown signal");
                    break;
                }
                _ = interval.tick() => {
-                   if let Err(e) = registry.heartbeat(&ip, &hostname, env!("CARGO_PKG_VERSION")).await {
+                   let now = std::time::SystemTime::now()
+                       .duration_since(std::time::UNIX_EPOCH)
+                       .unwrap_or_default()
+                       .as_secs();
+                    if let Err(e) = profile_store.heartbeat_node(crate::common::registry::NodeInfo {
+                        id: self.node_id.clone(),
+                        ip: ip.clone(),
+                        hostname: hostname.clone(),
+                        api_port,
+                        last_heartbeat: now,
+                        version: env!("CARGO_PKG_VERSION").to_string(),
+                    }).await {
                         error!("Failed to send heartbeat: {}", e);
                    }
                }
@@ -33,8 +60,7 @@ impl Engine {
         receiver: Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<T>>>,
         concurrency: usize,
         execute_fn: F,
-    )
-    where
+    ) where
         T: Identifiable + Send + 'static,
         F: Fn(T) -> Fut + Send + Sync + 'static + Clone,
         Fut: Future<Output = ()> + Send,
@@ -51,7 +77,10 @@ impl Engine {
     }
 
     /// Starts task ingestion workers (`TaskModel` / unified ingress path).
-    pub(super) async fn start_task_processor(&self, unified_task_ingress: Arc<UnifiedTaskIngressChain>) {
+    pub(super) async fn start_task_processor(
+        &self,
+        unified_task_ingress: Arc<UnifiedTaskIngressChain>,
+    ) {
         let concurrency = self
             .state
             .config
@@ -62,6 +91,8 @@ impl Engine {
             .unwrap_or(2048);
         let queue_manager = self.queue_manager.clone();
         let policy_resolver = PolicyResolver::new(self.state.config.read().await.policy.as_ref());
+        let status_tracker = self.state.status_tracker.clone();
+        let node_id = self.node_id.clone();
 
         self.run_processor_loop(
             "Task",
@@ -71,16 +102,52 @@ impl Engine {
                 let ingress = unified_task_ingress.clone();
                 let queue_manager = queue_manager.clone();
                 let policy_resolver = policy_resolver.clone();
+                let status_tracker = status_tracker.clone();
+                let node_id = node_id.clone();
                 async move {
-                    let (task, mut ack_fn, mut nack_fn) = task_item.into_parts();
+                    let (dispatch, mut ack_fn, mut nack_fn) = task_item.into_parts();
+                    let task = match decode_task_dispatch(dispatch.clone()) {
+                        Ok(task) => task,
+                        Err(e) => {
+                            error!("Failed to decode task dispatch envelope: {}", e);
+                            if let Some(f) = nack_fn.take() {
+                                let _ = f(format!("task dispatch decode failed: {e}")).await;
+                            }
+                            return;
+                        }
+                    };
                     let task_for_dlq = task.clone();
                     let id = task.get_id();
+                    let status_task_id = task.run_id.to_string();
+                    let _ = status_tracker
+                        .update_status(
+                            &status_task_id,
+                            PipelineStage::Task,
+                            TaskStatus::Running,
+                            0,
+                            &node_id,
+                            None,
+                        )
+                        .await;
+                    let processor_context = processor_context_from_dispatch(&dispatch);
                     let result = ingress
-                        .execute(UnifiedTaskInput::Task(task), ProcessorContext::default())
+                        .execute(UnifiedTaskInput::Task(task), processor_context)
                         .await;
                     match result {
-                        crate::common::processors::processor::ProcessorResult::Success(mut stream) => {
+                        crate::common::processors::processor::ProcessorResult::Success(
+                            mut stream,
+                        ) => {
                             while stream.next().await.is_some() {}
+                            let _ = status_tracker
+                                .update_status(
+                                    &status_task_id,
+                                    PipelineStage::Task,
+                                    TaskStatus::Done,
+                                    0,
+                                    &node_id,
+                                    None,
+                                )
+                                .await;
                             if let Some(comp) = &queue_manager.compensator {
                                 let _ = comp.remove_task("task", &id).await;
                             }
@@ -90,7 +157,19 @@ impl Engine {
                                 }
                             }
                         }
-                        crate::common::processors::processor::ProcessorResult::RetryableFailure(retry_policy) => {
+                        crate::common::processors::processor::ProcessorResult::RetryableFailure(
+                            retry_policy,
+                        ) => {
+                            let _ = status_tracker
+                                .update_status(
+                                    &status_task_id,
+                                    PipelineStage::Task,
+                                    TaskStatus::Retrying,
+                                    retry_policy.current_retry,
+                                    &node_id,
+                                    retry_policy.reason.clone(),
+                                )
+                                .await;
                             Self::handle_policy_retry(
                                 &policy_resolver,
                                 &queue_manager,
@@ -103,7 +182,19 @@ impl Engine {
                             )
                             .await;
                         }
-                        crate::common::processors::processor::ProcessorResult::FatalFailure(err) => {
+                        crate::common::processors::processor::ProcessorResult::FatalFailure(
+                            err,
+                        ) => {
+                            let _ = status_tracker
+                                .update_status(
+                                    &status_task_id,
+                                    PipelineStage::Task,
+                                    TaskStatus::Failed,
+                                    0,
+                                    &node_id,
+                                    Some(err.to_string()),
+                                )
+                                .await;
                             Self::handle_policy_failure(
                                 &policy_resolver,
                                 &queue_manager,
@@ -159,6 +250,8 @@ impl Engine {
         );
         let queue_manager = self.queue_manager.clone();
         let policy_resolver = PolicyResolver::new(self.state.config.read().await.policy.as_ref());
+        let status_tracker = self.state.status_tracker.clone();
+        let node_id = self.node_id.clone();
 
         self.run_processor_loop(
             "Download",
@@ -169,10 +262,50 @@ impl Engine {
                 let wss_chain = wss_download_chain.clone();
                 let queue_manager = queue_manager.clone();
                 let policy_resolver = policy_resolver.clone();
+                let status_tracker = status_tracker.clone();
+                let node_id = node_id.clone();
                 async move {
-                    let (request, mut ack_fn, mut nack_fn) = request_item.into_parts();
-                    let request_for_dlq = request.clone();
+                    let (request_dispatch, mut ack_fn, mut nack_fn) = request_item.into_parts();
+                    let request_dispatch_for_dlq = request_dispatch.clone();
+                    let dispatch_id = request_dispatch.routing.request_id.to_string();
+                    let dispatch_run_id = request_dispatch.routing.run_id.to_string();
+                    let dispatch_retry_count = request_dispatch.exec.retry_count;
+                    let request = match decode_request_dispatch(request_dispatch) {
+                        Ok(request) => request,
+                        Err(err) => {
+                            error!(
+                                "Failed to decode request envelope {}: {}",
+                                dispatch_id, err
+                            );
+                            let _ = status_tracker
+                                .update_status(
+                                    &dispatch_run_id,
+                                    PipelineStage::Request,
+                                    TaskStatus::Failed,
+                                    dispatch_retry_count,
+                                    &node_id,
+                                    Some(err.to_string()),
+                                )
+                                .await;
+                            if let Some(f) = nack_fn.take() {
+                                let _ = f(format!("request envelope decode failed: {err}")).await;
+                            }
+                            return;
+                        }
+                    };
                     let id = request.get_id();
+                    let status_task_id = request.run_id.to_string();
+                    let retry_count = request.retry_times as u32;
+                    let _ = status_tracker
+                        .update_status(
+                            &status_task_id,
+                            PipelineStage::Request,
+                            TaskStatus::Running,
+                            retry_count,
+                            &node_id,
+                            None,
+                        )
+                        .await;
                     info!("[DownloadExecuteFn] starting chain for request_id={} module={} url={}", id, request.module_id(), request.url);
 
                     let chain_start = std::time::Instant::now();
@@ -191,6 +324,16 @@ impl Engine {
 
                     match result {
                         crate::common::processors::processor::ProcessorResult::Success(_) => {
+                            let _ = status_tracker
+                                .update_status(
+                                    &status_task_id,
+                                    PipelineStage::Request,
+                                    TaskStatus::Done,
+                                    retry_count,
+                                    &node_id,
+                                    None,
+                                )
+                                .await;
                             if let Some(comp) = &queue_manager.compensator {
                                 let _ = comp.remove_task("request", &id).await;
                             }
@@ -201,12 +344,22 @@ impl Engine {
                             }
                         }
                         crate::common::processors::processor::ProcessorResult::RetryableFailure(retry_policy) => {
+                            let _ = status_tracker
+                                .update_status(
+                                    &status_task_id,
+                                    PipelineStage::Request,
+                                    TaskStatus::Retrying,
+                                    retry_policy.current_retry,
+                                    &node_id,
+                                    retry_policy.reason.clone(),
+                                )
+                                .await;
                             Self::handle_policy_retry(
                                 &policy_resolver,
                                 &queue_manager,
                                 "request",
                                 "download",
-                                &request_for_dlq,
+                                &request_dispatch_for_dlq,
                                 &retry_policy,
                                 &mut ack_fn,
                                 &mut nack_fn,
@@ -214,12 +367,22 @@ impl Engine {
                             .await;
                         }
                         crate::common::processors::processor::ProcessorResult::FatalFailure(err) => {
+                            let _ = status_tracker
+                                .update_status(
+                                    &status_task_id,
+                                    PipelineStage::Request,
+                                    TaskStatus::Failed,
+                                    retry_count,
+                                    &node_id,
+                                    Some(err.to_string()),
+                                )
+                                .await;
                             Self::handle_policy_failure(
                                 &policy_resolver,
                                 &queue_manager,
                                 "request",
                                 "download",
-                                &request_for_dlq,
+                                &request_dispatch_for_dlq,
                                 &err,
                                 &mut ack_fn,
                                 &mut nack_fn,
@@ -234,7 +397,10 @@ impl Engine {
     }
 
     /// Starts parser-task workers that continue chain progression after parser outcomes.
-    pub(super) async fn start_parser_model_processor(&self, unified_task_ingress: Arc<UnifiedTaskIngressChain>) {
+    pub(super) async fn start_parser_model_processor(
+        &self,
+        unified_task_ingress: Arc<UnifiedTaskIngressChain>,
+    ) {
         let concurrency = {
             let cfg = self.state.config.read().await;
             cfg.crawler
@@ -247,10 +413,9 @@ impl Engine {
         let state = self.state.clone();
         let lua_registry = self.lua_registry.clone();
         let policy_resolver = PolicyResolver::new(self.state.config.read().await.policy.as_ref());
-        let single_node_mode = {
-            let cfg = self.state.config.read().await;
-            cfg.is_single_node_mode()
-        };
+        let status_tracker = self.state.status_tracker.clone();
+        let node_id = self.node_id.clone();
+        let use_cache_redis_lua = self.state.has_cache_redis_backend();
 
         self.run_processor_loop(
             "Parser",
@@ -262,25 +427,54 @@ impl Engine {
                 let state = state.clone();
                 let lua_registry = lua_registry.clone();
                 let policy_resolver = policy_resolver.clone();
-                let single_node_mode = single_node_mode;
+                let status_tracker = status_tracker.clone();
+                let node_id = node_id.clone();
+                let use_cache_redis_lua = use_cache_redis_lua;
                 async move {
-                    let (task, mut ack_fn, mut nack_fn) = task_item.into_parts();
-                    let task_for_dlq = task.clone();
-                    let id = task.get_id();
+                    let (task_dispatch, mut ack_fn, mut nack_fn) = task_item.into_parts();
+                    let dispatch_id = task_dispatch.routing.request_id.to_string();
+                    let dispatch_run_id = task_dispatch.routing.run_id.to_string();
+                    let parser_seed = match extract_parser_dispatch_seed(&task_dispatch) {
+                        Ok(seed) => seed,
+                        Err(err) => {
+                            error!(
+                                "Failed to extract parser task seed {}: {}",
+                                dispatch_id, err
+                            );
+                            let _ = status_tracker
+                                .update_status(
+                                    &dispatch_run_id,
+                                    PipelineStage::ParserTask,
+                                    TaskStatus::Failed,
+                                    0,
+                                    &node_id,
+                                    Some(err.to_string()),
+                                )
+                                .await;
+                            if let Some(f) = nack_fn.take() {
+                                let _ = f(format!("parser task envelope seed extraction failed: {err}")).await;
+                            }
+                            return;
+                        }
+                    };
+                    let task_for_dlq = task_dispatch.clone();
+                    let id = task_for_dlq.get_id();
+                    let status_task_id = task_dispatch.routing.run_id.to_string();
 
-                    let module_id = task
+                    let module_id = parser_seed
                         .context
                         .module_id
                         .clone()
                         .or_else(|| {
-                            task.account_task
+                            parser_seed
+                                .task_model
                                 .module
                                 .as_ref()
                                 .and_then(|modules| {
                                     modules.first().map(|m| {
                                         chain_key::module_runtime_id(
-                                            &task.account_task.account,
-                                            &task.account_task.platform,
+                                            &parser_seed.task_model.account,
+                                            &parser_seed.task_model.platform,
                                             m,
                                         )
                                     })
@@ -288,23 +482,23 @@ impl Engine {
                         })
                         .unwrap_or_else(|| {
                             chain_key::module_runtime_id(
-                                &task.account_task.account,
-                                &task.account_task.platform,
+                                &parser_seed.task_model.account,
+                                &parser_seed.task_model.platform,
                                 "unknown",
                             )
                         });
-                    let step_idx = task.context.step_idx.unwrap_or(0);
+                    let step_idx = parser_seed.context.step_idx.unwrap_or(0);
                     let expected_step = step_idx.saturating_add(1);
                     let ptm_key = chain_key::ptm_key(
-                        task.run_id,
-                        &task.account_task.account,
-                        &task.account_task.platform,
+                        parser_seed.run_id,
+                        &parser_seed.task_model.account,
+                        &parser_seed.task_model.platform,
                         &module_id,
                         step_idx,
-                        task.prefix_request,
+                        parser_seed.prefix_request,
                     );
                     let dedup_key = chain_key::dedup_key(&ptm_key);
-                    let exec_key = chain_key::execution_state_key(task.run_id, &module_id);
+                    let exec_key = chain_key::execution_state_key(parser_seed.run_id, &module_id);
                     let lease_owner = state
                         .config
                         .read()
@@ -329,7 +523,7 @@ impl Engine {
                         now_epoch.as_str(),
                     ];
 
-                    if !single_node_mode {
+                    if use_cache_redis_lua {
                         match lua_registry
                             .eval_triplet_with_fallback(
                                 state.cache_service.as_ref(),
@@ -351,11 +545,21 @@ impl Engine {
                             Ok((3, msg, _)) | Ok((4, msg, _)) => {
                                 let retry_policy = RetryPolicy::default()
                                     .with_reason(format!("ptm_claim deferred: {}", msg));
+                                let _ = status_tracker
+                                    .update_status(
+                                        &status_task_id,
+                                        PipelineStage::ParserTask,
+                                        TaskStatus::Retrying,
+                                        retry_policy.current_retry,
+                                        &node_id,
+                                        retry_policy.reason.clone(),
+                                    )
+                                    .await;
                                 Self::handle_policy_retry(
                                     &policy_resolver,
                                     &queue_manager,
                                     "parser_task",
-                                    "parser_task_model",
+                                    "parser_dispatch",
                                     &task_for_dlq,
                                     &retry_policy,
                                     &mut ack_fn,
@@ -379,20 +583,41 @@ impl Engine {
                         }
                     }
 
+                    let _ = status_tracker
+                        .update_status(
+                            &status_task_id,
+                            PipelineStage::ParserTask,
+                            TaskStatus::Running,
+                            0,
+                            &node_id,
+                            None,
+                        )
+                        .await;
+
                     let result = ingress
                         .execute(
-                            UnifiedTaskInput::ParserTask(task.clone()),
+                            UnifiedTaskInput::ParserDispatch(task_dispatch),
                             ProcessorContext::default(),
                         )
                         .await;
                     match result {
                         crate::common::processors::processor::ProcessorResult::Success(mut stream) => {
                             while stream.next().await.is_some() {}
+                            let _ = status_tracker
+                                .update_status(
+                                    &status_task_id,
+                                    PipelineStage::ParserTask,
+                                    TaskStatus::Done,
+                                    0,
+                                    &node_id,
+                                    None,
+                                )
+                                .await;
                             if let Some(comp) = &queue_manager.compensator {
                                 let _ = comp.remove_task("parser_task", &id).await;
                             }
 
-                            if !single_node_mode {
+                            if use_cache_redis_lua {
                                 let done_ttl_s = "86400".to_string();
                                 let commit_args = [
                                     expected_step_s.as_str(),
@@ -428,7 +653,7 @@ impl Engine {
                                             &policy_resolver,
                                             &queue_manager,
                                             "parser_task",
-                                            "parser_task_model",
+                                            "parser_dispatch",
                                             &task_for_dlq,
                                             &retry_policy,
                                             &mut ack_fn,
@@ -445,7 +670,7 @@ impl Engine {
                                             &policy_resolver,
                                             &queue_manager,
                                             "parser_task",
-                                            "parser_task_model",
+                                            "parser_dispatch",
                                             &task_for_dlq,
                                             &retry_policy,
                                             &mut ack_fn,
@@ -468,7 +693,7 @@ impl Engine {
                                             &policy_resolver,
                                             &queue_manager,
                                             "parser_task",
-                                            "parser_task_model",
+                                            "parser_dispatch",
                                             &task_for_dlq,
                                             &retry_policy,
                                             &mut ack_fn,
@@ -488,7 +713,7 @@ impl Engine {
                                             &policy_resolver,
                                             &queue_manager,
                                             "parser_task",
-                                            "parser_task_model",
+                                            "parser_dispatch",
                                             &task_for_dlq,
                                             &retry_policy,
                                             &mut ack_fn,
@@ -507,13 +732,23 @@ impl Engine {
                             }
                         }
                         crate::common::processors::processor::ProcessorResult::RetryableFailure(retry_policy) => {
-                            if !single_node_mode {
+                            let _ = status_tracker
+                                .update_status(
+                                    &status_task_id,
+                                    PipelineStage::ParserTask,
+                                    TaskStatus::Retrying,
+                                    retry_policy.current_retry,
+                                    &node_id,
+                                    retry_policy.reason.clone(),
+                                )
+                                .await;
+                            if use_cache_redis_lua {
                                 let error_hash = format!("retry:{}", id);
                                 let error_emit_key = chain_key::error_emit_key(
-                                    task.run_id,
+                                    parser_seed.run_id,
                                     &module_id,
                                     step_idx as usize,
-                                    task.prefix_request,
+                                    parser_seed.prefix_request,
                                     &error_hash,
                                 );
                                 let fail_ttl_s = "300".to_string();
@@ -555,7 +790,7 @@ impl Engine {
                                             &policy_resolver,
                                             &queue_manager,
                                             "parser_task",
-                                            "parser_task_model",
+                                            "parser_dispatch",
                                             &task_for_dlq,
                                             &retry_policy,
                                             &mut ack_fn,
@@ -581,7 +816,7 @@ impl Engine {
                                 &policy_resolver,
                                 &queue_manager,
                                 "parser_task",
-                                "parser_task_model",
+                                "parser_dispatch",
                                 &task_for_dlq,
                                 &retry_policy,
                                 &mut ack_fn,
@@ -590,13 +825,23 @@ impl Engine {
                             .await;
                         }
                         crate::common::processors::processor::ProcessorResult::FatalFailure(err) => {
-                            if !single_node_mode {
+                            let _ = status_tracker
+                                .update_status(
+                                    &status_task_id,
+                                    PipelineStage::ParserTask,
+                                    TaskStatus::Failed,
+                                    0,
+                                    &node_id,
+                                    Some(err.to_string()),
+                                )
+                                .await;
+                            if use_cache_redis_lua {
                                 let error_hash = format!("fatal:{}", id);
                                 let error_emit_key = chain_key::error_emit_key(
-                                    task.run_id,
+                                    parser_seed.run_id,
                                     &module_id,
                                     step_idx as usize,
-                                    task.prefix_request,
+                                    parser_seed.prefix_request,
                                     &error_hash,
                                 );
                                 let fail_ttl_s = "300".to_string();
@@ -643,7 +888,7 @@ impl Engine {
                                 &policy_resolver,
                                 &queue_manager,
                                 "parser_task",
-                                "parser_task_model",
+                                "parser_dispatch",
                                 &task_for_dlq,
                                 &err,
                                 &mut ack_fn,
@@ -658,7 +903,10 @@ impl Engine {
         .await;
     }
 
-    pub(super) async fn start_error_processor(&self, unified_task_ingress: Arc<UnifiedTaskIngressChain>) {
+    pub(super) async fn start_error_processor(
+        &self,
+        unified_task_ingress: Arc<UnifiedTaskIngressChain>,
+    ) {
         let concurrency = {
             let cfg = self.state.config.read().await;
             cfg.crawler
@@ -670,6 +918,8 @@ impl Engine {
         info!("Starting error processor");
         let queue_manager = self.queue_manager.clone();
         let policy_resolver = PolicyResolver::new(self.state.config.read().await.policy.as_ref());
+        let status_tracker = self.state.status_tracker.clone();
+        let node_id = self.node_id.clone();
 
         self.run_processor_loop(
             "Error",
@@ -679,16 +929,69 @@ impl Engine {
                 let ingress = unified_task_ingress.clone();
                 let queue_manager = queue_manager.clone();
                 let policy_resolver = policy_resolver.clone();
+                let status_tracker = status_tracker.clone();
+                let node_id = node_id.clone();
                 async move {
-                    let (task, mut ack_fn, mut nack_fn) = task_item.into_parts();
-                    let task_for_dlq = task.clone();
-                    let id = task.get_id();
+                    let (task_envelope, mut ack_fn, mut nack_fn) = task_item.into_parts();
+                    let dispatch_id = task_envelope.routing.request_id.to_string();
+                    let dispatch_run_id = task_envelope.routing.run_id.to_string();
+                    let error_seed = match extract_error_envelope_seed(&task_envelope) {
+                        Ok(seed) => seed,
+                        Err(err) => {
+                            error!(
+                                "Failed to extract error task seed {}: {}",
+                                dispatch_id, err
+                            );
+                            let _ = status_tracker
+                                .update_status(
+                                    &dispatch_run_id,
+                                    PipelineStage::Error,
+                                    TaskStatus::Failed,
+                                    0,
+                                    &node_id,
+                                    Some(err.to_string()),
+                                )
+                                .await;
+                            if let Some(f) = nack_fn.take() {
+                                let _ = f(format!("error task envelope seed extraction failed: {err}")).await;
+                            }
+                            return;
+                        }
+                    };
+                    let task_for_dlq = task_envelope.clone();
+                    let id = task_for_dlq.get_id();
+                    let status_task_id = task_envelope.routing.run_id.to_string();
+                    let _ = status_tracker
+                        .update_status(
+                            &status_task_id,
+                            PipelineStage::Error,
+                            TaskStatus::Running,
+                            0,
+                            &node_id,
+                            Some(error_seed.error_message.clone()),
+                        )
+                        .await;
                     let result = ingress
-                        .execute(UnifiedTaskInput::ErrorTask(task), ProcessorContext::default())
+                        .execute(
+                            UnifiedTaskInput::ErrorEnvelope(task_envelope),
+                            ProcessorContext::default(),
+                        )
                         .await;
                     match result {
-                        crate::common::processors::processor::ProcessorResult::Success(mut stream) => {
+                        crate::common::processors::processor::ProcessorResult::Success(
+                            mut stream,
+                        ) => {
                             while stream.next().await.is_some() {}
+                            let _ = status_tracker
+                                .update_status(
+                                    &status_task_id,
+                                    PipelineStage::Error,
+                                    TaskStatus::Done,
+                                    0,
+                                    &node_id,
+                                    None,
+                                )
+                                .await;
                             if let Some(comp) = &queue_manager.compensator {
                                 let _ = comp.remove_task("error_task", &id).await;
                             }
@@ -698,7 +1001,19 @@ impl Engine {
                                 }
                             }
                         }
-                        crate::common::processors::processor::ProcessorResult::RetryableFailure(retry_policy) => {
+                        crate::common::processors::processor::ProcessorResult::RetryableFailure(
+                            retry_policy,
+                        ) => {
+                            let _ = status_tracker
+                                .update_status(
+                                    &status_task_id,
+                                    PipelineStage::Error,
+                                    TaskStatus::Retrying,
+                                    retry_policy.current_retry,
+                                    &node_id,
+                                    retry_policy.reason.clone(),
+                                )
+                                .await;
                             Self::handle_policy_retry(
                                 &policy_resolver,
                                 &queue_manager,
@@ -711,7 +1026,19 @@ impl Engine {
                             )
                             .await;
                         }
-                        crate::common::processors::processor::ProcessorResult::FatalFailure(err) => {
+                        crate::common::processors::processor::ProcessorResult::FatalFailure(
+                            err,
+                        ) => {
+                            let _ = status_tracker
+                                .update_status(
+                                    &status_task_id,
+                                    PipelineStage::Error,
+                                    TaskStatus::Failed,
+                                    0,
+                                    &node_id,
+                                    Some(err.to_string()),
+                                )
+                                .await;
                             Self::handle_policy_failure(
                                 &policy_resolver,
                                 &queue_manager,
@@ -753,6 +1080,8 @@ impl Engine {
         );
         let queue_manager = self.queue_manager.clone();
         let policy_resolver = PolicyResolver::new(self.state.config.read().await.policy.as_ref());
+        let status_tracker = self.state.status_tracker.clone();
+        let node_id = self.node_id.clone();
 
         self.run_processor_loop(
             "Response",
@@ -762,13 +1091,63 @@ impl Engine {
                 let chain = parser_chain.clone();
                 let queue_manager = queue_manager.clone();
                 let policy_resolver = policy_resolver.clone();
+                let status_tracker = status_tracker.clone();
+                let node_id = node_id.clone();
                 async move {
-                    let (response, mut ack_fn, mut nack_fn) = response_item.into_parts();
-                    let response_for_dlq = response.clone();
+                    let (response_dispatch, mut ack_fn, mut nack_fn) = response_item.into_parts();
+                    let response_dispatch_for_dlq = response_dispatch.clone();
+                    let dispatch_id = response_dispatch.routing.request_id.to_string();
+                    let dispatch_run_id = response_dispatch.routing.run_id.to_string();
+                    let dispatch_retry_count = response_dispatch.exec.task_retry_count;
+                    let response = match decode_response_dispatch(response_dispatch) {
+                        Ok(response) => response,
+                        Err(err) => {
+                            error!(
+                                "Failed to decode response envelope {}: {}",
+                                dispatch_id, err
+                            );
+                            let _ = status_tracker
+                                .update_status(
+                                    &dispatch_run_id,
+                                    PipelineStage::Response,
+                                    TaskStatus::Failed,
+                                    dispatch_retry_count,
+                                    &node_id,
+                                    Some(err.to_string()),
+                                )
+                                .await;
+                            if let Some(f) = nack_fn.take() {
+                                let _ = f(format!("response envelope decode failed: {err}")).await;
+                            }
+                            return;
+                        }
+                    };
                     let id = response.get_id();
+                    let status_task_id = response.run_id.to_string();
+                    let retry_count = response.task_retry_times as u32;
+                    let _ = status_tracker
+                        .update_status(
+                            &status_task_id,
+                            PipelineStage::Response,
+                            TaskStatus::Running,
+                            retry_count,
+                            &node_id,
+                            None,
+                        )
+                        .await;
                     let result = chain.execute(response, ProcessorContext::default()).await;
                     match result {
                         crate::common::processors::processor::ProcessorResult::Success(_) => {
+                            let _ = status_tracker
+                                .update_status(
+                                    &status_task_id,
+                                    PipelineStage::Response,
+                                    TaskStatus::Done,
+                                    retry_count,
+                                    &node_id,
+                                    None,
+                                )
+                                .await;
                             if let Some(comp) = &queue_manager.compensator {
                                 let _ = comp.remove_task("response", &id).await;
                             }
@@ -778,26 +1157,50 @@ impl Engine {
                                 }
                             }
                         }
-                        crate::common::processors::processor::ProcessorResult::RetryableFailure(retry_policy) => {
+                        crate::common::processors::processor::ProcessorResult::RetryableFailure(
+                            retry_policy,
+                        ) => {
+                            let _ = status_tracker
+                                .update_status(
+                                    &status_task_id,
+                                    PipelineStage::Response,
+                                    TaskStatus::Retrying,
+                                    retry_policy.current_retry,
+                                    &node_id,
+                                    retry_policy.reason.clone(),
+                                )
+                                .await;
                             Self::handle_policy_retry(
                                 &policy_resolver,
                                 &queue_manager,
                                 "response",
                                 "parser",
-                                &response_for_dlq,
+                                &response_dispatch_for_dlq,
                                 &retry_policy,
                                 &mut ack_fn,
                                 &mut nack_fn,
                             )
                             .await;
                         }
-                        crate::common::processors::processor::ProcessorResult::FatalFailure(err) => {
+                        crate::common::processors::processor::ProcessorResult::FatalFailure(
+                            err,
+                        ) => {
+                            let _ = status_tracker
+                                .update_status(
+                                    &status_task_id,
+                                    PipelineStage::Response,
+                                    TaskStatus::Failed,
+                                    retry_count,
+                                    &node_id,
+                                    Some(err.to_string()),
+                                )
+                                .await;
                             Self::handle_policy_failure(
                                 &policy_resolver,
                                 &queue_manager,
                                 "response",
                                 "parser",
-                                &response_for_dlq,
+                                &response_dispatch_for_dlq,
                                 &err,
                                 &mut ack_fn,
                                 &mut nack_fn,

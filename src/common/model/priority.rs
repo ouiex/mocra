@@ -1,1 +1,1 @@
-pub use crate::utils::priority::{Priority, Prioritizable};
+pub use crate::utils::priority::{Prioritizable, Priority};

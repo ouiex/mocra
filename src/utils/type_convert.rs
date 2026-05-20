@@ -404,9 +404,7 @@ pub fn json_values_to_series_with_target(
                         }
                     }
                     Value::Null => buf.push(None),
-                    Value::String(s) => {
-                        buf.push(None)
-                    }
+                    Value::String(s) => buf.push(None),
                     _ => buf.push(None),
                 }
             }
@@ -418,9 +416,7 @@ pub fn json_values_to_series_with_target(
                 match v {
                     Value::Number(n) => buf.push(n.as_i64()),
                     Value::Null => buf.push(None),
-                    Value::String(s) => {
-                        buf.push(None)
-                    }
+                    Value::String(s) => buf.push(None),
                     _ => buf.push(None),
                 }
             }
@@ -432,9 +428,7 @@ pub fn json_values_to_series_with_target(
                 match v {
                     Value::Number(n) => buf.push(n.as_u64()),
                     Value::Null => buf.push(None),
-                    Value::String(s) => {
-                        buf.push(None)
-                    }
+                    Value::String(s) => buf.push(None),
                     _ => buf.push(None),
                 }
             }

@@ -1,13 +1,11 @@
+use crate::cacheable::CacheAble;
 use crate::common::model::Cookies;
 use crate::common::model::ExecutionMark;
 use crate::common::model::meta::MetaData;
-use crate::cacheable::CacheAble;
 use uuid::Uuid;
 
 use serde::{Deserialize, Serialize};
-#[derive(
-    Debug, Clone, Serialize, Deserialize
-)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Response {
     pub id: Uuid,
     pub platform: String,
@@ -43,7 +41,10 @@ impl Response {
     }
     /// Run-scoped module identifier for error tracking.
     pub fn module_runtime_id(&self) -> String {
-        format!("{}-{}-{}-{}", self.account, self.platform, self.module, self.run_id)
+        format!(
+            "{}-{}-{}-{}",
+            self.account, self.platform, self.module, self.run_id
+        )
     }
     pub fn get_meta<T>(&self, key: &str) -> Option<T>
     where
@@ -105,9 +106,12 @@ impl crate::common::interface::storage::Offloadable for Response {
         self.content.len() > threshold && self.storage_path.is_none()
     }
 
-    async fn offload(&mut self, storage: &std::sync::Arc<dyn crate::common::interface::storage::BlobStorage>) -> crate::errors::Result<()> {
+    async fn offload(
+        &mut self,
+        storage: &std::sync::Arc<dyn crate::common::interface::storage::BlobStorage>,
+    ) -> crate::errors::Result<()> {
         if self.content.is_empty() {
-             return Ok(());
+            return Ok(());
         }
         let key = format!("response/{}/{}.bin", self.run_id, self.id);
         let path = storage.put(&key, &self.content).await?;
@@ -117,9 +121,12 @@ impl crate::common::interface::storage::Offloadable for Response {
         Ok(())
     }
 
-    async fn reload(&mut self, storage: &std::sync::Arc<dyn crate::common::interface::storage::BlobStorage>) -> crate::errors::Result<()> {
+    async fn reload(
+        &mut self,
+        storage: &std::sync::Arc<dyn crate::common::interface::storage::BlobStorage>,
+    ) -> crate::errors::Result<()> {
         if let Some(path) = &self.storage_path {
-            // If content is already present (e.g. reloaded twice), skip? 
+            // If content is already present (e.g. reloaded twice), skip?
             // But if we want to ensure full content, we should check if empty.
             if self.content.is_empty() {
                 let data = storage.get(path).await?;

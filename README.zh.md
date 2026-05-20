@@ -48,9 +48,8 @@ futures = "0.3"
 use std::sync::Arc;
 use async_trait::async_trait;
 use futures::stream;
-use serde_json::{Map, Value};
 use mocra::prelude::*;
-use mocra::common::model::login_info::LoginInfo;
+use mocra::common::model::{NodeGenerateContext, NodeParseContext, NodeParseOutput};
 use mocra::common::state::State;
 use mocra::engine::engine::Engine;
 
@@ -60,19 +59,17 @@ struct FetchNode;
 impl ModuleNodeTrait for FetchNode {
     async fn generate(
         &self,
-        _config: Arc<ModuleConfig>,
-        _params: Map<String, Value>,
-        _login_info: Option<LoginInfo>,
+        _ctx: NodeGenerateContext<'_>,
     ) -> Result<SyncBoxStream<'static, Request>> {
         let req = Request::new("https://httpbin.org/get", RequestMethod::Get.as_ref());
         Ok(Box::pin(stream::iter(vec![req])))
     }
 
     async fn parser(
-        &self, response: Response, _config: Option<Arc<ModuleConfig>>,
-    ) -> Result<TaskOutputEvent> {
-        println!("状态码: {}, 响应体: {} 字节", response.status, response.body.len());
-        Ok(TaskOutputEvent::default())
+        &self, response: Response, _ctx: NodeParseContext<'_>,
+    ) -> Result<NodeParseOutput> {
+        println!("状态码: {}, 响应体: {} 字节", response.status_code, response.content.len());
+        Ok(NodeParseOutput::default())
     }
 }
 
@@ -80,7 +77,7 @@ struct MyModule;
 
 #[async_trait]
 impl ModuleTrait for MyModule {
-    fn name(&self) -> String { "my_module".into() }
+    fn name(&self) -> &'static str { "my_module" }
     fn version(&self) -> i32 { 1 }
     fn should_login(&self) -> bool { false }
     fn default_arc() -> Arc<dyn ModuleTrait> { Arc::new(Self) }

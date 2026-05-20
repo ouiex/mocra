@@ -2,11 +2,10 @@
 #![allow(unused)]
 pub mod prelude;
 
-pub mod log;
-pub mod task_result;
 pub mod account;
 pub mod data_middleware;
 pub mod download_middleware;
+pub mod log;
 pub mod module;
 pub mod platform;
 pub mod rel_account_platform;
@@ -14,6 +13,7 @@ pub mod rel_module_account;
 pub mod rel_module_data_middleware;
 pub mod rel_module_download_middleware;
 pub mod rel_module_platform;
+pub mod task_result;
 
 pub use log::{Column as LogColumn, Entity as LogEntity, Model as LogModel};
 pub use task_result::{

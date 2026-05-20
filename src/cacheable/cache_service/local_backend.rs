@@ -1,7 +1,7 @@
 use super::backend::CacheBackend;
+use crate::errors::CacheError;
 use dashmap::DashMap;
 use deadpool_redis::redis::Value as RedisValue;
-use crate::errors::CacheError;
 use std::time::{Duration, Instant};
 
 pub struct LocalBackend {
@@ -61,7 +61,11 @@ impl CacheBackend for LocalBackend {
         self.keys_with_limit(pattern, usize::MAX).await
     }
 
-    async fn keys_with_limit(&self, pattern: &str, limit: usize) -> Result<Vec<String>, CacheError> {
+    async fn keys_with_limit(
+        &self,
+        pattern: &str,
+        limit: usize,
+    ) -> Result<Vec<String>, CacheError> {
         let prefix = pattern.trim_end_matches('*');
         let now = Instant::now();
         let mut keys = Vec::new();
@@ -87,7 +91,12 @@ impl CacheBackend for LocalBackend {
         Ok(keys)
     }
 
-    async fn set_nx(&self, key: &str, value: &[u8], ttl: Option<Duration>) -> Result<bool, CacheError> {
+    async fn set_nx(
+        &self,
+        key: &str,
+        value: &[u8],
+        ttl: Option<Duration>,
+    ) -> Result<bool, CacheError> {
         let now = Instant::now();
         let expires_at = ttl.map(|d| now + d);
 
@@ -113,7 +122,12 @@ impl CacheBackend for LocalBackend {
         }
     }
 
-    async fn set_nx_batch(&self, keys: &[&str], value: &[u8], ttl: Option<Duration>) -> Result<Vec<bool>, CacheError> {
+    async fn set_nx_batch(
+        &self,
+        keys: &[&str],
+        value: &[u8],
+        ttl: Option<Duration>,
+    ) -> Result<Vec<bool>, CacheError> {
         let mut results = Vec::with_capacity(keys.len());
         for key in keys {
             results.push(self.set_nx(key, value, ttl).await?);
@@ -167,7 +181,12 @@ impl CacheBackend for LocalBackend {
         Ok(if removed { 0 } else { 1 })
     }
 
-    async fn zrangebyscore(&self, key: &str, min: f64, max: f64) -> Result<Vec<Vec<u8>>, CacheError> {
+    async fn zrangebyscore(
+        &self,
+        key: &str,
+        min: f64,
+        max: f64,
+    ) -> Result<Vec<Vec<u8>>, CacheError> {
         if let Some(entry) = self.zstore.get(key) {
             let vec = entry.value();
             let res = vec
@@ -193,21 +212,31 @@ impl CacheBackend for LocalBackend {
     async fn script_load(&self, script: &str) -> Result<String, CacheError> {
         let _ = script;
         Err(CacheError::Pool(
-            "Lua scripts are only supported in distributed Redis mode".to_string(),
+            "Lua scripts require a cache-backed Redis backend".to_string(),
         ))
     }
 
-    async fn evalsha(&self, sha: &str, keys: &[&str], args: &[&str]) -> Result<RedisValue, CacheError> {
+    async fn evalsha(
+        &self,
+        sha: &str,
+        keys: &[&str],
+        args: &[&str],
+    ) -> Result<RedisValue, CacheError> {
         let _ = (sha, keys, args);
         Err(CacheError::Pool(
-            "Lua scripts are only supported in distributed Redis mode".to_string(),
+            "Lua scripts require a cache-backed Redis backend".to_string(),
         ))
     }
 
-    async fn eval_lua(&self, script: &str, keys: &[&str], args: &[&str]) -> Result<RedisValue, CacheError> {
+    async fn eval_lua(
+        &self,
+        script: &str,
+        keys: &[&str],
+        args: &[&str],
+    ) -> Result<RedisValue, CacheError> {
         let _ = (script, keys, args);
         Err(CacheError::Pool(
-            "Lua scripts are only supported in distributed Redis mode".to_string(),
+            "Lua scripts require a cache-backed Redis backend".to_string(),
         ))
     }
 }

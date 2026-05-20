@@ -1,9 +1,9 @@
 #![allow(unused)]
-use deadpool_redis::redis::{AsyncCommands};
-use serde_json::{json, Value};
+use deadpool_redis::redis;
+use deadpool_redis::redis::AsyncCommands;
+use serde_json::{Value, json};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
-use deadpool_redis::redis;
 
 /// Read-only monitoring API over Redis-backed event data.
 ///
@@ -50,14 +50,28 @@ impl RedisEventMonitor {
     }
 
     /// Returns aggregated real-time counters and derived success-rate metrics.
-    pub async fn get_system_stats(&self) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
-        let mut conn = self.redis_pool.get().await
+    pub async fn get_system_stats(
+        &self,
+    ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+        let mut conn = self
+            .redis_pool
+            .get()
+            .await
             .map_err(|e| format!("Redis connection failed: {e}"))?;
 
         // Read high-level counters.
-        let request_success: i64 = conn.get(format!("{}:stats:request_success_count", self.key_prefix)).await.unwrap_or(0);
-        let request_fail: i64 = conn.get(format!("{}:stats:request_fail_count", self.key_prefix)).await.unwrap_or(0);
-        let task_fail: i64 = conn.get(format!("{}:stats:task_fail_count", self.key_prefix)).await.unwrap_or(0);
+        let request_success: i64 = conn
+            .get(format!("{}:stats:request_success_count", self.key_prefix))
+            .await
+            .unwrap_or(0);
+        let request_fail: i64 = conn
+            .get(format!("{}:stats:request_fail_count", self.key_prefix))
+            .await
+            .unwrap_or(0);
+        let task_fail: i64 = conn
+            .get(format!("{}:stats:task_fail_count", self.key_prefix))
+            .await
+            .unwrap_or(0);
 
         // Read per-event counters for selected core event keys.
         let mut event_counts = json!({});
@@ -71,13 +85,16 @@ impl RedisEventMonitor {
             "engine.download.started",
             "engine.download.completed",
             "engine.download.failed",
-            "engine.parser_task_model.started",
-            "engine.parser_task_model.completed",
-            "engine.parser_task_model.failed",
+            "engine.parser_dispatch.started",
+            "engine.parser_dispatch.completed",
+            "engine.parser_dispatch.failed",
         ];
 
         for event_type in &event_types {
-            let count: i64 = conn.get(format!("{}:stats:count:{}", self.key_prefix, event_type)).await.unwrap_or(0);
+            let count: i64 = conn
+                .get(format!("{}:stats:count:{}", self.key_prefix, event_type))
+                .await
+                .unwrap_or(0);
             event_counts[event_type] = json!(count);
         }
 
@@ -96,21 +113,32 @@ impl RedisEventMonitor {
     }
 
     /// Returns progress information for a specific task id.
-    pub async fn get_task_progress(&self, task_id: &str) -> Result<Option<Value>, Box<dyn std::error::Error + Send + Sync>> {
-        let mut conn = self.redis_pool.get().await
+    pub async fn get_task_progress(
+        &self,
+        task_id: &str,
+    ) -> Result<Option<Value>, Box<dyn std::error::Error + Send + Sync>> {
+        let mut conn = self
+            .redis_pool
+            .get()
+            .await
             .map_err(|e| format!("Redis connection failed: {e}"))?;
         let progress_key = format!("{}:progress:task:{}", self.key_prefix, task_id);
 
         let progress_data: Option<String> = conn.get(&progress_key).await?;
         match progress_data {
             Some(data) => Ok(Some(serde_json::from_str(&data)?)),
-            None => Ok(None)
+            None => Ok(None),
         }
     }
 
     /// Returns progress entries for all active tasks.
-    pub async fn get_all_task_progress(&self) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
-        let mut conn = self.redis_pool.get().await
+    pub async fn get_all_task_progress(
+        &self,
+    ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+        let mut conn = self
+            .redis_pool
+            .get()
+            .await
             .map_err(|e| format!("Redis connection failed: {e}"))?;
         let pattern = format!("{}:progress:task:*", self.key_prefix);
 
@@ -120,10 +148,11 @@ impl RedisEventMonitor {
 
         for key in keys {
             if let Ok(Some(data)) = conn.get::<&str, Option<String>>(&key).await
-                && let Ok(task_data) = serde_json::from_str::<Value>(&data) {
-                    let task_id = key.split(':').next_back().unwrap_or("unknown");
-                    tasks[task_id] = task_data;
-                }
+                && let Ok(task_data) = serde_json::from_str::<Value>(&data)
+            {
+                let task_id = key.split(':').next_back().unwrap_or("unknown");
+                tasks[task_id] = task_data;
+            }
         }
 
         Ok(json!({
@@ -134,8 +163,14 @@ impl RedisEventMonitor {
     }
 
     /// Returns recent download performance records and summary statistics.
-    pub async fn get_download_performance(&self, limit: usize) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
-        let mut conn = self.redis_pool.get().await
+    pub async fn get_download_performance(
+        &self,
+        limit: usize,
+    ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+        let mut conn = self
+            .redis_pool
+            .get()
+            .await
             .map_err(|e| format!("Redis connection failed: {e}"))?;
         let perf_key = format!("{}:stats:download_performance", self.key_prefix);
 
@@ -145,14 +180,16 @@ impl RedisEventMonitor {
             .arg((limit as isize) - 1)
             .query_async(&mut *conn)
             .await?;
-        
+
         let mut performances = Vec::new();
         let mut total_duration = 0u64;
         let mut total_size = 0u64;
-        
+
         for data_str in performance_data {
             if let Ok(data) = serde_json::from_str::<Value>(&data_str) {
-                if let (Some(duration), Some(size)) = (data["duration_ms"].as_u64(), data["response_size"].as_u64()) {
+                if let (Some(duration), Some(size)) =
+                    (data["duration_ms"].as_u64(), data["response_size"].as_u64())
+                {
                     total_duration += duration;
                     total_size += size;
                 }
@@ -175,20 +212,27 @@ impl RedisEventMonitor {
     }
 
     /// Returns recent failure events ordered by descending timestamp.
-    pub async fn get_error_details(&self, limit: usize) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
-        let mut conn = self.redis_pool.get().await
+    pub async fn get_error_details(
+        &self,
+        limit: usize,
+    ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+        let mut conn = self
+            .redis_pool
+            .get()
+            .await
             .map_err(|e| format!("Redis connection failed: {e}"))?;
-        
+
         // Read recent failure-related event keys.
         let error_pattern = format!("{}:events:*failed", self.key_prefix);
         let keys = Self::scan_keys(&mut conn, &error_pattern).await?;
-        
+
         let mut errors = Vec::new();
         for key in keys.into_iter().take(limit) {
             if let Ok(Some(data)) = conn.get::<&str, Option<String>>(&key).await
-                && let Ok(error_data) = serde_json::from_str::<Value>(&data) {
-                    errors.push(error_data);
-                }
+                && let Ok(error_data) = serde_json::from_str::<Value>(&data)
+            {
+                errors.push(error_data);
+            }
         }
 
         // Sort by timestamp.
@@ -206,8 +250,15 @@ impl RedisEventMonitor {
     }
 
     /// Returns time-series points for `event_type` in the latest `hours` window.
-    pub async fn get_timeseries_data(&self, event_type: &str, hours: u64) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
-        let mut conn = self.redis_pool.get().await
+    pub async fn get_timeseries_data(
+        &self,
+        event_type: &str,
+        hours: u64,
+    ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+        let mut conn = self
+            .redis_pool
+            .get()
+            .await
             .map_err(|e| format!("Redis connection failed: {e}"))?;
         let ts_key = format!("{}:timeseries:{}", self.key_prefix, event_type);
 
@@ -220,7 +271,7 @@ impl RedisEventMonitor {
             .arg(current_time as f64)
             .query_async(&mut *conn)
             .await?;
-        
+
         let mut timeseries = Vec::new();
         for item in data {
             if let Ok(ts_data) = serde_json::from_str::<Value>(&item) {
@@ -238,27 +289,33 @@ impl RedisEventMonitor {
     }
 
     /// Returns a synthesized health report from recent system health events.
-    pub async fn get_health_report(&self) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
-        let mut conn = self.redis_pool.get().await
+    pub async fn get_health_report(
+        &self,
+    ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+        let mut conn = self
+            .redis_pool
+            .get()
+            .await
             .map_err(|e| format!("Redis connection failed: {e}"))?;
-        
+
         // Read recent health-check events.
         let health_pattern = format!("{}:events:system.system_health.*", self.key_prefix);
         let keys = Self::scan_keys(&mut conn, &health_pattern).await?;
-        
+
         let mut health_data = json!({});
         for key in keys {
             if let Ok(Some(data)) = conn.get::<&str, Option<String>>(&key).await
                 && let Ok(health_info) = serde_json::from_str::<Value>(&data)
-                    && let Some(component) = health_info["data"]["payload"]["component"].as_str() {
-                        health_data[component] = health_info["data"].clone();
-                    }
+                && let Some(component) = health_info["data"]["payload"]["component"].as_str()
+            {
+                health_data[component] = health_info["data"].clone();
+            }
         }
 
         // Compute overall status from component-level statuses.
         let mut healthy_components = 0;
         let mut total_components = 0;
-        
+
         if let Some(components) = health_data.as_object() {
             total_components = components.len();
             for (_, component_data) in components {
@@ -269,10 +326,16 @@ impl RedisEventMonitor {
         }
 
         let overall_health = if total_components > 0 {
-            if healthy_components == total_components { "healthy" }
-            else if healthy_components > 0 { "degraded" }
-            else { "unhealthy" }
-        } else { "unknown" };
+            if healthy_components == total_components {
+                "healthy"
+            } else if healthy_components > 0 {
+                "degraded"
+            } else {
+                "unhealthy"
+            }
+        } else {
+            "unknown"
+        };
 
         Ok(json!({
             "overall_status": overall_health,
@@ -284,8 +347,13 @@ impl RedisEventMonitor {
     }
 
     /// Cleans up expired time-series points and returns deleted entry count.
-    pub async fn cleanup_expired_data(&self) -> Result<u64, Box<dyn std::error::Error + Send + Sync>> {
-        let mut conn = self.redis_pool.get().await
+    pub async fn cleanup_expired_data(
+        &self,
+    ) -> Result<u64, Box<dyn std::error::Error + Send + Sync>> {
+        let mut conn = self
+            .redis_pool
+            .get()
+            .await
             .map_err(|e| format!("Redis connection failed: {e}"))?;
         let current_time = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
         let cutoff_time = current_time - (24 * 3600);
@@ -295,7 +363,7 @@ impl RedisEventMonitor {
         // Remove old points from each time-series key.
         let ts_pattern = format!("{}:timeseries:*", self.key_prefix);
         let ts_keys = Self::scan_keys(&mut conn, &ts_pattern).await?;
-        
+
         for key in ts_keys {
             let removed: u64 = redis::cmd("ZREMRANGEBYSCORE")
                 .arg(&key)
