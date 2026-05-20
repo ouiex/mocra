@@ -332,7 +332,7 @@ impl TaskManager {
     /// Compiles a module DAG by module name using the unified `compile_module` strategy.
     ///
     /// - custom `dag_definition()` only → compile custom DAG.
-    /// - `add_step()` only → compile linear-compat DAG.
+    /// - `add_step()` only → compile linear DAG.
     /// - both present → merge into one multi-route DAG.
     pub async fn compile_module_dag(
         &self,

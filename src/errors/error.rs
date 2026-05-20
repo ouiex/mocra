@@ -654,8 +654,6 @@ pub enum DynLibError {
 
 #[derive(Error, Debug)]
 pub enum CacheError {
-    #[error("Redis error: {0}")]
-    Redis(#[from] deadpool_redis::redis::RedisError),
     #[error("Pool error: {0}")]
     Pool(String),
     #[error("Serialization error: {0}")]

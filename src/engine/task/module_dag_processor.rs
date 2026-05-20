@@ -24,7 +24,7 @@ use crate::engine::task::module_dag_compiler::{
     ModuleDagCompiler, ModuleDagDefinition, ModuleDagNodeDef,
 };
 use crate::engine::task::node_context_adapter::{
-    build_legacy_generate_context_with_common, build_legacy_parse_context_with_common,
+    build_module_config_generate_context, build_module_config_parse_context,
 };
 use crate::engine::task::parser_error_adapter::{
     ErrorEnvelopeSeed, ParserDispatchSeed, TypedParserOutput,
@@ -168,9 +168,8 @@ pub struct ModuleDagProcessor {
     profile_version: u64,
     dag_version: String,
     cache: Arc<CacheService>,
-    ttl: u64,
     default_common_config: Arc<RwLock<ResolvedCommonConfig>>,
-    /// Node registry: preserves definition order so index-based backward-compat lookup works.
+    /// Node registry: preserves definition order for index-based routing.
     nodes: Arc<RwLock<IndexMap<String, Arc<dyn ModuleNodeTrait>>>>,
     /// Explicit runtime routing hints derived from DAG node placement and policy.
     node_routing_hints: Arc<RwLock<HashMap<String, RuntimeNodeRoutingHint>>>,
@@ -184,14 +183,13 @@ pub struct ModuleDagProcessor {
 
 impl ModuleDagProcessor {
     /// Creates an empty processor. Call `init_from_definition` before use.
-    pub fn new(module_id: String, cache: Arc<CacheService>, run_id: Uuid, ttl: u64) -> Self {
+    pub fn new(module_id: String, cache: Arc<CacheService>, run_id: Uuid, _ttl: u64) -> Self {
         Self {
             module_id,
             run_id,
             profile_version: 0,
             dag_version: String::new(),
             cache,
-            ttl,
             default_common_config: Arc::new(RwLock::new(ResolvedCommonConfig::default())),
             nodes: Arc::new(RwLock::new(IndexMap::new())),
             node_routing_hints: Arc::new(RwLock::new(HashMap::new())),
@@ -368,7 +366,7 @@ impl ModuleDagProcessor {
         );
     }
 
-    /// Total registered nodes (used for legacy compatibility checks).
+    /// Total registered nodes.
     pub async fn get_total_nodes(&self) -> usize {
         let nodes: tokio::sync::RwLockReadGuard<IndexMap<String, Arc<dyn ModuleNodeTrait>>> =
             self.nodes.read().await;
@@ -381,7 +379,7 @@ impl ModuleDagProcessor {
     ///
     /// Priority:
     /// 1. `ctx.node_id` if set
-    /// 2. `ctx.step_idx` → index into `nodes` (backward compat for in-flight queue messages)
+    /// 2. `ctx.step_idx` → index into `nodes`
     /// 3. First entry node (initial call with no context)
     async fn resolve_node_id(&self, ctx: &Option<ExecutionMark>) -> Option<String> {
         if let Some(mark) = ctx {
@@ -390,7 +388,7 @@ impl ModuleDagProcessor {
                     return Some(nid.clone());
                 }
             }
-            // Backward compat: step_idx → positional lookup.
+            // step_idx → positional lookup.
             if let Some(idx) = mark.step_idx {
                 let nodes: tokio::sync::RwLockReadGuard<
                     IndexMap<String, Arc<dyn ModuleNodeTrait>>,
@@ -787,7 +785,7 @@ impl ModuleDagProcessor {
 
         // Clean up all advance gate keys for this run.
         // Successors are already in memory — enumerate every edge and delete its gate key
-        // without needing a Redis SCAN.
+        // without needing a backend-wide scan.
         let gate_keys: Vec<String> = {
             let succ = self.successors.read().await;
             succ.iter()
@@ -958,7 +956,7 @@ impl ModuleDagProcessor {
             mark
         };
         let default_common = self.default_common_config.read().await.clone();
-        let node_ctx = build_legacy_generate_context_with_common(
+        let node_ctx = build_module_config_generate_context(
             &self.module_id,
             self.run_id,
             &node_id,
@@ -1065,7 +1063,7 @@ impl ModuleDagProcessor {
         };
 
         let default_common = self.default_common_config.read().await.clone();
-        let parse_ctx = build_legacy_parse_context_with_common(
+        let parse_ctx = build_module_config_parse_context(
             &self.module_id,
             &node_id,
             default_common,
@@ -1131,9 +1129,7 @@ mod tests {
         );
     }
 
-    struct DummyNode {
-        pub name: &'static str,
-    }
+    struct DummyNode;
 
     #[async_trait]
     impl ModuleNodeTrait for DummyNode {
@@ -1162,9 +1158,7 @@ mod tests {
             .iter()
             .map(|id| ModuleDagNodeDef {
                 node_id: id.clone(),
-                node: Arc::new(DummyNode {
-                    name: Box::leak(id.clone().into_boxed_str()),
-                }),
+                node: Arc::new(DummyNode),
                 placement_override: None,
                 policy_override: None,
                 tags: vec![],
@@ -1657,7 +1651,7 @@ mod tests {
         let def = ModuleDagDefinition {
             nodes: vec![ModuleDagNodeDef {
                 node_id: "node_a".into(),
-                node: Arc::new(DummyNode { name: "node_a" }),
+                node: Arc::new(DummyNode),
                 placement_override: Some(NodePlacement::remote("wg-parser")),
                 policy_override: None,
                 tags: vec![],
@@ -1717,7 +1711,7 @@ mod tests {
         let def = ModuleDagDefinition {
             nodes: vec![ModuleDagNodeDef {
                 node_id: "node_a".into(),
-                node: Arc::new(DummyNode { name: "node_a" }),
+                node: Arc::new(DummyNode),
                 placement_override: Some(NodePlacement::remote("wg-parser")),
                 policy_override: None,
                 tags: vec![],
@@ -1773,14 +1767,14 @@ mod tests {
             nodes: vec![
                 ModuleDagNodeDef {
                     node_id: "node_a".into(),
-                    node: Arc::new(DummyNode { name: "node_a" }),
+                    node: Arc::new(DummyNode),
                     placement_override: Some(NodePlacement::remote("wg-a")),
                     policy_override: Some(policy.clone()),
                     tags: vec![],
                 },
                 ModuleDagNodeDef {
                     node_id: "node_b".into(),
-                    node: Arc::new(DummyNode { name: "node_b" }),
+                    node: Arc::new(DummyNode),
                     placement_override: None,
                     policy_override: None,
                     tags: vec![],
@@ -1829,14 +1823,14 @@ mod tests {
             nodes: vec![
                 ModuleDagNodeDef {
                     node_id: "node_a".into(),
-                    node: Arc::new(DummyNode { name: "node_a" }),
+                    node: Arc::new(DummyNode),
                     placement_override: Some(NodePlacement::remote("wg-a")),
                     policy_override: Some(policy.clone()),
                     tags: vec![],
                 },
                 ModuleDagNodeDef {
                     node_id: "node_b".into(),
-                    node: Arc::new(DummyNode { name: "node_b" }),
+                    node: Arc::new(DummyNode),
                     placement_override: None,
                     policy_override: None,
                     tags: vec![],
@@ -1880,14 +1874,14 @@ mod tests {
             nodes: vec![
                 ModuleDagNodeDef {
                     node_id: "node_a".into(),
-                    node: Arc::new(DummyNode { name: "node_a" }),
+                    node: Arc::new(DummyNode),
                     placement_override: None,
                     policy_override: None,
                     tags: vec![],
                 },
                 ModuleDagNodeDef {
                     node_id: "node_b".into(),
-                    node: Arc::new(DummyNode { name: "node_b" }),
+                    node: Arc::new(DummyNode),
                     placement_override: None,
                     policy_override: None,
                     tags: vec![],

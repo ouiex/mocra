@@ -66,7 +66,7 @@ pub trait ModuleTrait: Send + Sync {
     /// Optional custom DAG definition built from ModuleNodeTrait nodes.
     ///
     /// - `Some(definition)`: use custom DAG path.
-    /// - `None`: fallback to legacy `add_step` linear DAG.
+    /// - `None`: build a linear DAG from `add_step`.
     ///
     /// When both `dag_definition()` and `add_step()` are implemented, the custom DAG
     /// takes precedence and `add_step()` is ignored.
@@ -148,8 +148,7 @@ pub trait ModuleNodeTrait: Send + Sync {
     /// reconstruct the module instance), so error retry routing works correctly.
     ///
     /// Override this and return a short constant string that is unique among all
-    /// nodes in the same module's DAG. Default is `""` (random UUID, existing
-    /// behavior preserved for backward compatibility).
+    /// nodes in the same module's DAG. Default is `""` (random UUID).
     fn stable_node_key(&self) -> &'static str {
         ""
     }

@@ -4,9 +4,8 @@ use crate::common::interface::{
 use crate::common::model::entity::{AccountModel, PlatformModel};
 use crate::common::model::login_info::LoginInfo;
 use crate::common::model::{
-    Cookies, ExecutionMeta, Headers, ModuleConfig, NodeInput, PayloadCodec, Request,
-    ResolvedCommonConfig, Response, RoutingMeta, TaskProfileSnapshot, TypedEnvelope,
-    WorkflowDefinition,
+    Cookies, ExecutionMeta, Headers, ModuleConfig, NodeInput, PayloadCodec, Request, Response,
+    RoutingMeta, TaskProfileSnapshot, TypedEnvelope, WorkflowDefinition,
 };
 use crate::common::response_cache::apply_request_response_cache_policy;
 use crate::engine::task::module_dag_orchestrator::ModuleDagOrchestrator;
@@ -663,7 +662,9 @@ mod tests {
     };
     use crate::common::model::data::DataEvent;
     use crate::common::model::entity::{AccountModel, PlatformModel};
-    use crate::common::model::{ExecutionMark, NodeParseOutput, Priority, Request, Response};
+    use crate::common::model::{
+        ExecutionMark, NodeParseOutput, Priority, Request, ResolvedCommonConfig, Response,
+    };
     use crate::common::response_cache::{RESPONSE_CACHE_EXPIRES_AT_KEY, current_time_ms};
     use crate::engine::task::module_dag_compiler::{ModuleDagDefinition, ModuleDagNodeDef};
     use crate::engine::task::module_dag_processor::ModuleDagProcessor;
@@ -1794,7 +1795,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn generate_with_empty_dag_does_not_use_legacy_generate_path() {
+    async fn generate_with_empty_dag_uses_scheduler_bridge_only() {
         let module = build_test_module(Arc::new(EmptyDagTestModule), None);
         module.add_step().await;
 

@@ -73,7 +73,7 @@ impl SlidingWindowRateLimiter {
         }
     }
 
-    /// Creates a simple limiter (backward-compatible helper).
+    /// Creates a simple limiter.
     ///
     /// # Parameters
     /// * `max_requests_per_second` - Maximum requests per second (supports decimals).

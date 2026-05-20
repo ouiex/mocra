@@ -23,7 +23,7 @@ mod tests {
     use super::NodeInfo;
 
     #[test]
-    fn node_info_deserializes_legacy_payload_without_api_port() {
+    fn node_info_deserializes_payload_without_api_port() {
         let node: NodeInfo = serde_json::from_str(
             r#"{
                 "id": "node-a",
@@ -33,7 +33,7 @@ mod tests {
                 "version": "0.2.16"
             }"#,
         )
-        .expect("legacy node info should deserialize");
+        .expect("node info should deserialize");
 
         assert_eq!(node.api_port, None);
         assert_eq!(node.id, "node-a");

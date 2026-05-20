@@ -173,7 +173,7 @@ impl ModuleDagOrchestrator {
     ///
     /// Behavior:
     /// - only `dag_definition()`: compile custom DAG.
-    /// - only `add_step()`: compile linear-compat DAG.
+    /// - only `add_step()`: compile linear DAG.
     /// - both present: merge into one multi-route DAG and compile.
     pub async fn compile_module(&self, module: Arc<dyn ModuleTrait>) -> Result<Dag, DagError> {
         self.compile_definition(self.build_definition(module).await)
@@ -353,8 +353,8 @@ mod tests {
         ModuleDagDefinition, ModuleDagEdgeDef, ModuleDagNodeDef,
     };
     use crate::engine::task::module_node_runtime_bridge::{
-        build_legacy_generate_runtime_input_with_common,
-        build_legacy_parse_runtime_input_with_common,
+        build_module_config_generate_runtime_input,
+        build_module_config_parse_runtime_input,
         decode_parser_output_payload, decode_request_batch_payload,
     };
     use crate::errors::Result;
@@ -573,7 +573,7 @@ mod tests {
             .expect("compiled dag should have one node")
             .id
             .clone();
-        let runtime_input = build_legacy_generate_runtime_input_with_common(
+        let runtime_input = build_module_config_generate_runtime_input(
             "account-a-platform-x-dummy_module_for_orchestrator",
             Uuid::now_v7(),
             &node_id,
@@ -636,7 +636,7 @@ mod tests {
             request_hash: None,
             priority: Default::default(),
         };
-        let runtime_input = build_legacy_parse_runtime_input_with_common(
+        let runtime_input = build_module_config_parse_runtime_input(
             "account-a-platform-x-dummy_module_for_orchestrator",
             &node_id,
             crate::common::model::ResolvedCommonConfig::default(),
@@ -693,7 +693,7 @@ mod tests {
             .expect("topological sort should succeed");
         assert!(topo.iter().any(|id| id == "custom_root"));
         assert!(topo.iter().any(|id| id == "custom_leaf"));
-        assert!(!topo.iter().any(|id| id.starts_with("legacy_")));
+        assert!(!topo.iter().any(|id| id.starts_with("linear_step_")));
     }
 
     #[tokio::test]

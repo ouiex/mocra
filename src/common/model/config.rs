@@ -25,53 +25,6 @@ impl fmt::Debug for Api {
     }
 }
 
-/// Redis Configuration
-#[derive(Serialize, Deserialize, Clone)]
-pub struct RedisConfig {
-    /// Redis server hostname
-    pub redis_host: String,
-    /// Redis server port
-    pub redis_port: u16,
-    /// Redis database index
-    pub redis_db: u16,
-    /// Optional Redis username
-    pub redis_username: Option<String>,
-    /// Optional Redis password
-    pub redis_password: Option<String>,
-    /// Connection pool size
-    pub pool_size: Option<usize>,
-    /// Number of shards for stream operations
-    pub shards: Option<usize>,
-    /// Enable TLS for connection
-    pub tls: Option<bool>,
-    /// Minimum idle time in milliseconds for claiming stuck messages (default: 600000)
-    pub claim_min_idle: Option<u64>,
-    /// Number of messages to claim at once (default: 10)
-    pub claim_count: Option<usize>,
-    /// Interval in milliseconds for claiming stuck messages check (default: 60000)
-    pub claim_interval: Option<u64>,
-    /// Number of listener tasks for sharded multiplexing (default: 4)
-    pub listener_count: Option<usize>,
-}
-
-impl fmt::Debug for RedisConfig {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("RedisConfig")
-            .field("redis_host", &self.redis_host)
-            .field("redis_port", &self.redis_port)
-            .field("redis_db", &self.redis_db)
-            .field("redis_username", &self.redis_username)
-            .field(
-                "redis_password",
-                &self.redis_password.as_ref().map(|_| "***REDACTED***"),
-            )
-            .field("pool_size", &self.pool_size)
-            .field("shards", &self.shards)
-            .field("tls", &self.tls)
-            .finish()
-    }
-}
-
 /// Database Configuration
 #[derive(Serialize, Deserialize, Clone)]
 pub struct DatabaseConfig {
@@ -124,20 +77,11 @@ pub struct DownloadConfig {
 /// Synchronization Configuration
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct SyncConfig {
-    /// Redis configuration for synchronization
-    pub redis: Option<RedisConfig>,
     /// Kafka configuration for synchronization
     pub kafka: Option<KafkaConfig>,
-    /// Allow rollback to older versions (default: true)
-    #[serde(default = "default_sync_allow_rollback")]
-    pub allow_rollback: bool,
     /// Enable versioned envelope for sync payloads (default: false)
     #[serde(default = "default_sync_envelope_enabled")]
     pub envelope_enabled: bool,
-}
-
-fn default_sync_allow_rollback() -> bool {
-    true
 }
 
 fn default_sync_envelope_enabled() -> bool {
@@ -147,21 +91,17 @@ fn default_sync_envelope_enabled() -> bool {
 impl Default for SyncConfig {
     fn default() -> Self {
         Self {
-            redis: None,
             kafka: None,
-            allow_rollback: true,
             envelope_enabled: false,
         }
     }
 }
 
-/// Explicit cache backend kind — overrides Redis-pool inference.
+/// Explicit cache backend kind.
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum CacheBackendKind {
     Local,
-    Redis,
-    TwoLevel,
     RaftRocksdb,
 }
 
@@ -170,10 +110,8 @@ pub enum CacheBackendKind {
 pub struct CacheConfig {
     /// Default TTL for cache items
     pub ttl: u64,
-    /// Explicit backend selection (overrides Redis-pool inference).
+    /// Explicit backend selection.
     pub backend: Option<CacheBackendKind>,
-    /// Redis configuration for cache storage
-    pub redis: Option<RedisConfig>,
     /// Compression threshold in bytes (payloads larger than this will be compressed)
     pub compression_threshold: Option<usize>,
     /// Enable L1 local cache layer (default: false)
@@ -224,9 +162,6 @@ pub struct SchedulerIngressCutoverGateConfig {
     pub recovery_window_secs: Option<u64>,
     /// Cutover gray ratio in [0, 1], where 1 means full cutover.
     pub gray_ratio: Option<f64>,
-    /// When true, gate-blocked messages fall back to the old parser/error chain.
-    /// Default false: gate-blocked messages return retryable fail-closed.
-    pub legacy_scheduler_ingress_fallback_enabled: Option<bool>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -234,7 +169,6 @@ pub struct SchedulerIngressCutoverGateConfigResolved {
     pub failure_threshold: usize,
     pub recovery_window_secs: u64,
     pub gray_ratio: f64,
-    pub legacy_scheduler_ingress_fallback_enabled: bool,
 }
 
 impl Default for SchedulerIngressCutoverGateConfigResolved {
@@ -243,7 +177,6 @@ impl Default for SchedulerIngressCutoverGateConfigResolved {
             failure_threshold: 3,
             recovery_window_secs: 60,
             gray_ratio: 1.0,
-            legacy_scheduler_ingress_fallback_enabled: false,
         }
     }
 }
@@ -258,9 +191,6 @@ impl CrawlerConfig {
                 .gray_ratio
                 .unwrap_or(resolved.gray_ratio)
                 .clamp(0.0, 1.0);
-            resolved.legacy_scheduler_ingress_fallback_enabled =
-                cfg.legacy_scheduler_ingress_fallback_enabled
-                    .unwrap_or(resolved.legacy_scheduler_ingress_fallback_enabled);
         }
         resolved
     }
@@ -318,12 +248,8 @@ pub struct BlobStorageConfig {
 pub struct ChannelConfig {
     /// Blob storage configuration
     pub blob_storage: Option<BlobStorageConfig>,
-    /// Redis configuration for queue
-    pub redis: Option<RedisConfig>,
     /// Kafka configuration for queue
     pub kafka: Option<KafkaConfig>,
-    /// Compensator Redis configuration (for dead letter or retry)
-    pub compensator: Option<RedisConfig>,
     /// Minimum ID time (snowflake/uuid related)
     pub minid_time: u64,
     /// Channel capacity
@@ -416,8 +342,6 @@ pub struct Config {
     pub scheduler: Option<SchedulerConfig>,
     /// Synchronization configuration
     pub sync: Option<SyncConfig>,
-    /// Cookie storage configuration
-    pub cookie: Option<RedisConfig>,
     /// Message channel configuration
     pub channel_config: ChannelConfig,
     /// Proxy configuration
@@ -434,25 +358,12 @@ pub struct Config {
     ///
     /// When set, this node joins the Raft group for `config.name` namespace.
     /// Only ONE peer address is required to bootstrap or join an existing cluster.
-    /// Omit entirely to disable Raft (falls back to Redis-based soft coordination).
+    /// Omit entirely to use local-only coordination.
     pub raft: Option<RaftConfig>,
 }
 impl Config {
     pub fn cache_backend_kind(&self) -> Option<CacheBackendKind> {
         self.cache.backend
-    }
-
-    /// Whether the cache uses Redis (explicitly or by inference).
-    pub fn has_cache_redis(&self) -> bool {
-        match self.cache.backend {
-            Some(CacheBackendKind::Redis) | Some(CacheBackendKind::TwoLevel) => true,
-            Some(CacheBackendKind::Local) | Some(CacheBackendKind::RaftRocksdb) => false,
-            None => self.cache.redis.is_some(),
-        }
-    }
-
-    pub fn has_cookie_redis(&self) -> bool {
-        self.cookie.is_some()
     }
 
     pub fn has_raft_control_plane(&self) -> bool {
@@ -461,15 +372,8 @@ impl Config {
 
     /// Whether the derived deployment label is `single_node`.
     ///
-    /// Rule: if `cache.redis` is configured, the deployment label is `distributed`;
-    /// otherwise it is `single_node`.
     pub fn is_single_node_deployment(&self) -> bool {
-        !self.has_cache_redis()
-    }
-
-    /// Compatibility alias for older call sites that still use the legacy runtime-mode name.
-    pub fn is_single_node_mode(&self) -> bool {
-        self.is_single_node_deployment()
+        self.raft.is_none()
     }
 
     /// Loads configuration from a TOML file
@@ -569,24 +473,8 @@ mod tests {
         .unwrap();
 
         assert!(config.is_single_node_deployment());
-        assert!(!config.has_cache_redis());
-        assert!(!config.has_cookie_redis());
         assert!(!config.has_raft_control_plane());
 
-        config.cookie = Some(RedisConfig {
-            redis_host: "127.0.0.1".to_string(),
-            redis_port: 6379,
-            redis_db: 1,
-            redis_username: None,
-            redis_password: None,
-            pool_size: Some(4),
-            shards: None,
-            tls: Some(false),
-            claim_min_idle: None,
-            claim_count: None,
-            claim_interval: None,
-            listener_count: None,
-        });
         config.raft = Some(RaftConfig {
             addr: "127.0.0.1:7101".to_string(),
             peers: Vec::new(),
@@ -596,10 +484,8 @@ mod tests {
             data_dir: None,
         });
 
-        assert!(config.is_single_node_deployment());
-        assert!(config.has_cookie_redis());
+        assert!(!config.is_single_node_deployment());
         assert!(config.has_raft_control_plane());
-        assert!(config.is_single_node_mode());
     }
 
     #[test]
@@ -720,14 +606,6 @@ mod tests {
             CacheBackendKind::Local
         );
         assert_eq!(
-            serde_json::from_str::<CacheBackendKind>("\"redis\"").unwrap(),
-            CacheBackendKind::Redis
-        );
-        assert_eq!(
-            serde_json::from_str::<CacheBackendKind>("\"two_level\"").unwrap(),
-            CacheBackendKind::TwoLevel
-        );
-        assert_eq!(
             serde_json::from_str::<CacheBackendKind>("\"raft_rocksdb\"").unwrap(),
             CacheBackendKind::RaftRocksdb
         );
@@ -738,7 +616,6 @@ mod tests {
         let config = CacheConfig {
             backend: None,
             ttl: 60,
-            redis: None,
             compression_threshold: None,
             enable_l1: None,
             l1_ttl_secs: None,

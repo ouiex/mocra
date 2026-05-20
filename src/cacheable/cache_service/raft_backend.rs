@@ -2,7 +2,6 @@ use crate::cacheable::cache_service::backend::CacheBackend;
 use crate::engine::api::profile_store::ProfileControlPlaneStore;
 use crate::errors::error::CacheError;
 use async_trait::async_trait;
-use deadpool_redis::redis::Value as RedisValue;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -10,7 +9,7 @@ use std::time::Duration;
 ///
 /// All writes go through `ProfileControlPlaneStore::submit_command()` (Raft consensus
 /// when a Raft runtime is active, local apply otherwise). Reads go directly to the
-/// local RocksDB read model. Lua scripting is not supported.
+/// local RocksDB read model.
 pub struct RaftRocksDbCacheBackend {
     store: Arc<ProfileControlPlaneStore>,
     namespace: String,
@@ -177,37 +176,6 @@ impl CacheBackend for RaftRocksDbCacheBackend {
         Ok(count)
     }
 
-    async fn script_load(&self, _script: &str) -> Result<String, CacheError> {
-        Err(CacheError::Pool(
-            "Lua scripting not supported on Raft backend".to_string(),
-        ))
-    }
-
-    async fn evalsha(
-        &self,
-        _sha: &str,
-        _keys: &[&str],
-        _args: &[&str],
-    ) -> Result<RedisValue, CacheError> {
-        Err(CacheError::Pool(
-            "Lua scripting not supported on Raft backend".to_string(),
-        ))
-    }
-
-    async fn eval_lua(
-        &self,
-        _script: &str,
-        _keys: &[&str],
-        _args: &[&str],
-    ) -> Result<RedisValue, CacheError> {
-        Err(CacheError::Pool(
-            "Lua scripting not supported on Raft backend".to_string(),
-        ))
-    }
-
-    fn supports_lua(&self) -> bool {
-        false
-    }
 }
 
 #[cfg(test)]
@@ -334,20 +302,6 @@ mod tests {
         assert_eq!(count, 2);
         assert_eq!(backend.get("d2").await.unwrap(), None);
         assert_eq!(backend.get("d3").await.unwrap(), None);
-    }
-
-    #[tokio::test]
-    async fn raft_backend_lua_methods_return_unsupported() {
-        let backend = test_backend();
-        assert!(backend.script_load("return 1").await.is_err());
-        assert!(backend
-            .evalsha("abc", &["k"], &["v"])
-            .await
-            .is_err());
-        assert!(backend
-            .eval_lua("return 1", &["k"], &["v"])
-            .await
-            .is_err());
     }
 
     #[tokio::test]

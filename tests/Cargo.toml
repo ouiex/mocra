@@ -13,7 +13,6 @@ axum = { version = "0.8", features = ["http1"] }
 async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-deadpool-redis = { version = "0.22", features = ["json", "script", "serde", "streams"] }
 chrono = { version = "0.4", features = ["serde"] }
 tracing = "0.1"
 log = "0.4"
@@ -28,32 +27,9 @@ name = "tests_debug"
 path = "src/main.rs"
 
 [[bin]]
-name = "mock_benchmark"
-path = "src/mock_benchmark.rs"
-
-[[bin]]
-name = "mock_engine_benchmark"
-path = "src/mock_engine_benchmark.rs"
-
-[[bin]]
-name = "mock_prod_like_benchmark"
-path = "src/mock_prod_like_benchmark.rs"
-
-[[bin]]
 name = "log_stress"
 path = "src/log_stress.rs"
 
 [[bin]]
-name = "session_e2e"
-path = "src/session_e2e.rs"
-
-[[bin]]
 name = "dag_module_trait_e2e"
 path = "src/dag_module_trait_e2e.rs"
-
-[[bin]]
-name = "httpbin_prometheus_benchmark"
-path = "src/httpbin_prometheus_benchmark.rs"
-
-
-

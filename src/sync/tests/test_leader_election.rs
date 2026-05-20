@@ -61,7 +61,6 @@ impl CoordinationBackend for MockBackend {
         if let Some((owner, exp)) = locks.get_mut(key) {
             if owner == value {
                 // Only renew if not already expired? Or revive?
-                // Redis PEXPIRE usually works if key exists.
                 // But strict distributed lock usually requires checking if we still hold it.
                 // Here we simplify: if key exists and owner matches, extend.
                 *exp = now + ttl_ms;

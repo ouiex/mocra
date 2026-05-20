@@ -1,7 +1,6 @@
 use super::backend::CacheBackend;
 use crate::errors::CacheError;
 use dashmap::DashMap;
-use deadpool_redis::redis::Value as RedisValue;
 use std::time::{Duration, Instant};
 
 pub struct LocalBackend {
@@ -209,34 +208,4 @@ impl CacheBackend for LocalBackend {
         Ok(0)
     }
 
-    async fn script_load(&self, script: &str) -> Result<String, CacheError> {
-        let _ = script;
-        Err(CacheError::Pool(
-            "Lua scripts require a cache-backed Redis backend".to_string(),
-        ))
-    }
-
-    async fn evalsha(
-        &self,
-        sha: &str,
-        keys: &[&str],
-        args: &[&str],
-    ) -> Result<RedisValue, CacheError> {
-        let _ = (sha, keys, args);
-        Err(CacheError::Pool(
-            "Lua scripts require a cache-backed Redis backend".to_string(),
-        ))
-    }
-
-    async fn eval_lua(
-        &self,
-        script: &str,
-        keys: &[&str],
-        args: &[&str],
-    ) -> Result<RedisValue, CacheError> {
-        let _ = (script, keys, args);
-        Err(CacheError::Pool(
-            "Lua scripts require a cache-backed Redis backend".to_string(),
-        ))
-    }
 }

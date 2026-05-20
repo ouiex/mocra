@@ -1,17 +1,20 @@
-use crate::common::model::ModuleConfig;
 use crate::common::interface::module::NodeGenerateContext;
 use crate::common::interface::module::NodeParseContext;
 use crate::common::model::login_info::LoginInfo;
+#[cfg(test)]
+use crate::common::model::ModuleConfig;
 use crate::common::model::{
     data::{DataEvent, DataFrameStore, DataType, DataframeStoreData, FileStore, StoreContext},
     ExecutionMeta, NodeDispatch, NodeInput, NodeParseOutput, ParsedData, Request,
     ResolvedNodeConfig, Response, RoutingMeta,
 };
+#[cfg(test)]
 use crate::engine::task::node_context_adapter::{
-    build_legacy_generate_context_with_common, build_legacy_parse_context_with_common,
+    build_module_config_generate_context, build_module_config_parse_context,
 };
 use crate::schedule::dag::{DagError, TaskPayload};
 use serde::{Deserialize, Serialize};
+#[cfg(test)]
 use serde_json::{Map, Value};
 use uuid::Uuid;
 
@@ -244,7 +247,7 @@ impl SchedulerNodeParserRuntimeOutput {
 }
 
 #[cfg(test)]
-pub(crate) fn build_legacy_generate_runtime_input_with_common(
+pub(crate) fn build_module_config_generate_runtime_input(
     module_id: &str,
     run_id: Uuid,
     node_key: &str,
@@ -254,7 +257,7 @@ pub(crate) fn build_legacy_generate_runtime_input_with_common(
     login_info: Option<LoginInfo>,
     parent_request_id: Option<Uuid>,
 ) -> SchedulerNodeGenerateRuntimeInput {
-    let context = build_legacy_generate_context_with_common(
+    let context = build_module_config_generate_context(
         module_id,
         run_id,
         node_key,
@@ -275,14 +278,14 @@ pub(crate) fn build_legacy_generate_runtime_input_with_common(
 }
 
 #[cfg(test)]
-pub(crate) fn build_legacy_parse_runtime_input_with_common(
+pub(crate) fn build_module_config_parse_runtime_input(
     module_id: &str,
     node_key: &str,
     base_common: crate::common::model::ResolvedCommonConfig,
     config: Option<&ModuleConfig>,
     response: &Response,
 ) -> SchedulerNodeParserRuntimeInput {
-    let context = build_legacy_parse_context_with_common(
+    let context = build_module_config_parse_context(
         module_id,
         node_key,
         base_common,
@@ -391,8 +394,8 @@ pub(crate) fn decode_request_batch_payload(payload: &TaskPayload) -> Result<Vec<
 mod tests {
     use super::{
         SchedulerNodeGenerateRuntimeInput, SchedulerNodeParserRuntimeInput,
-        build_legacy_generate_runtime_input_with_common,
-        build_legacy_parse_runtime_input_with_common,
+        build_module_config_generate_runtime_input,
+        build_module_config_parse_runtime_input,
         decode_generate_runtime_input, decode_parser_output_payload, decode_parser_runtime_input,
         decode_request_batch_payload, encode_generate_runtime_input,
         encode_parser_output_payload, encode_parser_runtime_input, encode_request_batch_payload,
@@ -620,7 +623,7 @@ mod tests {
         let mut payload = encode_generate_runtime_input(&input).expect("encode generate input");
         payload
             .metadata
-            .insert("schema".to_string(), "legacy.generate_input".to_string());
+            .insert("schema".to_string(), "transport.generate_input".to_string());
 
         assert!(!is_generate_runtime_input(&payload));
         assert!(decode_generate_runtime_input(&payload).is_err());
@@ -637,8 +640,8 @@ mod tests {
     }
 
     #[test]
-    fn build_legacy_generate_runtime_input_matches_legacy_context_shape() {
-        let input = build_legacy_generate_runtime_input_with_common(
+    fn build_module_config_generate_runtime_input_matches_context_shape() {
+        let input = build_module_config_generate_runtime_input(
             "account-a-platform-x-catalog",
             Uuid::now_v7(),
             "detail",
@@ -657,9 +660,9 @@ mod tests {
     }
 
     #[test]
-    fn build_legacy_parse_runtime_input_matches_response_shape() {
+    fn build_module_config_parse_runtime_input_matches_response_shape() {
         let response = sample_response();
-        let input = build_legacy_parse_runtime_input_with_common(
+        let input = build_module_config_parse_runtime_input(
             "account-a-platform-x-catalog",
             "page",
             crate::common::model::ResolvedCommonConfig::default(),

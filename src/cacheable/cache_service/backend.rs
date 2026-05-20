@@ -1,5 +1,4 @@
 use crate::errors::CacheError;
-use deadpool_redis::redis::Value as RedisValue;
 use std::time::Duration;
 
 #[async_trait::async_trait]
@@ -34,23 +33,4 @@ pub trait CacheBackend: Send + Sync {
         max: f64,
     ) -> Result<Vec<Vec<u8>>, CacheError>;
     async fn zremrangebyscore(&self, key: &str, min: f64, max: f64) -> Result<i64, CacheError>;
-    async fn script_load(&self, script: &str) -> Result<String, CacheError>;
-    async fn evalsha(
-        &self,
-        sha: &str,
-        keys: &[&str],
-        args: &[&str],
-    ) -> Result<RedisValue, CacheError>;
-    async fn eval_lua(
-        &self,
-        script: &str,
-        keys: &[&str],
-        args: &[&str],
-    ) -> Result<RedisValue, CacheError>;
-
-    /// Whether this backend supports Lua scripting (Redis only).
-    fn supports_lua(&self) -> bool {
-        false
-    }
-
 }

@@ -1,6 +1,6 @@
 // #![allow(unused)]
 use crate::downloader::DownloaderManager;
-use crate::engine::events::{EventBus, RedisEventHandler};
+use crate::engine::events::EventBus;
 use crate::engine::monitor::SystemMonitor;
 use crate::engine::zombie;
 use crate::queue::Identifiable;
@@ -24,17 +24,14 @@ use crate::common::interface::{
     DataMiddlewareHandle, DataStoreMiddlewareHandle, DownloadMiddlewareHandle, MiddlewareManager,
     ModuleTrait,
 };
-use crate::common::model::chain_key;
 use crate::common::model::message::UnifiedTaskInput;
 use crate::common::processors::processor::{ProcessorContext, RetryPolicy};
-use crate::engine::lua::LuaScriptRegistry;
 use crate::engine::runner::ProcessorRunner;
 use crate::engine::scheduler::CronScheduler;
 use crate::engine::task::TaskManager;
 use crate::proxy::ProxyManager;
 use crate::schedule::dag::Dag;
 use crate::sync::{LeadershipGate, build_leadership_gate};
-use crate::utils::connector::create_redis_pool;
 use crate::utils::logger as app_logger;
 use crate::utils::logger::{
     LogOutputConfig as AppLogOutputConfig, LogSender as AppLogSender,
@@ -43,7 +40,7 @@ use crate::utils::logger::{
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 use tokio::sync::{broadcast, watch};
 use uuid::Uuid;
 
@@ -64,8 +61,8 @@ mod tests;
 /// 5. `ErrorProcessor`: Handles errors and retries (via `ErrorChain`).
 ///
 /// # Distributed Coordination
-/// - **Queues**: Redis/Kafka are used for passing messages between processors, enabling horizontal scaling.
-/// - **Locking**: Optional distributed locking (Redis-based) ensures serial execution for state-sensitive tasks.
+/// - **Queues**: Kafka or local channels pass messages between processors.
+/// - **Locking**: Distributed locking uses the configured Raft/RocksDB control plane.
 /// - **Rate Limiting**: Distributed sliding window rate limiter protects target sites and manages concurrency.
 /// - **Cron**: `CronScheduler` handles distributed timing tasks with de-duplication.
 pub struct Engine {
@@ -93,8 +90,6 @@ pub struct Engine {
     pub node_id: String,
     /// Distributed cron scheduler.
     pub cron_scheduler: Arc<CronScheduler>,
-    /// Lua script registry used for atomic distributed coordination paths.
-    pub lua_registry: Arc<LuaScriptRegistry>,
     /// Shared counter tracking in-flight tasks across all processors.
     pub inflight_counter: Arc<std::sync::atomic::AtomicUsize>,
 }
@@ -107,7 +102,7 @@ impl Engine {
     fn init_leadership_gate(state: &Arc<State>, namespace: &str) -> Arc<dyn LeadershipGate> {
         build_leadership_gate(
             state.raft_runtime.clone(),
-            state.redis.clone(),
+            None,
             namespace,
             Self::LEADERSHIP_TTL_MS,
         )
@@ -591,7 +586,6 @@ impl Engine {
             .await,
         );
 
-        let lua_registry = Arc::new(LuaScriptRegistry::new_default());
         Self::spawn_pause_state_watcher(Arc::clone(&state.profile_store), pause_tx.clone(), &shutdown_tx);
 
         Ok(Self {
@@ -607,7 +601,6 @@ impl Engine {
             prometheus_handle,
             node_id,
             cron_scheduler,
-            lua_registry,
             inflight_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         })
     }

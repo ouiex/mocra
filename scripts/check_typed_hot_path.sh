@@ -1,18 +1,18 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# ── Legacy Hot-Path Static Check ────────────────────────────────────────
-# Scans for forbidden legacy patterns in typed main paths.
+# ── Typed Hot-Path Static Check ─────────────────────────────────────────
+# Scans for forbidden historical patterns in typed main paths.
 # Uses allowlists: known-legitimate files are excluded from each check.
 # New occurrences outside the allowlist cause a non-zero exit.
 #
 # Allowlist files are listed relative to the repository root.
-# Edit the allowlists below when legacy code is removed from a file.
+# Edit the allowlists below when historical code is removed from a file.
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 FAILED=0
 
-section() { echo; echo "── $1 ──"; }
+section() { echo; echo "-- $1 --"; }
 
 # ── Check 1: ModuleConfig in chain / interface directories ──────────
 
@@ -49,17 +49,9 @@ else
     echo "PASS"
 fi
 
-# ── Check 2: "legacy.*" schema IDs outside tests ───────────────────────
+# ── Check 2: historical schema IDs outside tests ───────────────────────
 
-section 'Check 2: "legacy.*" schema IDs in production code'
-
-ALLOWLIST_LEGACY_SCHEMA=(
-    "src/engine/task/module_node_runtime_bridge.rs"
-    "src/engine/task/module_processor_with_chain.rs"
-    "src/engine/task/parser_error_adapter.rs"
-    "src/engine/task/task_dispatch_adapter.rs"
-    "src/engine/task/node_context_adapter.rs"
-)
+section "Check 2: historical schema IDs in production code"
 
 MATCHES=$(grep -rn '"legacy\.' src/ --include="*.rs" 2>/dev/null || true)
 VIOLATIONS=""
@@ -70,17 +62,11 @@ while IFS= read -r line; do
     if echo "$line" | grep -qE '(mod tests|#\[cfg\(test\)\]|_tests::|fn test_)'; then
         continue
     fi
-    allowed=false
-    for a in "${ALLOWLIST_LEGACY_SCHEMA[@]}"; do
-        [[ "$rel" == "$a" ]] && allowed=true && break
-    done
-    if ! $allowed; then
-        VIOLATIONS+="$line"$'\n'
-    fi
+    VIOLATIONS+="$line"$'\n'
 done <<< "$MATCHES"
 
 if [[ -n "$VIOLATIONS" ]]; then
-    echo 'FAIL: "legacy.*" schema IDs found outside allowlist in production code:'
+    echo "FAIL: historical schema IDs found in production code:"
     echo "$VIOLATIONS"
     FAILED=1
 else
@@ -121,18 +107,9 @@ else
     echo "PASS"
 fi
 
-# ── Check 4: build_legacy_* calls outside allowlist ─────────────────
+# ── Check 4: historical runtime builders outside tests ───────────────
 
-section "Check 4: build_legacy_* calls in production code"
-
-ALLOWLIST_LEGACY_BUILDER=(
-    "src/engine/task/module_dag_orchestrator.rs"
-    "src/engine/task/module_dag_processor.rs"
-    "src/engine/task/module_node_runtime_bridge.rs"
-    "src/engine/task/module_processor_with_chain.rs"
-    "src/engine/task/node_context_adapter.rs"
-    "src/schedule/dag/remote_redis.rs"
-)
+section "Check 4: historical runtime builders in production code"
 
 MATCHES=$(grep -rn 'build_legacy_' src/ --include="*.rs" 2>/dev/null || true)
 VIOLATIONS=""
@@ -143,17 +120,11 @@ while IFS= read -r line; do
     if echo "$line" | grep -qE '(mod tests|#\[cfg\(test\)\]|_tests::|fn test_)'; then
         continue
     fi
-    allowed=false
-    for a in "${ALLOWLIST_LEGACY_BUILDER[@]}"; do
-        [[ "$rel" == "$a" ]] && allowed=true && break
-    done
-    if ! $allowed; then
-        VIOLATIONS+="$line"$'\n'
-    fi
+    VIOLATIONS+="$line"$'\n'
 done <<< "$MATCHES"
 
 if [[ -n "$VIOLATIONS" ]]; then
-    echo "FAIL: build_legacy_* calls found outside allowlist in production code:"
+    echo "FAIL: historical runtime builder calls found in production code:"
     echo "$VIOLATIONS"
     FAILED=1
 else
@@ -164,9 +135,9 @@ fi
 
 echo
 if [[ "$FAILED" -eq 0 ]]; then
-    echo "All legacy hot-path checks passed."
+    echo "All typed hot-path checks passed."
     exit 0
 else
-    echo "Legacy hot-path checks FAILED. See violations above."
+    echo "Typed hot-path checks FAILED. See violations above."
     exit 1
 fi

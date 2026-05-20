@@ -1,4 +1,4 @@
-﻿# mocra 去中心化爬虫架构设计 v2
+# mocra 去中心化爬虫架构设计 v2
 
 > 本文档基于 `src/` 实际代码结构撰写，是对当前项目的重构与优化。本项目是一个rust crate包，而非单一二进制应用，因此架构设计更侧重于模块划分、组件交互、数据流动、以及核心机制的实现细节，而非传统意义上的部署架构图。
 
@@ -225,7 +225,6 @@ max_staleness_secs      = 120   # 强制刷新前的最大过期时间（秒）
 
 # ── 同步（SyncConfig，可选）──────────────────────────────────────
 [sync]
-allow_rollback   = true    # 是否允许版本回滚
 envelope_enabled = false   # 是否启用版本 envelope 封装
 
 # ── HTTP API（可选）──────────────────────────────────────────────
@@ -268,9 +267,9 @@ data_dir              = "./raft_data"        # 实际路径 data_dir/{config.nam
 
 **当前代码中的运行模式判定与目标态约束：**
 
-1. `Config::is_single_node_deployment()` 以 `cache.redis` 是否配置为派生判断：未配置时 deployment label 为单节点；已配置时为当前分布式基线。`is_single_node_mode()` 仍作为兼容别名保留。
-2. `[raft]` 表示目标态控制面的配置入口，不应再额外引入 `runtime_mode` 之类手动切模式字段。
-3. 当前 `Config` 仍保留多组 Redis 兼容字段（如 `cache.redis`、`channel_config.redis`、`channel_config.compensator`、`cookie`）；v2 目标态是逐步把这些能力收敛到 `Raft + RocksDB`，而不是要求一次性删空兼容字段。
+1. `Config::is_single_node_deployment()` 现在只表达本地部署标签，不再由外部 KV 配置派生。
+2. `[raft]` 是控制面配置入口；`[cache].backend = "raft_rocksdb"` 时 cache / lock / rate-limit / status 共享 `ProfileControlPlaneStore`。
+3. 当前 `Config` 不再保留旧外部 KV 后端、队列补偿后端和 cookie 后端兼容字段；新增配置应进入 typed profile、queue、cache 或 raft 的明确边界。
 
 ---
 
@@ -303,20 +302,16 @@ data_dir              = "./raft_data"        # 实际路径 data_dir/{config.nam
 
 ### 3.1 State — 当前代码中的资源装配入口
 
-`State`（`src/common/state.rs`）仍是整个运行时的组合根；即使未来把控制面后端从 Redis 迁到 `Raft + RocksDB`，这一职责边界也不变。
+`State`（`src/common/state.rs`）仍是整个运行时的组合根；当前控制面已经收口到 `Raft + RocksDB` / `ProfileControlPlaneStore`。
 
 `State::try_new_with_provider()` 的当前装配顺序大致如下：
 
-1. 读取配置，并通过 `Config::is_single_node_deployment()` 派生当前 deployment label。
+1. 读取配置，并通过显式 cache backend / raft 配置派生当前 runtime capability。
 2. 初始化数据库连接（当前代码使用 **SeaORM** `DatabaseConnection`，而不是单独的 SQLx pool 抽象）。
-3. 按各自配置独立创建 `cache_pool` / `cookie_pool`，并仅对 `cache_pool` 做 `PING` 探活；single-node deployment label 仍保留为部署标识，但不再作为 `cookie` 后端的总开关。
-4. 复用 `cache_pool` 构造 `DistributedLockManager`、下载限流器以及可选 API 限流器。
-5. 构造 `CacheService` / `cookie_service`：
-   - 当前后端是 `LocalBackend`、`RedisBackend` 或 `TwoLevelCacheBackend(Redis + L1)`。
-   - v2 目标态是把这个后端替换为 `RaftCacheBackend + RocksDB`，而不改变上层调用方式。
-    - `Engine` 的 Lua preload 与 PTM claim/commit 热路径现在直接根据 `State` 已装配的 cache Redis backend 判定，而不再重复读取 `Config::is_single_node_deployment()`。
-    - task ingress 的 threshold/terminate Lua 决策也同样显式绑定到 `State` 的 cache Redis capability；仅仅“持有一个 `LuaScriptRegistry`”不再意味着允许走 Lua 原子路径。
-6. 基于 `CacheService + DistributedLockManager` 初始化 `StatusTracker`。
+3. 打开 `ProfileControlPlaneStore`，并按 `[cache].backend` 构造 `CacheService`。
+4. `raft_rocksdb` 模式下注入 `RaftLockBackend` 与 `RaftRateLimitBackend`；本地模式使用进程内 backend。
+5. 构造 `DistributedLockManager`、下载限流器、可选 API 限流器、`StatusTracker` 和 cookie service。
+6. 基于 `CacheService + DistributedLockManager` 初始化运行时状态跟踪。
 7. 启动配置 watcher；当配置热更新时，动态刷新内存中的 `Config` 和限流阈值。
 
 需要特别注意：当前 `State` 的 watcher 还不是“全量运行时重绑定”。  
@@ -330,7 +325,7 @@ data_dir              = "./raft_data"        # 实际路径 data_dir/{config.nam
 - `QueueManager`
 - `CacheService` / `cookie_service`
 - `DistributedLockManager`
-- Redis pool / MQ backend
+- MQ backend
 - API listener 端口
 
 因此，当前真正支持在线生效的主要仍是**业务行为配置和限流阈值**，而不是 queue codec / backend / cache topology / 监听端口这类基础设施配置切换。
@@ -346,7 +341,6 @@ data_dir              = "./raft_data"        # 实际路径 data_dir/{config.nam
 - `NodeRegistry`：节点心跳与活跃节点视图
 - `CronScheduler`：分布式 cron 调度
 - `EventBus`：进程内事件总线（可选）
-- `LuaScriptRegistry`：当前分布式基线下的原子脚本注册表
 - `shutdown_tx` / `pause_tx` / `prometheus_handle` / `inflight_counter`：运行时控制与观测组件
 
 其中 `pause_tx` 现在由控制面 `ProfileControlPlaneStore` 的本地 `watch::channel<bool>` 驱动：  
@@ -356,13 +350,12 @@ data_dir              = "./raft_data"        # 实际路径 data_dir/{config.nam
 
 当前代码中的启动不是单个 `start_work()` 调用，而是 `State::new()` → `Engine::new()` → `engine.start()` 的多阶段流程：
 
-1. 若当前处于分布式基线模式，则预加载 Lua 脚本。
-2. 若配置了 `[api]`，启动 axum API。
-3. 若启用 `EventBus`，注册 console / MQ / Redis 等 handler 并启动事件总线。
-4. 启动下载器后台清理器、Ctrl+C 监听、zombie cleaner、system monitor、idle-stop watcher。
-5. 启动 `CronScheduler`。
-6. 构造 `UnifiedTaskIngressChain`、download chain、parser chain 等责任链。
-7. 并发拉起 `TaskProcessor / DownloadProcessor / ParserProcessor / ErrorProcessor / HealthMonitor`。
+1. 若配置了 `[api]`，启动 axum API。
+2. 若启用 `EventBus`，启动进程内 typed event bus。
+3. 启动下载器后台清理器、Ctrl+C 监听、zombie cleaner、system monitor、idle-stop watcher。
+4. 启动 `CronScheduler`。
+5. 构造 `UnifiedTaskIngressChain`、download chain、parser chain 等责任链。
+6. 并发拉起 `TaskProcessor / DownloadProcessor / ParserProcessor / ErrorProcessor / HealthMonitor`。
 
 `HealthMonitor` 也需要和 HTTP `/health` 区分开看：  
 当前 `start_health_monitor()` 每 30 秒主要做两件事：
@@ -426,10 +419,7 @@ data_dir              = "./raft_data"        # 实际路径 data_dir/{config.nam
 
 文档层可以继续把它理解成“`topic_base + priority`”的抽象命名；当前代码里的物理 topic / stream key 则是由 backend 再拼入命名空间前缀。
 
-当前 consumer group 的具体形态依 backend 而不同：
-
-- **Kafka**：`{namespace}-crawler_group`
-- **Redis Stream**：`{namespace}:crawler_group`
+当前远程 consumer group 由 MQ backend 决定；Kafka 后端使用 `{namespace}-crawler_group`。
 
 模块级优先级通过 `ModuleTrait::priority_level()` 声明，映射关系如下：
 
@@ -542,13 +532,14 @@ pub struct CompensationEvent {
 则 `CompensationReplayer` 不应立即重发，而应优先等待 broker 原生恢复机制生效。  
 只有在超出 `reclaim_timeout_ms` / `lease_timeout` 后仍未恢复时，才执行补偿回放，避免重复投递。
 
-#### 4.3.7 当前代码中的近似实现
+#### 4.3.7 当前代码中的实现状态
 
-当前代码尚未落地 `comp_begin:* / comp_done` 事件流，但已经有一版**补偿雏形**：
+当前代码已删除外部 KV 补偿实现，远程 queue backend 默认安装 `QueueNativeCompensator`：
 
-- `QueueManager` 在订阅侧反序列化成功后，可调用 `Compensator::add_task(topic, id, payload)` 记录“进入处理”。
-- 各 processor 在成功完成后，会调用 `comp.remove_task(topic, id)` 删除补偿记录。
-- 当前默认实现仍是 `RedisCompensator`，因此它更接近“Redis 时代的补偿基线”，尚未演进成文档中的 queue-native replayer。
+- `QueueManager` 在订阅侧反序列化成功后，通过 `Compensator::add_task(topic, id, payload)` 记录“进入处理”。
+- 各 processor 成功完成后，通过 `comp.remove_task(topic, id)` 删除补偿记录。
+- `QueueNativeCompensator` 提供 `scan_incomplete()` 与 `drain_pending()`，用于启动恢复和 crash/replay 测试。
+- 当前补偿状态仍是进程内 pending map；目标态如需跨进程恢复，应把 pending log 落到 queue-native event topic 或 RocksDB/WAL。
 
 ### 4.4 去重功能（暂时移除）
 
@@ -812,7 +803,7 @@ flowchart TD
 3. **节点执行失败后**
    - generate 失败：保留当前 node，不推进 DAG，交由当前 stage 的 retry policy 重试
    - parser 失败：写出 `TaskErrorEvent`，并带 `stay_current_step=true` 让同节点重试
-   - 若达到 circuit breaker / rollback 阈值，则触发 `DagCutoverStateTracker` 或 run 级失败终止
+   - 若达到 circuit breaker / failure gate 阈值，则触发 `DagCutoverStateTracker` 阻断继续切换，或让 run 级失败终止
 
 4. **节点恢复**
    - 调度器从 `DagRunStateStore` 读取 `DagRunResumeState`
@@ -824,11 +815,11 @@ flowchart TD
 
 ### 5.3 DAG 蓝绿切换
 
-`DagCutoverStateTracker`（当前嵌入 `src/engine/task/task_manager.rs`）管理 DAG 版本热切换：
+`DagCutoverStateTracker`（当前嵌入 `src/engine/task/task_manager.rs`）管理 DAG 版本切换门禁：
 
-- **warmup 计数器**：新版本 DAG 需执行 N 次成功才完成预热
-- **failure_streak**：连续失败次数超阈值时自动回滚到旧版本
-- **原子状态机**：`Warming → Active → (Rollback)` 状态迁移
+- **warmup 计数器**：shadow compare 连续 match 达到门槛后允许切换
+- **failure_streak**：连续失败次数超阈值时阻断切换
+- **gate snapshot**：通过 `ModuleDagCutoverGateState` 暴露 `failure_streak / last_failure_ms / blocked`
 
 ### 5.4 ProcessorRunner 批处理
 
@@ -876,18 +867,17 @@ loop {
 
 ```rust
 pub struct DagCutoverStateTracker {
-    warmup_target:   u32,           // 预热目标次数
-    warmup_count:    AtomicU32,     // 当前预热计数
-    failure_streak:  AtomicU32,     // 连续失败次数
-    rollback_thresh: u32,           // 触发回滚的失败阈值
-    state:           AtomicU8,      // 0=Warming, 1=Active, 2=RolledBack
+    failures: Arc<DashMap<String, DagCutoverFailureState>>,
+    warmup: Arc<DashMap<String, DagCutoverWarmupState>>,
+    now_ms_provider: Arc<dyn Fn() -> u64 + Send + Sync>,
 }
 ```
 
 状态迁移：
-- `Warming` + 成功执行 → `warmup_count++`；达到 `warmup_target` → `Active`
-- `Active` + 连续失败 → `failure_streak++`；达到 `rollback_thresh` → `RolledBack`
-- `RolledBack` → 触发 `EventBus::emit(DagRollback)` 通知 `Engine` 切换回旧 DAG
+- `record_shadow_compare_result(scope, "match")` 累加 warmup match。
+- shadow mismatch / shadow error 清空该 scope 的 warmup。
+- `record_cutover_failure(scope)` 累加 failure streak。
+- `should_allow_cutover(scope, max_failures, recovery_window_secs)` 在超出失败阈值时阻断切换，冷却窗口后允许重新探测。
 
 ---
 
@@ -1053,7 +1043,7 @@ v2 目标态中，这里的 leader guard 将从 `LeaderElector` 平滑切换到 
 - `publish()` 使用 `try_send`，队列满时直接丢弃事件，避免把背压传回主处理链路
 - `start()` 会启动一个专用线程/运行时，将事件分发给精确 topic 和 `*` 通配订阅者
 
-因此当前 `EventBus` 更接近“轻量异步事件分发器”，而不是依赖 `broadcast` 的全局总线；Redis/MQ 等外部输出能力是挂在 handler 层，而不是 EventBus 本体。
+因此当前 `EventBus` 更接近“轻量异步事件分发器”，而不是依赖 `broadcast` 的全局总线；外部输出能力应挂在 handler 层，而不是 EventBus 本体。
 
 ### 6.10 Policy 框架
 
@@ -1124,101 +1114,62 @@ pub fn resolve_with_kind(&self, domain: &str, event_type: Option<&str>,
 
 ### 7.1 当前重构进度（截至当前代码）
 
-> 以下状态表示**代码已实际落地**的部分，不等同于目标态已经完成最终 cutover。
+| 重构包 | 状态 | 当前说明 |
+|------|------|----------|
+| Pack 1：Canonical Model | ✅ 已完成 | canonical model / typed envelope / control-plane 写入模型已建立 |
+| Pack 2：Module Runtime | ✅ 已完成 | `ModuleTrait` / `ModuleNodeTrait` 已切到 typed context 与 profile runtime contract |
+| Pack 3：Scheduler Core | ✅ 已完成 | DAG 调度恢复、放置、停止收敛、run guard / fencing 已落地 |
+| Pack 4：Transport Layer | ✅ 已完成 | queue codec、topic、batch、DLQ envelope 已收口 |
+| Pack 5：Execution Pipeline | ✅ 已完成 | task/request/response/parser/error 主路径已切到 typed envelope；生产代码无 `"legacy.*"` schema 与 `build_legacy_*` builder |
+| Pack 6：Control Plane API | ✅ 已完成 | `/config/*`、`/tasks/dispatch`、`/cluster/*`、`/debug/*`、`/control/*` 已接入 `ProfileControlPlaneStore` |
+| Pack 7：Observability | ✅ 已完成 | metrics facade、统一标签、dashboard/alert 基线已落地 |
+| Pack 8：Bootstrap / Legacy Removal | ✅ 已完成 | Redis/Lua/rollback 兼容路径、旧检查脚本名、旧补偿后端和旧归档证据已清理 |
 
-| 重构包 | 状态 | 已落地范围 | 当前说明 |
-|------|------|----------|----------|
-| Pack 1：Canonical Model（A01-A04） | ✅ 已完成 | `TaskProfileSnapshot`、`WorkflowDefinition`、`RoutingMeta / ExecutionMeta / NodeInput / NodeParseOutput`、`QueueEnvelope / TaskDispatchEnvelope / NodeDispatchEnvelope / NodeErrorEnvelope / DeadLetterEnvelope`、控制面写入模型 | canonical model 已建立；新设计不再继续向主路径扩展旧 `ModuleConfig / MetaData` |
-| Pack 2：Module Runtime（B01-B04） | ✅ 已完成 | `ModuleTrait` 静态声明、`ModuleNodeTrait` typed context、legacy adapter、`WorkflowCompiler`、`TaskFactory` profile/workflow 加载 | 节点运行时契约和工厂装配已切到 typed profile/runtime contract |
-| Pack 3：Scheduler Core（C01-C05） | ✅ 已完成 | `DagRunState`、run guard / fencing、scheduler persistence / recovery、placement contract、stop signal convergence | DAG 调度核心已经具备恢复、放置、停止收敛与持久化快照语义 |
-| Pack 4：Transport Layer（D01-D03） | ✅ 已完成 | queue codec boundary、topic / batch / backpressure contract、structured DLQ | `QueueManager` 内散落的 codec/topic 策略已收口，DLQ 读取已改成结构化 envelope 视图 |
-| Pack 5：Execution Pipeline（E01-E04） | 🚧 进行中 | **E01 / E02 已完成**：`task/request/response` topic 已切到 typed dispatch；**E03 已继续内推**：`parser_task/error_task` topic、worker 入口、parser/error ingress chain、`TaskManager`、`TaskFactory`、`TaskModelProcessor` 主执行路径均已切到 envelope-first，且新消息主路径已优先使用 envelope 自带 typed parser/error context；**E04 已进一步收口**：`ResponseParserProcessor` 的隐式 `local_generate` 分支已移除，`ModuleDagProcessor` 会把目标节点的 placement/policy 显式保留为 runtime routing hint，并透传进 parser/error envelope typed context；`DagScheduler` 已支持按 `node_id` 直接应用 runtime override，`NodeExecutionContext` / remote wire protocol 已支持 opaque `runtime_input`，`ModuleNodeDagAdapter` 在拿到该输入时已可执行真实 `generate()` 并返回 request batch payload；`ModuleDagProcessor` 已补齐 generate/parser 双侧单节点 DAG 编译能力（含 parser stale node_id→step_idx 回退）；`Module::generate()` 对本地 placement 的当前 target node 已经通过 `ModuleDagOrchestrator::execute_dag_with_generate_runtime_input(...)` 走 scheduler bridge 执行真实 generate，`Module::parser()` 也已接入 `execute_dag_with_parser_runtime_input_and_dispatcher(...)` 并复用处理器路由语义；parser scheduler bridge 对本地 placement 的执行失败现已 fail-closed，不再回退到本地 parse 路径；scheduler ingress 在 bridge 已接管后若预编译 DAG 缺失、重建 task 与目标模块/节点不一致、scheduler bridge 自身未挂载，或 parser/error transport 已缺失 `module/node` 目标字段，都会直接 retryable fail-closed；同时 parser 本地快路径已补齐 remote placement fail-closed 保护，避免 remote parser 节点误落本地执行 | request/response replay 本地证据已闭环；parser/error ingress 的执行期 fallback 已进一步收敛到 gray/failure gate 未放行这类显式 rollout 边界；`Module::generate()` 的 remote dispatcher 仍需进一步与 scheduler cutover 的最终策略统一；整张 DAG 的 parser/error scheduler cutover 仍在推进中 |
-| Pack 6：Control Plane API（F01-F04） | ✅ 已完成 | `/config/*`、`/tasks/dispatch`、`/cluster/*`、`/debug/*`、`/control/*` | `ApiState` + `ProfileControlPlaneStore` 已接入主链路，follower 写可自动转发 leader，接口已覆盖配置、状态、调试与控制面常用路径 |
-| Pack 7：Observability（G01-G03） | ✅ 已完成 | metrics facade、统一标签、dashboard/alert 基线 | `control_plane` 与 `scheduler_ingress` 主路径已统一接入吞吐/时延/错误指标，告警规则已落地；`scheduler_ingress` 的 gray/failure gate fallback 现单独保留 cutover 指标口径，不再重复计入 stage error |
-| Pack 8：Bootstrap / Legacy Removal（H01-H03） | 🚧 进行中 | `State/Engine` 装配边界收口、legacy 兼容层分批清理、cutover rehearsal 脚本 | 已完成装配单入口与 rehearsal 脚本；P8-A 已完成，P8-C/P8-D 已完成，P8-E 已推进到 batch-66，P8-B 已推进到 batch-37，当前剩余主线已收敛到 parser/error 整张 DAG cutover 与目标环境证据闭环 |
+**当前验证状态（2026-05-20）：**
 
-**最近一次定向代码验证状态：**
-
-- `cargo test --lib -- --nocapture` 已通过（2026-04-24；`485 passed, 0 failed, 1 ignored`；过程中仅保留既有 warning，未出现新的失败）
-- `cargo test module_dag_processor --lib -- --nocapture` 已通过（2026-04-21）
-- `cargo test module_processor_with_chain --lib -- --nocapture` 已通过（2026-04-21）
-- `cargo test node_context_adapter --lib -- --nocapture` 已通过（2026-04-21）
-- `cargo test --manifest-path C:\Users\eason\RustroverProjects\mocra\tests\Cargo.toml --bin tests_debug -- --nocapture` 已通过（2026-04-21；本地无 Redis 时相关 case 按预期输出 skip）
-- `cargo test engine::events --lib -- --nocapture` 已通过（2026-04-22）
-- `cargo test message --lib -- --nocapture` 已通过（2026-04-22）
-- `cargo test parser_error_adapter --lib -- --nocapture` 已通过（2026-04-22）
-- `cargo test scheduler_ingress --lib -- --nocapture` 已通过（2026-04-22）
-- `cargo test module --lib -- --nocapture` 已通过（2026-04-22）
-- `cargo test message --lib -- --nocapture` 已通过（2026-04-22）
-- `cargo test request_response_adapter --lib -- --nocapture` 已通过（2026-04-22）
-- `cargo test queue --lib -- --nocapture` 已通过（2026-04-22）
-- `cargo test retryable_failure_policy_ --lib -- --nocapture` 已通过（2026-04-22）
-- `cargo test dlq_message --lib -- --nocapture` 已通过（2026-04-22）
-- `cargo test dlq_ --lib -- --nocapture` 已通过（2026-04-22）
-- `cargo test queue_manager_stored_ --lib -- --nocapture` 已通过（2026-04-22）
-- `cargo test parser_fails_closed_when_scheduler_bridge_fails_for_local_node --lib -- --nocapture` 已通过（2026-04-22）
-- `cargo test scheduler_ingress --lib -- --nocapture` 已通过（2026-04-23）
-
-**当前下一步：**
-
-- 继续推进 **Pack 8**：按冻结清单完成 P8-B/P8-E 的剩余兼容层收敛，直到主路径不再依赖 legacy schema / shared runtime bridge
-- 完成 E04 最后一段“整张 DAG parser/error scheduler cutover”，把 parser/error 主路径从 compatibility carrier 切到 typed dispatch / typed error envelope 直连
-- 在目标环境执行 cutover rehearsal、alert gate、probe whitelist 与回滚演练，补齐首份生产验收证据
+- `cargo check` 通过。
+- `cargo check --tests` 通过。
+- `cargo check --manifest-path tests\Cargo.toml --bins` 通过。
+- `powershell -ExecutionPolicy Bypass -File scripts\check_typed_hot_path.ps1` 通过。
 
 ### 7.2 已实现（稳定）
 
 | 组件 | 状态 | 说明 |
 |------|------|------|
-| `State` | ✅ 稳定 | 组合根，资源初始化完整 |
-| `Engine` | ✅ 稳定 | 主协调器，字段完整 |
-| `QueueManager` | ✅ 稳定 | 远程消息队列抽象 + 优先级 topic |
+| `State` | ✅ 稳定 | 组合根，按 `[cache].backend` 装配 Local 或 Raft/RocksDB 控制面 |
+| `Engine` | ✅ 稳定 | 主协调器，事件驱动 pause/resume 与 processor 生命周期完整 |
+| `QueueManager` | ✅ 稳定 | 本地 channel + Kafka/MQ backend 桥接；batch/codec/compress/DLQ/NACK |
+| `QueueNativeCompensator` | ✅ 稳定 | 远程 queue backend 默认补偿器，不依赖外部 KV |
 | `ProcessorRunner` | ✅ 稳定 | 有界并发、暂停/关闭完整 |
-| `TaskManager` | ✅ 稳定 | 任务 CRUD + 状态管理 |
-| `CacheService` | ✅ 稳定基线 | 当前提供通用 KV / TTL / ZSET / script / L1，后端仍以 Local/Redis 为主 |
-| `CronScheduler` | ✅ 稳定 | cron 触发 + leader guard；当前已切到 `LeadershipGate` 抽象，单节点 Raft 配置可直接复用 Raft Leader |
-| `LeaderElector` | ✅ 稳定基线 | 当前是 Redis lock 软 leader，目标态由 Raft Leader 替代 |
-| `NodeRegistry` | ✅ 稳定基线 | 当前为 `CacheService + ZSET` 节点心跳索引，目标态迁移到 Raft 状态机 |
-| `StatusTracker` | ✅ 稳定基线 | 当前为 `CacheService + lock` 的错误/状态跟踪器，目标态迁移到统一状态机 |
-| `EventBus` | ✅ 稳定 | broadcast，进程内 |
-| `DagCutoverStateTracker` | ✅ 稳定 | 当前嵌入 `TaskManager` 内部，负责 warmup/failure gate |
-| `DataStoreMiddleware` | ✅ 稳定 | 三段式落地 |
-| `RaftRuntime` | ✅ 初始落地 | 已接入 `openraft 0.10.0-alpha.17 + RocksDB`，支持单节点 bootstrap、metrics/leader 读取、RocksDB log/state machine scaffold |
+| `TaskManager` | ✅ 稳定 | 任务 CRUD、DAG 预编译、warmup/failure gate |
+| `CacheService` | ✅ 稳定 | Local 与 Raft/RocksDB backend；KV / TTL / ZSET / L1 facade |
+| `DistributedLockManager` | ✅ 稳定 | Local / Raft lock backend；模块文件为 `src/utils/distributed_lock.rs` |
+| `DistributedSlidingWindowRateLimiter` | ✅ 稳定 | Local / Raft rate-limit backend；`raft_rocksdb` 模式写入 `ProfileControlPlaneStore` |
+| `CronScheduler` | ✅ 稳定 | cron 触发 + leader guard；启用 `[raft]` 时走 Raft leader 视图 |
+| `NodeRegistry` | ✅ 稳定 | 基于 cache/ZSET 的节点心跳索引；Raft backend 可作为底层一致性存储 |
+| `StatusTracker` | ✅ 稳定 | 错误/状态跟踪器，经 CacheService + lock 接入 Local/Raft backend |
+| `EventBus` | ✅ 稳定 | 进程内 typed fan-out 总线 |
+| `RaftRuntime` | ✅ 稳定 | `openraft 0.10.0-alpha.17 + RocksDB`，支持单节点 bootstrap、metrics/leader、状态机 apply |
 
-### 7.2.1 当前代码仍存在的 Redis 时代兼容层
+### 7.3 当前剩余工作
 
-这些组件不应再被误读为 v2 目标态的最终控制面，而应视为**当前实现基线/迁移前状态**：
-
-| 文件 | 当前作用 | 目标态去向 |
-|------|----------|-----------|
-| `src/sync/leader.rs` | 基于分布式锁的 soft leader | 收敛到 openraft 领导权 |
-| `src/common/registry.rs` | 基于 cache + ZSET 的节点注册/心跳 | 收敛到 Raft 状态机 |
-| `src/common/status_tracker.rs` | 错误计数、终止判定、模块锁联动 | 收敛到统一执行状态机 |
-| `src/engine/engine.rs` 中 cron leader 选择 | 已通过统一 `LeadershipGate` 装配收口 | 启用 `[raft]` 时走 `RaftLeadershipGate`；未启用 `[raft]` 时才回落到 soft leader / 本地 gate |
-| `src/cacheable/cache_service/redis_backend.rs` | 当前 Redis cache backend | 被 `raft_rocksdb` 后端替代 |
-| `src/queue/redis.rs` | Redis Stream 队列 backend | 保留为可选 MQ backend，不再承担控制面职责 |
-| `src/queue/compensation/*` | Redis 补偿记录 | 迁移到 QueueManager 原生补偿 topic |
-| `src/engine/events/redis_event_handler.rs` | 可选 Redis 事件输出 | 保留为观测性 sink，不属于控制面核心 |
-
-### 7.3 部分实现（需补全）
-
-| 组件 | 状态 | 缺失部分 |
+| 组件 | 状态 | 后续方向 |
 |------|------|----------|
-| `CompensationReplayer` | ⚠️ 设计已定 | 需要把 Begin/Done 事件流接入 QueueManager |
-| `Response Cache` | ⚠️ 设计已定 | 需要补齐本地文件索引与 gRPC 远程读取 |
-| `Policy / CircuitBreaker` | ⚠️ 框架存在 | 断路器逻辑待完善 |
-| `BlobStorage` | ⚠️ 可选启用 | 仅本地文件系统实现 |
-| `Metrics` | ⚠️ Prometheus 格式 | 部分指标标签缺失 |
-| `Raft 控制面接线` | ⚠️ 已进入主路径 | `State` 已能解析并启动 `RaftRuntime`，scheduler 在启用 `[raft]` 时直接以 Raft Leader 为准；`ProfileControlPlaneStore` 写路径已通过 Raft proposal 提交，并由状态机 apply 回填控制面 RocksDB 读模型，follower 上的控制面写请求会自动 forward 到当前 leader |
+| `CompensationReplayer` | ⚠️ 可增强 | 当前已有 `QueueNativeCompensator` pending scan/drain；若要求跨进程 crash recovery，应落 queue-native event topic 或 RocksDB/WAL |
+| `Response Cache` | ⚠️ 可增强 | 当前已有 owner index、远端 HTTP 回源和本地 warm copy；大 body 文件化 + Raft 索引 + gRPC 回源仍可作为后续优化 |
+| `Policy / CircuitBreaker` | ⚠️ 可增强 | 框架存在，断路器策略可继续细化 |
+| `BlobStorage` | ⚠️ 可增强 | 当前以本地文件系统实现为主，可按部署需要扩展 |
+| `Metrics` | ⚠️ 可增强 | 主路径指标已落地，仍可继续压缩标签漂移并补齐业务指标 |
 
-### 7.4 待实现
+### 7.4 当前不再支持的历史路径
 
-| 组件 | 说明 |
+| 历史路径 | 当前处理 |
 |------|------|
-| 统一 `CacheBackend` 落地 | openraft + RocksDB，统一缓存/锁/限流/状态 |
-| `LeaderElector` 迁移 | 对未启用 `[raft]` 的旧路径保留 soft leader；Raft 主路径已切到 `RaftLeadershipGate` |
-| 联邦 Download Pool | 跨命名空间共享 HTTP 下载能力 |
-| `Response.namespace` 路由 | 下载完成后路由回正确命名空间解析器 |
-| 跨节点通信能力补齐 | Raft 复制与 join/forward 已走 axum+HTTP(JSON)；Response Cache 跨节点读取接口待补齐（可选 gRPC） |
+| Redis cache / queue / event / sync / lock | 已删除，不再支持历史兼容 |
+| Lua 原子脚本路径 | 已删除，不再支持 |
+| rollback / cutover rehearsal 脚本和归档证据 | 已删除，不再作为上线流程 |
+| `check_legacy_hot_path.*` | 已替换为 `check_typed_hot_path.*` |
+| `build_legacy_*` runtime builder / `"legacy.*"` schema ID | 生产代码零命中，并由 typed hot-path 检查阻断新增 |
 
 ### 7.5 数据落地策略
 
@@ -1708,7 +1659,7 @@ engine.middleware_chain.lock().await.add(
 
 **另外几个当前实现细节也很重要：**
 
-3. `/health` 目前只检查 `cache_service.ping()` 和 `db.ping()`；返回体带 `components.redis / components.db` 与整体 `up / degraded` 状态，但 handler 直接返回 JSON，因此当前实现里即使 degraded 也仍是 HTTP 200。
+3. `/health` 目前检查 `cache_service.ping()` 和 `db.ping()`；返回体带 `components.cache / components.db` 与整体 `up / degraded` 状态，但 handler 直接返回 JSON，因此当前实现里即使 degraded 也仍是 HTTP 200。
 4. `rate_limit_middleware` 会优先使用 `X-API-Key`，其次使用 `Authorization: Bearer ...`，都没有时退化为 `"anonymous"`；因此 `/metrics` 和所有未认证请求共享同一个 anonymous 限流桶。
 5. `GET /cluster/leader` 直接读取 `RaftRuntime` metrics 暴露当前 leader 视图；如果当前节点启用了 Raft 但选举尚未收敛，则接口返回 `503 Service Unavailable`。
 
@@ -1739,7 +1690,7 @@ engine.middleware_chain.lock().await.add(
 2. 标签不统一：有的指标带 `module`，有的只带 `result`，有的没有 backend/stage 维度；分布式下 `namespace` 与 `node_id` 也未严格分离。
 3. 单位不统一：当前代码同时出现 `_us`、`_ms`、`_seconds`，不利于统一 dashboard 和告警阈值。
 4. 覆盖不完整：API、control plane、config hot update、profile version 漂移、DagRunState 恢复等关键路径缺少一等指标。
-5. 后端不对称：Redis 兼容路径指标较多，Kafka / in-memory / 未来 `Raft + RocksDB` 路径指标不完整。
+5. 后端不对称：Kafka / in-memory / `Raft + RocksDB` 路径的指标覆盖仍可继续补齐。
 
 #### 13.2.1 分层目标
 
@@ -1765,7 +1716,7 @@ engine.middleware_chain.lock().await.add(
 | `deployment_mode` | `single / distributed` | 必带 | 方便单节点与分布式看板共用 |
 | `pipeline` | 固定枚举 | 按需 | `task / request / download / response / parse / parser_task / error / dag / api / control` |
 | `stage` | 固定枚举 | 按需 | `ingress / generate / build_request / download / parse / dispatch / ack / nack / dlq / commit / recover` |
-| `backend` | 固定枚举 | 按需 | `memory / redis / kafka / raft / rocksdb / http / wss` |
+| `backend` | 固定枚举 | 按需 | `memory / kafka / raft / rocksdb / http / wss` |
 | `result` | 固定枚举 | 按需 | `success / error / retry / timeout / dropped / rejected / dlq / skipped / canceled` |
 | `error_class` | 固定枚举 | 错误类 | `network / parse / policy / backend / timeout / validation / coordination / panic` |
 | `error_code` | 受控枚举 | 错误类 | 禁止直接使用原始异常文本 |
@@ -1776,7 +1727,7 @@ engine.middleware_chain.lock().await.add(
 
 1. 禁止把 `account`、`request_id`、`task_id`、`run_id`、原始 URL、原始错误消息作为标签。
 2. `module`、`workflow`、`node_name` 只允许出现在真正需要按业务拓扑定位的指标上。
-3. `backend` 必须覆盖 `memory / redis / kafka` 当前路径，并为未来 `raft / rocksdb` 预留。
+3. `backend` 必须覆盖 `memory / kafka / raft / rocksdb` 当前路径。
 4. 所有分布式指标必须同时带 `namespace + node_id`，防止多节点聚合后失真。
 
 #### 13.2.3 核心流水线指标（L1）
@@ -1842,7 +1793,7 @@ engine.middleware_chain.lock().await.add(
 | `mocra_dag_recovery_total` | Counter | `reason,result` | run resume / replay / recovery 次数 |
 | `mocra_dag_state_store_total` | Counter | `operation,result` | run state save / load / clear |
 
-`mocra_dag_remote_*`、`mocra_ptm_commit_total` 等现有指标可在兼容期保留为 L3 调试指标，但目标态 L2 应以 backend/placement 标签统一，不再把 Redis 原型路径单独发展成第二套命名。
+`mocra_dag_remote_*`、`mocra_ptm_commit_total` 等现有指标可作为 L3 调试指标；目标态 L2 应以 backend/placement 标签统一。
 
 ##### Downloader / Proxy / 限流
 
@@ -1960,7 +1911,7 @@ engine.middleware_chain.lock().await.add(
 
 1. 先修基础标签：拆分 `namespace` 与 `node_id`，重建 `MetricsScope`。
 2. 再接入核心流水线 5 件套：统一 task/request/download/response/parse/error。
-3. 再对齐 queue backend：Redis、Kafka、in-memory 使用同一指标族。
+3. 再对齐 queue backend：Kafka、in-memory 使用同一指标族。
 4. 再补 DAG / scheduler / control plane / config hot update。
 5. 最后补 downloader / parser / cache / dedup / logger 的子系统指标。
 6. 兼容窗口内同时保留旧指标名与新指标名；当 dashboard 和告警完成切换后，再删除 legacy 指标。
@@ -2078,23 +2029,23 @@ engine.middleware_chain.lock().await.add(
 - [x] 已补齐 parser/error metadata 与 prefix_request 的 typed-first 优先级回归：typed context > transport parent/request fields > legacy seed
 - [x] 清理仅为过渡期保留的 fallback 推断分支，并为保留项写明退出条件
 - [x] 为 cutover 增加 shadow compare / warmup gate / failure gate 的校验测试
-- [x] 更新运行文档，明确 parser/error 主路径、fallback 边界与回滚策略
+- [x] 更新运行文档，明确 parser/error 主路径、fallback 边界与 gate/block 策略
 
 **重构进度评估（2026-04-15）**
 
 - Phase 3 完成度：5/5（含 fallback 推断分支清理与最小保留项边界）
 - 代码健康检查（当时）：`cargo test --lib` 通过（`337 passed, 0 failed, 1 ignored`），`cargo test --all-targets` 通过；当前分支最新全量 `cargo test --lib` 结果见 21.1 当前验证基线
 - gate 覆盖现状：failure/warmup/shadow 三类 gate 均有可执行单测并通过（`engine::task::task_manager::tests::*`）
-- 当前主要风险：显式 fallback 已主要收敛到 gray/failure gate 这类 rollout 控制分支，后续重点转向目标环境 gate 阈值、告警与回滚演练证据闭环
+- 当前主要风险：显式 fallback 已主要收敛到 gray/failure gate 这类 rollout 控制分支，后续重点转向目标环境 gate 阈值、告警与 release block 证据闭环
 
 **Phase 3 保留项与退出条件（fallback）**
 
 - 保留项范围：parser/error ingress 不再保留“typed context / transport 目标字段缺失时回退 legacy chain”的兼容分支；当前仅保留 gray/failure gate 未放行时的显式 rollout fallback
 - 退出条件：
     1. shadow compare 与 warmup gate 在目标模块满足上线阈值并持续稳定
-    2. 目标环境中的 alert gate / probe whitelist / rollback rehearsal 证据闭环
+    2. 目标环境中的 alert gate / probe whitelist / release block 证据闭环
     3. 线上观测窗口内 `gray_gate_blocked` / `failure_gate_blocked` fallback 命中持续收敛至 0（或满足约定阈值）
-    4. 具备可验证的按模块粒度回滚演练结果
+    4. 具备可验证的按模块粒度阻断与恢复验证结果
 
 ### 15.4.1 重构深度报告（基于当前代码，2026-04-16）
 
@@ -2218,346 +2169,19 @@ engine.middleware_chain.lock().await.add(
 
 ### 15.5 Phase 4：Pack 6-8 平台化收口
 
-**阶段目标**
-
-- 在 Execution Pipeline 收口后，再推进 Control Plane API、Observability、Bootstrap/Legacy Removal。
-- 把当前“文档已冻结但代码未切”的包拆成可执行任务，而不是继续保留大而泛的待办。
-
-**历史交付清单**
-
-- [x] Pack 6：按 `/config/*`、`/tasks/dispatch`、`/cluster/*`、`/debug/*` 分批落控制面 API，并补 leader/follower 写转发验证
-- [x] Pack 7：把指标 facade、统一标签、dashboard/alert 基线接到主链路与 scheduler 路径
-- [x] Pack 8：重组 `State/Engine` 装配边界，清理 legacy compatibility 层并补 cutover rehearsal 脚本
-- [x] 为 Pack 6-8 分别补 acceptance checklist，避免“代码有了但不可切换”
-- [x] 在 Pack 6-8 启动前重新审视联邦 Download Pool、QueueManager 原生补偿、统一 CacheService 收口的优先级
-
-**Pack 6-8 Acceptance Checklist**
-
-**Pack 6（Control Plane API）**
-
-- [x] `router.rs` 暴露 `/config/*`、`/tasks/dispatch`、`/cluster/*`、`/debug/*` 路由并可启动
-- [x] `/cluster/leader` 在本地模式与 raft 模式均可返回一致语义（含 leader_id / is_local_leader）
-- [x] follower 写请求可转发至 leader（`sync::raft::tests::follower_client_write_forwards_to_leader`）
-- [x] 控制面关键 handler 覆盖至少一组回归测试（`engine::api::control::tests::*`）
-
-**Pack 7（Observability）**
-
-- [x] control-plane/config/debug/cluster 关键接口都接入统一 throughput/latency 指标
-- [x] scheduler ingress fallback 命中按 `path+reason` 可观测
-- [x] dashboard baseline 覆盖：吞吐、延迟、错误、fallback 命中、raft 转发
-- [x] alerts baseline 覆盖：leader 变更异常、fallback 持续高位、cutover gate 持续阻断
-
-**Pack 7 当前落地资产（第一批）**
-
-- [x] Scheduler ingress 结果接入统一 metrics facade：`mocra_stage_events_total` / `mocra_stage_errors_total`（pipeline=`engine`, stage=`scheduler_ingress`）
-- [x] Prometheus 规则：`monitoring/prometheus/rules/mocra-pack7-alerts.yml`
-- [x] Grafana baseline dashboard：`docs/dashboards/mocra-pack7-baseline.json`
-
-**Pack 7 当前落地资产（第二批）**
-
-- [x] `/tasks/dispatch` 接入统一 throughput/latency/error 指标（pipeline=`control_plane`, stage=`dispatch`）
-- [x] `config/debug/cluster` 接口与 `dispatch` 路径统一纳入 control-plane 指标口径
-
-**Pack 7 结论（2026-04-15）**
-
-- 指标口径统一、观测资产（dashboard+alerts）和关键控制面路径已完成收口，可作为 Pack 8 的基线进入装配边界与 legacy 清理阶段。
-
-**Pack 8（Bootstrap/Legacy Removal）**
-
-- [x] `State/Engine` 装配边界文档化，控制面依赖注入路径固定
-- [x] legacy compatibility 清单冻结并分批删除（含 owner、回滚点、完成时间）
-- [x] cutover rehearsal 脚本可复现：切入 scheduler -> 观测 -> 回滚 -> 再切入
-- [x] rehearsal 输出包含成功判定标准与失败处置手册
-
-**Pack 8 当前落地资产（第一批）**
-
-- [x] API 控制面装配路径固定为单入口：`ApiState::new(queue_manager, prometheus_handle, state)`，`profile_store` 由 `State` 内部注入，避免运行时分散拼装
-- [x] rehearsal 脚本：`scripts/cutover_rehearsal.ps1`、`scripts/cutover_rehearsal.sh`
-- [x] rehearsal 报告输出统一：`docs/dashboards/rehearsal/cutover_rehearsal_<release_tag>.md`
-
-**Pack 8 当前落地资产（第二批 / P8-A 最小风险删除）**
-
-- [x] 删除 `TaskModelProcessor<ParserTaskModel>` 与 `TaskModelProcessor<ErrorTaskModel>` 中仅用于兼容提示的 debug 文案（不涉及执行路径与分支条件变更）
-- [x] 清理 scheduler ingress 注释中的 legacy 语义描述（仅文字调整，不涉及分支与数据流）
-- [x] 回归验证：`cargo test --lib scheduler_ingress -- --nocapture` 通过（9/9）
-- [x] 回归验证（当时）：`cargo test --lib` 通过（337 passed, 0 failed, 1 ignored）；当前分支最新全量结果见 21.1 当前验证基线
-
-**Pack 8 Rehearsal 使用示例**
-
-PowerShell:
-
-```powershell
-pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/cutover_rehearsal.ps1 `
-    -PromUrl http://127.0.0.1:9090 `
-    -Profile dev `
-    -CutInCommand "curl.exe -X POST http://127.0.0.1:8080/cluster/pause" `
-    -RollbackCommand "curl.exe -X POST http://127.0.0.1:8080/cluster/resume"
-```
-
-Bash:
-
-```bash
-bash scripts/cutover_rehearsal.sh \
-    "http://127.0.0.1:9090" \
-    "curl -sS -X POST http://127.0.0.1:8080/cluster/pause" \
-    "curl -sS -X POST http://127.0.0.1:8080/cluster/resume" \
-    "dev"
-```
-
-**Pack 8 Legacy Compatibility 清单（冻结版）**
-
-| 批次 | 兼容层范围 | 当前锚点 | Owner | 回滚点 | 目标完成时间 |
-|------|------------|----------|-------|--------|--------------|
-| P8-A | `add_step()` 线性兼容 DAG 合并路径（已完成，2026-04-21） | 已删除；custom DAG 与 `add_step()` 不再走 hybrid merge，`add_step()` 仅作为无 custom DAG 时的线性 fallback | `engine/task` | 回滚需恢复 hybrid merge 语义、显式 linear-compat API 与 `merged_with_linear_compat` 标记 | 2026-04-21 |
-| P8-B | parser/error 兼容封装与 legacy schema (`legacy.*`) | `task_model_chain.rs`、`parser_error_adapter.rs`、`request_response_adapter.rs` | `engine/chain` | 恢复 `compatibility wrapper -> ParserDispatch/ErrorEnvelope` 日志链路 | 2026-04-24 |
-| P8-C | legacy execution key 双写/兼容读取（已完成，2026-04-20） | 已删除；主链路只保留 canonical `chain:*` key | `common/model` | 不再保留 runtime rollback anchor；旧 key 仅通过 cutover drain 自然淘汰 | 2026-04-20 |
-| P8-D | 远端执行 wire 兼容 JSON 字段兜底（已完成，2026-04-20） | 已删除；remote wire 现要求显式携带 `runtime_input_envelope` 字段（可为 `null`） | `schedule/dag` | 不再保留缺字段兼容；回滚需恢复 `#[serde(default)]` 与 legacy 缺字段测试 | 2026-04-20 |
-| P8-E | legacy runtime 输入构造桥接 | `module_node_runtime_bridge.rs` + `module_dag_processor.rs` / `module_processor_with_chain.rs` 中 residual legacy parser output adapter | `engine/task` | 恢复 `node_context_adapter.rs` 对 legacy parser output/metadata helper 的集中导出 | 2026-04-28 |
-
-冻结策略：本表进入变更控制后，新增兼容层一律禁止；仅允许“替换或删除”，且必须附带回滚点与 gate 结果。
-
-已执行批次记录：
-
-- 2026-04-21 / P8-A batch-1：`module_dag_orchestrator.rs` 已删除显式 `compile_linear_compat()` API，`task_manager.rs` 已删除 `compile_module_dag_linear_compat()` / `execute_module_dag_linear_compat()` / `execute_module_dag_linear_compat_with_compare()` 三个 linear-compat 入口，`workflow_compiler.rs` 与 `module_dag_orchestrator.rs` 也已移除 `merged_with_linear_compat` 元数据标记；当前只保留 `compile_module()` / `build_definition()` 目标路径与 `legacy_` 命名空间 merge 本身。回滚点为恢复显式 linear-compat API 和 `merged_with_linear_compat` 标记；回归记录：`cargo test module_dag_orchestrator --lib -- --nocapture`、`cargo test workflow_compiler --lib -- --nocapture`、`cargo test task_manager --lib -- --nocapture`
-- 2026-04-21 / P8-A batch-2：`module_dag_orchestrator.rs` 与 `workflow_compiler.rs` 已删除 custom DAG 与 `add_step()` 同时存在时的 hybrid merge 语义，当前统一为 `dag_definition()` 优先，`add_step()` 只在没有 custom DAG 时生效；`ModuleTrait` 注释与相关测试已同步到 custom-first 行为。至此 P8-A 完成。回滚点为恢复 `legacy_` 命名空间 merge 与 hybrid workflow/profile 测试；回归记录：`cargo test module_dag_orchestrator --lib -- --nocapture`、`cargo test workflow_compiler --lib -- --nocapture`
-- 2026-04-17 / P8-B batch-1：`task_model_chain.rs` 的 parser/error scheduler ingress 已改为 `profile.resolve_node_config(node_id)` 优先构造 typed runtime input，仅在缺失 profile node config 时回退 `build_legacy_generate_runtime_input`；回滚点保持为 `compatibility wrapper -> ParserDispatch/ErrorEnvelope` 与 legacy helper；回归记录：`cargo test --lib engine::chain::task_model_chain::scheduler_ingress_tests -- --nocapture` -> `24 passed; 0 failed`
-- 2026-04-20 / P8-B batch-2：`parser_error_adapter.rs` 的 `extract_parser_dispatch_seed` / `extract_error_envelope_seed` 已不再回退解码 legacy payload，当前 parser/error seed 提取要求 envelope 显式携带 `parser_context` / `error_context`；回滚点为恢复 legacy payload decode fallback 与缺失 typed context 的兼容行为；回归记录：`cargo test parser_error_adapter --lib -- --nocapture`
-- 2026-04-20 / P8-B batch-3：`task_model_chain.rs` 的 scheduler ingress 已删除 parser/error seed-only fallback，node/module/metadata/prefix 解析现在只走 `typed context -> transport fields`；回滚点为恢复 `parser_seed_fallback` / `error_seed_fallback` 及对应 seed 解析分支；回归记录：`cargo test scheduler_ingress --lib -- --nocapture`
-- 2026-04-21 / P8-B batch-4：`parser_error_adapter.rs` 已删除 `legacy.parser_task` / `legacy.error_task` schema 的主路径使用与 error detail payload 依赖；`build_parser_task_dispatch()` 现仅发送 transport placeholder payload，`build_error_task_envelope()` 不再附带 legacy detail，`decode_parser_task_dispatch()` / `decode_error_task_envelope()` 统一改为从 transport fields 与 typed context 重建事件语义。回滚点为恢复 `legacy.parser_task` / `legacy.error_task` schema 与 detail payload decode；回归记录：`cargo test parser_error_adapter --lib -- --nocapture`、`cargo test scheduler_ingress --lib -- --nocapture`
-- 2026-04-21 / P8-B batch-5：`request_response_adapter.rs` 已把 request/response dispatch 的 schema id 从 `legacy.request` / `legacy.response` 切换为 `transport.request` / `transport.response`，去掉这两类 legacy schema 名称继续作为主路径事实标准；`transport_envelope.rs` 与 adapter 自身测试已同步更新。该批次不改变 request/response payload 语义，只收口 schema 命名。回滚点为恢复 `legacy.request` / `legacy.response` schema id。回归记录：`cargo test request_response_adapter --lib -- --nocapture`、`cargo test transport_envelope --lib -- --nocapture`
-- 2026-04-21 / P8-B batch-6：`parser_error_adapter.rs` 与 `request_response_adapter.rs` 已继续清理内部 fallback node / helper / test 命名中的 `legacy_*` 语义，默认 node key 现统一改为 `transport_parser` / `transport_error` / `transport_request` / `transport_response`，避免 transport-only 主路径仍以 legacy 名称承载默认 routing 语义。该批次不改变编码/解码行为，只继续收口主路径命名。回滚点为恢复两处 adapter 内部 `legacy_*` fallback node 与 helper/test 命名。回归记录：`cargo test parser_error_adapter --lib -- --nocapture`、`cargo test request_response_adapter --lib -- --nocapture`
-- 2026-04-21 / P8-B batch-7：`parser_chain.rs` 与 `task_model_chain.rs` 的内部 error 入队路径已不再临时物化 `TaskErrorEvent` 再转 envelope，改为直接构造 `ErrorEnvelopeSeed` 并生成 `NodeErrorEnvelope`；该批次不改变外部 processor trait 的兼容入口，只继续压缩主链路内部的 legacy carrier 组装。回滚点为恢复两处链路内部 `TaskErrorEvent` 临时对象与 `build_error_task_envelope()` 组装。回归记录：`cargo test parser_chain --lib -- --nocapture`、`cargo test scheduler_ingress --lib -- --nocapture`
-- 2026-04-21 / P8-B batch-8：`task_model_chain.rs` 中 `ProcessorTrait<TaskParserEvent, Task>`、`ProcessorTrait<TaskErrorEvent, Task>` 以及 `UnifiedTaskInput::ParserTask/ErrorTask` 的兼容入口已统一改成通过 `ParserDispatchSeed` / `ErrorEnvelopeSeed` 走 shared seed builder 生成 transport envelope，不再在这些入口直接调用 legacy model -> envelope 的专用 builder。该批次不移除外部兼容 trait，只进一步统一主链路内部的 envelope 构造方式。回滚点为恢复这些兼容入口对 `build_parser_task_dispatch()` / `build_error_task_envelope()` 的直接调用。回归记录：`cargo test scheduler_ingress --lib -- --nocapture`、`cargo test parser_error_adapter --lib -- --nocapture`
-- 2026-04-21 / P8-B batch-9：`UnifiedTaskIngressChain::execute()` 已把 `UnifiedTaskInput::ParserTask/ErrorTask` 与 `ParserDispatch/ErrorEnvelope` 对齐为同一套 scheduler cutover 判定顺序；兼容输入在转成 transport envelope 后不再绕过 `try_scheduler_parser_dispatch()` / `try_scheduler_error_dispatch()`，避免同一语义输入因载体不同而走出不同的 local/remote 分叉。该批次不移除兼容输入类型，只统一 cutover gate。回滚点为恢复 `UnifiedTaskIngressChain::execute()` 中 `ParserTask/ErrorTask` 分支直接执行 `parser_chain/error_chain` 的旧路径。回归记录：`cargo test scheduler_ingress --lib -- --nocapture`
-- 2026-04-21 / P8-B batch-10：`parser_error_adapter.rs` 已删除仅面向 legacy model wrapper 的 `build_parser_task_dispatch()` / `build_error_task_envelope()` 两个薄封装，主代码与单测现统一直接使用 `build_parser_dispatch_from_seed()` / `build_error_envelope_from_seed()`；这意味着 parser/error transport adapter 的公共构造路径只再保留 seed-based 接口。回滚点为恢复两个 legacy-model wrapper builder 并让调用点重新回到 `TaskParserEvent` / `TaskErrorEvent` 薄封装入口。回归记录：`cargo test parser_error_adapter --lib -- --nocapture`、`cargo test scheduler_ingress --lib -- --nocapture`
-- 2026-04-21 / P8-B batch-11：`task_model_chain.rs` 的 `scheduler_ingress_tests` 已新增 execute-level 兼容输入回归，直接验证 `UnifiedTaskIngressChain::execute()` 在接收 `UnifiedTaskInput::ParserTask/ErrorTask` 时，会先 canonical 化为 `NodeDispatchEnvelope` / `NodeErrorEnvelope` 再进入 parser/error 链，而不是继续把 legacy carrier 当作下游事实标准。该批次不引入真实 scheduler bridge，只把“兼容输入已统一 transport contract”从间接断言提升为直接测试证据。回滚点为删除两条 execute-level 回归并恢复仅靠 `try_scheduler_*`/resolver 单测证明 cutover 的状态。回归记录：`cargo test scheduler_ingress --lib -- --nocapture`
-- 2026-04-21 / P8-B batch-12：`task_model_chain.rs` 已删除 `TaskModelProcessor` 上不再被任何 ingress chain 消费的 `ProcessorTrait/EventProcessorTrait<TaskParserEvent, Task>` 与 `ProcessorTrait/EventProcessorTrait<TaskErrorEvent, Task>` 两组实现，避免 `TaskParserEvent/TaskErrorEvent` 继续伪装成可直接驱动 `TaskModelProcessor` 的主路径输入；当前兼容输入只再通过 `UnifiedTaskIngressChain::execute()` 先 canonical 化为 transport envelope 后进入 parser/error 链。回滚点为恢复这两组 compatibility impl。回归记录：`cargo test scheduler_ingress --lib -- --nocapture`
-- 2026-04-21 / P8-B batch-13：`factory.rs` 已删除 `load_parser_model()` / `load_error_model()`，`task_manager.rs` 已删除对应的 `load_parser()` / `load_error()` wrapper；这两层在代码中已无任何真实调用，继续保留只会让 `TaskParserEvent/TaskErrorEvent` 看起来像仍是 task 恢复的正式入口。当前 parser/error 恢复路径只再保留 `ParserDispatchSeed/ErrorEnvelopeSeed -> NodeDispatchEnvelope/NodeErrorEnvelope -> load_*_dispatch/envelope`。回滚点为恢复这四个 legacy wrapper。回归记录：`cargo test task_manager --lib -- --nocapture`
-- 2026-04-21 / P8-B batch-14：`queue/compensation.rs` 已删除 `TaskParserEvent` / `TaskErrorEvent` 的 `Identifiable` 兼容实现。当前 `Channel` 与 `QueueManager` 的 parser/error topic 已统一使用 `NodeDispatchEnvelope` / `NodeErrorEnvelope`，继续保留旧 carrier 的 queue 身份接口没有运行时价值，只会扩大“旧 carrier 仍可直接入队”的误导面。回滚点为恢复这两条 `Identifiable` impl。回归记录：`cargo test queue --lib -- --nocapture`
-- 2026-04-21 / P8-B batch-15：`common/model/message.rs` 已删除一批 workspace 内零调用的 legacy carrier helper surface：`TaskParserEvent::start_other_module*()`、`UnifiedTaskInput` 针对 `TaskParserEvent/TaskErrorEvent` 的直接 `From` 转换、`From<&Response> for TaskErrorEvent`，以及 `TaskOutputEvent` 上未再被消费的 `with_tasks/with_error/with_stop` builder。该批次不移除 `TaskParserEvent` / `TaskErrorEvent` / `TaskOutputEvent` 类型本体，也不触碰仍由 trait 与测试基面承载的 `TaskOutputEvent::with_task()` / `TaskParserEvent::from(&Response)`；目标只是先压缩 `message.rs` 的零调用 helper 面。回滚点为恢复上述 helper/builder/conversion impl。回归记录：`cargo test message --lib -- --nocapture`
-- 2026-04-21 / P8-B batch-16：`common/model/message.rs` 已继续删除两处 workspace 内零调用的 legacy helper：旧的 topic 名称拼装器 `TopicType::get_name()` 与 `UnifiedTaskInput::run_id()` accessor。它们都不再参与当前 queue contract 或 ingress 主路径，只会继续扩大 `message.rs` 的遗留表面积。该批次不改变任何 carrier 类型与队列路由语义，只进一步压缩零调用 API 面。回滚点为恢复这两个 helper。回归记录：`cargo test message --lib -- --nocapture`
-- 2026-04-21 / P8-B batch-17：`prelude.rs` 已删除对 `TaskOutputEvent` / `TaskParserEvent` 的公共再导出，workspace 内剩余消费者改为显式从 `common::model::message` 导入。该批次不改变 `ModuleNodeTrait` 的 parser 返回签名，也不移除 `TaskOutputEvent` / `TaskParserEvent` 类型本体；目标是先把 legacy carrier 从默认公共入口面撤掉，避免继续把它们包装成推荐用户路径。回滚点为恢复 `prelude` 再导出并撤销对应调用点导入调整。回归记录：`cargo test --manifest-path C:\Users\eason\RustroverProjects\mocra\Cargo.toml message --lib -- --nocapture`、`cargo test --manifest-path C:\Users\eason\RustroverProjects\mocra\tests\Cargo.toml --bin dag_module_trait_e2e -- --nocapture`
-- 2026-04-21 / P8-B batch-18：`common/model/message.rs` 已删除 `From<&Response> for TaskParserEvent` 这一仅剩测试语义使用的 legacy conversion helper，`module_dag_processor.rs` 与 `message.rs` 的相关回归已同步改成显式构造 `TaskParserEvent`。该批次不改变 parser 主路径、`TaskParserEvent` 类型本体或 `TaskOutputEvent` 兼容载体；目标只是继续压缩 `message.rs` 中不再被生产代码依赖的隐式 legacy builder/conversion 面。回滚点为恢复该 `From<&Response>` impl 及对应测试。回归记录：`cargo test --manifest-path C:\Users\eason\RustroverProjects\mocra\Cargo.toml message --lib -- --nocapture`、`cargo test --manifest-path C:\Users\eason\RustroverProjects\mocra\Cargo.toml module_dag_processor --lib -- --nocapture`
-- 2026-04-21 / P8-B batch-19：`common/model/message.rs` 已删除 `TaskOutputEvent::with_task()` helper，仓库内最后两个残余调用点（`simple/module_node_trait_dag.rs` 与 `tests/src/modules/test/add_chain_api.rs`）已同步改成显式构造 `TaskParserEvent` 并直接 `push` 到 `parser_task`。该批次不改变 `TaskOutputEvent` 类型本体或旧 trait 示例的整体接口，只继续删除把 legacy parser carrier 包装成默认 builder 风格的表面积。回滚点为恢复 `with_task()` helper 及两个示例中的链式调用。回归记录：`cargo test --manifest-path C:\Users\eason\RustroverProjects\mocra\Cargo.toml message --lib -- --nocapture`
-- 2026-04-21 / P8-B batch-20：`engine/events/events.rs` 已删除 `ParserTaskModelEvent` 对 `TaskParserEvent` / `TaskErrorEvent` 的直接 `From` 兼容映射，相关回归改为只验证 `NodeDispatchEnvelope` / `NodeErrorEnvelope` 这两条当前主路径输入。该批次不改变事件名、event bus 契约或 parser/error processor 逻辑；目标是让事件层也停止把 legacy parser/error carrier 当作一等生产输入模型。回滚点为恢复两条 `From<&TaskParserEvent|&TaskErrorEvent>` impl 及对应测试。回归记录：`cargo test --manifest-path C:\Users\eason\RustroverProjects\mocra\Cargo.toml events --lib -- --nocapture`
-- 2026-04-21 / P8-B batch-21：`common/model/message.rs` 已删除 `TaskOutputEvent::with_data()` 这一最后残留的 output builder helper，剩余三个旧测试模块调用点（`tests/src/modules/test/add_chain_api.rs`、`tests/src/modules/test/moc_dev.rs`、`tests/src/modules/test/portal_live_trend.rs`）已改成显式 `output.data.push(...)`。该批次不改变 `TaskOutputEvent` 类型本体、旧 trait 签名或测试模块业务逻辑；目标只是把 `TaskOutputEvent` 从 builder 风格 helper 收口到纯结构体载体。回滚点为恢复 `with_data()` helper 及三处旧写法。回归记录：`cargo test --manifest-path C:\Users\eason\RustroverProjects\mocra\Cargo.toml message --lib -- --nocapture`
-- 2026-04-21 / P8-B batch-22：`simple/module_node_trait_dag.rs` 已迁移到当前 `NodeGenerateContext<'_>` / `NodeParseContext<'_>` / `NodeParseOutput` 接口，并补齐稳定 node key 与 typed `NodeDispatch` 示例；`README.md` / `README.zh.md` 的 quickstart 片段也已同步改成 typed parser 签名，`common/interface/module.rs` 的 trait 注释则从旧的 `Request -> Response -> ParserData -> Request` 更新为 `Request -> Response -> NodeParseOutput -> NodeDispatch`。该批次不改变生产调度逻辑或 `TaskOutputEvent` 类型本体；目标是收掉仓库对外可见的旧示例/trait 签名口径，避免继续传播过时 API。回滚点为恢复 `simple/module_node_trait_dag.rs` 和中英文 README 的旧签名示例。回归记录：`cargo test --manifest-path C:\Users\eason\RustroverProjects\mocra\Cargo.toml common::interface::module --lib -- --nocapture`
-- 2026-04-21 / P8-B batch-23：`tests/src/modules/test/add_chain_api.rs`、`moc_dev.rs`、`mock_dev.rs`、`portal_live_trend.rs` 已迁移到当前 `NodeGenerateContext<'_>` / `NodeParseContext<'_>` / `NodeParseOutput` 接口，并统一改为通过 `DataEvent` / `NodeDispatch` 组装 typed parser 结果；同时 `tests/src/middleware/object_store.rs` 已切到 `DataEvent`，`tests/src/main.rs` 也已对齐当前 `Engine::new(...).await -> Result<Engine>` 与 `RequestDownloader::new(...)` 签名，并把 Redis 不可达的 session harness case 收口为显式 skip。该批次使 `tests/src` 范围内残留的 `ParserData` / `ParserTaskModel` 命名兼容面清零，并把 `tests_debug` 恢复到当前代码可执行状态。回滚点为恢复这几处 tests harness 的旧 parser 签名、`Data` 旧类型与旧构造函数调用方式。回归记录：`cargo test --manifest-path C:\Users\eason\RustroverProjects\mocra\tests\Cargo.toml --bin tests_debug -- --nocapture`
-- 2026-04-22 / P8-B batch-24：`engine/events/events.rs` 中仅用于 event bus 的紧凑载体 `ParserTaskModelEvent` 已重命名为 `ParserDispatchEvent`，对应 `EventType::ParserTaskModel` 也已收口为 `EventType::ParserDispatch`；`engine.rs`、`engine/engine/processors.rs` 与 `engine/events/redis_event_monitor.rs` 的内部事件键/订阅字符串同步从 `parser_task_model` 切到 `parser_dispatch`。该批次不触碰 `common/model/message.rs` 中 `TaskParserEvent` / `TaskOutputEvent` 类型本体，也不改变 parser/error 运行时 carrier；目标只是先清掉事件层残留的旧命名，让 event bus 口径和当前 envelope-first 主路径一致。回滚点为恢复 `ParserTaskModelEvent` / `EventType::ParserTaskModel` 及其事件键字符串。回归记录：`cargo test engine::events --lib -- --nocapture`、`cargo test scheduler_ingress --lib -- --nocapture`
-- 2026-04-22 / P8-B batch-25：`engine/task/module.rs` 中残留的测试夹具命名 `ParserDataTestNode` / `ParserDataTestModule` 已收口为 `ParseOutputTestNode` / `ParseOutputTestModule`，避免 typed parser output 主路径旁边继续保留旧 `ParserData` 术语；同时 `common/model/message.rs` 已删除两处 workspace 内零调用的 `get_context()` helper，并把 `stay_current_step()` 注释从旧 `ParserTaskModel` 术语改成当前 dispatch 语义。该批次不触碰 `TaskParserEvent` / `TaskErrorEvent` / `TaskOutputEvent` 类型本体，也不改变 parser/error 主链路行为；目标只是继续清理剩余内部旧命名与零调用 helper 表面积。回滚点为恢复两处测试夹具命名、`get_context()` helper 和 `stay_current_step()` 旧注释。回归记录：`cargo test module --lib -- --nocapture`、`cargo test message --lib -- --nocapture`
-- 2026-04-22 / P8-B batch-26：`common/model/message.rs` 已继续删除 `TaskParserEvent::with_context()`、`stay_current_step()`、`with_prefix_request()` 这三处只被 `message.rs` 自测消费的 legacy-style builder，并把相关回归改成显式字段更新，避免 `TaskParserEvent` 继续暴露 builder 风格的兼容入口。该批次不触碰 `TaskParserEvent` / `TaskErrorEvent` / `TaskOutputEvent` 类型本体，也不改变 parser/error 生产主路径；目标只是进一步压缩 `message.rs` 中仅剩的零调用 helper 表面积。回滚点为恢复这三个 helper 与 `message.rs` 对应测试中的链式写法。回归记录：`cargo test message --lib -- --nocapture`
-- 2026-04-22 / P8-B batch-27：`common/model/message.rs` 已继续删除 `TaskErrorEvent::with_meta()`、`add_meta()` 两处 workspace 内零调用 helper，以及 `UnifiedTaskInput` / `TaskOutputEvent` 两个空的无行为 `impl` 块；同时 `module_dag_processor.rs` 中仅测试使用的 `TaskParserEvent::with_meta()` / `add_meta()` 调用已改成显式 metadata 更新。该批次不触碰 `UnifiedTaskInput::ParserTask/ErrorTask` 兼容变体或 `TaskOutputEvent` / `TaskParserEvent` / `TaskErrorEvent` 类型本体，因为这些仍被 scheduler ingress 与兼容测试基面实际消费；目标只是把 `message.rs` 中最后一层“零调用 helper / 空壳 impl” 表面积先收干净。回滚点为恢复上述 helper、空 `impl` 块与 `module_dag_processor.rs` 测试中的链式 metadata 写法。回归记录：`cargo test add_meta_appends_with_meta_replaces --lib -- --nocapture`、`cargo test message --lib -- --nocapture`
-- 2026-04-22 / P8-B batch-28：`common/model/message.rs` 已删除 workspace 内零引用的 `TaskOutputEvent` 兼容类型本体，并同步清理其遗留 `DataEvent` 导入；这意味着 `message.rs` 中与 parser output 相关的“旧兼容壳”现在只剩 `TaskParserEvent` / `TaskErrorEvent` 以及 `UnifiedTaskInput::ParserTask/ErrorTask` 这组 ingress 兼容输入。该批次不触碰 scheduler ingress 对这两类兼容变体的实际消费，也不改变 parser/error 主链路；目标只是继续把 `message.rs` 中已完全失去运行时和测试引用的 legacy carrier 彻底移除。回滚点为恢复 `TaskOutputEvent` 类型定义与对应导入。回归记录：`cargo test message --lib -- --nocapture`
-- 2026-04-22 / P8-B batch-29：`common/model/message.rs` 已删除 `TaskParserEvent` / `TaskErrorEvent` 上不再被任何当前 queue 路径消费的 `Offloadable` / `Prioritizable` 兼容实现；`parser_error_adapter.rs` 中仅被本地测试消费的 `decode_parser_task_dispatch()` / `decode_error_task_envelope()` 也已移除，相关回归改为直接断言 `extract_*_seed()` 结果。该批次不触碰 `UnifiedTaskInput::ParserTask/ErrorTask` 兼容变体或 `ParserDispatchSeed` / `ErrorEnvelopeSeed` 的生产主路径，只继续清理“legacy carrier 仍像 queue item / decode endpoint 一样存在”的残留表面积。回滚点为恢复这四个 trait impl、两条 decode wrapper 以及对应测试中的旧断言方式。回归记录：`cargo test message --lib -- --nocapture`、`cargo test parser_error_adapter --lib -- --nocapture`
-- 2026-04-22 / P8-B batch-30：`common/model/message.rs` 已删除 `UnifiedTaskInput::ParserTask/ErrorTask` 两条仅剩的 ingress 兼容变体；`task_model_chain.rs` 中对应的 execute-level canonicalization 分支与只服务这些分支的本地测试辅助也已同步移除。该批次不触碰 `TaskParserEvent` / `TaskErrorEvent` 类型本体或 `ParserDispatchSeed` / `ErrorEnvelopeSeed` 的生产转换逻辑，只结束 scheduler ingress 继续接受 legacy parser/error carrier 作为统一入口这一兼容面。回滚点为恢复 `UnifiedTaskInput` 的两条兼容变体、`UnifiedTaskIngressChain::execute()` 中对应分支以及相关 execute-level 回归。回归记录：`cargo test scheduler_ingress --lib -- --nocapture`
-- 2026-04-22 / P8-B batch-31：`common/model/message.rs` 已删除只剩测试语义的 `TaskParserEvent` 类型本体；`parser_error_adapter.rs` 中对应的 `From<&TaskParserEvent> for ParserDispatchSeed` 生产转换也已移除，相关回归统一改为直接构造 `ParserDispatchSeed`。`module_dag_processor.rs` 与 `task_model_chain.rs` 中残留的 `TaskParserEvent` 注释/测试也已同步收口到当前 dispatch-seed 语义。该批次不触碰仍被生产错误路径实际消费的 `TaskErrorEvent -> ErrorEnvelopeSeed` 转换，只继续压缩 parser 侧已经完全退出运行时的 legacy carrier 表面积。回滚点为恢复 `TaskParserEvent` 类型定义、`ParserDispatchSeed` 上的 legacy `From` 转换，以及对应测试中的旧 carrier 构造。回归记录：`cargo test parser_error_adapter --lib -- --nocapture`、`cargo test message --lib -- --nocapture`、`cargo test module_dag_processor --lib -- --nocapture`
-- 2026-04-22 / P8-B batch-32：`module_dag_processor.rs` 与 `module_processor_with_chain.rs` 的 parser 失败路径已不再临时物化 `TaskErrorEvent`，统一改为直接构造 `ErrorEnvelopeSeed`；`common/model/message.rs` 中只剩测试语义的 `TaskErrorEvent` 类型本体，以及 `parser_error_adapter.rs` 上对应的 `From<&TaskErrorEvent> for ErrorEnvelopeSeed` 兼容转换也已删除，adapter 回归统一改为直接构造 `ErrorEnvelopeSeed`。该批次结束了 parser/error 运行时继续依赖 `message.rs` 中 legacy carrier 类型本体的最后一条代码路径；剩余 T21-03 重点转向 request/response transport contract 收口与整张 DAG cutover。回滚点为恢复两处 processor 中的 `TaskErrorEvent` 临时对象、`TaskErrorEvent` 类型定义以及 adapter 上对应 `From` 转换。回归记录：`cargo test parser_error_adapter --lib -- --nocapture`、`cargo test message --lib -- --nocapture`、`cargo test module_dag_processor --lib -- --nocapture`、`cargo test module_processor_with_chain --lib -- --nocapture`
-- 2026-04-22 / P8-B batch-33：`request_response_adapter.rs` 的 `decode_request_dispatch()` / `decode_response_dispatch()` 已从“MsgPack/Json 双解码”收口为只接受当前 transport 主路径实际发送的 `PayloadCodec::MsgPack`；两条新增回归明确断言 Json codec 的 request/response dispatch 会被拒绝，从而结束 request/response transport decode 继续为历史 Json dispatch 保留兼容壳的状态。该批次不移除 decode wrapper 本身，也不改变 queue/worker 对 request/response dispatch envelope 的运行时入口，只把 transport contract 明确收口到当前实际生产格式。回滚点为恢复 decode 中的 Json fallback 分支以及对应失败断言回归。回归记录：`cargo test request_response_adapter --lib -- --nocapture`、`cargo test queue --lib -- --nocapture`
-- 2026-04-22 / P8-B batch-34：`engine/processors.rs` 的 request/response worker 在 retry/fatal 进入 DLQ 时，已不再把解码后的裸 `Request` / `Response` 写入 DLQ，而是保留原始 `RequestDispatchEnvelope` / `ResponseDispatchEnvelope` 作为 replay 载荷。这样 `QueueManager::requeue_dlq_message()` 回放到 `request` / `response` topic 时，payload 形态与 worker 订阅契约保持一致，避免 replay 再次落回“业务模型字节直接投递到 dispatch topic”的兼容壳。该批次不改变 `QueueManager::send_to_dlq()` 的泛型接口，也不修改 DLQ API 面，只收口 request/response worker 失败路径的保存载荷。回滚点为恢复 processor 中 request/response 失败分支传入 `handle_policy_retry()` / `handle_policy_failure()` 的裸业务模型，以及对应断言 DLQ payload 形态的单测。回归记录：`cargo test retryable_failure_policy_ --lib -- --nocapture`
-- 2026-04-22 / P8-B batch-35：`engine/api/dlq.rs` 已补上 request/response replay 的 API 级契约证据：`GET /dlq/messages` 现在有直接回归断言 request DLQ 记录会暴露 `queue.request` / `msgpack` 这类当前 queue wrapper contract 元数据；`POST /dlq/messages/{id}/requeue` 也有回归断言 response dispatch 会按 backend record id 精确回放，并继续以 `ResponseDispatchEnvelope` 形态重新发布到原始 source topic。该批次不改变 DLQ handler 的对外接口，也不引入新的 payload 解析字段，只把 API 层当前已经承诺的 replay contract 固定成测试证据。回滚点为移除 `dlq.rs` 中这两条 handler 级单测。回归记录：`cargo test dlq_message --lib -- --nocapture`
-- 2026-04-22 / P8-B batch-36：`queue/tests.rs` 中原先仍以裸 `Request` 模型为基线的 DLQ record-id replay 回归，已改为直接使用 `RequestDispatchEnvelope`，并补上一条对称的 `ResponseDispatchEnvelope` replay 用例。当前 queue slice 已明确锁定两点：request/response 进入 DLQ 后保留的是 dispatch envelope payload，且 record-id replay 会把同一 envelope 形态重新发布回 `request` / `response` source topic，而不是回落到裸业务模型字节。该批次不改变 `QueueManager::send_to_dlq()` / `requeue_dlq_message()` 的运行时逻辑，只修正 queue 层测试基线到当前契约。回滚点为恢复 request replay 测试中的裸 `Request` 断言，以及删除新增的 response replay 用例。回归记录：`cargo test dlq_ --lib -- --nocapture`
-- 2026-04-22 / P8-B batch-37：`engine/api/dlq.rs` 已进一步补上 request/response replay 的真实整链证据：新增两条回归直接走 `QueueManager::send_to_dlq()` 的真实存储路径，再通过同一 backend 上的 `POST /dlq/messages/{id}/requeue` 完成 record-id replay，确认 request/response 两侧都会把原始 `RequestDispatchEnvelope` / `ResponseDispatchEnvelope` 重新发布回 source topic。至此 request/response 的 worker 失败入 DLQ、queue 存储、DLQ API 检视与 record-id replay 四段局部证据已经闭环，P8-B 中 request/response replay 的本地整链缺口已收口。该批次不改变运行时逻辑，只把最后一段“真实 queue 存储 -> API replay”链路固定成测试。回滚点为移除 `dlq.rs` 中两条 `queue_manager_stored_*_dlq_record_can_be_replayed_via_api` 集成单测。回归记录：`cargo test queue_manager_stored_ --lib -- --nocapture`
-- 2026-04-22 / P8-E batch-38：`module.rs` 中 parser scheduler bridge 对本地 placement 的失败分支已不再回退到 `execute_parse()` 本地快路径，而是与 remote placement 一样 fail-closed 返回错误；对应回归也已从“本地成功回退”改为显式断言 bridge 失败会直接冒泡。该批次结束了 parser scheduler bridge 在执行期因 dispatcher 失败而静默落回旧本地 parse 语义的兼容壳，进一步把 E04 的 cutover 边界收紧到“无 dispatcher 时允许显式本地路径、bridge 已接管时失败即失败”。回滚点为恢复 `Module::parser()` 中 `Err(err) if !requires_remote_dispatch` 分支的本地 parse 回退，以及对应测试中的成功断言。回归记录：`cargo test parser_fails_closed_when_scheduler_bridge_fails_for_local_node --lib -- --nocapture`
-- 2026-04-23 / P8-E batch-39：`task_model_chain.rs` 中 parser/error scheduler ingress 在 bridge 已接管后，如果 `load_*` 重建出的 task 无法包含当前解析出的目标模块/节点，已不再回退到旧 parser/error ingress chain，而是与其他 scheduler 执行期异常一样直接返回 retryable failure。该批次继续把 E04 的执行期兼容边界从“桥接失败时可能掉回旧链”收紧到“只有入口不具备接管资格时才 fallback；一旦 bridge 已接管，task 重建不一致也 fail-closed”。回滚点为恢复 parser/error 两侧 `module_not_found -> record_scheduler_ingress_fallback(...); return None` 分支，以及对应 fail-closed 回归。回归记录：`cargo test scheduler_ingress --lib -- --nocapture`
-- 2026-04-23 / P8-E batch-40：`task_model_chain.rs` 中 parser/error scheduler ingress 在 bridge 已接管后，如果目标模块的预编译 DAG 缓存缺失，已不再把该情况记作 fallback 后回退到旧 parser/error ingress chain，而是与其它 scheduler 执行期不一致一样直接返回 retryable failure。该批次继续把 E04 的 fallback 边界压缩到“bridge 缺失 / gate 未放行 / typed context 不完整”等未接管前提，避免模块 DAG 编译/装配漂移在 bridge 已接管后静默落回旧链。回滚点为恢复 parser/error 两侧 `dag_missing -> record_scheduler_ingress_fallback(...); return None` 分支，以及对应 fail-closed 回归。回归记录：`cargo test scheduler_ingress --lib -- --nocapture`
-- 2026-04-23 / P8-E batch-41：`task_model_chain.rs` 中 parser/error scheduler ingress 的 `bridge_missing` 已不再被视为可回退到旧 parser/error ingress chain 的合法边界；当前生产装配只通过 `create_unified_task_ingress_chain(...).with_scheduler_bridge(...)` 构造统一 ingress，因此一旦 bridge 本身未挂载，就与其它 bridge 已接管后的执行期不一致一样直接返回 retryable failure。该批次同时把 scheduler ingress 的资格判定顺序调整为“先判 node/module 等接管资格，再判 bridge 是否缺失”，避免 `bridge_missing` 短路这些资格不足检查；这些资格不足分支已在后续 batch-43 继续收口为 fail-closed。回滚点为恢复 parser/error 两侧 `bridge_missing -> record_scheduler_ingress_fallback(...); return None` 分支，以及对应测试中的 `returns_none` 断言。回归记录：`cargo test scheduler_ingress --lib -- --nocapture`
-- 2026-04-23 / P8-E batch-42：`task_model_chain.rs` 中 scheduler ingress 的 `record_scheduler_ingress_fallback()` 已把 gray/failure gate blocked 从 `scheduler_ingress` stage error 口径里剥离出来，保留 `mocra_scheduler_ingress_total{result="fallback",reason=...}` 这条 cutover 指标，但不再额外把这两类有意 rollout fallback 计入 `mocra_stage_errors_total{pipeline="engine",stage="scheduler_ingress"}`。这样 gate blocking 继续作为独立 cutover 信号存在，而 stage error 更聚焦于真正的 malformed envelope / bridge execution / runtime mismatch 类异常。回滚点为恢复 `record_scheduler_ingress_fallback()` 对所有 fallback reason 一律调用 `record_scheduler_ingress_error()`，以及对应 helper 单测。回归记录：`cargo test scheduler_ingress --lib -- --nocapture`
-- 2026-04-23 / P8-E batch-43：`task_model_chain.rs` 中 parser/error scheduler ingress 对 `node_id_missing` / `modules_missing` 已不再把它们视为“资格不足可回退 legacy chain”的边界；当前主路径的 parser/error envelope 构造会补齐 transport `module/node` 真相，因此一旦 bridge 已接管却仍缺失这些目标字段，就与其它 malformed transport 一样直接返回 retryable failure。该批次同时把原先依赖 `returns_none` 的 typed-context-missing 回归改成 fail-closed 断言，确认 parser/error ingress 的显式 fallback 已进一步收敛到 gray/failure gate blocked 这类 rollout 控制分支。回滚点为恢复 parser/error 两侧 `node_id_missing/modules_missing -> record_scheduler_ingress_fallback(...); return None` 分支，以及对应测试中的 fail-closed 断言。回归记录：`cargo test scheduler_ingress --lib -- --nocapture`
-- 2026-04-23 / P8-E batch-44：`module.rs` 中 generate scheduler bridge 对本地 placement 的执行失败已不再回退到旧 `execute_generate()` 本地路径，而是与 parser 侧保持一致，一旦 bridge 已接管却执行失败就直接 fail-closed 返回错误。该批次结束了 generate/parser 在 local placement 下对 bridge failure 语义的不对称状态，把单节点 scheduler bridge 的异常合同统一为“无 dispatcher 时可本地执行，bridge 执行失败时 generate/parser 均 fail-closed”。回滚点为恢复 `Module::generate()` 中 `Err(err) if !requires_remote_dispatch` 分支的本地 generate 回退，以及对应测试中的成功回退断言。回归记录：`cargo test scheduler_bridge_fails_for_local_node --lib -- --nocapture`
-- 2026-04-23 / P8-E batch-45：`module.rs` 中一条过期回归曾把 local/no-dispatcher parser 误记成“回退旧本地 parse 路径”；当前代码真实语义已核对为：local/no-dispatcher 仍走 scheduler 本地执行，只有 bridge-supported 的 `NodeDispatch + finished` parser 输出会成功，若 parser 产出 `data` 则因 `module_node_runtime_bridge.rs` 尚未支持该 payload 而显式 fail-closed。该批次把回归拆成一条成功样例和一条 data-output fail-closed 样例，用测试固定这条现有合同，并把文档同步到当前代码。回滚点为恢复旧的成功回退断言，或为 parser runtime bridge 增加 `NodeParseOutput.data` payload 支持后改写这两条回归。回归记录：`cargo test module --lib -- --nocapture`
-- 2026-04-23 / P8-E batch-46：`module_node_runtime_bridge.rs` 已为 parser output 增加 `NodeParseOutput.data` 的 payload wrapper，当前会把 `DataEvent` 按 file/dataframe 两类可序列化 transport 形态编码进 scheduler parser output，并在 decode 时重建为 `ParsedData`；`data.rs` 同步补了 `DataFrameStore` 的最小重建 builder。这样 local/no-dispatcher parser 不再因为产出 `data` 而 fail-closed，而是与 `NodeDispatch` 一样可通过 scheduler 本地执行链路返回给 `Module::parser()`。该批次同时把对应 module 回归从失败断言改成成功断言，并补齐 parser output payload round-trip 测试。回滚点为移除 parser output 的 `data` transport wrapper、恢复 `SchedulerNodeParserRuntimeOutput::from_node_parse_output()` 对非空 `data` 的拒绝，以及将 local parser data 回归改回 fail-closed 断言。回归记录：`cargo test parser_output_round_trips_through_task_payload --lib -- --nocapture`；`cargo test parser_succeeds_without_dispatcher_for_local_node_when_output_contains_data --lib -- --nocapture`
-- 2026-04-23 / P8-E batch-47：`module.rs` 中 parser scheduler cutover 在“当前 response 已无法解析出有效 target node”时，已不再静默回落到 `ModuleDagProcessor::execute_parse()` 并返回空输出，而是直接 fail-closed 返回错误。该批次把这条 unresolved-target 分支从兼容性空吞行为收口成显式 cutover mismatch，继续与前面几批“bridge 已接管后 malformed target / missing target 必须失败”的方向保持一致。回滚点为恢复 `Module::parser()` 在 `compile_parse_node_dag()` 返回 `None` 时对 `execute_parse()` 的本地回退，以及对应回归中的成功空返回预期。回归记录：`cargo test parser_fails_closed_when_scheduler_cutover_cannot_resolve_target_node --lib -- --nocapture`
-- 2026-04-23 / P8-E batch-48：`factory.rs` 中 parser dispatch 与 error envelope 在 task 重建后的 runtime refresh 已重新对齐。此前 `load_parser_seed()` 会从缓存重载 `ModuleConfig` 并刷新 `profile/workflow`，而 `load_error_seed()` 仍停留在旧状态，导致 parser/error fast-path 对 scheduler-ready runtime 状态的准备不一致。当前已把两侧统一收口到同一个 refresh helper，让 error path 在加载 task 后也会补齐 `config/profile/workflow` 刷新并重新绑定 execution metadata。该批次不改变 gray/failure gate fallback 边界，只消除 parser/error 在 factory 装载层面的一个实际不对称点。回滚点为恢复 `load_error_seed()` 的旧实现，移除共用 refresh helper，仅保留 parser dispatch 的 runtime refresh。回归记录：`cargo test scheduler_ingress --lib -- --nocapture`
-- 2026-04-23 / P8-E batch-49：`module.rs` 中 generate scheduler cutover 在“已有 pending_ctx 但当前 target 已无法解析成有效 scheduler node”时，已不再静默回落到 `ModuleDagProcessor::execute_generate()`。当前这条 unresolved-target 分支会和 parser 侧一样直接 fail-closed 返回错误，避免 bridge 已接管的 generate 路径在 target mismatch 时又掉回旧本地 generate 语义。该批次只收口“已有 pending target 但解析失败”这一类兼容性回退，不改变无 pending_ctx 的初始 entry-node 主路径。回滚点为恢复 `Module::generate()` 在 `compile_generate_node_dag()` 返回 `None` 且 `pending_ctx.is_some()` 时对 `execute_generate()` 的本地回退，以及对应回归中的失败断言。回归记录：`cargo test generate_fails_closed_when_scheduler_cutover_cannot_resolve_target_node --lib -- --nocapture`
-- 2026-04-23 / P8-E batch-50：`factory.rs` 中 response-based module loading 已进一步对齐到同一个 runtime refresh helper。此前 `load_module_with_response()` 只修正 `run_id`，不会像 parser/error envelope reconstruction 那样刷新 `config/profile/workflow`，这意味着 parser response 主链在命中 factory cache 时仍可能拿到旧的 scheduler-ready runtime 视图。当前已改为在 response-path 上也复用同一 refresh helper，让 parser response 装载与 parser/error envelope 重建在 runtime 准备语义上保持一致。回滚点为恢复 `load_module_with_response()` 里仅调用 `bind_module_execution()` 的旧实现，移除 response-path 的 refresh helper 调用。回归记录：`cargo test module --lib -- --nocapture`
-- 2026-04-24 / P8-E batch-51：scheduler parser bridge 下“节点 `parser()` 自身返回错误”的语义已重新对齐旧本地 `execute_parse()`。此前无论 local 还是 remote placement，只要 bridge 内节点 parser 失败，scheduler 最终都会把它包装成 `RetryExhausted/NodeExecutionFailed` 冒泡给 `Module::parser()`，从而整体 fail-closed；当前 `module_node_dag_adapter.rs` 会为真实 parser 节点错误打上专用标记，`module.rs` 会在 `RetryExhausted` 包装后识别这类错误，并回落到 `ModuleDagProcessor` 统一生成 `stay_current_step=true` 的 same-node error seed。这样 bridge 接管后的 parser 节点错误合同重新与旧本地 parse 对齐，而 dispatcher/transport/bridge 自身失败仍保持 fail-closed。回滚点为移除 parser node error 标记识别、恢复 `Module::parser()` 对这类 bridge 错误的整体失败返回，以及删掉两条 parser-error bridge 回归。回归记录：`cargo test parser_node_error_yields_same_node_error_seed_through_ --lib -- --nocapture`
-- 2026-04-24 / P8-E batch-52：补上了一条直接挂 `Module::parser()` scheduler bridge 的多后继 fan-out 回归。当前在自定义多节点 DAG 上，当 parser 节点经 bridge 成功返回空 `NodeParseOutput` 时，`execute_parse_with_preparsed()` 仍会沿用旧处理器语义，为所有 successor 合成 placeholder dispatch，而不会在 bridge 成功后再掉回任何额外兼容路径。该批次主要是把 “fan-out placeholder routing 在 bridge 接管后仍成立” 这条证据上移到 module 级真实入口，而不只停留在 `ModuleDagProcessor` 单元测试。回滚点为删除该 module 级回归，或在后续整张 DAG cutover 重写入口后改写断言。回归记录：`cargo test parser_bridge_preserves_fanout_placeholder_routing --lib -- --nocapture`
-- 2026-04-24 / P8-E batch-53：补上了一条 module 级 parser stop-signal 回归。当前当 bridged parser 节点返回 `NodeParseOutput::finish()` 时，`Module::parser()` 仍会把 `finished` 透传成 `TypedParserOutput.stop=true`，说明 scheduler bridge 成功路径下 stop signal 没有在入口层被吞掉。该批次继续把“整张 DAG parser cutover”剩余面的验证证据前移到真实 module 入口，而不只停留在处理器内部。回滚点为删除该 module 级 stop-signal 回归，或在后续入口改造时同步调整断言。回归记录：`cargo test parser_bridge_preserves_stop_signal --lib -- --nocapture`
-- 2026-04-24 / P8-E batch-54：补上了一条 module 级 parser advance-gate 回归。当前同一个 `Module` 实例在 scheduler bridge 成功返回空 parser 输出后，若再次对同一节点执行 parse，第二次不会重新合成 placeholder dispatch，说明 `try_mark_node_advanced_once()` 的 per-run gate 没有在 module 入口或 bridge 成功路径中被重置。该批次把“advance gate 仍是一锤子事实”从 `ModuleDagProcessor` 内部验证上移到了真实 `Module::parser()` 入口。回滚点为删除该 module 级 repeated-parse 回归，或在后续调整 gate 语义时同步改写断言。回归记录：`cargo test parser_bridge_preserves_advance_gate_across_repeated_parse_calls --lib -- --nocapture`
-- 2026-04-24 / P8-E batch-55：补上了一条 module 级多节点 parser error-recovery 回归。当前当带多个 successor 的 parser 节点在 scheduler bridge 下直接报错时，`Module::parser()` 会返回 same-node retry error seed，且不会误合成任何 successor placeholder dispatch，说明 bridge 的 error-recovery 分支没有旁路掉进 advance gate。该批次把“多节点 DAG 出错时不应继续推进”这条合同也上移到真实 module 入口。回滚点为删除该 module 级 fan-out error-recovery 回归，或在后续调整 error-recovery 语义时同步改写断言。回归记录：`cargo test parser_bridge_error_recovery_does_not_advance_fanout_successors --lib -- --nocapture`
-- 2026-04-24 / P8-E batch-56：补上了 remote 多节点 parser bridge 的 module 级证据。当前当入口 parser 节点本身是 remote placement 时，bridge 成功返回空输出后仍会在 `Module::parser()` 入口保留 fan-out placeholder routing；若 remote parser 节点直接报错，则同样返回 same-node retry error seed，且不会误推进 successor。该批次把此前只在本地 placement 上成立的多节点 success/error-recovery 合同，补齐到了 remote placement 组合面，并用 `RecordingRemoteDispatcher` 计数确认这些用例确实经过 remote dispatcher。回滚点为删除这两条 remote 多节点回归，或在后续 remote recovery 语义调整时同步改写断言。回归记录：`cargo test parser_remote_bridge_ --lib -- --nocapture`
-- 2026-04-24 / P8-E batch-57：补上了 remote 多节点 parser repeated-parse 的 advance-gate 回归。当前同一个 `Module` 实例若连续两次对 remote placement 的 fan-out parser 节点执行 parse，第二次不会重新合成 placeholder dispatch，但 remote dispatcher 计数会正常递增到 2，说明 remote bridge 成功路径并没有重置 per-run advance gate，只是再次执行了远端节点本身。该批次把此前已在本地 placement 上成立的 repeated-parse gate 合同补齐到了 remote placement 组合面。回滚点为删除这条 remote repeated-parse 回归，或在后续 gate 语义调整时同步改写断言。回归记录：`cargo test parser_remote_bridge_preserves_advance_gate_across_repeated_parse_calls --lib -- --nocapture`
-- 2026-04-24 / P8-E batch-58：补上了 remote parser stop-signal 的 module 级证据。当前当 remote placement 的 parser 节点返回 `NodeParseOutput::finish()` 时，`Module::parser()` 仍会透传 `TypedParserOutput.stop=true`，而且 `RecordingRemoteDispatcher` 计数为 1，说明 stop 语义在 remote bridge 成功路径下同样没有被入口层吞掉。该批次把此前仅在本地 placement 上验证过的 stop-signal 合同补齐到了 remote placement 组合面。回滚点为删除这条 remote stop 回归，或在后续 stop/recovery 语义调整时同步改写断言。回归记录：`cargo test parser_remote_bridge_preserves_stop_signal --lib -- --nocapture`
-- 2026-04-24 / P8-E batch-59：补上了 run-state resume 对 `profile_version + dag_version + run_id` 三元绑定的恢复侧证据。当前 `ModuleDagProcessor::compile_generate_node_dag()` / `compile_parse_node_dag()` 会把 execution binding 中的 `profile_version` 与 `dag_version` 写入单节点 runtime DAG metadata；`DagRunState` / `DagRunResumeState` 也会持久化这组 runtime identity，`DagScheduler::execute_parallel()` 在 recover 前会将当前 runtime DAG 的 identity 与快照 identity 对比，不一致时直接清掉旧快照并从当前 DAG 重新执行。这样 run 恢复不再会继续复用旧 profile/workflow 下的成功输出，而 identity 匹配时仍可继续 resume。回滚点为移除 runtime DAG metadata 中的 binding 注入、恢复 `DagRunState`/`DagRunResumeState` 仅持久化 outputs 的旧模型，或删掉 recover identity mismatch 的清快照逻辑。回归记录：`cargo test execute_parallel_discards_resume_snapshot_when_runtime_identity_changes --lib -- --nocapture`、`cargo test execute_parallel_resumes_from_run_state_store_snapshot --lib -- --nocapture`、`cargo test compile_generate_node_dag_preserves_target_runtime_settings --lib -- --nocapture`、`cargo test compile_parse_node_dag_preserves_target_runtime_settings --lib -- --nocapture`、`cargo test execute_parse_rejects_mismatched_execution_binding --lib -- --nocapture`
-- 2026-04-24 / P8-E batch-60：`engine/api/dlq.rs` 已补上 parser/error 两侧的 DLQ replay 合同回归，并新增一条 parser dispatch 的 delete-by-record-id 回归。当前 `QueueManager::send_to_dlq()` 写入 `NodeDispatchEnvelope` / `NodeErrorEnvelope` 后，`POST /dlq/messages/{id}/requeue` 会继续按原始 source topic 把同一 typed envelope 重新发布；`DELETE /dlq/messages/{id}` 也能在新 envelope 契约下按 backend record id 正确删除。该批次不改动 DLQ handler 或 `QueueManager` 运行时逻辑，只把 parser/error 这两类此前缺失的 replay/delete 证据补齐到与 request/response 对称。回滚点为移除 `dlq.rs` 中新增的 parser/error replay 与 parser delete 三条回归。回归记录：`cargo test dlq_record_can_be_ --lib -- --nocapture`
-- 2026-04-24 / P8-E batch-61：`task_model_chain.rs` 已补上两条 attached-bridge 的 scheduler ingress gate-hit 回归：一条固定 parser dispatch 在 gray gate blocked 时会回退到 parser ingress recorder chain，另一条固定 error envelope 在 failure gate blocked 时会回退到 error ingress recorder chain。这样 execute-level 的 scheduler ingress 证据不再只覆盖 `no_bridge` / malformed transport / fallback reason 计量，而是进一步证明“bridge 已挂载但 rollout gate 未放行”时不会误走 scheduler fast-path。该批次仍未尝试补真实 fast-path success 或 remote failure 组合面，因为那一侧会进入 `TaskFactory::create_task_with_modules()` 的 DB 装配链，需要单独的更重夹具。回滚点为移除 `task_model_chain.rs` 中新增的 attached-bridge gate-hit 两条回归。回归记录：`cargo test attached_bridge_falls_back --lib -- --nocapture`
-- 2026-04-24 / P8-E batch-62：`task_model_chain.rs` 已补上 attached-bridge + gate-miss 的 scheduler ingress fast-path success execute-level 证据。当前通过 seeded SQLite state 与最小 workflow/module harness，parser dispatch 与 error envelope 在 bridge 已挂载且 gate 放行时，都会经真实 `TaskFactory::create_task_with_modules()` / `ModuleDagOrchestrator` fast-path 发布 `RequestDispatchEnvelope` 到 request queue，而不是回退到 parser/error recorder chain。这样 T21-06 现已同时覆盖 attached-bridge 的 gate-hit fallback 与 gate-miss success 两个 execute-level 面，剩余缺口主要收敛到 remote placement / dispatcher-failed / network-failed 这类真实远端失败矩阵。回滚点为移除 `task_model_chain.rs` 中新增的 seeded SQLite harness、`FastPathSuccessModule` 以及两条 `fast_path_publishes_request_when_gate_allows` 回归。回归记录：`cargo test fast_path_publishes_request_when_gate_allows --lib -- --nocapture`
-- 2026-04-24 / P8-E batch-63：`task_model_chain.rs` 已把两条错误的 execute-level “no dispatcher” 远端断言修正为真实的 dispatcher backend failure 回归。当前在 attached bridge + gate 放行的 seeded SQLite harness 下，只要给 parser dispatch / error envelope 注入 remote placement `runtime_node` hint，scheduler ingress 就会经 `TaskFactory::create_task_with_modules()` 取到真实 `RedisRemoteDispatcher`；由于测试 state 只挂本地 `CacheService`、不提供 Redis backend，remote dispatch 会在 `enqueue remote request` 的 Lua 入队阶段显式失败，并由 ingress 统一返回 retryable failure，而不会回退到 parser/error recorder chain，也不会误发布 request。这样 T21-06 的 execute-level 远端失败矩阵已先补齐一类真实 `dispatcher-failed` 面，剩余缺口主要收敛到更接近目标环境的 network/timeout 类远端失败。回滚点为恢复这两条回归对“无 dispatcher”的旧错误假设，或删除 `task_model_chain.rs` 中新增的 `dispatcher_backend_failure_is_retryable_and_fail_closed` 断言。回归记录：`cargo test dispatcher_backend_failure_is_retryable_and_fail_closed --lib -- --nocapture`
-- 2026-04-24 / P8-E batch-64：`task_model_chain.rs` 已继续把 T21-06 的 execute-level 远端失败矩阵向前推进到真实 `network-failed` 面。当前在 attached bridge + gate 放行的 seeded SQLite harness 下，测试夹具会给 `AppState.cache_service` 挂一个指向本机关闭端口的 Redis-backed `CacheService`；此时 parser dispatch / error envelope 一旦注入 remote placement `runtime_node` hint，scheduler ingress 仍会走真实 `TaskFactory::create_task_with_modules()` + `RedisRemoteDispatcher` 路径，但会在 `enqueue remote request` 时因不可达 Redis endpoint 显式失败，并统一返回 retryable failure，而不会回退到 parser/error recorder chain，也不会误发布 request。这样 execute-level 基线现在已经分别覆盖了 fallback gate、fast-path success、backend 缺失型 dispatcher failure 与不可达 endpoint 型 network failure，剩余缺口主要收敛到 response-timeout / live-worker 参与的更深远端失败组合面。回滚点为移除 `scheduler_ingress_tests` 中新增的 unreachable-Redis cache helper、seeded harness 变体以及两条 `network_failure_is_retryable_and_fail_closed` 回归。回归记录：`cargo test network_failure_is_retryable_and_fail_closed --lib -- --nocapture`
-- 2026-04-25 / P8-E batch-65：`module.rs` 与 `task_model_chain.rs` 已进一步收掉 scheduler bridge 在 missing-profile 场景下的 legacy runtime input fallback。当前不论是 `Module::generate()/parser()` 还是 parser/error scheduler ingress，只要 bridge 已接管但缺少 loaded profile，就会直接 fail-closed 返回错误，而不会再偷偷退回 `build_legacy_generate_runtime_input_with_common(...)` / `build_legacy_parse_runtime_input_with_common(...)` 这类 compatibility builder。为保持 bridge 自测继续走真实 typed path，本批次同时给 `module.rs` 的测试夹具补了最小 profile/workflow 默认值。这样 P8-E 的 cutover 主功能又少掉一层旧 runtime-input 兼容壳。回滚点为恢复 `module.rs` / `task_model_chain.rs` 在 profile 缺失时的 legacy runtime builder fallback，以及恢复 `module.rs` 测试夹具的 `profile=None` 默认状态。回归记录：`cargo test scheduler_generate_runtime_input_errors_when_profile_missing --lib -- --nocapture`、`cargo test scheduler_parse_runtime_input_errors_when_profile_missing --lib -- --nocapture`、`cargo test uses_remote_dispatcher_for_remote_placement --lib -- --nocapture`、`cargo test parser_remote_bridge_preserves_fanout_placeholder_routing --lib -- --nocapture`
-- 2026-04-27 / P8-E batch-66：`module.rs` 已继续收掉 `Module::generate()` 在无 pending context 时掉回 `ModuleDagProcessor::execute_generate()` 的旧本地生成路径。当前 entry node 仍由 `compile_generate_node_dag(None)` 解析后走 scheduler bridge；若模块没有可编译 DAG 节点，则直接返回空请求流，不再借 legacy generate context builder 兜底。这样初始 generate 入口也与已接管节点的 fail-closed/typed bridge 语义对齐。回滚点为恢复 `Module::generate()` 中对 `self.processor.execute_generate(...)` 的 fallback 分支。回归记录：`cargo test generate_with_empty_dag_does_not_use_legacy_generate_path --lib -- --nocapture`、`cargo test generate_returns_requests_for_single_node_module --lib -- --nocapture`
-- 2026-04-17 / P8-E batch-1：`module.rs` 的 generate/parser scheduler bridge 已改为 profile-first typed runtime input，仅在缺失 profile node config 时回退 `build_legacy_generate_runtime_input` / `build_legacy_parse_runtime_input`；回滚点保持为 `module_node_runtime_bridge.rs` 内 legacy builder；回归记录：`cargo test --lib engine::task::module::tests -- --nocapture` -> `16 passed; 0 failed`
-- 2026-04-20 / P8-E batch-2：`module.rs` 的 scheduler runtime input builder 已改为“无 profile 才允许 legacy builder fallback”；一旦 profile 已加载但缺失目标 node config，generate/parser 现在 fail-closed 返回错误，避免 profile/workflow 漂移静默落回 legacy bridge。回滚点为恢复 `build_scheduler_generate_runtime_input` / `build_scheduler_parse_runtime_input` 在 profile 存在时的 legacy fallback；回归记录：`cargo test engine::task::module::tests --lib -- --nocapture`
-- 2026-04-20 / P8-E batch-3：`task_model_chain.rs` 的 scheduler ingress runtime input 构造已与 `module.rs` 对齐为 fail-closed 语义；当 task 已加载 profile 但缺失目标 node config 时，parser/error fast-path 现在直接返回 retryable failure，而不是静默退回 legacy runtime builder。回滚点为恢复 `build_scheduler_generate_runtime_input` 在 profile 存在时的 legacy fallback 以及 parser/error 分支中的 `runtime_input_invalid` 处理；回归记录：`cargo test scheduler_ingress --lib -- --nocapture`
-- 2026-04-20 / P8-E batch-4：`module_node_runtime_bridge.rs` 已删除不显式传入 common config 的 legacy runtime input wrapper，剩余调用点统一改为 `*_with_common(..., ResolvedCommonConfig::default(), ...)`，把默认 common config 的选择从隐式 helper 收口到调用端。该批次不改变运行时语义，只压缩 bridge API 面和兼容锚点。回滚点为恢复 `build_legacy_generate_runtime_input` / `build_legacy_parse_runtime_input` 两个 wrapper；回归记录：`cargo test module_node_runtime_bridge --lib -- --nocapture`、`cargo test scheduler_ingress --lib -- --nocapture`、`cargo test remote_redis --lib -- --nocapture`
-- 2026-04-20 / P8-E batch-5：`node_context_adapter.rs` 已删除不显式传入 common config 的 legacy context wrapper，`module_processor_with_chain.rs` 改为统一调用 `build_legacy_generate_context_with_common` / `build_legacy_parse_context_with_common` 并显式传 `ResolvedCommonConfig::default()`。该批次不改变链式 processor 的运行时语义，只继续压缩 legacy context bridge 的 API 面。回滚点为恢复 `build_legacy_generate_context` / `build_legacy_parse_context` 两个 wrapper；回归记录：`cargo test module_processor_with_chain --lib -- --nocapture`、`cargo test node_context_adapter --lib -- --nocapture`
-- 2026-04-20 / P8-E batch-6：`parse_legacy_step_target` 已从 `node_context_adapter.rs` 移出并本地化到 `module_processor_with_chain.rs`，`node_context_adapter` 只再保留仍被多处消费的 legacy parser output/metadata 适配逻辑。该批次不改变链式 parser 的推进语义，只继续缩小 legacy adapter 的导出面。回滚点为恢复 `node_context_adapter.rs` 对 `parse_legacy_step_target` 的导出；回归记录：`cargo test module_processor_with_chain --lib -- --nocapture`、`cargo test node_context_adapter --lib -- --nocapture`
-- 2026-04-21 / P8-E batch-7：`legacy_output_from_node_parse_output` 与 `decode_payload_to_metadata` 已从 `node_context_adapter.rs` 移除，并分别本地化到 `module_dag_processor.rs` 与 `module_processor_with_chain.rs` 两个真实消费点；`node_context_adapter` 现在只保留 legacy context/common override 构造职责。该批次不改变 DAG/chain parser 的运行时语义，只继续压缩 shared legacy adapter 的导出面。回滚点为恢复 `node_context_adapter.rs` 对 parser output/metadata helper 的集中导出；回归记录：`cargo test module_dag_processor --lib -- --nocapture`、`cargo test module_processor_with_chain --lib -- --nocapture`、`cargo test node_context_adapter --lib -- --nocapture`
-- 2026-04-21 / P8-E batch-8：`module_dag_processor.rs`、`module_processor_with_chain.rs` 与 `module.rs` 已删除本地 parser fast-path 对 `TaskOutputEvent` / `TaskParserEvent` 兼容模型的直接依赖，统一改为返回 typed parser result；`parser_chain.rs` 改为从 typed seed 直接构造 `NodeDispatchEnvelope` / `NodeErrorEnvelope`，把本地 `NodeParseOutput -> 下游 dispatch/error` 的桥接收口到 typed dispatch 语义。该批次保留现有 metadata 兼容回放语义，但结束了本地 DAG/chain parser 运行时继续物化 legacy parser task 的路径。回滚点为恢复 `Module::parser`、`ModuleDagProcessor::execute_parse*`、`ModuleProcessorWithChain::execute_parser` 返回 `TaskOutputEvent`，以及 `parser_chain.rs` 对 `TaskParserEvent` / `TaskErrorEvent` 的直接消费。回归记录：`cargo test module_dag_processor --lib -- --nocapture`、`cargo test module_processor_with_chain --lib -- --nocapture`、`cargo test module --lib -- --nocapture`、`cargo test parser_chain --lib -- --nocapture`、`cargo test parser_error_adapter --lib -- --nocapture`
-- 2026-04-20 / P8-C batch-1：`common/model/chain_key.rs` 与 `engine/task/module_processor_with_chain.rs` 已删除 legacy execution key / gate 双轨读写，链式 processor 的 stop / advance / fallback gate 只再使用 canonical `chain:exec:*`、`chain:gate:*` key；回滚策略调整为不再保留 runtime fallback anchor，而是在 cutover 窗口内通过 drain 清理旧 key；回归记录：`cargo test --lib common::model::chain_key::tests -- --nocapture`、`cargo test --lib engine::task::module_processor_with_chain::tests -- --nocapture`
-- 2026-04-20 / P8-D batch-1：`schedule/dag/remote_redis.rs` 已删除远端执行 wire 对“缺失 `runtime_input_envelope` 字段”的 legacy JSON 兜底；当前 remote wire 协议要求显式携带该字段，但允许 `null` 表示当前节点无 runtime input。回滚点为恢复 `WireNodeExecutionContext.runtime_input_envelope` 上的 `#[serde(default)]` 与缺字段兼容测试；回归记录：`cargo test --lib wire_context -- --nocapture`
-
-### 15.5.1 后续执行清单（2026-04-16）
-
-目标：在不引入新增兼容层的前提下，完成 Pack 8 收口、压低 fallback 风险，并把 typed runtime model 切换到可灰度、可回滚、可观测的稳定状态。
-
-**Week 1（P0：先关风险口）**
-
-- [x] W1-01 建立 parser/error ingress fallback 观测窗口（按模块输出命中率趋势）
-- [x] W1-02 给 fallback 下线定义阈值与开关（含灰度比例和回滚触发条件）
-- [x] W1-03 落地 parser/error 最终 typed runtime model cutover 方案文档（含边界与异常语义）
-- [x] W1-04 补齐 remote placement + dispatcher 异常矩阵测试（no-dispatcher / dispatcher-failed / network-failed）
-- [x] W1-05 固化 `profile_version + dag_version + run_id` 三元绑定校验点（创建、推进、恢复三阶段）
-
-**Week 1 验收标准**
-
-- [x] A1-01 fallback 指标可按 `path + reason + module` 分组查看，并形成日报
-- [x] A1-02 parser/error scheduler ingress 回归集在当前分支持续通过
-- [x] A1-03 三元绑定校验规则进入实现或至少进入强约束设计评审
-
-当前验收证据：
-
-- 日报脚本 `scripts/dag_alerts_baseline.py` / `scripts/dag_alerts_baseline.ps1` / `scripts/dag_alerts_baseline.sh` 已输出 `Scheduler Ingress Fallback Summary` 与 `Scheduler Ingress Fallback Hotspots By Path/Reason/Module`，并可落地到 `docs/dashboards/dag_alerts_baseline_latest.md` 与 `docs/dashboards/dag_alerts_baseline_latest.json`
-- `cargo test --lib engine::chain::task_model_chain::scheduler_ingress_tests -- --nocapture` 已于 2026-04-17 连续执行两次，结果均为 `22 passed; 0 failed`
-
-**Week 2（P1：收口兼容层）**
-
-- [x] W2-01 按 P8-B/P8-E 批次删除 legacy schema/runtime bridge 冗余分支（仅删已观测稳定部分）
-- [x] W2-02 保留最小回滚锚点并更新回滚手册（每一批删除都要有对应恢复点）
-- [x] W2-03 完成 queue codec 运维手册（明确“变更即滚动重启”的标准流程）
-- [x] W2-04 对齐联邦 Download Pool、Queue 原生补偿、统一 CacheService 的优先级决议
-
-**Week 2 验收标准**
-
-- [x] A2-01 legacy 删除批次有清单、有 owner、有回滚点、有测试记录
-- [x] A2-02 观测面可区分“cutover 问题”与“业务失败”两类告警
-- [x] A2-03 运维手册已覆盖灰度切换与回滚演练步骤
-
-当前验收证据：
-
-- `docs/alerts/dag_alerts_calibration_runbook.md` 已覆盖日报、灰度前 gate 检查、批次 rollback anchor、`scripts/cutover_rehearsal.ps1` / `scripts/cutover_rehearsal.sh` 的执行方式，以及失败后的回滚步骤
-- `docs/queue-codec-operations.md` 已明确 `channel_config.queue_codec` 由 `OnceCell` 在启动期固化，变更流程为 `pause -> rolling restart -> resume`
-- `cargo test --lib queue::codec::tests -- --nocapture` 已于 2026-04-17 通过，结果为 `2 passed; 0 failed`
-- `docs/pack8-priority-decision.md` 已冻结 Pack 8 三项延后能力的排序：`QueueManager native compensation -> Unified CacheService -> Federation Download Pool`，并明确 compensation 先入主 backlog、CacheService 单独成批、Download Pool 暂不进入 Pack 8 关键路径
-- `monitoring/prometheus/rules/mocra-pack7-alerts.yml` 已为现有 scheduler/cutover 告警补齐 `category=cutover`，并新增 `category=business_failure` 的 critical/non-retryable 告警；`scripts/dag_alerts_baseline.py` 与 `docs/alerts/dag_alerts_calibration_runbook.md` 已输出并说明 `Cutover Signals` / `Business Failure Signals` 两类分箱
-- `src/queue/compensation.rs` 与 `src/queue/manager.rs` 已切换到 queue native compensation 默认热路径：远端 queue backend 默认挂载 `QueueNativeCompensator`，`RedisCompensator` 仅保留为回滚锚点；focused regression：`cargo test --lib queue_native_compensator_tracks_add_and_remove -- --nocapture`、`cargo test --lib remote_queue_defaults_to_native_compensator -- --nocapture`、`cargo test --lib local_queue_without_rollback_anchor_keeps_compensator_disabled -- --nocapture` 均通过
-- `src/common/state.rs` 已完成 `Unified CacheService convergence` 的第一批收口：`CacheService`、cookie cache、distributed lock、download/API limiter 与 `StatusTracker` 统一通过内部 `CoordinationServices::build(...)` 装配，不再在 `State::try_new_with_provider()` 内分散拼装；focused regression：`cargo test --lib common::state::tests -- --nocapture` -> `5 passed; 0 failed`
-- `src/engine/task/request_response_adapter.rs` 已完成 Federation Download Pool 的第一批 transport 前置：`RequestDispatchEnvelope` / `ResponseDispatchEnvelope` round-trip 时会保留 origin namespace，不再在 response 回投时只能依赖下载节点本地 namespace；focused regression：`cargo test --lib request_response_adapter -- --nocapture` -> `3 passed; 0 failed`
-- `src/queue/contract.rs`、`src/queue/kafka.rs`、`src/queue/redis.rs` 已补齐 Federation Download Pool 的第二批底座前置：queue backend 现已支持显式 namespace-qualified topic（如 `origin::response-normal`），Kafka/Redis 的 publish、subscribe、DLQ 解析都会优先使用显式 namespace，但默认本地 namespace 行为保持不变；focused regression：`cargo test --lib explicit_namespace_topic -- --nocapture` -> `3 passed; 0 failed`
-- `src/queue/lib.rs`、`src/queue/manager.rs`、`src/engine/chain/download_chain.rs`、`src/engine/chain/stream_chain.rs` 已把上述能力接到 response 出口：`QueuedItem` 可携带 namespace override，`QueueManager` 会按 `(priority, namespace_override)` 分批并向 backend 发出 `origin::response-*`，远端 namespace 响应不会再误走本地 response fast path；focused regression：`cargo test --lib namespace -- --nocapture` -> `8 passed; 0 failed`
-- `src/common/model/config.rs`、`src/queue/manager.rs` 已补齐 Federation Download Pool 的 request-side 最小配置入口：`channel_config.federation_request_namespaces` 可显式声明下载池节点应订阅的远端 request namespace，`QueueManager` 会在保留本地 `request-*` 订阅的同时额外订阅 `origin::request-*`；focused regression：`cargo test --lib queue_manager_resolves_remote_request_namespace_subscriptions -- --nocapture`、`cargo test --lib federated_download_pool_subscribes_remote_request_topics -- --nocapture` -> 均 `1 passed; 0 failed`
-- `src/downloader/request_downloader.rs` 与 `src/downloader/downloader_manager.rs` 已补齐 response cache 的当前实现缺口：fresh download 现在会把 `Response` 写回当前 `CacheService`，并在 metadata 中显式保留 `response_cache_owner_namespace`、可选 `response_cache_owner_node_id` 与 `response_cache_lookup_key`；cache hit 路径也不再丢失缓存内已有 metadata，且修正了 `prefix_request` 回填错误；focused regression：`cargo test --lib response_cache_write_stores_ownership_metadata -- --nocapture`、`cargo test --lib cache_hit_preserves_cached_response_metadata -- --nocapture`、`cargo test --lib request_downloader -- --nocapture` -> 均通过
-- `src/engine/chain/parser_chain.rs` 已把现有 parser-side cache refresh 收口为显式本地 rollback copy：响应回到 parser 命名空间后，会以本 namespace 的 `response_cache_owner_namespace`（以及可选本地 `response_cache_owner_node_id`）重写本地缓存副本，避免把 foreign namespace ownership 直接留在 parser 侧回滚锚点里；focused regression：`cargo test --lib parser_side_cache_refresh -- --nocapture` -> `2 passed; 0 failed`
-- `src/common/registry.rs`、`src/engine/engine/processors.rs`、`src/engine/api/debug.rs` 已补齐 remote cache retrieval 的服务端基础：节点心跳会带上可选 `api_port`，受保护 API 已提供 `GET /debug/cache/response/{cache_key}` 本地读取缓存响应体的接口。
-- `src/common/model/control_plane_profile.rs`、`src/engine/api/profile_store.rs`、`src/downloader/request_downloader.rs`、`src/downloader/downloader_manager.rs` 已补齐当前批次的 caller-side owner lookup / fallback：downloader 现在会把 `cache_key -> owner_node_id` 轻量索引写入 control-plane store，本 namespace 内的其他节点在 local miss 时会基于 heartbeat 里的 `api_port` 回读 owner 节点的 `/debug/cache/response/{cache_key}`，并把结果回填到本地 cache 后再继续主链路。focused regression：`cargo test --lib response_cache_write_stores_ownership_metadata -- --nocapture`、`cargo test --lib remote_cache_hit_fetches_owner_response_and_warms_local_cache -- --nocapture`、`cargo test --lib remote_cache_lookup_skips_foreign_namespace_owner -- --nocapture` -> 均通过
-- 当前仍未进入真正的联邦下载池完整切换：本批次只覆盖 same-namespace owner lookup / remote fallback；foreign namespace owner 仍显式跳过并降级到 live download，且文档里的 `shared-download` 单 topic 方案也尚未实现
-
-**Week 3（P1/P2：演练闭环）**
-
-- [x] W3-01 执行一轮完整 cutover rehearsal（切入 -> 观测 -> 回滚 -> 再切入）
-- [x] W3-02 输出版本化 rehearsal 报告（含指标截图、阈值结果、失败处置）
-- [x] W3-03 复盘并锁定“可下线 fallback 的模块白名单”
-- [x] W3-04 更新架构文档中的“保留项与退出条件”为最新状态
-
-**Week 3 验收标准**
-
-- [x] A3-01 rehearsal 结论可复现，且回滚路径在时限内可完成
-- [x] A3-02 至少一批模块满足 fallback 下线条件并可灰度发布
-- [x] A3-03 文档、脚本、指标、告警四者口径一致
-
-当前验收证据：
-
-- `target\debug\metrics_node.exe` 已于 2026-04-17 在本地监控配置上验证可启动；为避开 Windows 保留端口区间，本地监控端口已从 `8905` 调整为 `8805`，并同步到 `monitoring/local_engine.toml` 与 `monitoring/prometheus/prometheus.yml`
-- `scripts/cutover_rehearsal.ps1` 已于 2026-04-17 以 `ReleaseTag=20260417_local` 完整执行：`pause -> gate -> resume -> rollback gate`，两次 gate 结果均为 `PASSED`
-- 版本化演练报告：`docs/dashboards/rehearsal/cutover_rehearsal_20260417_local.md`
-- 版本化 gate 摘要：`docs/dashboards/rehearsal/cutover_gate_20260417_local.json`
-- 归档基线：`docs/dashboards/archive/dag_alerts_baseline_20260417_local_20260417_025050.md`、`docs/dashboards/archive/dag_alerts_baseline_20260417_local_rollback_20260417_025052.md`
-- `target\debug\metrics_node.exe` 现已自带本地 SQLite `base` 任务目录初始化，并注册 `local_probe_module` 单跳候选模块用于本地 fallback-off 白名单验证
-- `scripts/local_probe_whitelist_check.ps1` 与 `scripts/local_probe_whitelist_check.sh` 已把候选批次的观测口径改为“dispatch 前后指标增量对比”：要求 dispatch success、DAG scheduler success、downloader success 的增量均至少一次，且 `mocra_scheduler_ingress_total` 与 `mocra_stage_errors_total` 的增量均为 0
-- `docs/dashboards/rehearsal/fallback_whitelist_20260417_local.md` 已更新为通过结论：`local_probe_module` 的 `single-hop-baseline` 可作为首批本地 fallback-off whitelist batch
-- `docs/alerts/dag_alerts_calibration_runbook.md` 已同步 fallback-off baseline 口径，并保留 multi-hop parser/error 模块单独验证的退出条件
-
-**执行约束（本清单生效期间）**
-
-- [ ] C-01 禁止新增任何 legacy compatibility 分支
-- [ ] C-02 所有 cutover 相关改动必须附带 focused regression 或 e2e rehearsal 证据
-- [ ] C-03 若出现连续异常，优先触发模块级回滚，不做全局硬切
-
-### 15.5.2 Week 1 开发任务单（文件/函数级）
-
-以下任务单对应 15.5.1 的 Week 1（W1-01 ~ W1-05），用于直接开工实施。
-
-#### W1-01 观测：fallback 命中趋势（按模块）
-
-- [x] 在 `src/engine/chain/task_model_chain.rs` 的 `record_scheduler_ingress_fallback()` 增加 `module` 维度透传（调用点在 parser/error 两条 ingress 分支）
-- [x] 对 `try_scheduler_parser_dispatch()` / `try_scheduler_error_dispatch()` 中各类 fallback reason 统一枚举，避免 reason 漂移导致看板碎片化
-- [x] 在 `monitoring/prometheus/rules/mocra-pack7-alerts.yml` 增加按 `path + reason + module` 的 fallback 高位告警
-
-建议回归：
-
-- `cargo test --lib engine::chain::task_model_chain::scheduler_ingress_tests -- --nocapture`
-
-#### W1-02 策略：fallback 下线阈值与开关
-
-- [x] 在 `src/engine/task/task_manager.rs`（cutover gate 逻辑）补一个模块级 fallback gate（高位时阻断切入或触发回滚）
-- [x] 在 `src/common/model/config.rs` 增加 gate 配置项（阈值、观察窗口、灰度比例）
-- [x] 在 `src/engine/api/control.rs`（或 `src/engine/api/debug.rs`）补一个只读接口，输出当前模块 fallback gate 状态
-
-建议回归：
-
-- `cargo test --lib engine::task::task_manager::tests -- --nocapture`
-- `cargo test --lib engine::api::control::tests -- --nocapture`
-
-#### W1-03 方案：parser/error 最终 typed runtime model cutover
-
-- [x] 在 `src/engine/chain/task_model_chain.rs` 的 `resolve_parser_*` / `resolve_error_*` 标注并收敛“仅保留最小 seed 回退”的退出条件
-- [x] 在 `src/engine/task/parser_error_adapter.rs` 识别并隔离 legacy seed decode 入口（为后续删除做 feature gate）
-- [x] 在 `src/engine/task/module_node_runtime_bridge.rs` 明确 generate/parser runtime input 的最终 schema 边界（避免继续扩大 legacy 输入面）
-
-当前收口结论：
-
-- parser/error ingress 的字段解析顺序固定为 `typed context -> transport routing -> minimal seed fallback`，不再允许为了“补全 typed 路径”而主动放大 legacy seed 读取面。
-- legacy seed decode 仅作为 cutover 兜底出口保留；当 typed/transport 已经足够定位 `node_id`、`module`、`metadata`、`prefix_request` 时，不再触发 legacy payload 解码。
-- scheduler runtime bridge 只接受四类显式 schema：`mocra.scheduler.generate_input`、`mocra.scheduler.parser_input`、`mocra.scheduler.parser_output`、`mocra.scheduler.request_batch`，并要求 `schema + version + content_type` 同时匹配。
-- parser runtime output 仍只承载 `next dispatches + finished`；`parsed data` 未进入 bridge schema，若出现该类输出，继续按 invalid payload 处理而不是隐式扩展 schema。
-- 异常语义保持 fail-closed：typed bridge schema 不匹配、runtime input 解码失败、remote dispatcher 执行失败，都不通过 legacy 输入面静默兜回旧路径。
-
-建议回归：
-
-- `cargo test --lib engine::chain::task_model_chain::scheduler_ingress_tests -- --nocapture`
-- `cargo test --lib engine::task::module_node_runtime_bridge::tests -- --nocapture`
-
-#### W1-04 测试：remote placement + dispatcher 异常矩阵
-
-- [x] 在 `src/engine/task/module.rs` 扩展现有 no-dispatcher 用例，补齐 dispatcher 执行失败与网络失败路径
-- [x] 在 `src/engine/chain/task_model_chain.rs` 增加 parser/error ingress 层的 dispatcher-failed 断言（确保 fail-closed）
-- [x] 在 `src/schedule/dag/remote_redis.rs`（若已有测试模块）补 wire 层错误映射测试，保证错误可观测且不被吞掉
-
-建议回归：
-
-- `cargo test --lib engine::task::module::tests -- --nocapture`
-- `cargo test --lib engine::chain::task_model_chain::scheduler_ingress_tests -- --nocapture`
-
-#### W1-05 一致性：`profile_version + dag_version + run_id` 三元绑定
-
-- [x] 在 `src/engine/task/factory.rs` 和 `src/engine/task/profile_loader.rs` 明确 profile_version 进入 Task/Module 的绑定点
-- [x] 在 `src/engine/task/module_dag_orchestrator.rs` 给 DAG 编译结果引入可追踪版本标识（至少是 hash/version 字段）
-- [x] 在 `src/engine/task/module_dag_processor.rs` 的恢复/推进关键路径增加 run_id 与版本一致性校验
-
-建议回归：
-
-- `cargo test --lib engine::task::factory::tests -- --nocapture`
-- `cargo test --lib engine::task::module_dag_orchestrator::tests -- --nocapture`
-- `cargo test --lib engine::task::module_dag_processor::tests -- --nocapture`
-
-#### Week 1 完成判定（执行口径）
-
-- [x] 至少一个 dashboard 面板可按 `path/reason/module` 直接定位 fallback 热点
-- [x] parser/error ingress focused 回归在连续两次提交中稳定通过
-- [x] 三元绑定规则已有代码约束（不仅停留在文档）
-- [x] cutover 与回滚触发条件已能通过接口或日志明确读取
-
----
+Pack 6-8 当前已完成，不再保留旧版分批回滚清单：
+
+- Pack 6 控制面 API 已接入 `ApiState`、`ProfileControlPlaneStore` 与 leader/follower 写路径。
+- Pack 7 metrics facade、dashboard baseline、alert gate 已落地，失败处理以 release block / gate block 为准。
+- Pack 8 已完成 State/Engine 装配边界收口，Redis/Lua/rollback/legacy runtime builder 清理完成。
+- 旧 `cutover_rehearsal` 脚本、旧 rollback 归档和 `docs/pack8-priority-decision.md` 已删除。
+
+当前执行约束：
+
+- 禁止新增 Redis 后端、Redis 配置字段、Redis 环境变量或 Redis 依赖。
+- 禁止新增 rollback 兼容流程；灰度失败只能进入 release block / gate block。
+- 禁止新增 `build_legacy_*` runtime builder 和 `"legacy.*"` schema ID。
+- 每次触碰 hot path 后必须运行第 21.4 节列出的检查命令。
 
 ## 16. 最终架构结论
 
@@ -2607,7 +2231,6 @@ bash scripts/cutover_rehearsal.sh \
 | `src/queue/lib.rs` | `MqBackend`, `QueuedItem`, `Message`, `NackPolicy` | ACK/NACK 抽象与队列协议面 |
 | `src/queue/batcher.rs` | `Batcher` | 出站/入站统一批次窗口执行器 |
 | `src/queue/kafka.rs` | `KafkaQueue` | Kafka backend |
-| `src/queue/redis.rs` | `RedisQueue` | Redis Stream backend（兼容实现） |
 
 ### 17.3 分布式协调
 
@@ -2615,11 +2238,11 @@ bash scripts/cutover_rehearsal.sh \
 |------|---------|------|
 | `src/common/registry.rs` | `NodeRegistry` | 当前 cache/ZSET 节点注册表；目标态迁移到 Raft 状态机 |
 | `src/common/status_tracker.rs` | `StatusTracker` | 当前错误/状态跟踪器；目标态迁移到统一状态机 |
-| `src/cacheable/cache_service/service.rs` | `CacheService` | KV / TTL / ZSET / script facade |
-| `src/cacheable/cache_service/redis_backend.rs` | `RedisBackend` | 当前 Redis cache backend |
+| `src/cacheable/cache_service/service.rs` | `CacheService` | KV / TTL / ZSET / L1 facade |
+| `src/cacheable/cache_service/raft_backend.rs` | `RaftRocksDbCacheBackend` | Raft/RocksDB cache backend |
 | `src/cacheable/cache_service/local_backend.rs` | `LocalBackend` | 单机内存 backend |
-| `src/cacheable/cache_service/two_level_backend.rs` | `TwoLevelCacheBackend` | Redis + L1 本地缓存 |
-| `src/sync/leader.rs` | `LeaderElector` | 当前 Redis lock soft leader |
+| `src/utils/distributed_lock.rs` | `DistributedLockManager`, `RaftLockBackend` | 分布式锁 facade 与 Raft 后端 |
+| `src/utils/distributed_rate_limit.rs` | `DistributedSlidingWindowRateLimiter`, `RaftRateLimitBackend` | 分布式限流 facade 与 Raft 后端 |
 
 ### 17.4 执行一致性
 
@@ -2631,13 +2254,12 @@ bash scripts/cutover_rehearsal.sh \
 | `src/engine/task/module_dag_processor.rs` | `ModuleDagProcessor` | DAG 节点执行与上下文推进 |
 | `src/schedule/dag/scheduler.rs` | `DagScheduler` | 目标态分布式 DAG 调度层：run guard、resume、fencing、dispatch |
 | `src/schedule/dag/types.rs` | `DagNodeDispatcher`, `DagRunGuard`, `DagRunStateStore`, `DagFencingStore`, `NodePlacement` | DAG 分布式执行契约与节点放置抽象 |
-| `src/schedule/dag/remote_redis.rs` | `RedisRemoteDispatcher` | 现有远程 dispatcher 原型；目标态应替换为 MQ/gRPC/Raft-aware dispatcher |
 
 ### 17.5 模型定义
 
 | 文件 | 主要类型 | 说明 |
 |------|---------|------|
-| `src/common/model/config.rs` | `Config` | 完整配置树（含 Redis 兼容字段与 `RaftConfig`） |
+| `src/common/model/config.rs` | `Config` | 完整配置树（含 cache backend、queue、api、raft 配置） |
 | `src/common/model/message.rs` | `TaskEvent`, `UnifiedTaskInput` | 当前任务载体与 ingress 兼容输入 |
 | `src/common/model/request.rs` | `Request` | 下载请求模型 |
 | `src/common/model/response.rs` | `Response` | 下载响应模型 |
@@ -2683,7 +2305,7 @@ bash scripts/cutover_rehearsal.sh \
 
 Response Cache 被定义为一个**分布式文件存储能力**：
 
-> **当前代码说明：** 现有实现已经具备 `Request.enable_response_cache(bool)` / `enable_response_cache_with(&T)`、`Response::sync(hash, cache_service)` 的缓存命中路径，以及 downloader 成功返回后的 cache 写回路径；当前缓存仍是把完整 `Response` 放进当前 `CacheService` backend，并在 metadata 中保留 `response_cache_owner_namespace`、可选 `response_cache_owner_node_id` 与 `response_cache_lookup_key`。parser 侧的历史 cache refresh 现已把回流响应显式落成本 namespace 的 rollback copy，并同步写入 namespace-local 的 `cache_key -> owner` 索引，避免 foreign namespace ownership 直接作为 parser 侧本地缓存锚点。与此同时，节点心跳已开始发布可选 `api_port`，受保护 API 也能按 cache key 读取本地 cached response；当前同 namespace 的 downloader 节点已能通过 control-plane 中的 `cache_key -> owner_node_id` 索引与 `/debug/cache/response/{cache_key}` 回读远端缓存并回填本地 cache，而且回填成功后的本地副本会立即重写为当前 downloader 的本地 owner 并覆盖 owner 索引，使 warmed copy 自身变成可发现的同 namespace fallback anchor。foreign namespace 场景下，当前实现新增了一个最小显式入口：通过 `channel_config.federation_response_cache_api_endpoints` 把 owner namespace 映射到受保护 API base URL，再走同一条 `/debug/cache/response/{cache_key}` 回源；此外，owner 索引现在已经具备首批安全失效路径，会在“self-owned 本地 miss”“同 namespace owner 已不在活跃心跳集”或“远端 owner 返回 404”这类可判定为当前记录失真的负信号上条件清理旧记录，避免索引无限累积陈旧 owner。这仍不是目标态的 shared-download/service-discovery 方案。v2 目标态将把“大 body 存储”从一致性层剥离出来，改为“本地文件 + Raft 索引 + gRPC 回源”。
+> **当前代码说明：** 现有实现已经具备 `Request.enable_response_cache(bool)` / `enable_response_cache_with(&T)`、`Response::sync(hash, cache_service)` 的缓存命中路径，以及 downloader 成功返回后的 cache 写回路径；当前缓存仍是把完整 `Response` 放进当前 `CacheService` backend，并在 metadata 中保留 `response_cache_owner_namespace`、可选 `response_cache_owner_node_id` 与 `response_cache_lookup_key`。parser 侧的历史 cache refresh 现已把回流响应显式落成本 namespace 的本地缓存副本，并同步写入 namespace-local 的 `cache_key -> owner` 索引，避免 foreign namespace ownership 直接作为 parser 侧本地缓存锚点。与此同时，节点心跳已开始发布可选 `api_port`，受保护 API 也能按 cache key 读取本地 cached response；当前同 namespace 的 downloader 节点已能通过 control-plane 中的 `cache_key -> owner_node_id` 索引与 `/debug/cache/response/{cache_key}` 回读远端缓存并回填本地 cache，而且回填成功后的本地副本会立即重写为当前 downloader 的本地 owner 并覆盖 owner 索引，使 warmed copy 自身变成可发现的同 namespace fallback anchor。foreign namespace 场景下，当前实现新增了一个最小显式入口：通过 `channel_config.federation_response_cache_api_endpoints` 把 owner namespace 映射到受保护 API base URL，再走同一条 `/debug/cache/response/{cache_key}` 回源；此外，owner 索引现在已经具备首批安全失效路径，会在“self-owned 本地 miss”“同 namespace owner 已不在活跃心跳集”或“远端 owner 返回 404”这类可判定为当前记录失真的负信号上条件清理旧记录，避免索引无限累积陈旧 owner。这仍不是目标态的 shared-download/service-discovery 方案。v2 目标态将把“大 body 存储”从一致性层剥离出来，改为“本地文件 + Raft 索引 + gRPC 回源”。
 
 | 层 | 存储内容 | 说明 |
 |----|----------|------|
@@ -3216,7 +2838,7 @@ pub struct NodeParseOutput {
 这里要明确一条边界：  
 本节讨论的“热更新能力”是 **TaskProfile / middleware / node business config** 级别的热更新，不等同于“任意基础设施参数都可以在线切换”。即使在目标态，也应把下列配置默认视为 **restart / rolling-rebind scope**：
 
-- queue backend 类型切换（in-memory / Redis / Kafka）
+- queue backend 类型切换（in-memory / Kafka）
 - queue codec 切换（JSON / MsgPack）
 - cache backend / cookie backend 拓扑切换
 - API listener 端口变更
@@ -3234,12 +2856,11 @@ pub struct NodeParseOutput {
 | Step 2 | ✅ 已完成 | 建立 `TaskProfileSnapshot / WorkflowDefinition / RoutingMeta / ExecutionMeta / NodeInput / NodeParseOutput / QueueEnvelope` 等 canonical model | 模型完成后不再继续扩展旧 `ModuleConfig / MetaData` |
 | Step 3 | ✅ 已完成 | 直接替换 `ModuleNodeTrait`、`TaskFactory`、workflow compile path，让节点只接受 typed context | 节点接口与工厂切换在同一阶段完成 |
 | Step 4 | ✅ 已完成（核心调度层） | 建立 `DagScheduler / DagRunStateStore / DagRunGuard / DagFencingStore / NodePlacement`，并把 run state 从 processor 中剥离 | scheduler 就位后再切 processor 主链路 |
-| Step 5 | 🚧 进行中 | 重做 queue schema、DLQ、blob、topic，统一到目标 envelope；切换前先 drain 或重建旧 topic | codec/topic/batch/DLQ 已完成；`task/request/response/parser/error` topic 均已切到 typed envelope，其中 parser/error 仍处于 bridge 形态，链内兼容 payload 还未完全删除 |
+| Step 5 | ✅ 已完成 | 重做 queue schema、DLQ、blob、topic，统一到目标 envelope | codec/topic/batch/DLQ 已完成；`task/request/response/parser/error` topic 均已切到 typed envelope |
 | Step 6 | ✅ 已完成 | 切换 `/config/*`、`/tasks/dispatch`、`/cluster/*`、`/debug/*`、`/control/*` 等目标 API，并同步更新脚本与控制面入口 | 目标 API 路由已在主 `router()` 生效，旧 route 不再是主路径 |
-| Step 7 | 🚧 进行中 | 用目标模块重组 `State/Engine`，删除 legacy 路由、旧类型和 Redis 时代主路径依赖 | 装配单入口与 rehearsal 脚本已就位；剩余工作集中在 P8-A/P8-B/P8-E 与生产演练闭环 |
+| Step 7 | ✅ 已完成 | 用目标模块重组 `State/Engine`，删除 legacy 路由、旧类型和 Redis 时代主路径依赖 | 装配单入口已就位；Redis/Lua/rollback/legacy runtime builder 已清理 |
 
-> 当前代码已经完成执行流水线的 transport 层切口：`task/request/response/parser/error` 五段 topic 都已切到 typed envelope，parser/error ingress chain、`TaskManager` / `TaskFactory`、`TaskModelProcessor` 也已直接接收 envelope，并在主路径内部先收口到 seed。  
-> 但这还不意味着 `pipeline::processors` 已完成整包切换，因为 parser/error 主链路内部仍在用 legacy event 作为兼容载体。
+> 当前代码已经完成执行流水线的 transport 层切口：`task/request/response/parser/error` 五段 topic 都已切到 typed envelope，parser/error ingress chain、`TaskManager` / `TaskFactory`、`TaskModelProcessor` 也已直接接收 envelope。生产代码中不再保留 `build_legacy_*` runtime builder 或 `"legacy.*"` schema ID。
 
 ## 20. ModuleTrait / ModuleNodeTrait 配置与上下文重构
 
@@ -3634,356 +3255,55 @@ max_response_size = 10485760   # 10MB
 
 ---
 
-## 21. 当前代码重构进度与 AI 可执行 TODO List
+## 21. 当前代码重构进度与遗留检查结论
 
-### 21.1 当前验证基线（2026-05-19）
+### 21.1 当前验证基线（2026-05-20）
 
-本节只记录**当前代码真实状态**和**仍需交给 AI 实现的剩余代码任务**。旧版 R01-R08 任务卡已删除，不再把已完成项作为待办展开。
+本节记录当前代码实际验证结果。旧版 T21-N01 至 T21-N06 任务卡已全部完成并移除，不再作为待办或兼容清单保留。
 
 已验证通过：
 
 ```bash
-cargo test --lib fail_closed -- --nocapture
-# 22 passed, 0 failed
-
-cargo test cacheable::cache_service --lib -- --nocapture
-# 16 passed, 0 failed
-
-cargo test raft_rocksdb --lib -- --nocapture
-# 2 passed, 0 failed
-
-cargo test raft_rate_limit --lib -- --nocapture
-# 3 passed, 0 failed
-
-cargo test --lib
-# 544 passed, 0 failed, 1 ignored
-
-powershell -ExecutionPolicy Bypass -File scripts\check_legacy_hot_path.ps1
-# PASS
+cargo check
+cargo check --tests
+cargo check --manifest-path tests\Cargo.toml --bins
+powershell -ExecutionPolicy Bypass -File scripts\check_typed_hot_path.ps1
 ```
 
-已验证失败：
+验证结论：
+
+- 主 crate、测试目标和 `tests` 独立 crate bin 均可编译。
+- `check_typed_hot_path.ps1` 通过；生产代码中没有 `"legacy.*"` schema ID，也没有 `build_legacy_*` runtime builder 调用。
+- 非本地临时/归档路径中没有 Redis 后端、Redis 配置、Redis 环境变量、`redis_lock`、rollback/cutover rehearsal 脚本引用。
+
+### 21.2 已完成的重构面
+
+1. Redis 生产支持已移除：`redis` / `deadpool-redis` 依赖、Redis cache backend、Redis queue、Redis event handler、Redis sync、Lua 脚本路径和 Redis DAG remote 均已删除。
+2. `Config` 已移除 Redis/cookie/compensator/rollback 兼容字段；`[cache].backend` 只保留 `local` 与 `raft_rocksdb`。
+3. `State` 在 `raft_rocksdb` 模式下注入 `RaftLockBackend` 与 `RaftRateLimitBackend`，cache/lock/rate-limit/status 主状态写入 `ProfileControlPlaneStore`。
+4. `QueueManager` 默认使用 `QueueNativeCompensator`，不再保留 Redis compensator 路径。
+5. `redis_lock.rs` 已重命名为 `distributed_lock.rs`，调用点均迁移到 `crate::utils::distributed_lock`。
+6. 旧 `check_legacy_hot_path` 脚本已重命名为 `check_typed_hot_path`，CI evidence gate 不再运行 Redis 可选测试。
+7. cutover rollback rehearsal 脚本和 2026-04-17 rollback 归档证据已删除。
+
+### 21.3 当前仍需注意的非代码残留
+
+- `tests/tmp/engine_e2e_*.toml` 是未被 git 跟踪的本地生成临时配置，其中仍可能包含旧 Redis / rollback 字段；它们不参与编译和仓库状态，可按需清空本地 tmp 目录。
+- 本文档早期章节仍包含部分架构演进背景中的“Redis / legacy / rollback”历史词汇；这些段落只作为迁移背景，不应作为当前代码能力或兼容承诺解读。
+- 若后续新增任务卡，应只记录真实未完成代码工作；已完成项不要再保留为 TODO。
+
+### 21.4 后续检查命令
+
+每次清理历史遗留后，至少执行：
 
 ```bash
-powershell -ExecutionPolicy Bypass -File scripts\ci_contract_tests.ps1
-# FAIL
+cargo check
+cargo check --tests
+cargo check --manifest-path tests\Cargo.toml --bins
+powershell -ExecutionPolicy Bypass -File scripts\check_typed_hot_path.ps1
+rg -n "deadpool_redis|deadpool-redis|\bredis\b|\bRedis\b|RedisConfig|allow_rollback|rollback|cutover_rehearsal|check_legacy_hot_path|redis_lock|build_legacy_|\"legacy\."" src Cargo.toml tests scripts docs --glob "!tests/tmp/**"
 ```
 
-失败原因不是单项 Rust 测试失败，而是证据脚本自身仍有问题：
+Go / No-Go 口径：上述命令通过，且新增代码不重新引入 Redis、rollback、legacy runtime builder 或旧 schema ID。
 
-1. `scripts/ci_contract_tests.ps1` 在 Windows 上仍调用 `bash scripts/check_legacy_hot_path.sh`，本机 WSL/Hyper-V 未启用时必然失败。
-2. `$ErrorActionPreference = "Stop"` 与 `cargo` warning stderr 组合后，PowerShell 把 warning 包装成 `NativeCommandError`，导致 `cargo test --lib` 和 `cargo test raft_rocksdb --lib -- --nocapture` 在 evidence runner 中被记录为失败。
-3. `target/mocra-evidence/latest.json` 因上述脚本问题写出 `overall = "fail"`，不能作为当前代码质量通过证据。
-
-### 21.2 当前已完成的重构面
-
-1. `ModuleTrait / ModuleNodeTrait` 已切到 typed context。
-2. `TaskProfileSnapshot / ResolvedNodeConfig / TypedEnvelope` 已进入运行时配置模型。
-3. `task / request / response / parser_task / error_task` 已具备 typed transport envelope 与 DLQ replay 契约。
-4. `Module::generate()` 与 `Module::parser()` 主路径已接 scheduler bridge。
-5. parser/error ingress 已有 scheduler fast-path，默认不再回退旧 chain；旧 fallback 只能通过 `legacy_scheduler_ingress_fallback_enabled` 显式开启。
-6. `ModuleConfig` 已从 download/parser/stream chain 与 middleware 热路径移出，剩余使用集中在 profile building、legacy adapter 或测试。
-7. Response Cache 已具备 owner index、远端 HTTP client 抽象、跨 namespace fallback、owner 清理与本地 warm copy。
-8. Queue-native compensator 已有 pending scan / drain 与 crash/replay 幂等测试。
-9. `ModuleProcessorWithChain` 已从生产主路径隔离。
-10. Raft runtime、ProfileControlPlaneStore、leader view、profile/default/middleware/status/response-cache-owner 读写模型已落地。
-11. `ControlPlaneRaftCommand` / `ControlPlaneApply` 已增加 cache KV、TTL、NX、counter、zset、lock 命令模型。
-12. `RaftRocksDbCacheBackend` 已实现并接入 `CacheService::new_with_backend_kind()`。
-13. `[cache].backend = "raft_rocksdb"` 已进入 `Config` 与 `State` 装配，cache 与 lock 在该模式下不依赖 Redis。
-14. `DistributedLockManager` 已支持 `LockBackend`，并有 `RaftLockBackend`。
-15. `StatusTrackerThresholdDecisionService` 已按 Redis capability 决定是否走 Lua，避免仅因存在 `LuaScriptRegistry` 就启用 Lua path。
-16. `scripts/ci_contract_tests.ps1` / `.sh` 已加入 `raft_rocksdb_backend` evidence 项，但 PowerShell 版仍需修复。
-
-### 21.3 当前真实剩余缺口
-
-1. `RaftRateLimitBackend` 已存在并有单元测试，但没有接入 `DistributedSlidingWindowRateLimiter` 主路径；`State` 在 `raft_rocksdb` 模式下仍调用 `DistributedSlidingWindowRateLimiter::new(None, ...)`，实际落到本地内存限流。
-2. cache/lock 的 NX、counter、CAS 返回值当前由 `ProfileControlPlaneStore` 在 submit 前本地读取再提交；单机测试可过，但多节点 Raft 场景下不是强线性化 apply-result 语义。
-3. `RaftRocksDbCacheBackend::zremrangebyscore()` 当前提交命令后固定返回 `0`，没有返回真实删除数量。
-4. no-redis `raft_rocksdb` 现有测试主要是 State/service smoke，没有覆盖真实 Engine 最小任务执行，也没有证明 rate-limit 主路径写入 Raft store。
-5. `scripts/ci_contract_tests.ps1` 不能作为 Windows 原生门禁；它仍调用 bash，且会把 cargo warning 当失败。
-6. 当前 `cargo test --lib` 仍有 warnings：`unused_braces`、`unused import: Instant`、`supports_raft_control_plane` dead code、若干 dead field。它们不阻塞测试，但会触发当前 PowerShell evidence runner 的误判。
-
-### 21.4 TODO 任务卡格式
-
-以下每个 TODO 都可以直接交给 AI 编码。执行时应把单张任务卡整体作为 prompt，并要求 AI 先读卡片中的**主要文件**，再实施代码变更。
-
-每张任务卡包含：
-
-- **AI 任务**：直接实施目标。
-- **设计目标**：本任务要解决的架构缺口。
-- **主要文件**：建议优先修改或新增的文件。
-- **实现要求**：必须满足的行为约束。
-- **实现步骤**：建议按顺序执行的代码改造步骤。
-- **测试设计**：需要新增或扩展的测试场景。
-- **验收命令**：完成后必须通过的命令。
-- **完成判定**：除测试外的静态或行为检查。
-- **可交给 AI 的实现提示**：可直接复制给 AI worker 的任务描述。
-
----
-
-### 21.5 P0：补齐 Raft-only 主路径正确性
-
-#### T21-N01 接入 `RaftRateLimitBackend` 到 `DistributedSlidingWindowRateLimiter` 主路径
-
-- [x] **AI 任务**：把 `RaftRateLimitBackend` 从孤立测试 backend 接入 `DistributedSlidingWindowRateLimiter` 与 `State` 装配；`[cache].backend = "raft_rocksdb"` 时限流状态必须写入 `ProfileControlPlaneStore`，不能落到本地 `DashMap`。
-- **设计目标**：
-  - 让 no-redis Raft 模式真正具备跨进程限流状态，而不是单进程本地限流。
-  - 保持 Redis/local 旧行为兼容。
-  - 让 `raft_rocksdb_cache_lock_rate_limit_status_smoke` 能证明 rate-limit 使用 Raft read model。
-- **主要文件**：
-  - `src/utils/distributed_rate_limit.rs`
-  - `src/common/state.rs`
-  - `src/engine/api/profile_store.rs`
-- **实现要求**：
-  - 新增 `RateLimitBackend` trait 或等价 backend enum，至少覆盖 `verify` / `wait` / `cleanup` 当前主路径需要的状态读写。
-  - `DistributedSlidingWindowRateLimiter` 保留现有 public API，但内部在 Redis/local/Raft 三种 backend 间分派。
-  - `State::CoordinationServices::build()` 在 `Some(CacheBackendKind::RaftRocksdb)` 时必须构造并注入 `RaftRateLimitBackend`。
-  - `api_limiter` 与主 `limiter` 都要按 backend kind 装配，不能只改 downloader limiter。
-  - Raft backend key 必须包含 namespace、limiter scope、identifier/bucket，避免主限流与 API 限流互相污染。
-- **实现步骤**：
-  1. 阅读 `DistributedSlidingWindowRateLimiter` 的 `verify`、`wait`、`cleanup`、`set_all_limit`、`set_key_configs` 当前逻辑，列出哪些状态必须进入 backend。
-  2. 提取最小 backend trait。若一次性迁移配置 API 风险过大，第一步至少把 request hit/last-request/window 语义迁到 backend，并保留配置本地缓存。
-  3. 将现有 Redis 分支封装为 `RedisRateLimitBackend`，本地分支封装为 `LocalRateLimitBackend`。
-  4. 将现有 `RaftRateLimitBackend::hit()` 接入主 limiter，补齐 `cleanup` 与当前 limiter 需要的返回值。
-  5. 修改 `State` 装配，`raft_rocksdb` 时注入 Raft backend，Redis pool 必须为 `None`。
-  6. 在 State smoke 测试里断言 rate-limit bucket/counter 可从 `ProfileControlPlaneStore` 读到。
-- **测试设计**：
-  - `cargo test raft_rate_limit --lib -- --nocapture`：保留现有 backend 单测。
-  - 新增 `raft_rocksdb_state_uses_raft_rate_limit_backend`：构建 `CoordinationServices` 后调用 limiter，断言 `profile_store.read_cache_counter(...)` 有 Raft bucket。
-  - 新增 `raft_rocksdb_api_limiter_uses_raft_backend`：配置 `api.rate_limit` 后验证 API limiter 也写 Raft store。
-  - 保留 `distributed_rate_limit` 现有 Redis/local 测试不退化。
-- **验收命令**：
-  ```bash
-  cargo test distributed_rate_limit --lib -- --nocapture
-  cargo test raft_rate_limit --lib -- --nocapture
-  cargo test raft_rocksdb_state --lib -- --nocapture
-  cargo test --lib
-  ```
-- **完成判定**：
-  - `rg "RaftRateLimitBackend" src/common src/utils` 能看到 State 装配和 limiter 主路径使用，不只是在测试里出现。
-  - `raft_rocksdb` 模式下 limiter 不写 `local_last_request` 作为主状态。
-- **可交给 AI 的实现提示**：
-  > 请把 `RaftRateLimitBackend` 接入 `DistributedSlidingWindowRateLimiter` 主路径和 `State` 装配。`raft_rocksdb` 模式下主 limiter 与 api_limiter 都必须写 `ProfileControlPlaneStore`，不能退回本地 DashMap。补充 State 级测试，断言限流 hit 后 Raft/RocksDB read model 中存在对应 counter/bucket。
-
-#### T21-N02 将 cache/lock 的 NX、counter、CAS 返回语义收口到 Raft apply 结果
-
-- [x] **AI 任务**：修复 `submit_cache_set_nx`、`submit_cache_incr_by`、`submit_lock_acquire`、`submit_lock_renew`、`submit_lock_release` 的 submit-before-read / read-before-submit 弱语义，让返回值来自 Raft 串行 apply 后的真实状态。
-- **设计目标**：
-  - 避免多节点并发时两个 caller 都在 submit 前读到旧状态，从而错误返回成功。
-  - 让 counter 返回值代表 Raft log apply 后的新值，而不是本地读出的预测值。
-  - 让 lock acquire/renew/release 的 owner 校验在状态机串行执行中完成。
-- **主要文件**：
-  - `src/common/model/control_plane_profile.rs`
-  - `src/engine/api/profile_store.rs`
-  - `src/sync/raft.rs`
-  - `src/utils/redis_lock.rs`
-  - `src/cacheable/cache_service/raft_backend.rs`
-- **实现要求**：
-  - `CacheSetNx` 的“key 不存在或已过期才写入”必须在 apply 侧判断，不允许只在 submit 前判断。
-  - `CacheIncrBy` command 字段应表达 delta，而不是把 submit 前计算出的 new value 塞进 `delta`。
-  - lock acquire/renew/release 的 owner 与 TTL 校验必须在 apply 侧判断。
-  - `ProfileControlPlaneStore` 需要提供可读取 apply outcome 的 helper。可以先用 request-id outcome record，例如 `{namespace}:control:outcome:{request_id}`，再由 helper submit 后读取。
-  - follower 转发场景下 helper 不得返回本地预测成功；无法确认 outcome 时应返回明确 error 或 retryable 状态。
-- **实现步骤**：
-  1. 为需要返回值的 command 增加 `request_id`，并新增 `ControlPlaneApply::CommandOutcomeUpsert` 或等价 outcome read model。
-  2. 在 `apply_model_to_batch()` 内执行条件判断，并写 outcome：`applied=true/false`、`value`、`reason`。
-  3. 修改 `submit_cache_set_nx()`、`submit_cache_incr_by()`、`submit_lock_*()`：submit 后读取 outcome，而不是 submit 前直接返回预测值。
-  4. 调整 `ControlPlaneRaftCommand::CacheIncrBy` 语义，确保 apply 侧用当前 counter + delta 得到新值。
-  5. 补并发测试，至少用 `tokio::join!` 在同一 store 上模拟两个 `set_nx` / `lock_acquire` 并发调用。
-  6. 保持现有 local apply 单测通过。
-- **测试设计**：
-  - `cache_set_nx_concurrent_only_one_success`
-  - `cache_incr_by_returns_apply_ordered_values`
-  - `raft_lock_concurrent_acquire_only_one_owner`
-  - `raft_lock_renew_and_release_wrong_owner_return_false_from_apply`
-  - `follower_or_forwarding_without_outcome_is_retryable_or_error`
-- **验收命令**：
-  ```bash
-  cargo test engine::api::profile_store --lib -- --nocapture
-  cargo test raft_lock --lib -- --nocapture
-  cargo test raft_rocksdb_cache --lib -- --nocapture
-  cargo test sync::raft --lib -- --nocapture
-  cargo test --lib
-  ```
-- **完成判定**：
-  - `submit_cache_set_nx`、`submit_cache_incr_by`、`submit_lock_*` 中不再以 submit 前本地 read 作为最终成功判定。
-  - 新增 tests 能证明并发冲突只有一个成功。
-- **可交给 AI 的实现提示**：
-  > 请把 Raft cache/lock 的条件写入和返回值改成 apply-result 语义。新增 command outcome read model，`set_nx`、`incr_by`、`lock_acquire/renew/release` 都要在状态机 apply 侧判断并写 outcome，helper submit 后读取 outcome 返回。补充并发冲突测试，确保多 caller 下只有一个 NX/lock acquire 成功。
-
-#### T21-N03 修复 Raft zset 删除返回值与索引一致性
-
-- [x] **AI 任务**：修复 `RaftRocksDbCacheBackend::zremrangebyscore()` 固定返回 `0` 的问题，并确保 `CacheZRem` / `CacheZRemRangeByScore` 同步清理 zset entry 与 member index。
-- **设计目标**：
-  - 让 Raft backend 的 zset 行为与 Redis backend 的返回语义一致。
-  - 避免删除 range 后 `zset_idx` 或 reverse index 残留，影响后续 `zrem(member)` 或重复 `zadd`。
-- **主要文件**：
-  - `src/common/model/control_plane_profile.rs`
-  - `src/engine/api/profile_store.rs`
-  - `src/cacheable/cache_service/raft_backend.rs`
-- **实现要求**：
-  - `zremrangebyscore()` 返回实际删除 entry 数。
-  - range delete 必须同时删除 score entry 和 member index。
-  - `zadd` 同一 member 新 score 时，旧 score entry 必须被删除或覆盖，不得出现同一 member 多个 score entry。
-  - 若继续使用 `hex(member)` 作为 index key，应补二进制 member 测试。
-- **实现步骤**：
-  1. 增加 zset member index read helper：由 `{namespace}:cache:zset_idx:{zset_key}:{member_hex}` 找到旧 score key。
-  2. 修改 `CacheZAdd` apply：写新 score 前删除同 member 的旧 score entry。
-  3. 修改 `CacheZRemRangeByScore` apply：统计删除数量，并删除对应 member index。
-  4. 通过 T21-N02 的 outcome 机制或新增 delete-count helper 让 backend 返回真实删除数。
-  5. 补 `zadd_same_member_updates_score`、`zremrangebyscore_returns_count_and_cleans_index` 测试。
-- **测试设计**：
-  - 同 member 先以 score=1 写入，再以 score=10 写入，`zrangebyscore(0, 5)` 不应返回该 member。
-  - range delete 删除两个 member，backend 返回 `2`。
-  - range delete 后再 `zadd` 同 member，不受旧 index 影响。
-  - member 使用非 UTF-8 bytes。
-- **验收命令**：
-  ```bash
-  cargo test raft_backend_zset --lib -- --nocapture
-  cargo test cache_zset --lib -- --nocapture
-  cargo test cacheable::cache_service --lib -- --nocapture
-  ```
-- **完成判定**：
-  - `RaftRocksDbCacheBackend::zremrangebyscore()` 不再 `.map(|_| 0)`。
-  - 删除后 RocksDB 中不存在对应 zset entry 和 index 残留。
-- **可交给 AI 的实现提示**：
-  > 请修复 Raft zset 删除语义：`zremrangebyscore` 返回真实删除数量，range delete 同步清理 member index，`zadd` 同一 member 新 score 时删除旧 score entry。补二进制 member、重复 zadd、删除数量和索引清理测试。
-
----
-
-### 21.6 P1：集成验收与证据门禁
-
-#### T21-N04 增加 no-redis `raft_rocksdb` Engine 最小执行集成测试
-
-- [x] **AI 任务**：在现有 State smoke 基础上增加真实 Engine 最小任务执行测试，证明 no-redis `raft_rocksdb` 模式不只服务可构建，而且能跑通最小 generate/parser 主路径。
-- **设计目标**：
-  - 让生产前验收覆盖 Engine 层，而不是只覆盖 `CoordinationServices::build()`。
-  - 同时证明 cache、lock、rate-limit、status tracker 在同一个 Engine 运行上下文中可用。
-- **主要文件**：
-  - `src/common/state.rs`
-  - `src/engine/engine.rs`
-  - `src/engine/engine/tests.rs` 或现有 engine test module
-  - `src/engine/task/module.rs`
-- **实现要求**：
-  - 测试配置不得包含 Redis。
-  - 使用 `[cache].backend = "raft_rocksdb"`。
-  - 使用临时 data dir / 单节点 Raft 或 local apply store，不能依赖固定端口。
-  - 注册最小 module / node，至少执行一次 generate 或 parser scheduler bridge。
-  - 执行后断言 control-plane store 中存在 cache、lock、rate-limit、status 中至少三类状态；rate-limit 必须是 Raft backend 写入，不是本地 `DashMap`。
-- **实现步骤**：
-  1. 复用 `common::state::tests::sample_config()` 或现有 engine fixture。
-  2. 构造 no-redis `State`，启用 `CacheBackendKind::RaftRocksdb`。
-  3. 初始化 Engine，并注册最小 workflow/module。
-  4. 触发最小 generate/parser 路径。
-  5. 断言无 Redis pool，且关键状态进入 `ProfileControlPlaneStore`。
-- **测试设计**：
-  - `raft_rocksdb_engine_minimal_generate_smoke`
-  - `raft_rocksdb_engine_minimal_parser_smoke`
-  - `raft_rocksdb_engine_no_redis_pool_and_raft_rate_limit_state`
-- **验收命令**：
-  ```bash
-  cargo test raft_rocksdb_engine --lib -- --nocapture
-  cargo test raft_rocksdb --lib -- --nocapture
-  cargo test --lib
-  ```
-- **完成判定**：
-  - `cargo test raft_rocksdb --lib -- --nocapture` 不再只跑 State 级测试。
-  - 测试断言 rate-limit 状态来自 Raft/RocksDB。
-- **可交给 AI 的实现提示**：
-  > 请新增 no-redis `raft_rocksdb` Engine 最小执行测试。复用现有 State/Engine fixture，配置 `CacheBackendKind::RaftRocksdb` 且无 Redis，跑通最小 generate/parser 路径，并断言 cache/lock/rate-limit/status 状态写入 `ProfileControlPlaneStore`。
-
-#### T21-N05 修复 Windows PowerShell CI evidence gate
-
-- [x] **AI 任务**：修复 `scripts/ci_contract_tests.ps1`，让 Windows 原生 evidence gate 不依赖 bash，且不会因为 cargo warning stderr 把通过的测试误判为失败。
-- **设计目标**：
-  - `powershell -ExecutionPolicy Bypass -File scripts\ci_contract_tests.ps1` 必须在 Windows 上可作为真实门禁。
-  - `target/mocra-evidence/latest.json` 的 `overall` 必须可靠反映命令 exit code。
-- **主要文件**：
-  - `scripts/ci_contract_tests.ps1`
-  - `scripts/check_legacy_hot_path.ps1`
-  - `scripts/ci_contract_tests.sh`
-- **实现要求**：
-  - PowerShell 版 legacy check 必须调用 `scripts/check_legacy_hot_path.ps1`，不能调用 `.sh` 或 `bash`。
-  - evidence runner 必须捕获 stdout/stderr 到文件，但只以 native process exit code 判定成功失败。
-  - `cargo` warning 可以写入 evidence txt，但不能让 `Invoke-EvidenceTest` 进入 catch 并误判。
-  - `summary.json` 需要包含每个 evidence item 的名称、命令、状态、exit code、日志路径，而不只是 passed/failed 总数。
-  - Bash 版继续用于 Linux/macOS，不影响 PowerShell 原生路径。
-- **实现步骤**：
-  1. 重写 `Invoke-EvidenceTest`，使用 `Start-Process` 或 `&` 调用后显式读取 `$LASTEXITCODE`，避免 `$ErrorActionPreference=Stop` 捕获 native stderr。
-  2. 将 `check_legacy` command 改为 `powershell -ExecutionPolicy Bypass -File scripts\check_legacy_hot_path.ps1`。
-  3. 写 structured items 到 `summary.json`。
-  4. 保留 `raft_rocksdb_backend` item。
-  5. 运行脚本并检查 `latest.json`。
-- **测试设计**：
-  - 正常运行时 overall 为 pass。
-  - 临时用不存在的 cargo filter 或 dry-run mock 验证失败命令会让 overall fail。
-  - 确认 evidence txt 包含 warning 但 passFile 为 true。
-- **验收命令**：
-  ```bash
-  powershell -ExecutionPolicy Bypass -File scripts\ci_contract_tests.ps1
-  powershell -ExecutionPolicy Bypass -File scripts\check_legacy_hot_path.ps1
-  ```
-- **完成判定**：
-  - Windows 无 WSL 环境下 `ci_contract_tests.ps1` 成功。
-  - `target/mocra-evidence/latest.json` 包含 `raft_rocksdb_backend` 且 `overall = "pass"`。
-- **可交给 AI 的实现提示**：
-  > 请修复 `scripts/ci_contract_tests.ps1`：不要调用 bash，legacy check 使用 PowerShell 脚本；重写 evidence runner，使 cargo warning stderr 不触发误判，只按 exit code 判定。summary.json 输出每个 evidence item 的 name/command/status/exit_code/log_path，并验证 latest.json overall pass。
-
-#### T21-N06 清理当前 lib test warnings，避免 evidence runner 与 CI 噪音
-
-- [x] **AI 任务**：清理 `cargo test --lib` 当前 warnings，尤其是会污染 evidence 的 native stderr 输出。
-- **设计目标**：
-  - 让 `cargo test --lib` 输出更稳定，降低 CI 脚本误判概率。
-  - 让新增 capability API 要么被使用，要么移除死代码。
-- **主要文件**：
-  - `src/common/model/cookies.rs`
-  - `src/engine/chain/parser_chain.rs`
-  - `src/cacheable/cache_service/backend.rs`
-  - `src/cacheable/cache_service/service.rs`
-  - `src/common/state.rs`
-  - `src/engine/chain/stream_chain.rs`
-  - `src/engine/task/module_dag_processor.rs`
-- **实现要求**：
-  - 移除 `cookies.rs` 中 unnecessary braces。
-  - 移除 `parser_chain.rs` 未使用的 `Instant` import。
-  - `supports_raft_control_plane` 如果保留，必须通过 `CacheService` / `State` 暴露并在测试中使用；否则从 trait 删除。
-  - 对确实暂时保留的 dead fields，使用更局部的 allow 或补真实读取，不能全 crate 粗暴关闭 warning。
-- **实现步骤**：
-  1. 跑 `cargo test --lib` 记录 warning 列表。
-  2. 逐项做最小修改。
-  3. 对 capability helper 补测试或删掉。
-  4. 再跑 `cargo test --lib`，确认没有上述 warnings。
-- **测试设计**：
-  - 不需要新增业务测试，除非保留 `supports_raft_control_plane` 时需要补 capability helper 测试。
-- **验收命令**：
-  ```bash
-  cargo test --lib
-  powershell -ExecutionPolicy Bypass -File scripts\ci_contract_tests.ps1
-  ```
-- **完成判定**：
-  - `cargo test --lib` 不再输出本节列出的 warnings。
-  - PowerShell evidence gate 不再因为 warning stderr 失败。
-- **可交给 AI 的实现提示**：
-  > 请清理当前 `cargo test --lib` warnings：去掉 `cookies.rs` 多余 braces、`parser_chain.rs` 未用 import，并处理 `supports_raft_control_plane` dead code。只做最小修改，不改业务行为。完成后 `cargo test --lib` 应无这些 warnings。
-
-### 21.7 Go/No-Go 代码验收门槛
-
-进入生产灰度前，必须全部满足：
-
-- [x] `T21-N01` 至 `T21-N06` 全部完成（N01 ✅ N02 ✅ N03 ✅ N04 ✅ N05 ✅ N06 ✅），551 passed, 0 failed, 1 ignored。
-- [x] `raft_rocksdb` 模式下 cache、lock、rate-limit、status tracker 都通过 Raft/RocksDB 主路径，不依赖 Redis，也不退回本地内存作为分布式状态。
-- [x] cache/lock 的 NX、counter、CAS 返回语义来自 Raft apply outcome，而不是 submit 前本地预测。
-- [x] `RaftRocksDbCacheBackend` zset 删除返回值与索引清理行为和 Redis backend 对齐。
-- [x] no-redis `raft_rocksdb` Engine 最小执行测试通过。
-- [x] 固定证据命令通过：
-  ```bash
-  cargo test fail_closed --lib -- --nocapture
-  cargo test cacheable::cache_service --lib -- --nocapture
-  cargo test raft_rocksdb --lib -- --nocapture
-  cargo test raft_rate_limit --lib -- --nocapture
-  cargo test --lib
-  powershell -ExecutionPolicy Bypass -File scripts\check_legacy_hot_path.ps1
-  powershell -ExecutionPolicy Bypass -File scripts\ci_contract_tests.ps1
-  ```
-
-*文档最后更新：2026-05-20。Section 21 全部完成。T21-N01-N06 ✅，Section 21.7 Go/No-Go ✅。551 passed, 0 failed, 1 ignored。所有分布式状态（cache/lock/rate-limit/suspension/status）均通过 Raft/RocksDB 主路径，config 配置本地缓存。*
+*文档最后更新：2026-05-20。当前结论：重构主路径已完成；本轮清理后未发现仍参与编译或 CI 的历史兼容代码。*

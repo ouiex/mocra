@@ -29,8 +29,6 @@ use crate::common::processors::processor::{
 };
 use crate::common::processors::processor_chain::ErrorStrategy;
 use crate::engine::chain::backpressure::{BackpressureSendState, send_with_backpressure};
-use crate::engine::deduplication::Deduplicator;
-use crate::engine::lua::LuaScriptRegistry;
 use crate::engine::task::module_dag_orchestrator::ModuleDagOrchestrator;
 use crate::engine::task::module_node_runtime_bridge::{
     SchedulerNodeGenerateRuntimeInput, decode_request_batch_payload,
@@ -83,50 +81,42 @@ impl ChainDecision {
 
 #[cfg(test)]
 mod threshold_decision_tests {
-    use super::{lua_thresholds_enabled, ChainDecision};
+    use super::ChainDecision;
 
     #[test]
-    fn chain_decision_action_applied_tracks_lua_side_effects() {
-        let retry_lua = ChainDecision::RetryAfter {
+    fn chain_decision_action_applied_tracks_external_side_effects() {
+        let retry_applied = ChainDecision::RetryAfter {
             delay: std::time::Duration::from_millis(100),
             action_applied: true,
         };
-        let retry_fallback = ChainDecision::RetryAfter {
+        let retry_unapplied = ChainDecision::RetryAfter {
             delay: std::time::Duration::from_millis(100),
             action_applied: false,
         };
-        assert!(retry_lua.action_applied());
-        assert!(!retry_fallback.action_applied());
+        assert!(retry_applied.action_applied());
+        assert!(!retry_unapplied.action_applied());
 
-        let terminate_module_lua = ChainDecision::TerminateModule {
+        let terminate_module_applied = ChainDecision::TerminateModule {
             reason: "module limit".to_string(),
             action_applied: true,
         };
-        let terminate_module_fallback = ChainDecision::TerminateModule {
+        let terminate_module_unapplied = ChainDecision::TerminateModule {
             reason: "module limit".to_string(),
             action_applied: false,
         };
-        assert!(terminate_module_lua.action_applied());
-        assert!(!terminate_module_fallback.action_applied());
+        assert!(terminate_module_applied.action_applied());
+        assert!(!terminate_module_unapplied.action_applied());
 
-        let terminate_task_lua = ChainDecision::TerminateTask {
+        let terminate_task_applied = ChainDecision::TerminateTask {
             reason: "task limit".to_string(),
             action_applied: true,
         };
-        let terminate_task_fallback = ChainDecision::TerminateTask {
+        let terminate_task_unapplied = ChainDecision::TerminateTask {
             reason: "task limit".to_string(),
             action_applied: false,
         };
-        assert!(terminate_task_lua.action_applied());
-        assert!(!terminate_task_fallback.action_applied());
-    }
-
-    #[test]
-    fn lua_thresholds_require_backend_and_registry() {
-        assert!(lua_thresholds_enabled(true, true));
-        assert!(!lua_thresholds_enabled(true, false));
-        assert!(!lua_thresholds_enabled(false, true));
-        assert!(!lua_thresholds_enabled(false, false));
+        assert!(terminate_task_applied.action_applied());
+        assert!(!terminate_task_unapplied.action_applied());
     }
 }
 
@@ -183,10 +173,6 @@ mod task_routing_policy_tests {
         assert_eq!(retry_policy.current_retry, 2);
         assert!(retry_policy.reason.as_deref().unwrap_or_default().contains("request error"));
     }
-}
-
-fn lua_thresholds_enabled(cache_redis_enabled: bool, has_lua_registry: bool) -> bool {
-    cache_redis_enabled && has_lua_registry
 }
 
 fn module_matches_pending_context(
@@ -249,31 +235,15 @@ pub trait ThresholdDecisionService: Send + Sync {
     async fn error_task_decide(&self, input: &ErrorEnvelopeSeed) -> ChainDecision;
 }
 
-/// Default threshold decision service backed by `StatusTracker` and optional Lua atomics.
+/// Default threshold decision service backed by `StatusTracker`.
 #[derive(Clone)]
 pub struct StatusTrackerThresholdDecisionService {
     state: Arc<State>,
-    lua_registry: Option<Arc<LuaScriptRegistry>>,
 }
 
 impl StatusTrackerThresholdDecisionService {
-    /// Creates a service with fallback-safe behavior when Lua is unavailable.
-    pub fn new(state: Arc<State>, lua_registry: Option<Arc<LuaScriptRegistry>>) -> Self {
-        Self {
-            state,
-            lua_registry,
-        }
-    }
-
-    fn lua_registry(&self) -> Option<&Arc<LuaScriptRegistry>> {
-        if lua_thresholds_enabled(
-            self.state.has_cache_redis_backend(),
-            self.lua_registry.is_some(),
-        ) {
-            self.lua_registry.as_ref()
-        } else {
-            None
-        }
+    pub fn new(state: Arc<State>) -> Self {
+        Self { state }
     }
 }
 
@@ -308,205 +278,6 @@ impl ThresholdDecisionService for StatusTrackerThresholdDecisionService {
             &input.task_model.account,
             input.run_id,
         );
-
-        if let (Some(lua_registry), Some(modules)) =
-            (self.lua_registry(), input.task_model.module.as_ref())
-            && let Some(module_name) = modules.first()
-        {
-            let module_id = chain_key::module_runtime_id(
-                &input.task_model.account,
-                &input.task_model.platform,
-                module_name,
-            );
-            let module_counter_key = chain_key::module_threshold_key(&task_id, &module_id);
-            let task_counter_key = chain_key::task_threshold_key(&task_id);
-
-            let cfg = self.state.config.read().await;
-            let module_threshold = cfg.crawler.module_max_errors.to_string();
-            let task_threshold = cfg.crawler.task_max_errors.to_string();
-            let retry_after_ms = "1000".to_string();
-            let ttl_secs = cfg.cache.ttl.to_string();
-            drop(cfg);
-
-            let now_ms = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis()
-                .to_string();
-
-            let keys = [module_counter_key.as_str(), task_counter_key.as_str()];
-            let args = [
-                module_threshold.as_str(),
-                task_threshold.as_str(),
-                retry_after_ms.as_str(),
-                ttl_secs.as_str(),
-            ];
-
-            match lua_registry
-                .eval_triplet_with_fallback(
-                    self.state.cache_service.as_ref(),
-                    "etm_threshold_decide.lua",
-                    include_str!("../../lua/etm_threshold_decide.lua"),
-                    &keys,
-                    &args,
-                )
-                .await
-            {
-                Ok((0, _, _)) => return ChainDecision::Continue,
-                Ok((1, _, _)) => {
-                    let retry_schedule_key = chain_key::error_retry_schedule_key(&task_id);
-                    let retry_member =
-                        format!("{}:{}:{}", task_id, module_id, input.prefix_request);
-                    let schedule_keys = [retry_schedule_key.as_str()];
-                    let schedule_args = [
-                        retry_member.as_str(),
-                        retry_after_ms.as_str(),
-                        now_ms.as_str(),
-                        ttl_secs.as_str(),
-                    ];
-                    match lua_registry
-                        .eval_triplet_with_fallback(
-                            self.state.cache_service.as_ref(),
-                            "etm_retry_schedule.lua",
-                            include_str!("../../lua/etm_retry_schedule.lua"),
-                            &schedule_keys,
-                            &schedule_args,
-                        )
-                        .await
-                    {
-                        Ok((0, _, _)) => {
-                            counter!("mocra_error_task_lua_action_total", "action" => "retry_scheduled").increment(1);
-                        }
-                        Ok((1, msg, _)) | Ok((2, msg, _)) => {
-                            counter!("mocra_error_task_lua_action_total", "action" => "retry_schedule_rejected").increment(1);
-                            warn!(
-                                "[ThresholdDecisionService] etm_retry_schedule rejected: task_id={} module_id={} msg={}",
-                                task_id, module_id, msg
-                            );
-                        }
-                        Ok((code, msg, _)) => {
-                            counter!("mocra_error_task_lua_action_total", "action" => "retry_schedule_unknown").increment(1);
-                            warn!(
-                                "[ThresholdDecisionService] etm_retry_schedule unexpected code={} task_id={} module_id={} msg={}",
-                                code, task_id, module_id, msg
-                            );
-                        }
-                        Err(err) => {
-                            counter!("mocra_error_task_lua_action_total", "action" => "retry_schedule_error").increment(1);
-                            warn!(
-                                "[ThresholdDecisionService] etm_retry_schedule failed: task_id={} module_id={} error={}",
-                                task_id, module_id, err
-                            );
-                        }
-                    }
-                    return ChainDecision::RetryAfter {
-                        delay: std::time::Duration::from_millis(1000),
-                        action_applied: true,
-                    };
-                }
-                Ok((2, msg, _)) => {
-                    let terminate_key = chain_key::terminate_module_key(&task_id, &module_id);
-                    let terminate_keys = [terminate_key.as_str()];
-                    let terminate_args = [msg.as_str(), now_ms.as_str(), ttl_secs.as_str()];
-                    match lua_registry
-                        .eval_triplet_with_fallback(
-                            self.state.cache_service.as_ref(),
-                            "etm_terminate_mark.lua",
-                            include_str!("../../lua/etm_terminate_mark.lua"),
-                            &terminate_keys,
-                            &terminate_args,
-                        )
-                        .await
-                    {
-                        Ok((0, _, _)) => {
-                            counter!("mocra_error_task_lua_action_total", "action" => "terminate_module_marked").increment(1);
-                        }
-                        Ok((1, _, _)) => {
-                            counter!("mocra_error_task_lua_action_total", "action" => "terminate_module_already_marked").increment(1);
-                        }
-                        Ok((code, _, _)) => {
-                            counter!("mocra_error_task_lua_action_total", "action" => "terminate_module_unknown").increment(1);
-                            warn!(
-                                "[ThresholdDecisionService] etm_terminate_mark(module) unexpected code={} task_id={} module_id={}",
-                                code, task_id, module_id
-                            );
-                        }
-                        Err(err) => {
-                            counter!("mocra_error_task_lua_action_total", "action" => "terminate_module_error").increment(1);
-                            warn!(
-                                "[ThresholdDecisionService] etm_terminate_mark(module) failed: task_id={} module_id={} error={}",
-                                task_id, module_id, err
-                            );
-                        }
-                    }
-                    self.state
-                        .status_tracker
-                        .release_module_locker(&format!("{}-{}", module_id, input.run_id))
-                        .await;
-                    return ChainDecision::TerminateModule {
-                        reason: msg,
-                        action_applied: true,
-                    };
-                }
-                Ok((3, msg, _)) => {
-                    let terminate_key = chain_key::terminate_task_key(&task_id);
-                    let terminate_keys = [terminate_key.as_str()];
-                    let terminate_args = [msg.as_str(), now_ms.as_str(), ttl_secs.as_str()];
-                    match lua_registry
-                        .eval_triplet_with_fallback(
-                            self.state.cache_service.as_ref(),
-                            "etm_terminate_mark.lua",
-                            include_str!("../../lua/etm_terminate_mark.lua"),
-                            &terminate_keys,
-                            &terminate_args,
-                        )
-                        .await
-                    {
-                        Ok((0, _, _)) => {
-                            counter!("mocra_error_task_lua_action_total", "action" => "terminate_task_marked").increment(1);
-                        }
-                        Ok((1, _, _)) => {
-                            counter!("mocra_error_task_lua_action_total", "action" => "terminate_task_already_marked").increment(1);
-                        }
-                        Ok((code, _, _)) => {
-                            counter!("mocra_error_task_lua_action_total", "action" => "terminate_task_unknown").increment(1);
-                            warn!(
-                                "[ThresholdDecisionService] etm_terminate_mark(task) unexpected code={} task_id={}",
-                                code, task_id
-                            );
-                        }
-                        Err(err) => {
-                            counter!("mocra_error_task_lua_action_total", "action" => "terminate_task_error").increment(1);
-                            warn!(
-                                "[ThresholdDecisionService] etm_terminate_mark(task) failed: task_id={} error={}",
-                                task_id, err
-                            );
-                        }
-                    }
-                    let _ = self
-                        .state
-                        .status_tracker
-                        .mark_task_terminated(&task_id)
-                        .await;
-                    return ChainDecision::TerminateTask {
-                        reason: msg,
-                        action_applied: true,
-                    };
-                }
-                Ok((code, msg, _)) => {
-                    warn!(
-                        "[ThresholdDecisionService] unexpected lua decision code={} msg={}, fallback rust",
-                        code, msg
-                    );
-                }
-                Err(err) => {
-                    warn!(
-                        "[ThresholdDecisionService] lua decide failed, fallback rust: task_id={} module_id={} error={}",
-                        task_id, module_id, err
-                    );
-                }
-            }
-        }
 
         let parse_error: Error = ModuleError::ModuleNotFound(input.error_message.clone().into()).into();
         let mut retry_after: Option<std::time::Duration> = None;
@@ -1524,7 +1295,6 @@ impl EventProcessorTrait<Module, SyncBoxStream<'static, Request>> for TaskProces
 pub struct RequestPublish {
     queue_manager: Arc<QueueManager>,
     state: Arc<State>,
-    deduplicator: Option<Arc<Deduplicator>>,
 }
 
 #[async_trait]
@@ -1536,30 +1306,11 @@ impl ProcessorTrait<Request, ()> for RequestPublish {
     async fn process(&self, input: Request, context: ProcessorContext) -> ProcessorResult<()> {
         let request_id = input.id;
         let module_id = input.module_id();
-        let request_hash = input.hash();
         let backpressure_retry_delay_ms = {
             let cfg = self.state.config.read().await;
             cfg.crawler.backpressure_retry_delay_ms
         };
 
-        if let Some(deduplicator) = &self.deduplicator {
-            match deduplicator.check_and_set(&request_hash).await {
-                Ok(false) => {
-                    info!(
-                        "[RequestPublish] duplicate request skipped: request_id={} module_id={} hash={}",
-                        request_id, module_id, request_hash
-                    );
-                    return ProcessorResult::Success(());
-                }
-                Ok(true) => {}
-                Err(e) => {
-                    warn!(
-                        "[RequestPublish] deduplication check failed, allowing request: request_id={} module_id={} error={}",
-                        request_id, module_id, e
-                    );
-                }
-            }
-        }
         info!(
             "[RequestPublish] publish request: request_id={} module_id={}",
             request_id, module_id
@@ -2088,21 +1839,6 @@ impl<T: Send + Sync + 'static>
     }
 }
 
-async fn build_request_deduplicator(state: &Arc<State>) -> Option<Arc<Deduplicator>> {
-    let dedup_ttl = state
-        .config
-        .read()
-        .await
-        .crawler
-        .dedup_ttl_secs
-        .unwrap_or(3600) as usize;
-    let namespace = state.cache_service.namespace().to_string();
-    state
-        .locker
-        .get_pool()
-        .map(|pool| Arc::new(Deduplicator::new(pool.clone(), dedup_ttl, namespace)))
-}
-
 pub struct UnifiedTaskIngressChain {
     /// Ingress chain for standard task creation path.
     task_chain: Arc<EventAwareTypedChain<TaskEvent, SyncBoxStream<'static, ()>>>,
@@ -2240,10 +1976,6 @@ impl UnifiedTaskIngressChain {
                 reason,
                 Some(module_name.as_str()),
             );
-            let gate = self.scheduler_cutover_gate_config().await;
-            if gate.legacy_scheduler_ingress_fallback_enabled {
-                return None;
-            }
             task_manager.record_module_dag_cutover_failure(&module_name);
             return Some(ProcessorResult::RetryableFailure(
                 RetryPolicy::default()
@@ -2469,10 +2201,6 @@ impl UnifiedTaskIngressChain {
                 reason,
                 Some(module_name.as_str()),
             );
-            let gate = self.scheduler_cutover_gate_config().await;
-            if gate.legacy_scheduler_ingress_fallback_enabled {
-                return None;
-            }
             task_manager.record_module_dag_cutover_failure(&module_name);
             return Some(ProcessorResult::RetryableFailure(
                 RetryPolicy::default()
@@ -2967,7 +2695,6 @@ pub async fn create_unified_task_ingress_chain(
     queue_manager: Arc<QueueManager>,
     event_bus: Option<Arc<EventBus>>,
     state: Arc<State>,
-    lua_registry: Option<Arc<LuaScriptRegistry>>,
 ) -> UnifiedTaskIngressChain {
     let ingress_namespace = queue_manager.namespace.clone();
     let task_concurrency = state
@@ -3014,7 +2741,6 @@ pub async fn create_unified_task_ingress_chain(
         .publish_concurrency
         .unwrap_or(32);
 
-    let task_deduplicator = build_request_deduplicator(&state).await;
     let task_chain = Arc::new(
         EventAwareTypedChain::<TaskEvent, TaskEvent>::new(event_bus.clone())
             .then::<Task, _>(TaskModelProcessor {
@@ -3024,7 +2750,6 @@ pub async fn create_unified_task_ingress_chain(
                 event_bus: event_bus.clone(),
                 threshold_decision_service: Arc::new(StatusTrackerThresholdDecisionService::new(
                     state.clone(),
-                    lua_registry.clone(),
                 )),
             })
             .then::<Vec<Module>, _>(TaskModuleProcessor {
@@ -3051,14 +2776,12 @@ pub async fn create_unified_task_ingress_chain(
                 RequestPublish {
                     queue_manager: queue_manager.clone(),
                     state: state.clone(),
-                    deduplicator: task_deduplicator,
                 },
                 task_publish_concurrency,
                 ErrorStrategy::Skip,
             ),
     );
 
-    let parser_deduplicator = build_request_deduplicator(&state).await;
     let parser_chain = Arc::new(
         EventAwareTypedChain::<NodeDispatchEnvelope, NodeDispatchEnvelope>::new(event_bus.clone())
             .then::<Task, _>(TaskModelProcessor {
@@ -3068,7 +2791,6 @@ pub async fn create_unified_task_ingress_chain(
                 event_bus: event_bus.clone(),
                 threshold_decision_service: Arc::new(StatusTrackerThresholdDecisionService::new(
                     state.clone(),
-                    lua_registry.clone(),
                 )),
             })
             .then::<Vec<Module>, _>(TaskModuleProcessor {
@@ -3087,7 +2809,6 @@ pub async fn create_unified_task_ingress_chain(
                 RequestPublish {
                     queue_manager: queue_manager.clone(),
                     state: state.clone(),
-                    deduplicator: parser_deduplicator,
                 },
                 parser_publish_concurrency,
                 ErrorStrategy::Skip,
@@ -3098,7 +2819,6 @@ pub async fn create_unified_task_ingress_chain(
     let scheduler_queue_manager = queue_manager.clone();
     let scheduler_state = state.clone();
 
-    let error_deduplicator = build_request_deduplicator(&state).await;
     let error_chain = Arc::new(
         EventAwareTypedChain::<NodeErrorEnvelope, NodeErrorEnvelope>::new(event_bus)
             .then::<Task, _>(TaskModelProcessor {
@@ -3108,7 +2828,6 @@ pub async fn create_unified_task_ingress_chain(
                 event_bus: None,
                 threshold_decision_service: Arc::new(StatusTrackerThresholdDecisionService::new(
                     state.clone(),
-                    lua_registry,
                 )),
             })
             .then::<Vec<Module>, _>(TaskModuleProcessor {
@@ -3127,7 +2846,6 @@ pub async fn create_unified_task_ingress_chain(
                 RequestPublish {
                     queue_manager,
                     state,
-                    deduplicator: error_deduplicator,
                 },
                 error_publish_concurrency,
                 ErrorStrategy::Skip,
@@ -3166,7 +2884,6 @@ mod scheduler_ingress_tests {
     use crate::engine::task::request_response_adapter::decode_request_dispatch;
     use crate::engine::task::task_manager::TaskManager;
     use crate::queue::QueueManager;
-    use crate::utils::connector::create_redis_pool;
     use sea_orm::{ConnectionTrait, DbBackend, Statement};
     use tokio::sync::RwLock;
 
@@ -3327,7 +3044,6 @@ mod scheduler_ingress_tests {
             cache: CacheConfig {
                 backend: None,
                 ttl: 60,
-                redis: None,
                 compression_threshold: None,
                 enable_l1: Some(false),
                 l1_ttl_secs: None,
@@ -3350,12 +3066,9 @@ mod scheduler_ingress_tests {
             },
             scheduler: None,
             sync: None,
-            cookie: None,
             channel_config: ChannelConfig {
                 blob_storage: Some(BlobStorageConfig { path: None }),
-                redis: None,
                 kafka: None,
-                compensator: None,
                 minid_time: 0,
                 capacity: 16,
                 queue_codec: None,
@@ -3375,34 +3088,6 @@ mod scheduler_ingress_tests {
         }
     }
 
-    fn cache_service_with_unreachable_redis_endpoint(namespace: &str) -> Arc<CacheService> {
-        let closed_listener =
-            TcpListener::bind("127.0.0.1:0").expect("ephemeral local port should bind");
-        let closed_port = closed_listener
-            .local_addr()
-            .expect("ephemeral local addr should resolve")
-            .port();
-        drop(closed_listener);
-
-        let pool = create_redis_pool(
-            "127.0.0.1",
-            closed_port,
-            0,
-            &None,
-            &None,
-            Some(2),
-            false,
-        )
-        .expect("redis pool should build for unreachable local endpoint");
-
-        Arc::new(CacheService::new(
-            Some(pool),
-            namespace.to_string(),
-            Some(Duration::from_secs(60)),
-            None,
-        ))
-    }
-
     async fn build_scheduler_test_state_with_cache_service(
         cache_service: Arc<CacheService>,
         scheduler_ingress_cutover_gate: Option<SchedulerIngressCutoverGateConfig>,
@@ -3418,13 +3103,13 @@ mod scheduler_ingress_tests {
             ))),
             cache_service,
             cookie_service: None,
-            locker: Arc::new(crate::utils::redis_lock::DistributedLockManager::new(
+            locker: Arc::new(crate::utils::distributed_lock::DistributedLockManager::new(
                 None, "test",
             )),
             limiter: Arc::new(
                 crate::utils::distributed_rate_limit::DistributedSlidingWindowRateLimiter::new(
                     None,
-                    Arc::new(crate::utils::redis_lock::DistributedLockManager::new(
+                    Arc::new(crate::utils::distributed_lock::DistributedLockManager::new(
                         None, "test",
                     )),
                     "test",
@@ -3454,7 +3139,6 @@ mod scheduler_ingress_tests {
             profile_store,
             raft_runtime_config: None,
             raft_runtime: None,
-            redis: None,
         })
     }
 
@@ -3594,7 +3278,6 @@ mod scheduler_ingress_tests {
             failure_threshold: Some(3),
             recovery_window_secs: Some(60),
             gray_ratio: Some(1.0),
-            legacy_scheduler_ingress_fallback_enabled: None,
         }))
         .await;
         seed_scheduler_task_factory_state(&state, "fast_path_mod", "acc", "plt").await;
@@ -3620,7 +3303,6 @@ mod scheduler_ingress_tests {
                 failure_threshold: Some(3),
                 recovery_window_secs: Some(60),
                 gray_ratio: Some(1.0),
-                legacy_scheduler_ingress_fallback_enabled: None,
             }),
         )
         .await;
@@ -3848,7 +3530,7 @@ mod scheduler_ingress_tests {
     }
 
     #[tokio::test]
-    async fn parser_dispatch_with_attached_bridge_falls_back_when_gray_gate_blocks() {
+    async fn parser_dispatch_gate_blocked_fails_closed() {
         let parser_seen = Arc::new(Mutex::new(Vec::new()));
         let error_seen = Arc::new(Mutex::new(Vec::new()));
         let (chain, _task_manager) = make_ingress_chain_with_scheduler_bridge_and_recorders(
@@ -3858,68 +3540,6 @@ mod scheduler_ingress_tests {
                 failure_threshold: Some(3),
                 recovery_window_secs: Some(60),
                 gray_ratio: Some(0.0),
-                legacy_scheduler_ingress_fallback_enabled: Some(true),
-            }),
-        )
-        .await;
-        let dispatch = make_dispatch_envelope("my_mod", Some("node_a"));
-
-        let result = chain
-            .execute(
-                UnifiedTaskInput::ParserDispatch(dispatch.clone()),
-                ProcessorContext::default(),
-            )
-            .await;
-
-        assert!(matches!(result, ProcessorResult::Success(_)));
-        assert_eq!(parser_seen.lock().unwrap().len(), 1);
-        assert_eq!(error_seen.lock().unwrap().len(), 0);
-        assert_eq!(parser_seen.lock().unwrap()[0].routing.request_id, dispatch.routing.request_id);
-    }
-
-    #[tokio::test]
-    async fn error_envelope_with_attached_bridge_falls_back_when_failure_gate_blocks() {
-        let parser_seen = Arc::new(Mutex::new(Vec::new()));
-        let error_seen = Arc::new(Mutex::new(Vec::new()));
-        let (chain, task_manager) = make_ingress_chain_with_scheduler_bridge_and_recorders(
-            parser_seen.clone(),
-            error_seen.clone(),
-            Some(SchedulerIngressCutoverGateConfig {
-                failure_threshold: Some(1),
-                recovery_window_secs: Some(60),
-                gray_ratio: Some(1.0),
-                legacy_scheduler_ingress_fallback_enabled: Some(true),
-            }),
-        )
-        .await;
-        task_manager.record_module_dag_cutover_failure("my_mod");
-        let envelope = make_error_envelope("my_mod", Some("node_a"));
-
-        let result = chain
-            .execute(
-                UnifiedTaskInput::ErrorEnvelope(envelope.clone()),
-                ProcessorContext::default(),
-            )
-            .await;
-
-        assert!(matches!(result, ProcessorResult::Success(_)));
-        assert_eq!(parser_seen.lock().unwrap().len(), 0);
-        assert_eq!(error_seen.lock().unwrap().len(), 1);
-        assert_eq!(error_seen.lock().unwrap()[0].routing.request_id, envelope.routing.request_id);
-    }
-
-    #[tokio::test]
-    async fn parser_dispatch_gate_blocked_defaults_to_fail_closed_without_legacy_fallback() {
-        let parser_seen = Arc::new(Mutex::new(Vec::new()));
-        let error_seen = Arc::new(Mutex::new(Vec::new()));
-        let (chain, _task_manager) = make_ingress_chain_with_scheduler_bridge_and_recorders(
-            parser_seen.clone(),
-            error_seen.clone(),
-            Some(SchedulerIngressCutoverGateConfig {
-                failure_threshold: Some(3),
-                recovery_window_secs: Some(60),
-                gray_ratio: Some(0.0),
-                legacy_scheduler_ingress_fallback_enabled: None, // default: false
             }),
         )
         .await;
@@ -3934,14 +3554,14 @@ mod scheduler_ingress_tests {
 
         assert!(
             matches!(result, ProcessorResult::RetryableFailure(_)),
-            "gate-blocked parser dispatch must fail-closed by default"
+            "gate-blocked parser dispatch must fail-closed"
         );
         assert_eq!(parser_seen.lock().unwrap().len(), 0);
         assert_eq!(error_seen.lock().unwrap().len(), 0);
     }
 
     #[tokio::test]
-    async fn error_envelope_gate_blocked_defaults_to_fail_closed_without_legacy_fallback() {
+    async fn error_envelope_gate_blocked_fails_closed() {
         let parser_seen = Arc::new(Mutex::new(Vec::new()));
         let error_seen = Arc::new(Mutex::new(Vec::new()));
         let (chain, task_manager) = make_ingress_chain_with_scheduler_bridge_and_recorders(
@@ -3951,7 +3571,6 @@ mod scheduler_ingress_tests {
                 failure_threshold: Some(1),
                 recovery_window_secs: Some(60),
                 gray_ratio: Some(1.0),
-                legacy_scheduler_ingress_fallback_enabled: None, // default: false
             }),
         )
         .await;
@@ -3967,7 +3586,7 @@ mod scheduler_ingress_tests {
 
         assert!(
             matches!(result, ProcessorResult::RetryableFailure(_)),
-            "gate-blocked error envelope must fail-closed by default"
+            "gate-blocked error envelope must fail-closed"
         );
         assert_eq!(parser_seen.lock().unwrap().len(), 0);
         assert_eq!(error_seen.lock().unwrap().len(), 0);
@@ -4060,11 +3679,7 @@ mod scheduler_ingress_tests {
                     "unexpected reason: {reason}"
                 );
                 assert!(
-                    reason.contains("enqueue remote request"),
-                    "unexpected reason: {reason}"
-                );
-                assert!(
-                    reason.contains("Lua scripts require a cache-backed Redis backend"),
+                    reason.contains("requires dag_dispatcher but none configured"),
                     "unexpected reason: {reason}"
                 );
             }
@@ -4108,115 +3723,7 @@ mod scheduler_ingress_tests {
                     "unexpected reason: {reason}"
                 );
                 assert!(
-                    reason.contains("enqueue remote request"),
-                    "unexpected reason: {reason}"
-                );
-                assert!(
-                    reason.contains("Lua scripts require a cache-backed Redis backend"),
-                    "unexpected reason: {reason}"
-                );
-            }
-            _ => panic!("expected retryable failure"),
-        }
-
-        assert!(parser_seen.lock().unwrap().is_empty());
-        assert!(error_seen.lock().unwrap().is_empty());
-        assert!(queue_manager
-            .get_request_pop_channel()
-            .lock()
-            .await
-            .try_recv()
-            .is_err());
-    }
-
-    #[tokio::test]
-    async fn parser_dispatch_with_attached_bridge_remote_hint_network_failure_is_retryable_and_fail_closed() {
-        let parser_seen = Arc::new(Mutex::new(Vec::new()));
-        let error_seen = Arc::new(Mutex::new(Vec::new()));
-        let (chain, _task_manager, queue_manager) = make_seeded_scheduler_bridge_chain_with_cache_service(
-            parser_seen.clone(),
-            error_seen.clone(),
-            cache_service_with_unreachable_redis_endpoint("test:cache:network-fail:parser"),
-        )
-        .await;
-        let mut dispatch = make_dispatch_envelope("fast_path_mod", Some("step_0"));
-        dispatch.parser_context.as_mut().unwrap().runtime_node = Some(
-            RuntimeNodeRoutingHint::new("step_0")
-                .with_placement(crate::schedule::dag::NodePlacement::remote("wg-test")),
-        );
-
-        let result = chain
-            .execute(
-                UnifiedTaskInput::ParserDispatch(dispatch),
-                ProcessorContext::default(),
-            )
-            .await;
-
-        match result {
-            ProcessorResult::RetryableFailure(policy) => {
-                let reason = policy.reason.expect("retry policy reason should exist");
-                assert!(
-                    reason.contains("scheduler parser execution failed"),
-                    "unexpected reason: {reason}"
-                );
-                assert!(
-                    reason.contains("enqueue remote request"),
-                    "unexpected reason: {reason}"
-                );
-                assert!(
-                    !reason.contains("Lua scripts require a cache-backed Redis backend"),
-                    "unexpected reason: {reason}"
-                );
-            }
-            _ => panic!("expected retryable failure"),
-        }
-
-        assert!(parser_seen.lock().unwrap().is_empty());
-        assert!(error_seen.lock().unwrap().is_empty());
-        assert!(queue_manager
-            .get_request_pop_channel()
-            .lock()
-            .await
-            .try_recv()
-            .is_err());
-    }
-
-    #[tokio::test]
-    async fn error_envelope_with_attached_bridge_remote_hint_network_failure_is_retryable_and_fail_closed() {
-        let parser_seen = Arc::new(Mutex::new(Vec::new()));
-        let error_seen = Arc::new(Mutex::new(Vec::new()));
-        let (chain, _task_manager, queue_manager) = make_seeded_scheduler_bridge_chain_with_cache_service(
-            parser_seen.clone(),
-            error_seen.clone(),
-            cache_service_with_unreachable_redis_endpoint("test:cache:network-fail:error"),
-        )
-        .await;
-        let mut envelope = make_error_envelope("fast_path_mod", Some("step_0"));
-        envelope.error_context.as_mut().unwrap().runtime_node = Some(
-            RuntimeNodeRoutingHint::new("step_0")
-                .with_placement(crate::schedule::dag::NodePlacement::remote("wg-test")),
-        );
-
-        let result = chain
-            .execute(
-                UnifiedTaskInput::ErrorEnvelope(envelope),
-                ProcessorContext::default(),
-            )
-            .await;
-
-        match result {
-            ProcessorResult::RetryableFailure(policy) => {
-                let reason = policy.reason.expect("retry policy reason should exist");
-                assert!(
-                    reason.contains("scheduler error execution failed"),
-                    "unexpected reason: {reason}"
-                );
-                assert!(
-                    reason.contains("enqueue remote request"),
-                    "unexpected reason: {reason}"
-                );
-                assert!(
-                    !reason.contains("Lua scripts require a cache-backed Redis backend"),
+                    reason.contains("requires dag_dispatcher but none configured"),
                     "unexpected reason: {reason}"
                 );
             }
@@ -4443,10 +3950,10 @@ mod scheduler_ingress_tests {
     }
 
     #[test]
-    fn resolve_parser_targets_ignore_malformed_legacy_payload_when_transport_is_complete() {
+    fn resolve_parser_targets_ignore_malformed_payload_when_transport_is_complete() {
         let chain = make_ingress_chain_no_bridge();
         let mut dispatch = make_dispatch_envelope("transport_mod", None);
-        dispatch.dispatch.input.payload.bytes = b"not-valid-legacy-seed".to_vec();
+        dispatch.dispatch.input.payload.bytes = b"not-valid-transport-seed".to_vec();
 
         assert_eq!(
             chain

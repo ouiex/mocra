@@ -84,7 +84,7 @@ impl
             let cached_task_decision = {
                 if let Some(entry) = self.decision_cache.get(&task_id) {
                     let (ts, decision) = entry.value();
-                    // 1s TTL to avoid hot-path Redis amplification.
+                    // 1s TTL to avoid hot-path cache amplification.
                     if ts.elapsed() < Duration::from_secs(1) {
                         Some(Ok(decision.clone()))
                     } else {

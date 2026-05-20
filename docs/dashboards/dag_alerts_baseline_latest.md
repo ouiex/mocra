@@ -77,7 +77,7 @@
 ## Calibration Notes
 
 - Compare Avg/P95 with docs/alerts/dag_alerts_calibration_runbook.md environment profile.
-- If critical_events max > 0, treat as immediate rollback gate in gray rollout.
+- If critical_events max > 0, treat as an immediate release block in gray rollout.
 - If warning/non-retryable stays above profile for 24h, keep preview mode and postpone cutover.
 - Scheduler ingress fallback daily report must retain hotspot rows grouped by path/reason/module for operator review.
 - Treat scheduler fallback / failure gate / scheduler_ingress stage errors as cutover signals; treat critical/warning/non-retryable/retryable as business failure signals.

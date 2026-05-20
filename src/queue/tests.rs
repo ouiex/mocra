@@ -1,5 +1,5 @@
 use crate::common::model::{ExecutionMark, Priority, Request, Response};
-use crate::common::model::config::{KafkaConfig, RedisConfig};
+use crate::common::model::config::KafkaConfig;
 use crate::common::policy::{PolicyConfig, PolicyOverride};
 use crate::engine::task::request_response_adapter::{
     build_request_dispatch, build_response_dispatch, decode_request_dispatch,
@@ -14,7 +14,6 @@ use crate::queue::{
     NackDisposition, NackPolicy, QueueManager, QueuedItem, decide_nack,
 };
 use async_trait::async_trait;
-use deadpool_redis::redis;
 use rmp_serde as rmps;
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
@@ -520,7 +519,6 @@ fn minimal_config(policy: Option<PolicyConfig>) -> crate::common::model::config:
         cache: CacheConfig {
             backend: None,
             ttl: 1,
-            redis: None,
             compression_threshold: None,
             enable_l1: None,
             l1_ttl_secs: None,
@@ -543,12 +541,9 @@ fn minimal_config(policy: Option<PolicyConfig>) -> crate::common::model::config:
         },
         scheduler: None,
         sync: None,
-        cookie: None,
         channel_config: ChannelConfig {
             blob_storage: None,
-            redis: None,
             kafka: None,
-            compensator: None,
             minid_time: 0,
             capacity: 10,
             queue_codec: None,
@@ -579,7 +574,7 @@ fn remote_queue_defaults_to_native_compensator() {
 }
 
 #[test]
-fn local_queue_without_rollback_anchor_keeps_compensator_disabled() {
+fn local_queue_without_backend_keeps_compensator_disabled() {
     let mut manager = QueueManager::new(None, 16);
     let cfg = minimal_config(None);
     manager.install_default_compensator(&cfg.channel_config, &cfg.name);
@@ -692,33 +687,6 @@ fn test_decide_nack_retry_vs_dlq() {
     assert_eq!(decide_nack(policy, 2), NackDisposition::Dlq);
 }
 
-fn build_redis_config() -> RedisConfig {
-    let host = std::env::var("REDIS_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
-    let port = std::env::var("REDIS_PORT")
-        .ok()
-        .and_then(|v| v.parse::<u16>().ok())
-        .unwrap_or(6379);
-    let db = std::env::var("REDIS_DB")
-        .ok()
-        .and_then(|v| v.parse::<u16>().ok())
-        .unwrap_or(0);
-
-    RedisConfig {
-        redis_host: host,
-        redis_port: port,
-        redis_db: db,
-        redis_username: std::env::var("REDIS_USERNAME").ok(),
-        redis_password: std::env::var("REDIS_PASSWORD").ok(),
-        pool_size: Some(8),
-        shards: Some(1),
-        tls: Some(false),
-        claim_min_idle: Some(1000),
-        claim_count: Some(10),
-        claim_interval: Some(500),
-        listener_count: Some(1),
-    }
-}
-
 fn build_kafka_config() -> Option<KafkaConfig> {
     let brokers = std::env::var("KAFKA_BROKERS").ok()?;
     if brokers.trim().is_empty() {
@@ -737,161 +705,6 @@ fn build_kafka_config() -> Option<KafkaConfig> {
         password,
         tls,
     })
-}
-
-async fn redis_available(cfg: &RedisConfig) -> bool {
-    let pool = crate::utils::connector::create_redis_pool(
-        &cfg.redis_host,
-        cfg.redis_port,
-        cfg.redis_db,
-        &cfg.redis_username,
-        &cfg.redis_password,
-        cfg.pool_size,
-        cfg.tls.unwrap_or(false),
-    );
-    let Some(pool) = pool else {
-        return false;
-    };
-
-    match pool.get().await {
-        Ok(mut conn) => {
-            let pong: redis::RedisResult<String> = redis::cmd("PING").query_async(&mut conn).await;
-            pong.is_ok()
-        }
-        Err(_) => false,
-    }
-}
-
-#[tokio::test]
-async fn test_redis_duplicate_delivery_and_order_independent_ack() {
-    let cfg = build_redis_config();
-    if !redis_available(&cfg).await {
-        eprintln!(
-            "Redis not available, skipping test_redis_duplicate_delivery_and_order_independent_ack"
-        );
-        return;
-    }
-
-    let namespace = format!("queue_test_{}", Uuid::new_v4());
-    let nack_policy = NackPolicy {
-        max_retries: 1,
-        backoff_ms: 0,
-    };
-    let queue =
-        crate::queue::RedisQueue::new(&cfg, 0, &namespace, 10, nack_policy).expect("redis queue");
-
-    let (tx, mut rx) = tokio_mpsc::channel(10);
-    queue
-        .subscribe("contract_dup", tx)
-        .await
-        .expect("subscribe");
-
-    let mut headers = std::collections::HashMap::new();
-    headers.insert(HEADER_ATTEMPT.to_string(), "0".to_string());
-
-    let payload = vec![1, 2, 3, 4];
-    queue
-        .publish_with_headers("contract_dup", None, &payload, &headers)
-        .await
-        .expect("publish 1");
-    queue
-        .publish_with_headers("contract_dup", None, &payload, &headers)
-        .await
-        .expect("publish 2");
-
-    let msg1 = timeout(Duration::from_secs(3), rx.recv())
-        .await
-        .ok()
-        .flatten()
-        .expect("msg1");
-    let msg2 = timeout(Duration::from_secs(3), rx.recv())
-        .await
-        .ok()
-        .flatten()
-        .expect("msg2");
-
-    assert_eq!(msg1.payload.as_slice(), payload.as_slice());
-    assert_eq!(msg2.payload.as_slice(), payload.as_slice());
-    assert_ne!(msg1.id, msg2.id);
-
-    // Ack out of order to ensure ordering is not required for ack correctness.
-    msg2.ack().await.expect("ack2");
-    msg1.ack().await.expect("ack1");
-}
-
-#[tokio::test]
-async fn test_redis_retry_then_dlq_path() {
-    let cfg = build_redis_config();
-    if !redis_available(&cfg).await {
-        eprintln!("Redis not available, skipping test_redis_retry_then_dlq_path");
-        return;
-    }
-
-    let namespace = format!("queue_test_{}", Uuid::new_v4());
-    let nack_policy = NackPolicy {
-        max_retries: 1,
-        backoff_ms: 0,
-    };
-    let queue =
-        crate::queue::RedisQueue::new(&cfg, 0, &namespace, 10, nack_policy).expect("redis queue");
-
-    let (tx, mut rx) = tokio_mpsc::channel(10);
-    queue
-        .subscribe("contract_retry", tx)
-        .await
-        .expect("subscribe");
-
-    let mut headers = std::collections::HashMap::new();
-    headers.insert(HEADER_ATTEMPT.to_string(), "0".to_string());
-
-    let payload = vec![9, 9, 9];
-    queue
-        .publish_with_headers("contract_retry", None, &payload, &headers)
-        .await
-        .expect("publish");
-
-    let msg1 = timeout(Duration::from_secs(3), rx.recv())
-        .await
-        .ok()
-        .flatten()
-        .expect("msg1");
-    msg1.nack("first_fail").await.expect("nack1");
-
-    let msg2 = timeout(Duration::from_secs(5), rx.recv())
-        .await
-        .ok()
-        .flatten()
-        .expect("msg2");
-    assert_eq!(
-        msg2.headers.get(HEADER_ATTEMPT).map(|v| v.as_str()),
-        Some("1")
-    );
-    assert_eq!(
-        msg2.headers.get(HEADER_NACK_REASON).map(|v| v.as_str()),
-        Some("first_fail")
-    );
-    msg2.nack("second_fail").await.expect("nack2");
-
-    let mut dlq_entries = Vec::new();
-    for _ in 0..10 {
-        dlq_entries = queue
-            .read_dlq("contract_retry", 10)
-            .await
-            .expect("read dlq");
-        if !dlq_entries.is_empty() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(200)).await;
-    }
-
-    assert!(
-        !dlq_entries.is_empty(),
-        "expected DLQ entry after retry exhaustion"
-    );
-    let dlq_entry = &dlq_entries[0];
-    assert_eq!(dlq_entry.payload.as_slice(), payload.as_slice());
-    assert_eq!(dlq_entry.reason, "second_fail");
-    assert_eq!(dlq_entry.attempt, Some(1));
 }
 
 #[tokio::test]
@@ -1031,121 +844,3 @@ async fn test_kafka_out_of_order_ack() {
     msg1.ack().await.expect("ack1");
 }
 
-#[tokio::test]
-async fn test_redis_consumer_crash_redelivery() {
-    let mut cfg = build_redis_config();
-    cfg.claim_min_idle = Some(10);
-    cfg.claim_interval = Some(50);
-    cfg.claim_count = Some(10);
-    cfg.listener_count = Some(1);
-    cfg.shards = Some(1);
-
-    if !redis_available(&cfg).await {
-        eprintln!("Redis not available, skipping test_redis_consumer_crash_redelivery");
-        return;
-    }
-
-    let namespace = format!("queue_test_{}", Uuid::new_v4());
-    let nack_policy = NackPolicy {
-        max_retries: 1,
-        backoff_ms: 0,
-    };
-    let queue =
-        crate::queue::RedisQueue::new(&cfg, 0, &namespace, 10, nack_policy).expect("redis queue");
-
-    let (tx, mut rx) = tokio_mpsc::channel(10);
-    queue
-        .subscribe("contract_crash", tx)
-        .await
-        .expect("subscribe");
-
-    let mut headers = std::collections::HashMap::new();
-    headers.insert(HEADER_ATTEMPT.to_string(), "0".to_string());
-
-    let payload = vec![7, 7, 7];
-    queue
-        .publish_with_headers("contract_crash", None, &payload, &headers)
-        .await
-        .expect("publish");
-
-    let msg1 = timeout(Duration::from_secs(3), rx.recv())
-        .await
-        .ok()
-        .flatten()
-        .expect("msg1");
-
-    tokio::time::sleep(Duration::from_millis(300)).await;
-
-    let msg2 = timeout(Duration::from_secs(5), rx.recv())
-        .await
-        .ok()
-        .flatten()
-        .expect("msg2");
-
-    assert_eq!(msg2.payload.as_slice(), payload.as_slice());
-    assert_eq!(
-        msg2.id, msg1.id,
-        "redelivery should keep the same stream id"
-    );
-
-    msg2.ack().await.expect("ack2");
-}
-
-#[tokio::test]
-async fn test_redis_concurrent_out_of_order_ack() {
-    let cfg = build_redis_config();
-    if !redis_available(&cfg).await {
-        eprintln!("Redis not available, skipping test_redis_concurrent_out_of_order_ack");
-        return;
-    }
-
-    let namespace = format!("queue_test_{}", Uuid::new_v4());
-    let nack_policy = NackPolicy {
-        max_retries: 0,
-        backoff_ms: 0,
-    };
-    let queue =
-        crate::queue::RedisQueue::new(&cfg, 0, &namespace, 10, nack_policy).expect("redis queue");
-
-    let (tx, mut rx) = tokio_mpsc::channel(10);
-    queue
-        .subscribe("contract_concurrent", tx)
-        .await
-        .expect("subscribe");
-
-    let mut headers = std::collections::HashMap::new();
-    headers.insert(HEADER_ATTEMPT.to_string(), "0".to_string());
-
-    let payload1 = vec![1, 2, 3];
-    let payload2 = vec![4, 5, 6];
-    queue
-        .publish_with_headers("contract_concurrent", None, &payload1, &headers)
-        .await
-        .expect("publish1");
-    queue
-        .publish_with_headers("contract_concurrent", None, &payload2, &headers)
-        .await
-        .expect("publish2");
-
-    let msg1 = timeout(Duration::from_secs(3), rx.recv())
-        .await
-        .ok()
-        .flatten()
-        .expect("msg1");
-    let msg2 = timeout(Duration::from_secs(3), rx.recv())
-        .await
-        .ok()
-        .flatten()
-        .expect("msg2");
-
-    let (ack2, ack1) = tokio::join!(
-        async move {
-            tokio::time::sleep(Duration::from_millis(100)).await;
-            msg2.ack().await
-        },
-        async move { msg1.ack().await }
-    );
-
-    assert!(ack1.is_ok());
-    assert!(ack2.is_ok());
-}

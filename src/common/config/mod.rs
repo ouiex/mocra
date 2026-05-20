@@ -13,4 +13,3 @@ pub trait ConfigProvider: Send + Sync {
 }
 
 pub mod file;
-pub mod redis;

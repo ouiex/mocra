@@ -16,7 +16,7 @@ use crate::engine::api::profile_store::ProfileControlPlaneStore;
 use crate::downloader::Downloader;
 use crate::errors::{CacheError, DownloadError, RequestError, Result};
 use crate::utils::distributed_rate_limit::DistributedSlidingWindowRateLimiter;
-use crate::utils::redis_lock::DistributedLockManager;
+use crate::utils::distributed_lock::DistributedLockManager;
 use dashmap::DashMap;
 use futures::StreamExt;
 use log::{info, warn};
@@ -723,9 +723,9 @@ impl RequestDownloader {
 
     /// Load session state and apply it to the request.
     /// Returns the (modified request, loaded session) so callers can reuse the session
-    /// in `save_session_state` without a second Redis round-trip.
+    /// in `save_session_state` without a second cache read.
     /// On cache read failure the error is logged and degraded to no-session rather than
-    /// propagating, so a transient Redis hiccup does not abort the download.
+    /// propagating, so a transient cache failure does not abort the download.
     async fn process_request(&self, request: Request) -> (Request, Option<SessionState>) {
         if !self.is_session_enabled(&request) {
             return (request, None);
@@ -752,7 +752,7 @@ impl RequestDownloader {
         (modified_request, session_state)
     }
 
-    // Pass the already-loaded session from `process_request` to avoid a second Redis round-trip.
+    // Pass the already-loaded session from `process_request` to avoid a second cache read.
     // `None` means the session did not exist before this request (fresh start).
     async fn save_session_state(
         &self,
@@ -862,7 +862,7 @@ impl RequestDownloader {
             }
         }
 
-        // For a brand-new session with no collected state, skip the Redis write entirely.
+        // For a brand-new session with no collected state, skip the cache write entirely.
         // For an existing session, only write back when something actually changed.
         if !dirty {
             return;
@@ -1045,7 +1045,7 @@ impl RequestDownloader {
             };
 
             // Reserve a rate-limit time slot and wait. Each concurrent download
-            // gets a unique slot — one Redis call, no polling, no thundering herd.
+            // gets a unique slot without polling.
             self.limit.wait_for_permit(&limit_id).await?;
         }
 

@@ -114,15 +114,13 @@ mod tests {
 
 #[derive(Clone, Copy, Debug)]
 pub struct SyncOptions {
-    pub allow_rollback: bool,
     pub envelope_enabled: bool,
 }
 
 impl Default for SyncOptions {
     fn default() -> Self {
         Self {
-            allow_rollback: true,
-            envelope_enabled: false,
+            envelope_enabled: true,
         }
     }
 }
@@ -149,16 +147,8 @@ impl SyncService {
         namespace: String,
         config: &SyncConfig,
     ) -> Self {
-        let mut envelope_enabled = config.envelope_enabled;
-        if !config.allow_rollback && !envelope_enabled {
-            eprintln!(
-                "SyncConfig: allow_rollback=false requires envelope_enabled=true; enabling envelope automatically"
-            );
-            envelope_enabled = true;
-        }
         let options = SyncOptions {
-            allow_rollback: config.allow_rollback,
-            envelope_enabled,
+            envelope_enabled: config.envelope_enabled || true,
         };
 
         Self::new_with_options(backend, namespace, options)
@@ -237,7 +227,6 @@ impl SyncService {
         if self.namespace.is_empty() {
             format!("sync_kv:{}", topic)
         } else {
-            // Redis keys can safely use ':' separators
             format!("sync_kv:{}:{}", self.namespace, topic)
         }
     }
@@ -303,7 +292,7 @@ impl SyncService {
                                 Some(bytes) => {
                                     match Self::decode_value::<T>(options, &bytes) {
                                         Ok((value, version)) => {
-                                            if !options.allow_rollback && version < last_version {
+                                            if version < last_version {
                                                 continue;
                                             }
                                             last_version = version.max(last_version);
@@ -328,7 +317,7 @@ impl SyncService {
                                 Ok(Some(bytes)) => {
                                     match Self::decode_value::<T>(options, &bytes) {
                                         Ok((value, version)) => {
-                                            if !options.allow_rollback && version < last_version {
+                                            if version < last_version {
                                                 continue;
                                             }
                                             last_version = version.max(last_version);
@@ -400,7 +389,7 @@ impl SyncService {
                 while let Ok(bytes) = rx.recv().await {
                     match Self::decode_value::<T>(options, &bytes) {
                         Ok((value, version)) => {
-                            if !options.allow_rollback && version < last_version {
+                            if version < last_version {
                                 continue;
                             }
                             last_version = version.max(last_version);

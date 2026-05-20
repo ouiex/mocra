@@ -1,28 +1,18 @@
-#![allow(unused)]
-use async_trait::async_trait;
+use crate::engine::api::profile_store::ProfileControlPlaneStore;
 use crate::errors::Result;
 use crate::errors::error::RateLimitError;
-use crate::utils::redis_lock::{AdvancedDistributedLock, DistributedLockManager};
+use crate::utils::distributed_lock::DistributedLockManager;
+use async_trait::async_trait;
 use dashmap::DashMap;
-use deadpool_redis::{
-    Pool,
-    redis::{AsyncCommands, cmd},
-};
-use log::error;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use tokio::sync::RwLock;
 
-/// Rate limiter configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RateLimitConfig {
-    /// Maximum requests per second.
     pub max_requests_per_second: f32,
-    /// Window size in milliseconds (default: 1 second).
     pub window_size_millis: u64,
-    /// Baseline max requests per second (used for restoration).
     #[serde(default)]
     pub base_max_requests_per_second: Option<f32>,
 }
@@ -52,50 +42,16 @@ impl RateLimitConfig {
     }
 }
 
-/// Redis-based distributed smooth rate limiter.
-///
-/// Uses a smooth throttling strategy to control request rate per identifier.
-/// Features:
-/// 1. Distributed limiting with shared state across multiple instances.
-/// 2. Smooth pacing via computed interval per request.
-/// 3. Uses `AdvancedDistributedLock` to protect Redis read/write operations.
-/// 4. Supports per-key rate limits.
-/// 5. Supports dynamic key-level config updates.
-/// 6. Performs local calculations; Redis stores/synchronizes last-request time.
-/// 7. Stores key configs in Redis for persistence and dynamic updates.
 #[derive(Clone)]
 pub struct DistributedSlidingWindowRateLimiter {
-    /// Redis connection pool.
-    pool: Option<Arc<Pool>>,
-    /// Distributed lock manager.
-    lock_manager: Arc<DistributedLockManager>,
-    /// Rate limit backend (Raft/Local). When set, bypasses pool-based paths.
     backend: Option<Arc<dyn RateLimitBackend>>,
-    /// Redis key prefix.
     key_prefix: String,
-    /// Sub prefix
-    sub_prefix: String,
-    /// Redis key for default config.
-    default_config_key: String,
-    /// Redis key prefix for per-key configs.
-    config_key_prefix: String,
-    /// Default rate-limit config.
     default_config: RateLimitConfig,
-    /// Local cache of last request time (`identifier -> last_request_timestamp`).
     local_last_request: Arc<DashMap<String, u64>>,
-    /// Local config cache (`identifier -> RateLimitConfig`).
     local_configs: Arc<DashMap<String, RateLimitConfig>>,
-    /// Local default-config cache.
-    local_default_config: Arc<RwLock<Option<RateLimitConfig>>>,
-    /// Local suspension cache (`identifier -> suspend_until_timestamp`).
+    local_default_config: Arc<tokio::sync::RwLock<Option<RateLimitConfig>>>,
     local_suspended: Arc<DashMap<String, u64>>,
-    /// Local wait cache to reduce Redis contention (identifier -> wait_until_timestamp)
     local_wait_until: Arc<DashMap<String, u64>>,
-    /// Time offset between local clock and Redis clock (local - redis)
-    /// Used to reduce Redis TIME commands
-    time_offset: Arc<RwLock<Option<(i64, Instant)>>>,
-    /// Cache for suspension checks to reduce Redis load
-    /// Key: identifier, Value: (Last Check Time, Suspend Until Timestamp)
     suspend_cache: Arc<DashMap<String, (Instant, Option<u64>)>>,
 }
 
@@ -103,218 +59,118 @@ impl std::fmt::Debug for DistributedSlidingWindowRateLimiter {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DistributedSlidingWindowRateLimiter")
             .field("key_prefix", &self.key_prefix)
-            .field("has_pool", &self.pool.is_some())
             .field("has_backend", &self.backend.is_some())
             .finish()
     }
 }
 
-const TIME_OFFSET_REFRESH_SECS: u64 = 60;
-
 impl DistributedSlidingWindowRateLimiter {
-    /// Creates a new distributed rate limiter instance.
-    ///
-    /// # Parameters
-    /// * `pool` - Redis connection pool.
-    /// * `key_prefix` - Redis key prefix used to namespace limiter instances.
-    /// * `default_config` - Default rate-limit config.
     pub fn new(
-        limit_pool: Option<Arc<Pool>>,
-        locker: Arc<DistributedLockManager>,
+        _limit_pool: Option<()>,
+        _locker: Arc<DistributedLockManager>,
         namespace: &str,
         default_config: RateLimitConfig,
     ) -> Self {
-        let sub_prefix = "rate_limiter".to_string();
-        let key_prefix = format!("{namespace}:{sub_prefix}");
-        let default_config_key = format!("{key_prefix}:default_config");
-        let config_key_prefix = format!("{key_prefix}:config");
-
-        Self {
-            pool: limit_pool,
-            lock_manager: locker,
-            backend: None,
-            key_prefix,
-            sub_prefix,
-            default_config_key,
-            config_key_prefix,
-            default_config,
-            local_last_request: Arc::new(DashMap::new()),
-            local_configs: Arc::new(DashMap::new()),
-            local_default_config: Arc::new(RwLock::new(None)),
-            local_suspended: Arc::new(DashMap::new()),
-            local_wait_until: Arc::new(DashMap::new()),
-            time_offset: Arc::new(RwLock::new(None)),
-            suspend_cache: Arc::new(DashMap::new()),
-        }
+        Self::build(None, namespace, default_config)
     }
 
-    /// Creates a rate limiter backed by a `RateLimitBackend` (Raft or custom).
-    /// Rate-limit state is stored in the backend, not in Redis or local DashMap.
     pub fn with_backend(
         backend: Arc<dyn RateLimitBackend>,
         namespace: &str,
         default_config: RateLimitConfig,
     ) -> Self {
-        let sub_prefix = "rate_limiter".to_string();
-        let key_prefix = format!("{namespace}:{sub_prefix}");
-        let default_config_key = format!("{key_prefix}:default_config");
-        let config_key_prefix = format!("{key_prefix}:config");
+        Self::build(Some(backend), namespace, default_config)
+    }
 
+    fn build(
+        backend: Option<Arc<dyn RateLimitBackend>>,
+        namespace: &str,
+        default_config: RateLimitConfig,
+    ) -> Self {
+        let key_prefix = format!("{namespace}:rate_limiter");
         Self {
-            pool: None,
-            lock_manager: Arc::new(DistributedLockManager::new(None, namespace)),
-            backend: Some(backend),
+            backend,
             key_prefix,
-            sub_prefix,
-            default_config_key,
-            config_key_prefix,
             default_config,
             local_last_request: Arc::new(DashMap::new()),
             local_configs: Arc::new(DashMap::new()),
-            local_default_config: Arc::new(RwLock::new(None)),
+            local_default_config: Arc::new(tokio::sync::RwLock::new(None)),
             local_suspended: Arc::new(DashMap::new()),
             local_wait_until: Arc::new(DashMap::new()),
-            time_offset: Arc::new(RwLock::new(None)),
             suspend_cache: Arc::new(DashMap::new()),
         }
     }
 
-    /// Returns Redis key for stored last-request timestamp.
     fn get_last_request_key(&self, identifier: &str) -> String {
         format!("{}:last_request:{}", self.key_prefix, identifier)
     }
 
-    /// Returns distributed-lock key.
-    fn get_lock_key(&self, identifier: &str) -> String {
-        format!("{}:lock:{}", self.sub_prefix, identifier)
-    }
-
-    /// Returns per-key config key.
-    fn get_config_key(&self, identifier: &str) -> String {
-        format!("{}:{}", self.config_key_prefix, identifier)
-    }
-
-    /// Returns suspension key.
     fn get_suspended_key(&self, identifier: &str) -> String {
         format!("{}:suspended:{}", self.key_prefix, identifier)
     }
 
-    /// Suspends requests for specified identifier (circuit breaker).
     pub async fn suspend(&self, identifier: &str, duration: Duration) -> Result<()> {
         let current_time = self.get_current_timestamp().await?;
         let suspend_until = current_time + duration.as_millis() as u64;
 
-        // Route to RateLimitBackend if configured
         if let Some(backend) = &self.backend {
-            let key = self.get_suspended_key(identifier);
-            let ttl_ms = duration.as_millis() as u64;
             backend
-                .suspend(&key, suspend_until, ttl_ms)
-                .await
-                .map_err(|e| RateLimitError::RedisError(e.into()))?;
-            self.suspend_cache.remove(identifier);
-            return Ok(());
-        }
-
-        if let Some(pool) = &self.pool {
-            let mut conn = pool
-                .get()
-                .await
-                .map_err(|e| RateLimitError::RedisError(e.into()))?;
-            let key = self.get_suspended_key(identifier);
-            // Set with TTL
-            let _: () = conn
-                .set_ex(&key, suspend_until, duration.as_secs())
+                .suspend(
+                    &self.get_suspended_key(identifier),
+                    suspend_until,
+                    duration.as_millis() as u64,
+                )
                 .await
                 .map_err(|e| RateLimitError::RedisError(e.into()))?;
         } else {
             self.local_suspended
                 .insert(identifier.to_string(), suspend_until);
         }
-        // Invalidate cache
+
         self.suspend_cache.remove(identifier);
         Ok(())
     }
 
-    /// Checks whether identifier is currently suspended.
     async fn check_suspended(&self, identifier: &str) -> Result<Option<u64>> {
-        // Check short-lived cache first.
-        // IMPORTANT: Extract values immediately and drop the DashMap guard before
-        // any `.await` — holding a `parking_lot` read-lock across a yield point
-        // can deadlock the Tokio runtime when a writer on the same shard blocks
-        // an OS thread.
-        let cached = self.suspend_cache.get(identifier).map(|entry| {
-            let (checked_at, suspend_until_opt) = entry.value();
-            (*checked_at, *suspend_until_opt)
-        });
-        // guard dropped here
-        if let Some((checked_at, suspend_until_opt)) = cached {
+        if let Some(entry) = self.suspend_cache.get(identifier) {
+            let (checked_at, suspend_until_opt) = *entry.value();
+            drop(entry);
             if checked_at.elapsed() < Duration::from_millis(500) {
                 let current_time = self.get_current_timestamp().await?;
-                if let Some(suspend_until) = suspend_until_opt {
-                    if suspend_until > current_time {
-                        return Ok(Some(suspend_until - current_time));
-                    }
-                } else {
-                    return Ok(None);
-                }
+                return Ok(suspend_until_opt
+                    .filter(|suspend_until| *suspend_until > current_time)
+                    .map(|suspend_until| suspend_until - current_time));
             }
         }
 
         let current_time = self.get_current_timestamp().await?;
-        let mut found_suspend_until: Option<u64> = None;
-
-        // Route to RateLimitBackend if configured
-        if let Some(backend) = &self.backend {
-            let key = self.get_suspended_key(identifier);
-            let remaining = backend
-                .check_suspended(&key, current_time)
-                .await
-                .map_err(|e| RateLimitError::RedisError(e.into()))?;
-            if let Some(rem) = remaining {
-                found_suspend_until = Some(current_time + rem);
-            }
-        } else if let Some(pool) = &self.pool {
-            let mut conn = pool
-                .get()
-                .await
-                .map_err(|e| RateLimitError::RedisError(e.into()))?;
-            let key = self.get_suspended_key(identifier);
-            if let Some(suspend_until) = conn
-                .get::<_, Option<u64>>(&key)
+        let found_suspend_until = if let Some(backend) = &self.backend {
+            backend
+                .check_suspended(&self.get_suspended_key(identifier), current_time)
                 .await
                 .map_err(|e| RateLimitError::RedisError(e.into()))?
-            {
-                if suspend_until > current_time {
-                    found_suspend_until = Some(suspend_until);
-                }
-            }
+                .map(|remaining| current_time + remaining)
         } else if let Some(suspend_until) = self.local_suspended.get(identifier) {
-            if *suspend_until > current_time {
-                found_suspend_until = Some(*suspend_until);
+            let value = *suspend_until;
+            drop(suspend_until);
+            if value > current_time {
+                Some(value)
             } else {
-                // Lazy cleanup
-                drop(suspend_until); // release lock
                 self.local_suspended.remove(identifier);
+                None
             }
-        }
+        } else {
+            None
+        };
 
-        // Update cache
         self.suspend_cache.insert(
             identifier.to_string(),
             (Instant::now(), found_suspend_until),
         );
 
-        if let Some(suspend_until) = found_suspend_until {
-            Ok(Some(suspend_until - current_time))
-        } else {
-            Ok(None)
-        }
+        Ok(found_suspend_until.map(|suspend_until| suspend_until - current_time))
     }
 
-    /// Returns current timestamp in milliseconds.
-    ///
-    /// Prefers Redis time when available to reduce clock skew across instances.
     async fn get_current_timestamp(&self) -> Result<u64> {
         if let Some(backend) = &self.backend {
             return backend
@@ -322,1028 +178,311 @@ impl DistributedSlidingWindowRateLimiter {
                 .await
                 .map_err(|e| RateLimitError::RedisError(e.into()).into());
         }
-        if let Some(pool) = &self.pool {
-            // Try to use cached offset
-            if let Some((offset, last_refresh)) = *self.time_offset.read().await {
-                if last_refresh.elapsed() < Duration::from_secs(TIME_OFFSET_REFRESH_SECS) {
-                    let local_now = SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .unwrap()
-                        .as_millis() as i64;
-                    // redis_time = local_time - offset
-                    let redis_time = local_now - offset;
-                    return Ok(redis_time as u64);
-                }
-            }
 
-            let mut conn = pool
-                .get()
-                .await
-                .map_err(|e| RateLimitError::RedisError(e.into()))?;
-            // TIME command returns (seconds, microseconds)
-            let time: (u64, u64) = deadpool_redis::redis::cmd("TIME")
-                .query_async(&mut conn)
-                .await
-                .map_err(|e| RateLimitError::RedisError(e.into()))?;
-
-            let redis_millis = time.0 * 1000 + time.1 / 1000;
-            let local_now = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_millis() as i64;
-
-            // Calculate and cache offset: offset = local - redis
-            let offset = local_now - redis_millis as i64;
-            *self.time_offset.write().await = Some((offset, Instant::now()));
-
-            Ok(redis_millis)
-        } else {
-            Ok(SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_millis() as u64)
-        }
+        Ok(SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64)
     }
 
-    /// Sets rate-limit config for a specific key.
-    ///
-    /// # Parameters
-    /// * `key` - Target key.
-    /// * `config` - Rate-limit configuration.
     pub async fn set_key_config(&self, key: &str, config: RateLimitConfig) -> Result<()> {
-        // Check cache first to avoid redundant Redis writes
-        if let Some(existing) = self.local_configs.get(key) {
-            if *existing == config {
-                return Ok(());
-            }
+        if self.local_configs.get(key).is_some_and(|existing| *existing == config) {
+            return Ok(());
         }
-
-        if let Some(pool) = &self.pool {
-            let mut conn = pool
-                .get()
-                .await
-                .map_err(|e| RateLimitError::RedisError("redis connect error".into()))?;
-            let config_key = self.get_config_key(key);
-            let config_json = serde_json::to_string(&config)?;
-            let _: () = conn
-                .set(&config_key, &config_json)
-                .await
-                .map_err(|e| RateLimitError::RedisError(e.into()))?;
-
-            // Update cache
-            self.local_configs.insert(key.to_string(), config);
-        } else {
-            self.local_configs.insert(key.to_string(), config);
-        }
+        self.local_configs.insert(key.to_string(), config);
         Ok(())
     }
 
     pub async fn set_limit(&self, id: &str, limit: f32) -> Result<()> {
-        let config = RateLimitConfig::new(limit);
-        self.set_key_config(id, config).await
+        self.set_key_config(id, RateLimitConfig::new(limit)).await
     }
-    /// Sets global limit configuration (affects all keys).
+
     pub async fn set_all_limit(&self, limit: f32) -> Result<()> {
-        if let Some(pool) = &self.pool {
-            let mut conn = pool
-                .get()
-                .await
-                .map_err(|e| RateLimitError::RedisError(e.into()))?;
+        let mut default_config = self.default_config.clone();
+        default_config.max_requests_per_second = limit;
+        *self.local_default_config.write().await = Some(default_config);
 
-            // Update default config.
-            let mut default_config = self.default_config.clone();
-            default_config.max_requests_per_second = limit;
-            let config_json = serde_json::to_string(&default_config)?;
-            let _: () = conn
-                .set(&self.default_config_key, &config_json)
-                .await
-                .map_err(|e| RateLimitError::RedisError(e.into()))?;
-
-            // Update all configured keys.
-            let pattern = format!("{}:*", self.config_key_prefix);
-            let keys: Vec<String> = conn
-                .keys(&pattern)
-                .await
-                .map_err(|e| RateLimitError::RedisError(e.into()))?;
-
-            for key in keys {
-                let config_json: String = conn.get(&key).await.unwrap_or_default();
-                if !config_json.is_empty()
-                    && let Ok(mut config) = serde_json::from_str::<RateLimitConfig>(&config_json)
-                {
-                    config.max_requests_per_second = limit;
-                    let updated_json = serde_json::to_string(&config)?;
-                    let _: () = conn
-                        .set(&key, &updated_json)
-                        .await
-                        .map_err(|e| RateLimitError::RedisError(e.into()))?;
-                }
-            }
-        } else {
-            // Update local default config.
-            let mut default_config = self.default_config.clone();
-            default_config.max_requests_per_second = limit;
-            *self.local_default_config.write().await = Some(default_config);
-
-            // Update all local configs.
-            for mut entry in self.local_configs.iter_mut() {
-                entry.value_mut().max_requests_per_second = limit;
-            }
+        for mut entry in self.local_configs.iter_mut() {
+            entry.value_mut().max_requests_per_second = limit;
         }
-
         Ok(())
     }
 
-    /// Sets rate-limit configs for multiple keys in batch.
-    ///
-    /// # Parameters
-    /// * `configs` - Mapping from key to config.
     pub async fn set_key_configs(&self, configs: HashMap<String, RateLimitConfig>) -> Result<()> {
-        if let Some(pool) = &self.pool {
-            let mut conn = pool
-                .get()
-                .await
-                .map_err(|e| RateLimitError::RedisError(e.into()))?;
-            let mut pipe = deadpool_redis::redis::pipe();
-
-            let mut updates = Vec::new();
-
-            for (key, config) in configs {
-                // Check cache
-                if let Some(existing) = self.local_configs.get(&key) {
-                    if *existing == config {
-                        continue;
-                    }
-                }
-
-                let config_key = self.get_config_key(&key);
-                let config_json = serde_json::to_string(&config)?;
-                pipe.set(&config_key, &config_json);
-                updates.push((key, config));
-            }
-
-            if !updates.is_empty() {
-                let _: () = pipe
-                    .query_async(&mut *conn)
-                    .await
-                    .map_err(|e| RateLimitError::RedisError(e.into()))?;
-
-                // Update cache
-                for (key, config) in updates {
-                    self.local_configs.insert(key, config);
-                }
-            }
-        } else {
-            for (key, config) in configs {
-                self.local_configs.insert(key, config);
-            }
+        for (key, config) in configs {
+            self.local_configs.insert(key, config);
         }
         Ok(())
     }
 
-    /// Removes a key-specific config (falls back to default config).
-    ///
-    /// # Parameters
-    /// * `key` - Key whose config should be removed.
     pub async fn remove_key_config(&self, key: &str) -> Result<()> {
-        if let Some(pool) = &self.pool {
-            let mut conn = pool
-                .get()
-                .await
-                .map_err(|e| RateLimitError::RedisError(e.into()))?;
-            let config_key = self.get_config_key(key);
-            let _: usize = conn
-                .del(&config_key)
-                .await
-                .map_err(|e| RateLimitError::RedisError(e.into()))?;
-        } else {
-            self.local_configs.remove(key);
-        }
+        self.local_configs.remove(key);
         Ok(())
     }
 
-    /// Gets config for a specific key.
-    ///
-    /// # Parameters
-    /// * `key` - Key to query.
-    ///
-    /// # Returns
-    /// Key-specific config, or default config when not set.
     pub async fn get_key_config(&self, key: &str) -> Result<RateLimitConfig> {
-        if let Some(pool) = &self.pool {
-            let mut conn = pool
-                .get()
-                .await
-                .map_err(|e| RateLimitError::RedisError(e.into()))?;
-            let config_key = self.get_config_key(key);
-
-            // Try key-specific config first.
-            let config_json: Option<String> = conn
-                .get(&config_key)
-                .await
-                .map_err(|e| RateLimitError::RedisError(e.into()))?;
-            if let Some(json) = config_json
-                && let Ok(config) = serde_json::from_str::<RateLimitConfig>(&json)
-            {
-                return Ok(config);
-            }
-
-            // Then try default config.
-            let default_json: Option<String> = conn
-                .get(&self.default_config_key)
-                .await
-                .map_err(|e| RateLimitError::RedisError(e.into()))?;
-            if let Some(json) = default_json
-                && let Ok(config) = serde_json::from_str::<RateLimitConfig>(&json)
-            {
-                return Ok(config);
-            }
-        } else {
-            // Local mode.
-            if let Some(config) = self.local_configs.get(key) {
-                return Ok(config.clone());
-            }
-            if let Some(config) = self.local_default_config.read().await.as_ref() {
-                return Ok(config.clone());
-            }
+        if let Some(config) = self.local_configs.get(key) {
+            return Ok(config.clone());
         }
-
-        // Fallback to hard-coded default config.
+        if let Some(default_config) = self.local_default_config.read().await.clone() {
+            return Ok(default_config);
+        }
         Ok(self.default_config.clone())
     }
 
-    /// Returns all configured keys and their configs.
     pub async fn get_all_key_configs(&self) -> Result<HashMap<String, RateLimitConfig>> {
-        if let Some(pool) = &self.pool {
-            let mut conn = pool
-                .get()
-                .await
-                .map_err(|e| RateLimitError::RedisError(e.into()))?;
-            let pattern = format!("{}:*", self.config_key_prefix);
-            let keys: Vec<String> = conn
-                .keys(&pattern)
-                .await
-                .map_err(|e| RateLimitError::RedisError(e.into()))?;
-
-            let mut configs = HashMap::new();
-            for key in keys {
-                let config_json: Option<String> = conn
-                    .get(&key)
-                    .await
-                    .map_err(|e| RateLimitError::RedisError(e.into()))?;
-                if let Some(json) = config_json
-                    && let Ok(config) = serde_json::from_str::<RateLimitConfig>(&json)
-                {
-                    // Extract actual identifier (strip prefix).
-                    let identifier = key
-                        .strip_prefix(&format!("{}:", self.config_key_prefix))
-                        .unwrap_or(&key);
-                    configs.insert(identifier.to_string(), config);
-                }
-            }
-            Ok(configs)
-        } else {
-            let mut configs = HashMap::new();
-            for entry in self.local_configs.iter() {
-                configs.insert(entry.key().clone(), entry.value().clone());
-            }
-            Ok(configs)
-        }
+        Ok(self
+            .local_configs
+            .iter()
+            .map(|entry| (entry.key().clone(), entry.value().clone()))
+            .collect())
     }
 
-    /// Records one request.
-    ///
-    /// # Parameters
-    /// * `identifier` - Identifier used to distinguish request sources.
     pub async fn record(&self, identifier: &str) -> Result<()> {
-        // Route to RateLimitBackend if configured (backend provides its own serialization)
+        let current_time = self.get_current_timestamp().await?;
+        let config = self.get_key_config(identifier).await?;
+        let ttl_ms = (config.window_size_millis * 2).max(1);
+        let key = self.get_last_request_key(identifier);
+
         if let Some(backend) = &self.backend {
-            let config = self.get_key_config(identifier).await?;
-            let min_interval_millis = (config.window_size_millis as f64
-                / config.max_requests_per_second as f64) as u64;
-            let ttl_millis = min_interval_millis * 2;
-            let last_request_key = self.get_last_request_key(identifier);
-            let current_time = backend
-                .current_time_ms()
+            backend
+                .record(&key, current_time, ttl_ms)
                 .await
                 .map_err(|e| RateLimitError::RedisError(e.into()))?;
-            return backend
-                .record(&last_request_key, current_time, ttl_millis)
-                .await
-                .map_err(|e| RateLimitError::RedisError(e.into()).into());
-        }
-
-        let lock_key = self.get_lock_key(identifier);
-        let last_request_key = self.get_last_request_key(identifier);
-
-        // Acquire distributed lock to protect Redis operations.
-        if let Ok(acquired) = self
-            .lock_manager
-            .acquire_lock(&lock_key, 30, Duration::from_secs(5))
-            .await
-        {
-            if !acquired {
-                return Err(RateLimitError::RedisError("Failed to acquire lock".into()).into());
-            }
-
-            let current_time = self.get_current_timestamp().await?;
-
-            if let Some(pool) = &self.pool {
-                let mut conn = pool
-                    .get()
-                    .await
-                    .map_err(|e| RateLimitError::RedisError("redis connect error".into()))?;
-
-                // Set TTL based on request interval so record remains available for next check.
-                let config = self.get_key_config(identifier).await?;
-                let min_interval_millis = (config.window_size_millis as f64
-                    / config.max_requests_per_second as f64)
-                    as u64;
-                let ttl_millis = min_interval_millis * 2;
-                let ttl_seconds = (ttl_millis / 1000).max(1);
-                // Update last request time.
-                let _: () = conn
-                    .set_ex(&last_request_key, current_time, ttl_seconds)
-                    .await
-                    .map_err(|e| RateLimitError::RedisError(e.into()))?;
-            } else {
-                // Local mode.
-                self.local_last_request
-                    .insert(last_request_key, current_time);
-            }
-
-            // Release lock.
-            let _ = self.lock_manager.release_lock(&lock_key).await;
         } else {
-            return Err(RateLimitError::RedisError("Failed to acquire lock".into()).into());
+            self.local_last_request
+                .insert(identifier.to_string(), current_time);
         }
-
+        self.local_wait_until.remove(identifier);
         Ok(())
     }
 
-    /// Tries to acquire permit (atomic operation).
     pub async fn acquire(&self, identifier: &str, _permits: f64) -> Result<()> {
-        let wait_ms = self.check_and_update(identifier).await?;
-        if wait_ms > 0 {
-            let wait_secs = wait_ms.div_ceil(1000);
-            return Err(RateLimitError::WaitTime(wait_secs).into());
-        }
-        Ok(())
+        self.wait_for_permit(identifier).await
     }
 
-    /// Verifies whether max limit has been reached.
-    ///
-    /// # Parameters
-    /// * `identifier` - Identifier used to distinguish request sources.
-    ///
-    /// # Returns
-    /// * `Ok(())` - Limit not reached.
-    /// * `Err(u64)` - Limit reached; wait time in milliseconds.
     pub async fn verify(&self, identifier: &str) -> Result<Option<u64>> {
-        // Check suspension first
-        if let Some(wait) = self.check_suspended(identifier).await? {
-            return Ok(Some(wait));
+        if let Some(wait_ms) = self.check_suspended(identifier).await? {
+            return Ok(Some(wait_ms));
         }
-
-        let config = match self.get_key_config(identifier).await {
-            Ok(cfg) => cfg,
-            Err(e) => {
-                error!("{e:?}");
-                self.default_config.clone()
-            }
-        };
-
-        let last_request_key = self.get_last_request_key(identifier);
-        let min_interval_millis =
-            (config.window_size_millis as f64 / config.max_requests_per_second as f64) as u64;
 
         let current_time = self.get_current_timestamp().await?;
+        let config = self.get_key_config(identifier).await?;
+        let min_interval = Self::min_interval_ms(&config);
 
-        // Route to RateLimitBackend if configured (read-only check)
         if let Some(backend) = &self.backend {
-            let wait_ms = backend
+            let wait = backend
                 .check_and_update(
-                    &last_request_key,
+                    &self.get_last_request_key(identifier),
                     current_time,
-                    min_interval_millis,
-                    0, // ttl_ms not used for read-only verify
+                    min_interval,
+                    0,
                 )
                 .await
                 .map_err(|e| RateLimitError::RedisError(e.into()))?;
-            return if wait_ms > 0 {
-                Ok(Some(wait_ms))
-            } else {
-                Ok(None)
-            };
+            return Ok((wait > 0).then_some(wait));
         }
 
-        if let Some(pool) = &self.pool {
-            let mut conn = pool
-                .get()
-                .await
-                .map_err(|e| RateLimitError::RedisError(e.into()))?;
-            let script = r#"
-            local key = KEYS[1]
-            local current_time = tonumber(ARGV[1])
-            local min_interval = tonumber(ARGV[2])
-
-            local last_time = redis.call("GET", key)
-            if last_time then
-                local diff = current_time - tonumber(last_time)
-                if diff < min_interval then
-                    return min_interval - diff
-                end
-            end
-            return 0
-            "#;
-
-            let wait_ms: u64 = deadpool_redis::redis::Script::new(script)
-                .key(&last_request_key)
-                .arg(current_time)
-                .arg(min_interval_millis)
-                .invoke_async(&mut conn)
-                .await
-                .map_err(|e| RateLimitError::RedisError(e.into()))?;
-
-            if wait_ms > 0 {
-                Ok(Some(wait_ms))
-            } else {
-                Ok(None)
+        if let Some(last_time) = self.local_last_request.get(identifier) {
+            let elapsed = current_time.saturating_sub(*last_time);
+            if elapsed < min_interval {
+                return Ok(Some(min_interval - elapsed));
             }
-        } else {
-            // Local mode.
-            if let Some(last_time) = self.local_last_request.get(&last_request_key).map(|v| *v) {
-                let elapsed = current_time.saturating_sub(last_time);
-                if elapsed < min_interval_millis {
-                    return Ok(Some(min_interval_millis - elapsed));
-                }
-            }
-            Ok(None)
         }
+        Ok(None)
     }
 
-    /// Atomically checks and updates rate-limit state (competitive model).
-    ///
-    /// Only ONE caller wins the permit per interval; others receive a wait
-    /// duration and must retry.  Prefer [`wait_for_permit`] for download
-    /// tasks — it uses a reservation model that eliminates retry loops.
-    ///
-    /// # Returns
-    /// * `Ok(0)` - Permit acquired.
-    /// * `Ok(wait_ms)` - Must wait `wait_ms` milliseconds then retry.
     pub async fn check_and_update(&self, identifier: &str) -> Result<u64> {
-        // Check suspension first
-        if let Some(wait) = self.check_suspended(identifier).await? {
-            return Ok(wait);
-        }
-
-        // Route to RateLimitBackend if configured
-        if let Some(backend) = &self.backend {
-            let last_request_key = self.get_last_request_key(identifier);
-            let config = match self.get_key_config(identifier).await {
-                Ok(cfg) => cfg,
-                Err(e) => {
-                    error!("{e:?}");
-                    self.default_config.clone()
-                }
-            };
-            let min_interval_millis =
-                (config.window_size_millis as f64 / config.max_requests_per_second as f64) as u64;
-            let ttl_millis = min_interval_millis * 2;
-            let current_time = backend
-                .current_time_ms()
-                .await
-                .map_err(|e| RateLimitError::RedisError(e.into()))?;
-            let wait_ms = backend
-                .check_and_update(&last_request_key, current_time, min_interval_millis, ttl_millis)
-                .await
-                .map_err(|e| RateLimitError::RedisError(e.into()))?;
-            if wait_ms > 0 {
-                self.local_wait_until
-                    .insert(identifier.to_string(), current_time + wait_ms);
-            }
+        if let Some(wait_ms) = self.check_suspended(identifier).await? {
             return Ok(wait_ms);
         }
 
         let current_time = self.get_current_timestamp().await?;
+        let config = self.get_key_config(identifier).await?;
+        let min_interval = Self::min_interval_ms(&config);
+        let ttl_ms = (config.window_size_millis * 2).max(min_interval * 2).max(1);
 
-        // Check local wait cache to reduce Redis pressure
-        if let Some(entry) = self.local_wait_until.get(identifier) {
-            let wait_until = *entry;
-            if wait_until > current_time {
-                return Ok(wait_until - current_time);
-            }
-            drop(entry);
-            self.local_wait_until.remove(identifier);
-        }
-
-        let config = match self.get_key_config(identifier).await {
-            Ok(cfg) => cfg,
-            Err(e) => {
-                error!("{e:?}");
-                self.default_config.clone()
-            }
-        };
-
-        let last_request_key = self.get_last_request_key(identifier);
-        let min_interval_millis =
-            (config.window_size_millis as f64 / config.max_requests_per_second as f64) as u64;
-        let ttl_millis = min_interval_millis * 2;
-        let ttl_seconds = (ttl_millis / 1000).max(1);
-
-        if let Some(pool) = &self.pool {
-            let mut conn = pool
-                .get()
-                .await
-                .map_err(|e| RateLimitError::RedisError(e.into()))?;
-
-            let script = r#"
-            local key = KEYS[1]
-            local current_time = tonumber(ARGV[1])
-            local min_interval = tonumber(ARGV[2])
-            local ttl = tonumber(ARGV[3])
-
-            local last_time = redis.call("GET", key)
-            if last_time then
-                local diff = current_time - tonumber(last_time)
-                if diff < min_interval then
-                    return min_interval - diff
-                end
-            end
-
-            redis.call("SETEX", key, ttl, current_time)
-            return 0
-            "#;
-
-            let result: u64 = deadpool_redis::redis::Script::new(script)
-                .key(&last_request_key)
-                .arg(current_time)
-                .arg(min_interval_millis)
-                .arg(ttl_seconds)
-                .invoke_async(&mut conn)
-                .await
-                .map_err(|e| RateLimitError::RedisError(e.into()))?;
-
-            if result > 0 {
-                // Update local wait cache
-                self.local_wait_until
-                    .insert(identifier.to_string(), current_time + result);
-            }
-
-            Ok(result)
-        } else {
-            // Simple local-mode implementation (locking via DashMap entry).
-            let entry = self.local_last_request.entry(last_request_key);
-            match entry {
-                dashmap::mapref::entry::Entry::Occupied(mut occ) => {
-                    let last_time = *occ.get();
-                    let elapsed = current_time.saturating_sub(last_time);
-                    if elapsed < min_interval_millis {
-                        return Ok(min_interval_millis - elapsed);
-                    }
-                    occ.insert(current_time);
-                    Ok(0)
-                }
-                dashmap::mapref::entry::Entry::Vacant(vac) => {
-                    vac.insert(current_time);
-                    Ok(0)
-                }
-            }
-        }
-    }
-
-    /// Reserves a unique rate-limit time slot for the given identifier.
-    ///
-    /// Unlike [`check_and_update`] (competitive — one winner per call),
-    /// this method assigns each caller its own future slot atomically.
-    /// With N concurrent callers the slots are T, T+interval, T+2·interval, …
-    /// so every caller makes exactly **one** Redis round-trip.
-    ///
-    /// # Returns
-    /// * `Ok(0)` — Permit acquired immediately.
-    /// * `Ok(wait_ms)` — Slot reserved; caller should sleep then proceed.
-    async fn reserve_permit(&self, identifier: &str) -> Result<u64> {
-        let current_time = self.get_current_timestamp().await?;
-
-        let config = match self.get_key_config(identifier).await {
-            Ok(cfg) => cfg,
-            Err(e) => {
-                error!("{e:?}");
-                self.default_config.clone()
-            }
-        };
-
-        let last_request_key = self.get_last_request_key(identifier);
-        let min_interval_millis =
-            (config.window_size_millis as f64 / config.max_requests_per_second as f64) as u64;
-        let base_ttl_seconds = (min_interval_millis * 2 / 1000).max(1);
-
-        // Route to RateLimitBackend if configured
         if let Some(backend) = &self.backend {
-            let ttl_ms = base_ttl_seconds * 1000;
             return backend
-                .reserve_permit(&last_request_key, current_time, min_interval_millis, ttl_ms)
+                .check_and_update(
+                    &self.get_last_request_key(identifier),
+                    current_time,
+                    min_interval,
+                    ttl_ms,
+                )
                 .await
                 .map_err(|e| RateLimitError::RedisError(e.into()).into());
         }
 
-        if let Some(pool) = &self.pool {
-            let mut conn = pool
-                .get()
-                .await
-                .map_err(|e| RateLimitError::RedisError(e.into()))?;
-
-            // Reservation-based Lua script.
-            // Each caller atomically reads the last reserved time, computes the
-            // next available slot, writes it back, and returns the wait duration.
-            // Concurrent callers are serialised inside Redis so every caller
-            // receives a **distinct** future slot — no thundering-herd.
-            let script = r#"
-            local key          = KEYS[1]
-            local current_time = tonumber(ARGV[1])
-            local min_interval = tonumber(ARGV[2])
-            local base_ttl     = tonumber(ARGV[3])
-
-            local last_time = redis.call("GET", key)
-            local next_available
-            if last_time then
-                next_available = math.max(tonumber(last_time) + min_interval, current_time)
-            else
-                next_available = current_time
-            end
-
-            -- TTL must survive until the reserved slot expires
-            local wait = next_available - current_time
-            local ttl  = math.max(math.ceil((wait + min_interval * 2) / 1000), base_ttl)
-            redis.call("SETEX", key, ttl, next_available)
-            return wait
-            "#;
-
-            let wait_ms: u64 = deadpool_redis::redis::Script::new(script)
-                .key(&last_request_key)
-                .arg(current_time)
-                .arg(min_interval_millis)
-                .arg(base_ttl_seconds)
-                .invoke_async(&mut conn)
-                .await
-                .map_err(|e| RateLimitError::RedisError(e.into()))?;
-
-            Ok(wait_ms)
-        } else {
-            // Local mode: DashMap entry lock gives atomicity on one process.
-            let entry = self.local_last_request.entry(last_request_key);
-            match entry {
-                dashmap::mapref::entry::Entry::Occupied(mut occ) => {
-                    let last_time = *occ.get();
-                    let next_available = (last_time + min_interval_millis).max(current_time);
-                    let wait = next_available.saturating_sub(current_time);
-                    occ.insert(next_available);
-                    Ok(wait)
-                }
-                dashmap::mapref::entry::Entry::Vacant(vac) => {
-                    vac.insert(current_time);
+        match self.local_last_request.entry(identifier.to_string()) {
+            dashmap::mapref::entry::Entry::Occupied(mut entry) => {
+                let elapsed = current_time.saturating_sub(*entry.get());
+                if elapsed < min_interval {
+                    Ok(min_interval - elapsed)
+                } else {
+                    entry.insert(current_time);
                     Ok(0)
                 }
+            }
+            dashmap::mapref::entry::Entry::Vacant(entry) => {
+                entry.insert(current_time);
+                Ok(0)
             }
         }
     }
 
-    /// Waits until a rate-limit permit is available, then returns.
-    ///
-    /// Recommended entry point for download tasks.  Handles:
-    /// 1. **Suspension** (circuit breaker / 429 backoff) — waits until cleared.
-    /// 2. **Slot reservation** — each caller gets a unique future time slot
-    ///    via a single atomic Redis call, then sleeps exactly the right amount.
-    ///
-    /// No polling loop, no thundering-herd, no request abandonment.
+    async fn reserve_permit(&self, identifier: &str) -> Result<u64> {
+        let current_time = self.get_current_timestamp().await?;
+        let config = self.get_key_config(identifier).await?;
+        let min_interval = Self::min_interval_ms(&config);
+        let ttl_ms = (config.window_size_millis * 2).max(min_interval * 2).max(1);
+
+        if let Some(backend) = &self.backend {
+            return backend
+                .reserve_permit(
+                    &self.get_last_request_key(identifier),
+                    current_time,
+                    min_interval,
+                    ttl_ms,
+                )
+                .await
+                .map_err(|e| RateLimitError::RedisError(e.into()).into());
+        }
+
+        match self.local_last_request.entry(identifier.to_string()) {
+            dashmap::mapref::entry::Entry::Occupied(mut entry) => {
+                let next_available = (*entry.get() + min_interval).max(current_time);
+                let wait = next_available.saturating_sub(current_time);
+                entry.insert(next_available);
+                Ok(wait)
+            }
+            dashmap::mapref::entry::Entry::Vacant(entry) => {
+                entry.insert(current_time);
+                Ok(0)
+            }
+        }
+    }
+
     pub async fn wait_for_permit(&self, identifier: &str) -> Result<()> {
-        // Phase 1: wait for any active suspension to clear.
-        loop {
-            match self.check_suspended(identifier).await? {
-                Some(remaining_ms) => {
-                    tokio::time::sleep(Duration::from_millis(remaining_ms)).await;
-                }
-                None => break,
+        if let Some(wait_ms) = self.check_suspended(identifier).await? {
+            tokio::time::sleep(Duration::from_millis(wait_ms)).await;
+        }
+
+        if let Some(wait_until) = self.local_wait_until.get(identifier) {
+            let current_time = self.get_current_timestamp().await?;
+            if *wait_until > current_time {
+                tokio::time::sleep(Duration::from_millis(*wait_until - current_time)).await;
             }
         }
 
-        // Phase 2: reserve a slot in the rate-limit queue.
         let wait_ms = self.reserve_permit(identifier).await?;
         if wait_ms > 0 {
+            self.local_wait_until.insert(
+                identifier.to_string(),
+                self.get_current_timestamp().await? + wait_ms,
+            );
             tokio::time::sleep(Duration::from_millis(wait_ms)).await;
         }
         Ok(())
     }
 
-    /// Returns time until next request can proceed (milliseconds).
-    ///
-    /// # Parameters
-    /// * `identifier` - Identifier.
-    ///
-    /// # Returns
-    /// Milliseconds to wait; `0` means request is immediately allowed.
     pub async fn get_next_available_time(&self, identifier: &str) -> Result<u64> {
-        self.verify(identifier).await.map(|res| res.unwrap_or(0))
+        let current_time = self.get_current_timestamp().await?;
+        Ok(self
+            .verify(identifier)
+            .await?
+            .map(|wait| current_time + wait)
+            .unwrap_or(current_time))
     }
 
-    /// Decreases rate-limit throughput (backpressure).
-    ///
-    /// # Parameters
-    /// * `identifier` - Identifier.
-    /// * `factor` - Reduction factor (`0.0 - 1.0`), e.g. `0.5` halves throughput.
     pub async fn decrease_limit(&self, identifier: &str, factor: f32) -> Result<f32> {
         let mut config = self.get_key_config(identifier).await?;
-
-        // Ensure `base_max_requests_per_second` is initialized.
-        if config.base_max_requests_per_second.is_none() {
-            config.base_max_requests_per_second = Some(config.max_requests_per_second);
-        }
-
-        // Compute new limit.
-        let new_limit = config.max_requests_per_second * factor;
-        // Apply minimum floor to avoid zero.
-        config.max_requests_per_second = new_limit.max(0.1);
-
-        self.set_key_config(identifier, config.clone()).await?;
-        Ok(config.max_requests_per_second)
+        let base = config
+            .base_max_requests_per_second
+            .unwrap_or(config.max_requests_per_second);
+        config.base_max_requests_per_second = Some(base);
+        config.max_requests_per_second = (config.max_requests_per_second * factor).max(0.1);
+        let new_limit = config.max_requests_per_second;
+        self.set_key_config(identifier, config).await?;
+        Ok(new_limit)
     }
 
-    /// Tries to restore rate-limit throughput.
-    ///
-    /// # Parameters
-    /// * `identifier` - Identifier.
-    /// * `step_factor` - Restore step factor (`> 1.0`), e.g. `1.1` increases by 10%.
     pub async fn try_restore_limit(&self, identifier: &str, step_factor: f32) -> Result<f32> {
         let mut config = self.get_key_config(identifier).await?;
-
-        if let Some(base) = config.base_max_requests_per_second
-            && config.max_requests_per_second < base
-        {
-            let new_limit = config.max_requests_per_second * step_factor;
-            config.max_requests_per_second = new_limit.min(base);
-            self.set_key_config(identifier, config.clone()).await?;
-        }
-
-        Ok(config.max_requests_per_second)
+        let base = config
+            .base_max_requests_per_second
+            .unwrap_or(config.max_requests_per_second);
+        config.max_requests_per_second =
+            (config.max_requests_per_second * step_factor).min(base);
+        let new_limit = config.max_requests_per_second;
+        self.set_key_config(identifier, config).await?;
+        Ok(new_limit)
     }
 
-    /// Cleans all expired records.
-    ///
-    /// Can be called periodically to reclaim Redis memory.
     pub async fn cleanup(&self) -> Result<u64> {
+        let current_time = self.get_current_timestamp().await?;
+        let cutoff = current_time.saturating_sub(self.default_config.window_size_millis * 2);
+
         if let Some(backend) = &self.backend {
-            let pattern = format!("{}:last_request:", self.key_prefix);
-            let older_than = self.default_config.window_size_millis * 2;
             return backend
-                .cleanup(&pattern, older_than)
+                .cleanup(&self.key_prefix, self.default_config.window_size_millis * 2)
                 .await
                 .map_err(|e| RateLimitError::RedisError(e.into()).into());
         }
-        if let Some(pool) = &self.pool {
-            let mut conn = pool
-                .get()
-                .await
-                .map_err(|e| RateLimitError::RedisError(e.into()))?;
-            let pattern = format!("{}:last_request:*", self.key_prefix);
-            let keys: Vec<String> = conn
-                .keys(&pattern)
-                .await
-                .map_err(|e| RateLimitError::RedisError(e.into()))?;
 
-            let mut total_cleaned = 0u64;
-            let current_time = self.get_current_timestamp().await?;
-
-            for key in keys {
-                // Check whether key is expired (`TTL <= 0`) or value is stale.
-                let ttl: i64 = conn
-                    .ttl(&key)
-                    .await
-                    .map_err(|e| RateLimitError::RedisError(e.into()))?;
-
-                let should_delete = if ttl == -1 {
-                    // No TTL set; determine staleness from stored value.
-                    if let Ok(Some(last_time)) = conn.get::<_, Option<u64>>(&key).await {
-                        // Use default config to compute max valid age.
-                        let min_interval_millis = (self.default_config.window_size_millis as f64
-                            / self.default_config.max_requests_per_second as f64)
-                            as u64;
-                        let max_valid_age = min_interval_millis * 2; // Keep consistent with TTL policy.
-                        current_time.saturating_sub(last_time) > max_valid_age
-                    } else {
-                        true // Could not fetch value; delete key.
-                    }
-                } else {
-                    ttl <= 0 // TTL expired.
-                };
-
-                if should_delete {
-                    let deleted: usize = conn
-                        .del(&key)
-                        .await
-                        .map_err(|e| RateLimitError::RedisError(e.into()))?;
-                    if deleted > 0 {
-                        total_cleaned += 1;
-                    }
-                }
+        let mut removed = 0;
+        self.local_last_request.retain(|_, last| {
+            if *last < cutoff {
+                removed += 1;
+                false
+            } else {
+                true
             }
-
-            Ok(total_cleaned)
-        } else {
-            // Local-mode cleanup.
-            let mut total_cleaned = 0u64;
-            let current_time = self.get_current_timestamp().await?;
-
-            // Collect keys to delete to avoid mutating while iterating.
-            let mut keys_to_remove = Vec::new();
-
-            for entry in self.local_last_request.iter() {
-                let last_time = *entry.value();
-
-                // Try using corresponding config to compute expiry.
-                // Simplified: fall back to default config when key-specific config is unavailable.
-                // In practice identifier should be parsed from key; here key is already last_request_key.
-                // Using default config is a conservative estimate.
-
-                let min_interval_millis = (self.default_config.window_size_millis as f64
-                    / self.default_config.max_requests_per_second as f64)
-                    as u64;
-                let max_valid_age = min_interval_millis * 2;
-
-                if current_time.saturating_sub(last_time) > max_valid_age {
-                    keys_to_remove.push(entry.key().clone());
-                }
-            }
-
-            for key in keys_to_remove {
-                if self.local_last_request.remove(&key).is_some() {
-                    total_cleaned += 1;
-                }
-            }
-
-            Ok(total_cleaned)
-        }
+        });
+        Ok(removed)
     }
 
-    /// Returns number of identifiers currently stored.
     pub async fn get_identifier_count(&self) -> Result<usize> {
-        if let Some(pool) = &self.pool {
-            let mut conn = pool
-                .get()
-                .await
-                .map_err(|e| RateLimitError::RedisError(e.into()))?;
-            let pattern = format!("{}:last_request:*", self.key_prefix);
-            let keys: Vec<String> = conn
-                .keys(&pattern)
-                .await
-                .map_err(|e| RateLimitError::RedisError(e.into()))?;
-            Ok(keys.len())
-        } else {
-            Ok(self.local_last_request.len())
-        }
+        Ok(self.local_last_request.len())
     }
 
-    /// Resets records for a specific identifier.
     pub async fn reset(&self, identifier: &str) -> Result<()> {
         let key = self.get_last_request_key(identifier);
-        if let Some(pool) = &self.pool {
-            let mut conn = pool
-                .get()
+        if let Some(backend) = &self.backend {
+            backend
+                .cleanup(&key, 0)
                 .await
                 .map_err(|e| RateLimitError::RedisError(e.into()))?;
-            let _: usize = conn
-                .del(&key)
-                .await
-                .map_err(|e| RateLimitError::RedisError(e.into()))?;
-        } else {
-            self.local_last_request.remove(&key);
         }
+        self.local_last_request.remove(identifier);
+        self.local_wait_until.remove(identifier);
         Ok(())
     }
 
-    /// Resets all records.
     pub async fn reset_all(&self) -> Result<()> {
-        if let Some(pool) = &self.pool {
-            let mut conn = pool
-                .get()
-                .await
-                .map_err(|e| RateLimitError::RedisError(e.into()))?;
-            let pattern = format!("{}:last_request:*", self.key_prefix);
-            let keys: Vec<String> = conn
-                .keys(&pattern)
-                .await
-                .map_err(|e| RateLimitError::RedisError(e.into()))?;
-
-            if !keys.is_empty() {
-                let _: usize = conn
-                    .del(&keys)
-                    .await
-                    .map_err(|e| RateLimitError::RedisError(e.into()))?;
-            }
-        } else {
-            self.local_last_request.clear();
-        }
-
+        self.local_last_request.clear();
+        self.local_wait_until.clear();
+        self.local_suspended.clear();
+        self.suspend_cache.clear();
         Ok(())
     }
 
-    /// Returns key prefix (for debugging).
     pub fn get_key_prefix(&self) -> &str {
         &self.key_prefix
     }
-}
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::time::Duration;
-
-    #[tokio::test]
-    async fn test_rate_limiter_local() {
-        let lock_manager = Arc::new(DistributedLockManager::new(None, "test"));
-        let config = RateLimitConfig::new(1.0); // 1 request per second
-        let limiter = DistributedSlidingWindowRateLimiter::new(None, lock_manager, "test", config);
-
-        // First request should succeed
-        assert!(limiter.verify("user1").await.unwrap().is_none());
-        limiter.record("user1").await.unwrap();
-
-        // Second request immediately after should be delayed
-        // interval is 1000ms
-        let res = limiter.verify("user1").await.unwrap();
-        assert!(res.is_some());
-    }
-
-    #[tokio::test]
-    async fn test_cleanup() {
-        let lock_manager = Arc::new(DistributedLockManager::new(None, "test_cleanup"));
-        let config = RateLimitConfig::new(10.0); // 10 req/s => 100ms interval => 200ms ttl
-        let limiter = DistributedSlidingWindowRateLimiter::new(None, lock_manager, "test", config);
-
-        limiter.record("user_cleanup").await.unwrap();
-        // Check count (using internal method exposed via get_identifier_count)
-        // Note: record inserts a key.
-        assert!(limiter.get_identifier_count().await.unwrap() > 0);
-
-        // Wait for expiration (TTL is roughly 200ms)
-        tokio::time::sleep(Duration::from_millis(300)).await;
-
-        let cleaned = limiter.cleanup().await.unwrap();
-        assert!(cleaned > 0);
-        assert_eq!(limiter.get_identifier_count().await.unwrap(), 0);
-    }
-
-    #[tokio::test]
-    async fn test_adaptive_rate_limit() {
-        let lock_manager = Arc::new(DistributedLockManager::new(None, "test_adaptive"));
-        let config = RateLimitConfig::new(10.0);
-        let limiter = DistributedSlidingWindowRateLimiter::new(None, lock_manager, "test", config);
-
-        limiter.decrease_limit("adaptive", 0.5).await.unwrap();
-        let limit = limiter
-            .get_key_config("adaptive")
-            .await
-            .unwrap()
-            .max_requests_per_second;
-        assert_eq!(limit, 5.0);
-
-        limiter.try_restore_limit("adaptive", 1.5).await.unwrap();
-        let limit = limiter
-            .get_key_config("adaptive")
-            .await
-            .unwrap()
-            .max_requests_per_second;
-        assert_eq!(limit, 7.5);
-    }
-
-    #[tokio::test]
-    async fn test_suspend() {
-        let lock_manager = Arc::new(DistributedLockManager::new(None, "test_suspend"));
-        let config = RateLimitConfig::new(10.0);
-        let limiter = DistributedSlidingWindowRateLimiter::new(None, lock_manager, "test", config);
-
-        limiter
-            .suspend("user_suspend", Duration::from_millis(200))
-            .await
-            .unwrap();
-
-        let res = limiter.verify("user_suspend").await.unwrap();
-        assert!(res.is_some());
-
-        tokio::time::sleep(Duration::from_millis(300)).await;
-
-        // After wait, verify should pass (if no record exists, verify returns None)
-        let res = limiter.verify("user_suspend").await.unwrap();
-        assert!(res.is_none());
+    fn min_interval_ms(config: &RateLimitConfig) -> u64 {
+        if config.max_requests_per_second <= 0.0 {
+            config.window_size_millis.max(1)
+        } else {
+            (config.window_size_millis as f32 / config.max_requests_per_second).ceil() as u64
+        }
+        .max(1)
     }
 }
 
-// ── RateLimitBackend trait ──
-
-/// Trait abstracting rate-limit state reads/writes across backends.
-#[async_trait::async_trait]
+#[async_trait]
 pub trait RateLimitBackend: Send + Sync + std::fmt::Debug {
-    /// Atomically check and update the last-request timestamp.
-    /// Returns 0 if permit is acquired, or wait_ms if the caller must wait.
     async fn check_and_update(
         &self,
         key: &str,
@@ -1352,7 +491,6 @@ pub trait RateLimitBackend: Send + Sync + std::fmt::Debug {
         ttl_ms: u64,
     ) -> std::result::Result<u64, String>;
 
-    /// Reserve a future time slot. Returns wait_ms (0 = immediate).
     async fn reserve_permit(
         &self,
         key: &str,
@@ -1361,17 +499,11 @@ pub trait RateLimitBackend: Send + Sync + std::fmt::Debug {
         ttl_ms: u64,
     ) -> std::result::Result<u64, String>;
 
-    /// Current timestamp in milliseconds.
     async fn current_time_ms(&self) -> std::result::Result<u64, String>;
 
-    /// Clean up expired entries. Returns count removed.
-    async fn cleanup(
-        &self,
-        prefix: &str,
-        older_than_ms: u64,
-    ) -> std::result::Result<u64, String>;
+    async fn cleanup(&self, prefix: &str, older_than_ms: u64)
+        -> std::result::Result<u64, String>;
 
-    /// Record a request timestamp unconditionally (write-only, no check).
     async fn record(
         &self,
         key: &str,
@@ -1379,7 +511,6 @@ pub trait RateLimitBackend: Send + Sync + std::fmt::Debug {
         ttl_ms: u64,
     ) -> std::result::Result<(), String>;
 
-    /// Suspend an identifier for circuit-breaking.
     async fn suspend(
         &self,
         key: &str,
@@ -1387,15 +518,12 @@ pub trait RateLimitBackend: Send + Sync + std::fmt::Debug {
         ttl_ms: u64,
     ) -> std::result::Result<(), String>;
 
-    /// Check whether an identifier is suspended. Returns remaining wait ms.
     async fn check_suspended(
         &self,
         key: &str,
         current_time_ms: u64,
     ) -> std::result::Result<Option<u64>, String>;
 }
-
-// ── LocalRateLimitBackend ──
 
 #[derive(Debug)]
 pub struct LocalRateLimitBackend {
@@ -1412,27 +540,35 @@ impl LocalRateLimitBackend {
     }
 }
 
-#[async_trait::async_trait]
+#[async_trait]
 impl RateLimitBackend for LocalRateLimitBackend {
     async fn check_and_update(
         &self,
         key: &str,
         current_time_ms: u64,
         min_interval_ms: u64,
-        _ttl_ms: u64,
+        ttl_ms: u64,
     ) -> std::result::Result<u64, String> {
-        match self.last_request.entry(key.to_string()) {
-            dashmap::mapref::entry::Entry::Occupied(mut occ) => {
-                let last_time = *occ.get();
-                let elapsed = current_time_ms.saturating_sub(last_time);
-                if elapsed < min_interval_ms {
-                    return Ok(min_interval_ms - elapsed);
-                }
-                occ.insert(current_time_ms);
-                Ok(0)
+        if ttl_ms == 0 {
+            if let Some(last_time) = self.last_request.get(key) {
+                let elapsed = current_time_ms.saturating_sub(*last_time);
+                return Ok((elapsed < min_interval_ms).then_some(min_interval_ms - elapsed).unwrap_or(0));
             }
-            dashmap::mapref::entry::Entry::Vacant(vac) => {
-                vac.insert(current_time_ms);
+            return Ok(0);
+        }
+
+        match self.last_request.entry(key.to_string()) {
+            dashmap::mapref::entry::Entry::Occupied(mut entry) => {
+                let elapsed = current_time_ms.saturating_sub(*entry.get());
+                if elapsed < min_interval_ms {
+                    Ok(min_interval_ms - elapsed)
+                } else {
+                    entry.insert(current_time_ms);
+                    Ok(0)
+                }
+            }
+            dashmap::mapref::entry::Entry::Vacant(entry) => {
+                entry.insert(current_time_ms);
                 Ok(0)
             }
         }
@@ -1446,23 +582,22 @@ impl RateLimitBackend for LocalRateLimitBackend {
         _ttl_ms: u64,
     ) -> std::result::Result<u64, String> {
         match self.last_request.entry(key.to_string()) {
-            dashmap::mapref::entry::Entry::Occupied(mut occ) => {
-                let last_time = *occ.get();
-                let next_available = (last_time + min_interval_ms).max(current_time_ms);
+            dashmap::mapref::entry::Entry::Occupied(mut entry) => {
+                let next_available = (*entry.get() + min_interval_ms).max(current_time_ms);
                 let wait = next_available.saturating_sub(current_time_ms);
-                occ.insert(next_available);
+                entry.insert(next_available);
                 Ok(wait)
             }
-            dashmap::mapref::entry::Entry::Vacant(vac) => {
-                vac.insert(current_time_ms);
+            dashmap::mapref::entry::Entry::Vacant(entry) => {
+                entry.insert(current_time_ms);
                 Ok(0)
             }
         }
     }
 
     async fn current_time_ms(&self) -> std::result::Result<u64, String> {
-        Ok(std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        Ok(SystemTime::now()
+            .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis() as u64)
     }
@@ -1472,9 +607,8 @@ impl RateLimitBackend for LocalRateLimitBackend {
         prefix: &str,
         older_than_ms: u64,
     ) -> std::result::Result<u64, String> {
-        let now = self.current_time_ms().await?;
-        let cutoff = now.saturating_sub(older_than_ms);
-        let mut removed = 0u64;
+        let cutoff = self.current_time_ms().await?.saturating_sub(older_than_ms);
+        let mut removed = 0;
         self.last_request.retain(|key, last| {
             if key.starts_with(prefix) && *last < cutoff {
                 removed += 1;
@@ -1514,21 +648,16 @@ impl RateLimitBackend for LocalRateLimitBackend {
     ) -> std::result::Result<Option<u64>, String> {
         if let Some(entry) = self.suspended.get(key) {
             let suspend_until = *entry;
+            drop(entry);
             if suspend_until > current_time_ms {
                 return Ok(Some(suspend_until - current_time_ms));
             }
-            drop(entry);
             self.suspended.remove(key);
         }
         Ok(None)
     }
 }
 
-// ── RaftRateLimitBackend ──
-
-use crate::engine::api::profile_store::ProfileControlPlaneStore;
-
-/// Raft/RocksDB-backed rate limit backend.
 pub struct RaftRateLimitBackend {
     store: Arc<ProfileControlPlaneStore>,
     namespace: String,
@@ -1551,23 +680,17 @@ impl RaftRateLimitBackend {
     }
 
     fn last_request_key(&self, key: &str) -> String {
-        format!("ratelimit:last:{}", key)
+        format!("ratelimit:last:{key}")
     }
 
     fn suspend_key(&self, key: &str) -> String {
-        format!("ratelimit:suspended:{}", key)
+        format!("ratelimit:suspended:{key}")
     }
 
     fn bucket_key(&self, group: &str, key: &str, bucket_ms: u64) -> String {
-        format!(
-            "ratelimit:{group}:{key}:{bucket_ms}",
-            group = group,
-            key = key,
-            bucket_ms = bucket_ms
-        )
+        format!("ratelimit:{group}:{key}:{bucket_ms}")
     }
 
-    /// Check if rate limit allows this request. Returns (allowed, current_count).
     pub async fn hit(
         &self,
         group: &str,
@@ -1575,25 +698,19 @@ impl RaftRateLimitBackend {
         window_ms: u64,
         max_requests: u64,
     ) -> std::result::Result<(bool, u64), String> {
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis() as u64;
         let bucket_size_ms = 1000u64.max(window_ms / 10);
         let current_bucket = self.bucket_key(group, key, now_ms / bucket_size_ms * bucket_size_ms);
-        let window_start = now_ms.saturating_sub(window_ms);
 
-        // Count all buckets in the window
         let mut total: u64 = 0;
-        let num_buckets = window_ms / bucket_size_ms + 1;
-        for i in 0..num_buckets {
+        for i in 0..=(window_ms / bucket_size_ms) {
             let bucket_ms = (now_ms / bucket_size_ms).saturating_sub(i) * bucket_size_ms;
-            let bk = self.bucket_key(group, key, bucket_ms);
-            if let Some(val) = self
-                .store
-                .read_cache_counter(&self.namespace, &bk)
-            {
-                total = total.saturating_add(val as u64);
+            let bucket = self.bucket_key(group, key, bucket_ms);
+            if let Some(value) = self.store.read_cache_counter(&self.namespace, &bucket) {
+                total = total.saturating_add(value as u64);
             }
         }
 
@@ -1601,7 +718,6 @@ impl RaftRateLimitBackend {
             return Ok((false, total));
         }
 
-        // Increment current bucket
         self.store
             .submit_cache_incr_by(&self.namespace, &current_bucket, 1, Some(window_ms * 2))
             .await
@@ -1609,29 +725,32 @@ impl RaftRateLimitBackend {
         Ok((true, total.saturating_add(1)))
     }
 
-    /// Clean up expired rate-limit buckets.
-    pub async fn cleanup_buckets(&self, group: &str, key: &str, older_than_ms: u64) -> std::result::Result<usize, String> {
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+    pub async fn cleanup_buckets(
+        &self,
+        group: &str,
+        key: &str,
+        older_than_ms: u64,
+    ) -> std::result::Result<usize, String> {
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis() as u64;
         let cutoff = now_ms.saturating_sub(older_than_ms);
-        let bucket_size_ms = 1000u64;
         let mut removed = 0usize;
-        // Scan a few buckets and delete old ones
+
         for i in 0..100u64 {
-            let bucket_ms = cutoff.saturating_sub(i * bucket_size_ms);
+            let bucket_ms = cutoff.saturating_sub(i * 1000);
             if bucket_ms == 0 {
                 break;
             }
-            let bk = self.bucket_key(group, key, bucket_ms);
+            let bucket = self.bucket_key(group, key, bucket_ms);
             if self
                 .store
-                .read_cache_counter(&self.namespace, &bk)
+                .read_cache_counter(&self.namespace, &bucket)
                 .is_some()
             {
                 self.store
-                    .submit_cache_del(&self.namespace, &bk)
+                    .submit_cache_del(&self.namespace, &bucket)
                     .await
                     .map_err(|e| format!("{e}"))?;
                 removed += 1;
@@ -1641,7 +760,7 @@ impl RaftRateLimitBackend {
     }
 }
 
-#[async_trait::async_trait]
+#[async_trait]
 impl RateLimitBackend for RaftRateLimitBackend {
     async fn check_and_update(
         &self,
@@ -1651,24 +770,22 @@ impl RateLimitBackend for RaftRateLimitBackend {
         ttl_ms: u64,
     ) -> std::result::Result<u64, String> {
         let lk = self.last_request_key(key);
-        // Check if a recent request already exists
-        if let Some(last_time_bytes) = self.store.read_cache_value(&self.namespace, &lk) {
-            if let Ok(last_time_str) = String::from_utf8(last_time_bytes) {
-                if let Ok(last_time) = last_time_str.parse::<u64>() {
-                    let elapsed = current_time_ms.saturating_sub(last_time);
-                    if elapsed < min_interval_ms {
-                        return Ok(min_interval_ms - elapsed);
-                    }
-                }
+        if let Some(last_time_bytes) = self.store.read_cache_value(&self.namespace, &lk)
+            && let Ok(last_time_str) = String::from_utf8(last_time_bytes)
+            && let Ok(last_time) = last_time_str.parse::<u64>()
+        {
+            let elapsed = current_time_ms.saturating_sub(last_time);
+            if elapsed < min_interval_ms {
+                return Ok(min_interval_ms - elapsed);
             }
         }
-        // Write new timestamp (skip write when ttl_ms==0 — read-only check)
+
         if ttl_ms > 0 {
             self.store
                 .submit_cache_set(
                     &self.namespace,
                     &lk,
-                    current_time_ms.to_string().into_bytes().to_vec(),
+                    current_time_ms.to_string().into_bytes(),
                     Some(ttl_ms),
                 )
                 .await
@@ -1687,16 +804,10 @@ impl RateLimitBackend for RaftRateLimitBackend {
         let lk = self.last_request_key(key);
         let next_available = if let Some(last_time_bytes) =
             self.store.read_cache_value(&self.namespace, &lk)
+            && let Ok(last_time_str) = String::from_utf8(last_time_bytes)
+            && let Ok(last_time) = last_time_str.parse::<u64>()
         {
-            if let Ok(last_time_str) = String::from_utf8(last_time_bytes) {
-                if let Ok(last_time) = last_time_str.parse::<u64>() {
-                    (last_time + min_interval_ms).max(current_time_ms)
-                } else {
-                    current_time_ms
-                }
-            } else {
-                current_time_ms
-            }
+            (last_time + min_interval_ms).max(current_time_ms)
         } else {
             current_time_ms
         };
@@ -1705,7 +816,7 @@ impl RateLimitBackend for RaftRateLimitBackend {
             .submit_cache_set(
                 &self.namespace,
                 &lk,
-                next_available.to_string().into_bytes().to_vec(),
+                next_available.to_string().into_bytes(),
                 Some(ttl_ms.max(min_interval_ms * 2)),
             )
             .await
@@ -1714,8 +825,8 @@ impl RateLimitBackend for RaftRateLimitBackend {
     }
 
     async fn current_time_ms(&self) -> std::result::Result<u64, String> {
-        Ok(std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        Ok(SystemTime::now()
+            .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis() as u64)
     }
@@ -1725,21 +836,17 @@ impl RateLimitBackend for RaftRateLimitBackend {
         _prefix: &str,
         _older_than_ms: u64,
     ) -> std::result::Result<u64, String> {
-        // Scan for rate-limit last-request keys via the list helper.
-        // Keys are stored under {namespace}:cache:kv:ratelimit:last:*
-        let search_prefix = "ratelimit:last:";
         let keys = self
             .store
-            .list_cache_keys(&self.namespace, search_prefix, 100);
-        let count = keys.len() as u64;
-        let key_refs: Vec<&str> = keys.iter().map(|s| s.as_str()).collect();
+            .list_cache_keys(&self.namespace, "ratelimit:last:", 100);
+        let key_refs: Vec<&str> = keys.iter().map(String::as_str).collect();
         if !key_refs.is_empty() {
             self.store
                 .submit_cache_del_batch(&self.namespace, &key_refs)
                 .await
                 .map_err(|e| format!("{e}"))?;
         }
-        Ok(count)
+        Ok(keys.len() as u64)
     }
 
     async fn record(
@@ -1748,12 +855,11 @@ impl RateLimitBackend for RaftRateLimitBackend {
         current_time_ms: u64,
         ttl_ms: u64,
     ) -> std::result::Result<(), String> {
-        let lk = self.last_request_key(key);
         self.store
             .submit_cache_set(
                 &self.namespace,
-                &lk,
-                current_time_ms.to_string().into_bytes().to_vec(),
+                &self.last_request_key(key),
+                current_time_ms.to_string().into_bytes(),
                 Some(ttl_ms),
             )
             .await
@@ -1766,12 +872,11 @@ impl RateLimitBackend for RaftRateLimitBackend {
         suspend_until_ms: u64,
         ttl_ms: u64,
     ) -> std::result::Result<(), String> {
-        let sk = self.suspend_key(key);
         self.store
             .submit_cache_set(
                 &self.namespace,
-                &sk,
-                suspend_until_ms.to_string().into_bytes().to_vec(),
+                &self.suspend_key(key),
+                suspend_until_ms.to_string().into_bytes(),
                 Some(ttl_ms),
             )
             .await
@@ -1783,25 +888,102 @@ impl RateLimitBackend for RaftRateLimitBackend {
         key: &str,
         current_time_ms: u64,
     ) -> std::result::Result<Option<u64>, String> {
-        let sk = self.suspend_key(key);
-        if let Some(value) = self.store.read_cache_value(&self.namespace, &sk) {
-            if let Ok(value_str) = String::from_utf8(value) {
-                if let Ok(suspend_until) = value_str.parse::<u64>() {
-                    if suspend_until > current_time_ms {
-                        return Ok(Some(suspend_until - current_time_ms));
-                    }
-                }
-            }
+        if let Some(value) = self.store.read_cache_value(&self.namespace, &self.suspend_key(key))
+            && let Ok(value_str) = String::from_utf8(value)
+            && let Ok(suspend_until) = value_str.parse::<u64>()
+            && suspend_until > current_time_ms
+        {
+            return Ok(Some(suspend_until - current_time_ms));
         }
         Ok(None)
     }
 }
 
 #[cfg(test)]
-mod raft_tests {
+mod tests {
     use super::*;
-    use crate::engine::api::profile_store::ProfileControlPlaneStore;
-    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn test_rate_limiter_local() {
+        let lock_manager = Arc::new(DistributedLockManager::new(None, "test"));
+        let limiter = DistributedSlidingWindowRateLimiter::new(
+            None,
+            lock_manager,
+            "test",
+            RateLimitConfig::new(1.0),
+        );
+
+        assert!(limiter.verify("user1").await.unwrap().is_none());
+        limiter.record("user1").await.unwrap();
+        assert!(limiter.verify("user1").await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn test_cleanup() {
+        let lock_manager = Arc::new(DistributedLockManager::new(None, "test_cleanup"));
+        let limiter = DistributedSlidingWindowRateLimiter::new(
+            None,
+            lock_manager,
+            "test",
+            RateLimitConfig::new(10.0),
+        );
+
+        limiter.record("user_cleanup").await.unwrap();
+        assert!(limiter.get_identifier_count().await.unwrap() > 0);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(limiter.cleanup().await.unwrap() > 0);
+        assert_eq!(limiter.get_identifier_count().await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_adaptive_rate_limit() {
+        let lock_manager = Arc::new(DistributedLockManager::new(None, "test_adaptive"));
+        let limiter = DistributedSlidingWindowRateLimiter::new(
+            None,
+            lock_manager,
+            "test",
+            RateLimitConfig::new(10.0),
+        );
+
+        limiter.decrease_limit("adaptive", 0.5).await.unwrap();
+        assert_eq!(
+            limiter
+                .get_key_config("adaptive")
+                .await
+                .unwrap()
+                .max_requests_per_second,
+            5.0
+        );
+
+        limiter.try_restore_limit("adaptive", 1.5).await.unwrap();
+        assert_eq!(
+            limiter
+                .get_key_config("adaptive")
+                .await
+                .unwrap()
+                .max_requests_per_second,
+            7.5
+        );
+    }
+
+    #[tokio::test]
+    async fn test_suspend() {
+        let lock_manager = Arc::new(DistributedLockManager::new(None, "test_suspend"));
+        let limiter = DistributedSlidingWindowRateLimiter::new(
+            None,
+            lock_manager,
+            "test",
+            RateLimitConfig::new(10.0),
+        );
+
+        limiter
+            .suspend("user_suspend", Duration::from_millis(200))
+            .await
+            .unwrap();
+        assert!(limiter.verify("user_suspend").await.unwrap().is_some());
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(limiter.verify("user_suspend").await.unwrap().is_none());
+    }
 
     #[tokio::test]
     async fn raft_rate_limit_hits_to_limit() {
@@ -1822,15 +1004,11 @@ mod raft_tests {
         let store = ProfileControlPlaneStore::default();
         let backend = RaftRateLimitBackend::new(Arc::new(store), "ns");
 
-        // Exhaust group 1
         for _ in 0..3 {
             assert!(backend.hit("g1", "k1", 10_000, 3).await.unwrap().0);
         }
         assert!(!backend.hit("g1", "k1", 10_000, 3).await.unwrap().0);
-
-        // Group 2 still allowed
-        let (allowed, _) = backend.hit("g2", "k1", 10_000, 3).await.unwrap();
-        assert!(allowed);
+        assert!(backend.hit("g2", "k1", 10_000, 3).await.unwrap().0);
     }
 
     #[tokio::test]
@@ -1839,9 +1017,6 @@ mod raft_tests {
         let backend = RaftRateLimitBackend::new(Arc::new(store), "ns");
 
         backend.hit("gc", "kc", 10_000, 100).await.unwrap();
-        // Cleanup should succeed even if no buckets are old enough
-        let removed = backend.cleanup_buckets("gc", "kc", 10_000).await.unwrap();
-        // May be 0 or more — just verify no error
-        let _ = removed;
+        let _ = backend.cleanup_buckets("gc", "kc", 10_000).await.unwrap();
     }
 }

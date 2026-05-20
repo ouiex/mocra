@@ -97,6 +97,7 @@ impl QueueRouteContract {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn route(&self) -> QueueRoute {
         self.route
     }
@@ -112,6 +113,7 @@ impl QueueRouteContract {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn base_topic(&self) -> &str {
         &self.base_topic
     }

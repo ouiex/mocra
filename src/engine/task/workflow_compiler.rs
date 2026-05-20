@@ -292,7 +292,7 @@ mod tests {
 
         async fn add_step(&self) -> Vec<Arc<dyn ModuleNodeTrait>> {
             vec![Arc::new(DummyNode {
-                stable_key: "legacy_seed",
+                stable_key: "linear_seed",
             })]
         }
     }
@@ -364,7 +364,7 @@ mod tests {
 
         assert!(workflow.node("root").is_some());
         assert!(workflow.node("detail").is_some());
-        assert!(workflow.node("legacy_legacy_seed").is_none());
+        assert!(workflow.node("linear_seed").is_none());
     }
 
     #[tokio::test]

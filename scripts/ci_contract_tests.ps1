@@ -52,25 +52,9 @@ if (-not (Invoke-EvidenceTest "test_lib" { cargo test --lib })) { $TotalPass = $
 if (-not (Invoke-EvidenceTest "raft_rocksdb_backend" { cargo test raft_rocksdb --lib -- --nocapture })) { $TotalPass = $false }
 
 Write-Host ""
-Write-Host "Running legacy hot-path static check"
-$legacyCheckScript = Join-Path $RepoRoot "scripts/check_legacy_hot_path.ps1"
-if (-not (Invoke-EvidenceTest "check_legacy" { powershell -ExecutionPolicy Bypass -File $legacyCheckScript })) { $TotalPass = $false }
-
-# ── Optional Redis tests ──────────────────────────────────────────────
-
-$requireRedisTests = $env:MOCRA_REQUIRE_REDIS_CONTRACT_TESTS
-$redisUrl = if ($env:REDIS_URL) { $env:REDIS_URL } else { $env:MOCRA_REDIS_TEST_URL }
-
-if ($redisUrl) {
-    Write-Host ""
-    Write-Host "Running optional Redis integration tests"
-    if (-not (Invoke-EvidenceTest "test_redis" { cargo test redis_ -- --nocapture })) { $TotalPass = $false }
-} elseif ($requireRedisTests -eq "1") {
-    Write-Error "MOCRA_REQUIRE_REDIS_CONTRACT_TESTS=1 but REDIS_URL/MOCRA_REDIS_TEST_URL is not set"
-    $TotalPass = $false
-} else {
-    Write-Host "Skipping optional Redis integration tests"
-}
+Write-Host "Running typed hot-path static check"
+$typedCheckScript = Join-Path $RepoRoot "scripts/check_typed_hot_path.ps1"
+if (-not (Invoke-EvidenceTest "check_typed_hot_path" { powershell -ExecutionPolicy Bypass -File $typedCheckScript })) { $TotalPass = $false }
 
 # ── Write summary ──────────────────────────────────────────────────────
 

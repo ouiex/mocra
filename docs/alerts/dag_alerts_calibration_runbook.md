@@ -55,12 +55,12 @@ bash scripts/dag_alerts_baseline.sh \
 - Latest JSON summary: `docs/dashboards/dag_alerts_baseline_latest.json`
 - Archived daily report: `docs/dashboards/archive/dag_alerts_baseline_YYYYMMDD_HHMMSS.md`
 
-## Rollback Anchors
+## Cutover Gates
 
-| Batch | Scope | Minimal rollback anchor |
+| Batch | Scope | Blocking evidence |
 |---|---|---|
-| P8-B batch-1 | scheduler ingress parser/error typed runtime input | keep `compatibility wrapper -> ParserDispatch/ErrorEnvelope` log chain and `build_legacy_generate_runtime_input` fallback |
-| P8-E batch-1 | `Module::generate/parser` scheduler bridge | keep `build_legacy_generate_runtime_input` and `build_legacy_parse_runtime_input` in `module_node_runtime_bridge.rs` |
+| P8-B batch-1 | scheduler ingress parser/error typed runtime input | parser/error dispatch stays on typed runtime input without old-path schema hits |
+| P8-E batch-1 | `Module::generate/parser` scheduler bridge | module scheduler bridge stays on typed runtime input without old-path builder calls |
 
 ## Gray Rollout Checks
 
@@ -75,25 +75,30 @@ bash scripts/dag_alerts_baseline.sh \
 PowerShell:
 
 ```powershell
-pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/cutover_rehearsal.ps1 \
-  -PromUrl http://127.0.0.1:9090 \
-  -Profile dev \
-  -CutInCommand "curl.exe -X POST http://127.0.0.1:8080/control/pause" \
-  -RollbackCommand "curl.exe -X POST http://127.0.0.1:8080/control/resume"
+powershell -ExecutionPolicy Bypass -File scripts/dag_alerts_gate.ps1 `
+  -PromUrl http://127.0.0.1:9090 `
+  -Profile dev `
+  -ReleaseTag local_gate `
+  -SummaryJson docs/dashboards/rehearsal/cutover_gate_local.json
 ```
 
 Shell:
 
 ```bash
-bash scripts/cutover_rehearsal.sh \
+bash scripts/dag_alerts_gate.sh \
   "http://127.0.0.1:9090" \
-  "curl -sS -X POST http://127.0.0.1:8080/control/pause" \
-  "curl -sS -X POST http://127.0.0.1:8080/control/resume"
+  "dev" \
+  "2" \
+  "30" \
+  "local_gate" \
+  "docs/dashboards/dag_alerts_baseline_latest.md" \
+  "docs/dashboards/rehearsal/cutover_gate_local.json" \
+  "docs/dashboards/archive"
 ```
 
-## Rollback Procedure
+## Block Procedure
 
-1. Execute the rollback command immediately.
+1. Stop the cutover and keep the current release blocked.
 2. Re-run the gate check and archive the report under `docs/dashboards/rehearsal/`.
 3. Confirm `GET /control/fallback-gates/{module}` is readable and that the failure reason is captured.
-4. Keep the preserved rollback anchors in place until the next batch is verified.
+4. Fix the failing typed path before widening rollout.

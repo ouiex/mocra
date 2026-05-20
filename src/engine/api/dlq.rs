@@ -298,7 +298,6 @@ mod tests {
             cache: CacheConfig {
                 backend: None,
                 ttl: 60,
-                redis: None,
                 compression_threshold: None,
                 enable_l1: Some(false),
                 l1_ttl_secs: None,
@@ -321,12 +320,9 @@ mod tests {
             },
             scheduler: None,
             sync: None,
-            cookie: None,
             channel_config: ChannelConfig {
                 blob_storage: Some(BlobStorageConfig { path: None }),
-                redis: None,
                 kafka: None,
-                compensator: None,
                 minid_time: 0,
                 capacity: 16,
                 queue_codec: None,
@@ -361,14 +357,14 @@ mod tests {
                 None,
             )),
             cookie_service: None,
-            locker: Arc::new(crate::utils::redis_lock::DistributedLockManager::new(
+            locker: Arc::new(crate::utils::distributed_lock::DistributedLockManager::new(
                 None,
                 "demo",
             )),
             limiter: Arc::new(
                 crate::utils::distributed_rate_limit::DistributedSlidingWindowRateLimiter::new(
                     None,
-                    Arc::new(crate::utils::redis_lock::DistributedLockManager::new(
+                    Arc::new(crate::utils::distributed_lock::DistributedLockManager::new(
                         None,
                         "demo",
                     )),
@@ -399,7 +395,6 @@ mod tests {
             profile_store,
             raft_runtime_config: None,
             raft_runtime: None,
-            redis: None,
         });
         let task_manager = Arc::new(TaskManager::new(state.clone()));
         ApiState::new(queue_manager, None, state, task_manager)

@@ -13,7 +13,7 @@ use crate::errors::{Error, ErrorKind, Result};
 use crate::queue::Identifiable;
 use std::sync::Arc;
 
-const TASK_EVENT_SCHEMA_ID: &str = "legacy.task_event";
+const TASK_EVENT_SCHEMA_ID: &str = "transport.task_event";
 const TASK_INGRESS_NODE: &str = "task_ingress";
 
 fn now_ms() -> i64 {

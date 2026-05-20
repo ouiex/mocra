@@ -550,7 +550,7 @@ impl ProcessorTrait<(Response, Arc<Module>, Option<LoginInfo>), Vec<DataEvent>>
                 .await;
             }
 
-            // Legacy `record_response_error` is no longer used.
+            // `record_response_error` is no longer used.
             // Errors are already tracked via `error_tracker`.
         }
 
@@ -576,7 +576,7 @@ impl ProcessorTrait<(Response, Arc<Module>, Option<LoginInfo>), Vec<DataEvent>>
 
         let config = self.state.config.read().await;
 
-        // Keep a local rollback copy in the parser namespace so follow-up requests can reuse
+        // Keep a local parser-namespace copy so follow-up requests can reuse
         // cached responses without rewriting foreign namespace ownership anchors.
         persist_parser_side_response_cache_entry(
             &input.0,
@@ -1116,7 +1116,7 @@ mod tests {
     }
 
     #[test]
-    fn parser_side_cache_refresh_keeps_local_or_legacy_cache_entries() {
+    fn parser_side_cache_refresh_keeps_local_cache_entries() {
         let mut response = sample_response();
         response.metadata = response
             .metadata
@@ -1133,7 +1133,7 @@ mod tests {
 
         response.metadata = MetaData::default();
         let localized = localize_parser_side_response_cache_entry(&response, "origin-app", None)
-            .expect("legacy entries should still localize");
+            .expect("entries should still localize");
         assert_eq!(
             localized
                 .metadata

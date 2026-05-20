@@ -467,7 +467,7 @@ mod tests {
         let mut envelope = build_parser_dispatch_from_seed(&seed, "demo").expect("dispatch should build");
         envelope.dispatch.input.payload.bytes = b"not-msgpack".to_vec();
 
-        let seed = extract_parser_dispatch_seed(&envelope).expect("typed context should bypass legacy decode");
+        let seed = extract_parser_dispatch_seed(&envelope).expect("typed context should decode");
         assert_eq!(seed.context.node_id.as_deref(), Some("typed_node"));
     }
 
@@ -518,14 +518,14 @@ mod tests {
 
         let mut envelope = build_error_envelope_from_seed(&seed, "demo").expect("envelope should build");
         envelope.detail = Some(TypedEnvelope::new(
-            "legacy.error_detail",
+            "transport.error_detail",
             1,
             PayloadCodec::Json,
             b"not-json".to_vec(),
         ));
 
         let seed =
-            extract_error_envelope_seed(&envelope).expect("typed context should bypass legacy decode");
+            extract_error_envelope_seed(&envelope).expect("typed context should decode");
         assert_eq!(seed.context.node_id.as_deref(), Some("typed_error_node"));
     }
 

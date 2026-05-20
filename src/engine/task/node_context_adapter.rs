@@ -48,7 +48,7 @@ impl OwnedNodeParseContext {
     }
 }
 
-pub(crate) fn build_legacy_generate_context_with_common(
+pub(crate) fn build_module_config_generate_context(
     module_id: &str,
     run_id: Uuid,
     node_key: &str,
@@ -78,13 +78,13 @@ pub(crate) fn build_legacy_generate_context_with_common(
             updated_at_ms: now_ms,
             ..ExecutionMeta::default()
         },
-        config: build_legacy_node_config(module_id, node_key, base_common, Some(config)),
-        input: build_legacy_input(node_key, params),
+        config: build_module_config_node_config(module_id, node_key, base_common, Some(config)),
+        input: build_module_config_input(node_key, params),
         login_info,
     }
 }
 
-pub(crate) fn build_legacy_parse_context_with_common(
+pub(crate) fn build_module_config_parse_context(
     module_id: &str,
     node_key: &str,
     base_common: ResolvedCommonConfig,
@@ -112,12 +112,12 @@ pub(crate) fn build_legacy_parse_context_with_common(
             updated_at_ms: now_ms,
             ..ExecutionMeta::default()
         },
-        config: build_legacy_node_config(module_id, node_key, base_common, config),
+        config: build_module_config_node_config(module_id, node_key, base_common, config),
         login_info: None,
     }
 }
 
-fn build_legacy_node_config(
+fn build_module_config_node_config(
     module_id: &str,
     node_key: &str,
     base_common: ResolvedCommonConfig,
@@ -131,7 +131,7 @@ fn build_legacy_node_config(
     ResolvedNodeConfig {
         profile_key: format!("mocra.profile.v1:{}:{}:{}", account, platform, module),
         profile_version: 0,
-        common: build_legacy_common_config(base_common, config),
+        common: build_module_config_common_config(base_common, config),
         node_config: TypedEnvelope::new(
             format!("mocra.node_config.v1.{}", node_key),
             1,
@@ -141,7 +141,7 @@ fn build_legacy_node_config(
     }
 }
 
-pub(crate) fn apply_legacy_common_overrides(
+pub(crate) fn apply_module_config_common_overrides(
     mut common: ResolvedCommonConfig,
     config: Option<&ModuleConfig>,
 ) -> ResolvedCommonConfig {
@@ -184,14 +184,14 @@ pub(crate) fn apply_legacy_common_overrides(
     common
 }
 
-fn build_legacy_common_config(
+fn build_module_config_common_config(
     base_common: ResolvedCommonConfig,
     config: Option<&ModuleConfig>,
 ) -> ResolvedCommonConfig {
-    apply_legacy_common_overrides(base_common, config)
+    apply_module_config_common_overrides(base_common, config)
 }
 
-fn build_legacy_input(target_node: &str, params: Map<String, Value>) -> NodeInput {
+fn build_module_config_input(target_node: &str, params: Map<String, Value>) -> NodeInput {
     NodeInput::new(
         target_node,
         TypedEnvelope::new(
@@ -274,9 +274,9 @@ mod tests {
     }
 
     #[test]
-    fn apply_legacy_common_overrides_preserves_inherited_option_defaults() {
+    fn apply_module_config_common_overrides_preserves_inherited_option_defaults() {
         let default_common = CommonDefaultsTestModule.default_common_config();
-        let resolved = apply_legacy_common_overrides(default_common, Some(&ModuleConfig::default()));
+        let resolved = apply_module_config_common_overrides(default_common, Some(&ModuleConfig::default()));
 
         assert_eq!(resolved.rate_limit, Some(2.5));
         assert_eq!(resolved.proxy_pool.as_deref(), Some("pool-a"));

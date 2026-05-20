@@ -6,7 +6,7 @@ use std::time::Instant;
 
 #[derive(Serialize)]
 pub struct Components {
-    redis: ComponentStatus,
+    cache: ComponentStatus,
     db: ComponentStatus,
 }
 
@@ -40,8 +40,7 @@ impl ComponentStatus {
 
 pub async fn health_check(State(state): State<ApiState>) -> Json<HealthResponse> {
     let started = Instant::now();
-    // Check Redis
-    let redis_status = match state.state.cache_service.ping().await {
+    let cache_status = match state.state.cache_service.ping().await {
         Ok(_) => ComponentStatus::up(),
         Err(e) => ComponentStatus::down(e),
     };
@@ -52,13 +51,13 @@ pub async fn health_check(State(state): State<ApiState>) -> Json<HealthResponse>
         Err(e) => ComponentStatus::down(e),
     };
 
-    let global_status = if redis_status.status == "up" && db_status.status == "up" {
+    let global_status = if cache_status.status == "up" && db_status.status == "up" {
         "up"
     } else {
         "degraded"
     };
 
-    crate::common::metrics::set_component_health("cache", redis_status.status == "up");
+    crate::common::metrics::set_component_health("cache", cache_status.status == "up");
     crate::common::metrics::set_component_health("db", db_status.status == "up");
     crate::common::metrics::inc_throughput(
         "control_plane",
@@ -78,7 +77,7 @@ pub async fn health_check(State(state): State<ApiState>) -> Json<HealthResponse>
     Json(HealthResponse {
         status: global_status.to_string(),
         components: Components {
-            redis: redis_status,
+            cache: cache_status,
             db: db_status,
         },
     })

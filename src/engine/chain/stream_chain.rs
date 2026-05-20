@@ -29,7 +29,6 @@ struct WebSocketDownloadProcessor {
     wss_downloader: Arc<WebSocketDownloader>,
     middleware_manager: Arc<MiddlewareManager>,
     cache_service: Arc<CacheService>,
-    state: Arc<State>,
 }
 
 #[async_trait]
@@ -303,7 +302,6 @@ pub async fn create_wss_download_chain(
         wss_downloader: downloader_manager.wss_downloader.clone(),
         middleware_manager: middleware_manager.clone(),
         cache_service: cache_service.clone(),
-        state: state.clone(),
     };
 
     let request_middleware = RequestMiddlewareProcessor {

@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub struct ExecutionMark {
     pub module_id: Option<String>,
-    /// Legacy linear step index (kept for backward compat with in-flight queue messages).
+    /// Linear step index used only when a DAG node id is not available.
     /// When `node_id` is set, `step_idx` is ignored by `ModuleDagProcessor`.
     pub step_idx: Option<u32>,
     pub epoch: Option<u64>,
@@ -15,7 +15,6 @@ pub struct ExecutionMark {
     pub stay_current_step: bool,
     /// DAG node identifier. When set, this is the primary routing key for `ModuleDagProcessor`.
     /// Replaces `step_idx`-based routing in the new queue-backed DAG engine.
-    /// IMPORTANT: must be the last field to maintain msgpack array positional compat with old messages.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub node_id: Option<String>,
 }
@@ -46,16 +45,6 @@ impl ExecutionMark {
 #[cfg(test)]
 mod tests {
     use super::ExecutionMark;
-    use serde::{Deserialize, Serialize};
-
-    #[derive(Debug, Serialize, Deserialize)]
-    struct LegacyExecutionMark {
-        module_id: Option<String>,
-        step_idx: Option<u32>,
-        epoch: Option<u64>,
-        stay_current_step: bool,
-    }
-
     #[test]
     fn execution_mark_msgpack_round_trips_without_node_id() {
         let mark = ExecutionMark {
@@ -89,23 +78,4 @@ mod tests {
         assert_eq!(decoded, mark);
     }
 
-    #[test]
-    fn execution_mark_deserializes_legacy_msgpack_without_node_id() {
-        let legacy = LegacyExecutionMark {
-            module_id: Some("module-a".to_string()),
-            step_idx: Some(2),
-            epoch: Some(42),
-            stay_current_step: true,
-        };
-
-        let bytes = rmp_serde::to_vec(&legacy).expect("legacy execution mark should serialize");
-        let decoded: ExecutionMark =
-            rmp_serde::from_slice(&bytes).expect("legacy execution mark should deserialize");
-
-        assert_eq!(decoded.module_id.as_deref(), Some("module-a"));
-        assert_eq!(decoded.step_idx, Some(2));
-        assert_eq!(decoded.epoch, Some(42));
-        assert!(decoded.stay_current_step);
-        assert_eq!(decoded.node_id, None);
-    }
 }

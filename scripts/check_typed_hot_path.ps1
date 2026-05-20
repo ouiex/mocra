@@ -1,7 +1,7 @@
 $ErrorActionPreference = "Stop"
 
-# ── Legacy Hot-Path Static Check (PowerShell) ──────────────────────────
-# Scans for forbidden legacy patterns in typed main paths.
+# ── Typed Hot-Path Static Check (PowerShell) ───────────────────────────
+# Scans for forbidden historical patterns in typed main paths.
 # Uses allowlists: known-legitimate files are excluded from each check.
 # New occurrences outside the allowlist cause a non-zero exit.
 
@@ -10,7 +10,7 @@ $Failed = 0
 
 function Write-Section($Title) {
     Write-Host ""
-    Write-Host "── $Title ──"
+    Write-Host "-- $Title --"
 }
 
 function Test-Pattern {
@@ -70,21 +70,13 @@ Test-Pattern -SectionTitle "Check 1: ModuleConfig in chain/interface hot paths" 
     -Allowlist $allowlistModuleConfig `
     -Description "ModuleConfig"
 
-# ── Check 2: "legacy.*" schema IDs outside tests ───────────────────────
+# ── Check 2: historical schema IDs outside tests ───────────────────────
 
-$allowlistLegacySchema = @(
-    "src/engine/task/module_node_runtime_bridge.rs"
-    "src/engine/task/module_processor_with_chain.rs"
-    "src/engine/task/parser_error_adapter.rs"
-    "src/engine/task/task_dispatch_adapter.rs"
-    "src/engine/task/node_context_adapter.rs"
-)
-
-Test-Pattern -SectionTitle 'Check 2: "legacy.*" schema IDs in production code' `
+Test-Pattern -SectionTitle 'Check 2: historical schema IDs in production code' `
     -SearchPaths @("src\**\*.rs") `
     -Pattern '"legacy.' `
-    -Allowlist $allowlistLegacySchema `
-    -Description '"legacy.*" schema IDs'
+    -Allowlist @() `
+    -Description "historical schema IDs"
 
 # ── Check 3: parser_chain.execute / error_chain.execute fallback ───────
 
@@ -104,30 +96,21 @@ Test-Pattern -SectionTitle "Check 3b: error_chain.execute fallback calls" `
     -Allowlist $allowlistChainFallback `
     -Description "error_chain.execute fallback"
 
-# ── Check 4: build_legacy_* calls outside allowlist ──────────────────
+# ── Check 4: historical runtime builders outside tests ─────────────────
 
-$allowlistLegacyBuilder = @(
-    "src/engine/task/module_dag_orchestrator.rs"
-    "src/engine/task/module_dag_processor.rs"
-    "src/engine/task/module_node_runtime_bridge.rs"
-    "src/engine/task/module_processor_with_chain.rs"
-    "src/engine/task/node_context_adapter.rs"
-    "src/schedule/dag/remote_redis.rs"
-)
-
-Test-Pattern -SectionTitle "Check 4: build_legacy_* calls in production code" `
+Test-Pattern -SectionTitle "Check 4: historical runtime builders in production code" `
     -SearchPaths @("src\**\*.rs") `
     -Pattern "build_legacy_" `
-    -Allowlist $allowlistLegacyBuilder `
-    -Description "build_legacy_* calls"
+    -Allowlist @() `
+    -Description "historical runtime builder calls"
 
 # ── Result ──────────────────────────────────────────────────────────
 
 Write-Host ""
 if ($Failed -eq 0) {
-    Write-Host "All legacy hot-path checks passed."
+    Write-Host "All typed hot-path checks passed."
     exit 0
 } else {
-    Write-Host "Legacy hot-path checks FAILED. See violations above."
+    Write-Host "Typed hot-path checks FAILED. See violations above."
     exit 1
 }

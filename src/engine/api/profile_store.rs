@@ -133,20 +133,10 @@ impl<'de> Deserialize<'de> for StoredResponseCacheOwnerRecord {
         }
 
         #[derive(Deserialize)]
-        struct LegacyStoredResponseCacheOwnerRecord {
-            cache_key: String,
-            owner_namespace: String,
-            owner_node_id: Option<String>,
-            version: u64,
-            updated_at: i64,
-        }
-
-        #[derive(Deserialize)]
         #[serde(untagged)]
         enum CompatibleStoredResponseCacheOwnerRecord {
             Current(CurrentStoredResponseCacheOwnerRecord),
             Intermediate(IntermediateStoredResponseCacheOwnerRecord),
-            Legacy(LegacyStoredResponseCacheOwnerRecord),
         }
 
         match CompatibleStoredResponseCacheOwnerRecord::deserialize(deserializer)? {
@@ -165,15 +155,6 @@ impl<'de> Deserialize<'de> for StoredResponseCacheOwnerRecord {
                 owner_node_id: record.owner_node_id,
                 owner_api_base_url: None,
                 expires_at: record.expires_at,
-                version: record.version,
-                updated_at: record.updated_at,
-            }),
-            CompatibleStoredResponseCacheOwnerRecord::Legacy(record) => Ok(Self {
-                cache_key: record.cache_key,
-                owner_namespace: record.owner_namespace,
-                owner_node_id: record.owner_node_id,
-                owner_api_base_url: None,
-                expires_at: None,
                 version: record.version,
                 updated_at: record.updated_at,
             }),
@@ -2173,10 +2154,7 @@ impl Default for ProfileControlPlaneStore {
 mod tests {
     use std::collections::BTreeMap;
 
-    use super::{
-        DefaultConfigPatch, ProfileControlPlaneStore, StoredResponseCacheOwnerRecord,
-        TaskProfilePatch,
-    };
+    use super::{DefaultConfigPatch, ProfileControlPlaneStore, TaskProfilePatch};
     use crate::common::model::control_plane_profile::DefaultConfigScope;
     use crate::common::model::{
         DefaultConfigUpsert, MiddlewareType, PayloadCodec, PipelineStage, Priority,
@@ -2401,35 +2379,6 @@ mod tests {
             Some("http://127.0.0.1:8080")
         );
         assert_eq!(owner.expires_at, Some(1_710_000_000_000));
-    }
-
-    #[test]
-    fn response_cache_owner_record_deserializes_legacy_msgpack_without_expiry() {
-        #[derive(serde::Serialize)]
-        struct LegacyStoredResponseCacheOwnerRecord {
-            cache_key: String,
-            owner_namespace: String,
-            owner_node_id: Option<String>,
-            version: u64,
-            updated_at: i64,
-        }
-
-        let bytes = rmp_serde::to_vec(&LegacyStoredResponseCacheOwnerRecord {
-            cache_key: "cache-key-1".to_string(),
-            owner_namespace: "demo".to_string(),
-            owner_node_id: Some("node-a".to_string()),
-            version: 7,
-            updated_at: 123,
-        })
-        .expect("legacy msgpack should encode");
-
-        let record: StoredResponseCacheOwnerRecord =
-            rmp_serde::from_slice(&bytes).expect("legacy msgpack should decode");
-        assert_eq!(record.cache_key, "cache-key-1");
-        assert_eq!(record.owner_namespace, "demo");
-        assert_eq!(record.owner_node_id.as_deref(), Some("node-a"));
-        assert_eq!(record.owner_api_base_url, None);
-        assert_eq!(record.expires_at, None);
     }
 
     #[tokio::test]

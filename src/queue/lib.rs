@@ -6,14 +6,12 @@ pub mod compensation;
 pub mod compression;
 pub mod kafka;
 pub mod manager;
-pub mod redis;
 
 use crate::errors::Result;
 pub use crate::queue::channel::Channel;
 use async_trait::async_trait;
-pub use compensation::{Compensator, Identifiable, QueueNativeCompensator, RedisCompensator};
+pub use compensation::{Compensator, Identifiable, QueueNativeCompensator};
 pub use manager::QueueManager;
-pub use redis::RedisQueue;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 

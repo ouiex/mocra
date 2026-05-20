@@ -1,5 +1,7 @@
 use crate::common::model::config::Config;
-use crate::common::model::{PayloadCodec, QueueEnvelope};
+use crate::common::model::PayloadCodec;
+#[cfg(test)]
+use crate::common::model::QueueEnvelope;
 use once_cell::sync::OnceCell;
 use rmp_serde as rmps;
 use serde::Serialize;
@@ -28,6 +30,7 @@ impl QueueCodec {
         }
     }
 
+    #[cfg(test)]
     fn from_payload_codec(codec: PayloadCodec) -> Self {
         match codec {
             PayloadCodec::Json => Self::Json,
@@ -61,6 +64,7 @@ impl QueueMessageCodec {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn from_name(name: &str) -> Self {
         Self {
             codec: QueueCodec::from_name(name),
@@ -100,6 +104,7 @@ impl QueueMessageCodec {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn encode_envelope<T: Serialize>(
         self,
         schema_id: impl Into<String>,
@@ -111,6 +116,7 @@ impl QueueMessageCodec {
             .map_err(|e| crate::errors::Error::new(crate::errors::ErrorKind::Queue, Some(e)))
     }
 
+    #[cfg(test)]
     pub(crate) fn decode_envelope<T: DeserializeOwned>(
         self,
         envelope: &QueueEnvelope,

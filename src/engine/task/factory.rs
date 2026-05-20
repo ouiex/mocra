@@ -12,7 +12,6 @@ use crate::common::model::message::TaskEvent;
 use crate::common::model::{ModuleConfig, NodeDispatchEnvelope, NodeErrorEnvelope, Response};
 use crate::common::state::State;
 use crate::engine::task::module::Module;
-use crate::schedule::dag::{RedisRemoteDispatcher, RedisRemoteDispatcherOptions};
 use crate::engine::task::module_dag_processor::ModuleDagProcessor;
 use crate::engine::task::parser_error_adapter::{
     extract_error_envelope_seed, extract_parser_dispatch_seed, ErrorEnvelopeSeed,
@@ -69,7 +68,7 @@ impl TaskFactory {
             match result {
                 Ok(None) => {
                     let key = <LoginInfo as CacheAble>::cache_id(id, sync);
-                    log::warn!("cookie not found in redis: key={}", key);
+                    log::warn!("cookie not found in cache: key={}", key);
                 }
                 Ok(Some(info)) => {
                     return Some(info);
@@ -384,11 +383,7 @@ impl TaskFactory {
                 app_config.download_config.enable_locker
             };
             let cache_ttl = app_config.cache.ttl;
-            let dag_dispatcher = Some(Arc::new(RedisRemoteDispatcher::new(
-                self.state.cache_service.clone(),
-                self.state.cache_service.namespace(),
-                RedisRemoteDispatcherOptions::default(),
-            )) as Arc<dyn crate::schedule::dag::DagNodeDispatcher>);
+            let dag_dispatcher = None;
             let mut module_instance = Module {
                 config: Arc::new(module_config),
                 account: account.clone(),

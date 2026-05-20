@@ -14,3 +14,8 @@ data/
 scripts/__pycache__/
 tests/tmp/
 monitoring/tmp/
+.claude/
+.github/
+logs/
+raft_data/
+*.pyc

@@ -10,13 +10,12 @@ use crate::errors::ErrorKind;
 use crate::queue::batcher::Batcher;
 use crate::queue::channel::Channel;
 use crate::queue::codec::{queue_codec, set_queue_codec_from_config};
-use crate::queue::compensation::{Compensator, Identifiable, QueueNativeCompensator, RedisCompensator};
+use crate::queue::compensation::{Compensator, Identifiable, QueueNativeCompensator};
 use crate::queue::compression::{compress_payload_owned, decompress_payload};
 use crate::queue::contract::{
     LARGE_PAYLOAD_BYTES, QueueRoute, QueueRouteContract, qualify_topic_namespace,
 };
 use crate::queue::kafka::KafkaQueue;
-use crate::queue::redis::RedisQueue;
 use crate::queue::{HEADER_ATTEMPT, HEADER_CREATED_AT, MqBackend, NackPolicy, QueuedItem};
 use crate::utils::logger::LogModel;
 use crate::utils::storage::FileSystemBlobStorage;
@@ -103,28 +102,7 @@ impl QueueManager {
             }
         };
 
-        let mut queue_manager = if let Some(redis_config) = &channel_config.redis {
-            let batch_size = channel_config.batch_concurrency.unwrap_or(500);
-            match RedisQueue::new(
-                redis_config,
-                channel_config.minid_time,
-                namespace,
-                batch_size,
-                nack_policy,
-            ) {
-                Ok(redis_queue) => {
-                    info!(
-                        "RedisQueue initialized successfully with batch_size: {}",
-                        batch_size
-                    );
-                    QueueManager::new(Some(Arc::new(redis_queue)), channel_config.capacity)
-                }
-                Err(e) => {
-                    error!("RedisQueue init failed, fallback to in-memory queue: {}", e);
-                    QueueManager::new(None, channel_config.capacity)
-                }
-            }
-        } else if let Some(kafka_config) = &channel_config.kafka {
+        let mut queue_manager = if let Some(kafka_config) = &channel_config.kafka {
             match KafkaQueue::new(
                 kafka_config,
                 channel_config.minid_time,
@@ -185,35 +163,11 @@ impl QueueManager {
 
     pub(crate) fn install_default_compensator(
         &mut self,
-        channel_config: &ChannelConfig,
+        _channel_config: &ChannelConfig,
         namespace: &str,
     ) {
-        // Native compensation is now the default for remote queue backends.
-        // Keep RedisCompensator as a rollback anchor, but do not attach it to the
-        // hot path by default.
         if self.backend.is_some() {
             self.with_compensator(Arc::new(QueueNativeCompensator::new(namespace)));
-            if channel_config.compensator.is_some() {
-                info!(
-                    "Queue native compensator enabled for namespace {}; Redis compensator config retained only as rollback anchor",
-                    namespace
-                );
-            }
-            return;
-        }
-
-        if let Some(redis_config) = &channel_config.compensator {
-            match RedisCompensator::new(redis_config, namespace) {
-                Ok(compensator) => {
-                    self.with_compensator(Arc::new(compensator));
-                }
-                Err(e) => {
-                    error!(
-                        "RedisCompensator init failed, continue without compensator: {}",
-                        e
-                    );
-                }
-            }
         }
     }
 
@@ -753,7 +707,7 @@ impl QueueManager {
         self.backend.is_none() || self.response_namespace_override(dispatch).is_none()
     }
 
-    /// Attempts to send directly to local consumers (bypassing Redis/Kafka).
+    /// Attempts to send directly to local consumers before using a backend queue.
     /// Optimization: if local consumers exist and the channel is not full, send
     /// directly to avoid serialization and network overhead.
     pub fn try_send_local_response(

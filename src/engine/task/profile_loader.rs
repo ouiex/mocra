@@ -10,7 +10,7 @@ use crate::common::model::{
     ResolvedNodeConfig, TaskProfileSnapshot, TypedEnvelope, WorkflowDefinition,
 };
 use crate::engine::task::module_dag_compiler::ModuleDagDefinition;
-use crate::engine::task::node_context_adapter::apply_legacy_common_overrides;
+use crate::engine::task::node_context_adapter::apply_module_config_common_overrides;
 use crate::engine::task::workflow_compiler::{WorkflowCompileError, WorkflowCompiler};
 
 #[derive(Debug, Error)]
@@ -98,7 +98,7 @@ impl ProfileLoader {
     ) -> TaskProfileSnapshot {
         let merged_config = module_config.get_merged_config();
         let merged_bytes = serde_json::to_vec(&merged_config).unwrap_or_default();
-        let common = apply_legacy_common_overrides(default_common, Some(module_config));
+        let common = apply_module_config_common_overrides(default_common, Some(module_config));
 
         let node_configs = definition
             .nodes

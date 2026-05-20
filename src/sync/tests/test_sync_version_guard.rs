@@ -15,7 +15,7 @@ struct TestState {
 
 impl SyncAble for TestState {
     fn topic() -> String {
-        "rollback_test".to_string()
+        "version_guard_test".to_string()
     }
 }
 
@@ -96,11 +96,10 @@ struct Envelope<T> {
 }
 
 #[tokio::test]
-async fn test_sync_disallow_rollback_ignores_older_version() {
+async fn test_sync_ignores_older_version() {
     let backend = Arc::new(TestBackend::new());
     let namespace = "sync_ns".to_string();
     let options = SyncOptions {
-        allow_rollback: false,
         envelope_enabled: true,
     };
     let service = SyncService::new_with_options(Some(backend.clone()), namespace.clone(), options);
@@ -140,7 +139,6 @@ async fn test_sync_ignores_poison_stream_update() {
     let backend = Arc::new(TestBackend::new());
     let namespace = "sync_ns".to_string();
     let options = SyncOptions {
-        allow_rollback: false,
         envelope_enabled: true,
     };
     let service = SyncService::new_with_options(Some(backend.clone()), namespace.clone(), options);

@@ -1,9 +1,7 @@
 pub mod api;
 pub mod chain;
-pub mod deduplication;
 pub mod engine;
 pub mod events;
-pub mod lua;
 pub mod monitor;
 pub mod processors;
 pub mod runner;

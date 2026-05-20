@@ -10,7 +10,6 @@ use crate::downloader::{Downloader, WebSocketDownloader};
 use crate::engine::api::profile_store::ProfileControlPlaneStore;
 use crate::errors::CacheError;
 use dashmap::DashMap;
-use deadpool_redis::redis::Script;
 use log::warn;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -205,7 +204,7 @@ pub struct DownloaderManager {
     // Task downloader instances.
     pub task_downloader: Arc<DashMap<String, Box<dyn Downloader>>>,
     pub wss_downloader: Arc<WebSocketDownloader>,
-    // Records the last expiration update timestamp to reduce Redis write frequency.
+    // Records the last expiration update timestamp to reduce churn.
     pub expire_update_cache: Arc<DashMap<String, u64>>,
 }
 
@@ -312,43 +311,22 @@ impl DownloaderManager {
         let current_time = Self::current_timestamp();
         let max_score = current_time.saturating_sub(downloader_expire_time);
 
-        let config_name = self.state.config.read().await.name.clone();
-        let key = format!("{}:downloader_expire", config_name);
+        let expired_keys: Vec<String> = self
+            .expire_update_cache
+            .iter()
+            .filter_map(|entry| {
+                if *entry.value() <= max_score {
+                    Some(entry.key().clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
 
-        // Lua script to get and remove expired keys
-        let script = Script::new(
-            r#"
-            local key = KEYS[1]
-            local max_score = ARGV[1]
-            local expired = redis.call('ZRANGEBYSCORE', key, '-inf', max_score)
-            if #expired > 0 then
-                redis.call('ZREM', key, unpack(expired))
-            end
-            return expired
-        "#,
-        );
-
-        let mut expired_keys: Vec<String> = Vec::new();
-
-        // Execute Lua script
-        let pool = self.state.locker.get_pool();
-        if let Some(pool) = pool
-            && let Ok(mut conn) = pool.get().await
-        {
-            let result: Result<Vec<String>, _> = script
-                .key(&key)
-                .arg(max_score)
-                .invoke_async(&mut conn)
-                .await;
-
-            if let Ok(keys) = result {
-                expired_keys = keys;
-            }
-        }
-
-        // Remove expired keys from local map
         for key in &expired_keys {
             self.task_downloader.remove(key);
+            self.config.remove(key);
+            self.expire_update_cache.remove(key);
         }
 
         // Check health status.
@@ -361,16 +339,8 @@ impl DownloaderManager {
         for (key, downloader) in check_list {
             if downloader.health_check().await.is_err() {
                 self.task_downloader.remove(&key);
-                if let Some(pool) = pool
-                    && let Ok(mut conn) = pool.get().await
-                {
-                    let _: () = deadpool_redis::redis::cmd("ZREM")
-                        .arg(&key)
-                        .arg(&key)
-                        .query_async(&mut conn)
-                        .await
-                        .unwrap_or(());
-                }
+                self.config.remove(&key);
+                self.expire_update_cache.remove(&key);
             }
         }
     }
@@ -431,26 +401,6 @@ impl DownloaderManager {
             self.expire_update_cache
                 .insert(module_id.clone(), current_time);
 
-            // Update expiration time (Redis ZSET).
-            let config_name = self.state.config.read().await.name.clone();
-            let key = format!("{}:downloader_expire", config_name);
-            let pool = self.state.locker.get_pool().map(|p| p.clone());
-            let module_id_clone = module_id.clone();
-            let current_time_clone = current_time;
-
-            tokio::spawn(async move {
-                if let Some(pool) = pool
-                    && let Ok(mut conn) = pool.get().await
-                {
-                    let _: () = deadpool_redis::redis::cmd("ZADD")
-                        .arg(&key)
-                        .arg(current_time_clone)
-                        .arg(&module_id_clone)
-                        .query_async(&mut conn)
-                        .await
-                        .unwrap_or(());
-                }
-            });
         }
 
         // Get or insert configuration.

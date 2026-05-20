@@ -1,9 +1,9 @@
 // no direct filesystem path usage here
-use crate::utils::connector::{create_redis_pool, db_connection};
+use crate::utils::connector::db_connection;
 
 use crate::common::config::ConfigProvider;
 use crate::common::config::file::FileConfigProvider;
-use crate::common::model::config::{CacheBackendKind, Config, RedisConfig};
+use crate::common::model::config::{CacheBackendKind, Config};
 use crate::engine::api::profile_store::ProfileControlPlaneStore;
 use crate::sync::{RaftRuntime, RaftRuntimeConfig};
 
@@ -12,8 +12,7 @@ use crate::common::status_tracker::{ErrorTrackerConfig, StatusTracker};
 use crate::utils::distributed_rate_limit::{
     DistributedSlidingWindowRateLimiter, RaftRateLimitBackend, RateLimitConfig,
 };
-use crate::utils::redis_lock::{DistributedLockManager, RaftLockBackend};
-use deadpool_redis::Pool;
+use crate::utils::distributed_lock::{DistributedLockManager, RaftLockBackend};
 use log::{error, info};
 use std::sync::Arc;
 use std::time;
@@ -39,26 +38,11 @@ pub enum StateInitError {
         pool_size: Option<u32>,
         tls: Option<bool>,
     },
-    #[error(
-        "redis pool creation failed ({name}): host={host}, port={port}, db={db}, tls={tls}, pool_size={pool_size:?}"
-    )]
-    RedisPoolCreate {
-        name: &'static str,
-        host: String,
-        port: u16,
-        db: u16,
-        tls: bool,
-        pool_size: Option<usize>,
-    },
-    #[error("redis ping failed (cache): {0}")]
-    CachePing(String),
-    #[error("redis connection borrow failed (cache): {0}")]
-    CacheConn(String),
 }
 
 /// Global application state shared across the system.
 ///
-/// Contains connections to database, Redis, configuration, and shared services.
+/// Contains database, configuration, and shared runtime services.
 #[derive(Clone)]
 pub struct State {
     /// Database connection pool
@@ -83,15 +67,11 @@ pub struct State {
     pub raft_runtime_config: Option<Arc<RaftRuntimeConfig>>,
     /// Running openraft runtime when raft is configured.
     pub raft_runtime: Option<Arc<RaftRuntime>>,
-    /// Underlying Redis pool (exposed for specialized components like LeaderElector)
-    pub redis: Option<Pool>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct BootstrapCapabilities {
     single_node_deployment: bool,
-    cache_redis_enabled: bool,
-    cookie_redis_enabled: bool,
     raft_enabled: bool,
 }
 
@@ -99,8 +79,6 @@ impl BootstrapCapabilities {
     fn from_config(config: &Config) -> Self {
         Self {
             single_node_deployment: config.is_single_node_deployment(),
-            cache_redis_enabled: config.has_cache_redis(),
-            cookie_redis_enabled: config.has_cookie_redis(),
             raft_enabled: config.has_raft_control_plane(),
         }
     }
@@ -136,7 +114,7 @@ impl CacheRuntimeSettings {
 
     fn build_cache_service(
         &self,
-        pool: Option<Pool>,
+        pool: Option<()>,
         namespace: String,
         backend_kind: Option<CacheBackendKind>,
         profile_store: Option<Arc<ProfileControlPlaneStore>>,
@@ -167,14 +145,11 @@ struct CoordinationServices {
 impl CoordinationServices {
     fn build(
         config: &Config,
-        cache_pool: Option<Pool>,
-        cookie_pool: Option<Pool>,
+        cache_pool: Option<()>,
+        cookie_pool: Option<()>,
         profile_store: Arc<ProfileControlPlaneStore>,
         backend_kind: Option<CacheBackendKind>,
     ) -> Self {
-        let locker_pool = cache_pool.clone().map(Arc::new);
-        let limit_pool = cache_pool.clone().map(Arc::new);
-
         let locker: Arc<DistributedLockManager> = match backend_kind {
             Some(CacheBackendKind::RaftRocksdb) => {
                 let raft_lock = Arc::new(RaftLockBackend::new(
@@ -186,7 +161,7 @@ impl CoordinationServices {
                     &config.name,
                 ))
             }
-            _ => Arc::new(DistributedLockManager::new(locker_pool, &config.name)),
+            _ => Arc::new(DistributedLockManager::new(None, &config.name)),
         };
 
         let limiter: Arc<DistributedSlidingWindowRateLimiter> = match backend_kind {
@@ -206,7 +181,7 @@ impl CoordinationServices {
                 ))
             }
             _ => Arc::new(DistributedSlidingWindowRateLimiter::new(
-                limit_pool.clone(),
+                None,
                 locker.clone(),
                 &config.name,
                 RateLimitConfig {
@@ -236,7 +211,7 @@ impl CoordinationServices {
                         ))
                     }
                     _ => Arc::new(DistributedSlidingWindowRateLimiter::new(
-                        limit_pool.clone(),
+                        None,
                         locker.clone(),
                         &format!("{}:api", config.name),
                         RateLimitConfig {
@@ -260,7 +235,7 @@ impl CoordinationServices {
             cache_settings.build_cache_service(
                 Some(pool),
                 format!("{}:cookie", config.name),
-                None, // cookie always uses its own redis
+                None,
                 None,
             )
         });
@@ -291,20 +266,12 @@ impl CoordinationServices {
 }
 
 impl State {
-    pub fn has_cache_redis_backend(&self) -> bool {
-        self.redis.is_some()
-    }
-
     pub fn is_single_node_deployment(&self) -> bool {
-        !self.has_cache_redis_backend()
+        self.raft_runtime.is_none()
     }
 
     pub fn has_raft_control_plane(&self) -> bool {
         self.raft_runtime.is_some()
-    }
-
-    pub fn supports_lua(&self) -> bool {
-        self.cache_service.supports_lua()
     }
 
     /// Creates a new State instance using a file-based configuration.
@@ -326,7 +293,7 @@ impl State {
 
     /// Creates a new State instance with a custom configuration provider.
     ///
-    /// Initializes all connections (DB, Redis) and services (Lock, Limit, Tracker).
+    /// Initializes database connections and runtime services.
     /// Starts a background task to watch for configuration changes.
     pub async fn new_with_provider(provider: Box<dyn ConfigProvider>) -> Self {
         match Self::try_new_with_provider(provider).await {
@@ -348,10 +315,8 @@ impl State {
             .map_err(|e| StateInitError::LoadConfig(e.to_string()))?;
         let capabilities = BootstrapCapabilities::from_config(&config);
         info!(
-            "Runtime mode initialized: {} (cache_redis={}, cookie_redis={}, raft={})",
+            "Runtime mode initialized: {} (raft={})",
             capabilities.runtime_mode_label(),
-            capabilities.cache_redis_enabled,
-            capabilities.cookie_redis_enabled,
             capabilities.raft_enabled,
         );
 
@@ -373,27 +338,8 @@ impl State {
             })?,
         );
         info!("Database connected successfully");
-        let cache_pool = build_optional_redis_pool(config.cache.redis.as_ref(), "cache")?;
-        if let Some(pool) = cache_pool.as_ref() {
-            let mut cnn = pool
-                .get()
-                .await
-                .map_err(|e| StateInitError::CacheConn(e.to_string()))?;
-            let _pong: String = deadpool_redis::redis::cmd("PING")
-                .query_async(&mut *cnn)
-                .await
-                .map_err(|e| StateInitError::CachePing(e.to_string()))?;
-            info!("cache pool connected successfully");
-        } else {
-            info!("cache pool disabled (cache.redis not configured)");
-        }
-
-        let cookie_pool = build_optional_redis_pool(config.cookie.as_ref(), "cookie")?;
-        if cookie_pool.is_some() {
-            info!("cookie pool connected successfully");
-        } else {
-            info!("cookie pool disabled (cookie redis not configured)");
-        }
+        let cache_pool = None;
+        let cookie_pool = None;
 
         let profile_store = ProfileControlPlaneStore::from_config(&config)
             .map_err(|e| StateInitError::ControlPlaneStore(e.to_string()))?;
@@ -407,7 +353,7 @@ impl State {
             profile_store.clone(),
             backend_kind,
         );
-        info!("Redis connection pool created successfully");
+        info!("Coordination services initialized");
 
         let raft_runtime_config = config
             .raft
@@ -471,38 +417,8 @@ impl State {
             profile_store,
             raft_runtime_config,
             raft_runtime,
-            redis: cache_pool,
         })
     }
-}
-
-fn build_optional_redis_pool(
-    redis: Option<&RedisConfig>,
-    name: &'static str,
-) -> Result<Option<Pool>, StateInitError> {
-    let Some(redis) = redis else {
-        return Ok(None);
-    };
-
-    let pool = create_redis_pool(
-        &redis.redis_host,
-        redis.redis_port,
-        redis.redis_db,
-        &redis.redis_username,
-        &redis.redis_password,
-        redis.pool_size,
-        redis.tls.unwrap_or(false),
-    )
-    .ok_or_else(|| StateInitError::RedisPoolCreate {
-        name,
-        host: redis.redis_host.clone(),
-        port: redis.redis_port,
-        db: redis.redis_db,
-        tls: redis.tls.unwrap_or(false),
-        pool_size: redis.pool_size,
-    })?;
-
-    Ok(Some(pool))
 }
 
 #[cfg(test)]
@@ -539,7 +455,6 @@ mod tests {
             cache: CacheConfig {
                 backend: None,
                 ttl: 60,
-                redis: None,
                 compression_threshold: None,
                 enable_l1: Some(false),
                 l1_ttl_secs: None,
@@ -562,12 +477,9 @@ mod tests {
             },
             scheduler: None,
             sync: None,
-            cookie: None,
             channel_config: ChannelConfig {
                 blob_storage: Some(BlobStorageConfig { path: None }),
-                redis: None,
                 kafka: None,
-                compensator: None,
                 minid_time: 0,
                 capacity: 128,
                 queue_codec: None,
@@ -588,47 +500,16 @@ mod tests {
     }
 
     #[test]
-    fn bootstrap_capabilities_keep_cookie_backend_independent() {
-        let mut config = sample_config();
-        config.cookie = Some(crate::common::model::config::RedisConfig {
-            redis_host: "127.0.0.1".to_string(),
-            redis_port: 6379,
-            redis_db: 2,
-            redis_username: None,
-            redis_password: None,
-            pool_size: Some(2),
-            shards: None,
-            tls: Some(false),
-            claim_min_idle: None,
-            claim_count: None,
-            claim_interval: None,
-            listener_count: None,
-        });
-
+    fn bootstrap_capabilities_default_to_single_node_without_raft() {
+        let config = sample_config();
         let capabilities = BootstrapCapabilities::from_config(&config);
         assert!(capabilities.single_node_deployment);
-        assert!(!capabilities.cache_redis_enabled);
-        assert!(capabilities.cookie_redis_enabled);
         assert!(!capabilities.raft_enabled);
     }
 
     #[test]
-    fn bootstrap_capabilities_track_cache_and_raft_separately() {
+    fn bootstrap_capabilities_track_raft_deployment() {
         let mut config = sample_config();
-        config.cache.redis = Some(crate::common::model::config::RedisConfig {
-            redis_host: "127.0.0.1".to_string(),
-            redis_port: 6379,
-            redis_db: 0,
-            redis_username: None,
-            redis_password: None,
-            pool_size: Some(8),
-            shards: None,
-            tls: Some(false),
-            claim_min_idle: None,
-            claim_count: None,
-            claim_interval: None,
-            listener_count: None,
-        });
         config.raft = Some(RaftConfig {
             addr: "127.0.0.1:7101".to_string(),
             peers: Vec::new(),
@@ -640,8 +521,6 @@ mod tests {
 
         let capabilities = BootstrapCapabilities::from_config(&config);
         assert!(!capabilities.single_node_deployment);
-        assert!(capabilities.cache_redis_enabled);
-        assert!(!capabilities.cookie_redis_enabled);
         assert!(capabilities.raft_enabled);
         assert_eq!(capabilities.runtime_mode_label(), "distributed");
     }
@@ -650,22 +529,16 @@ mod tests {
     fn state_backend_helpers_follow_bootstrap_capabilities() {
         let local = BootstrapCapabilities {
             single_node_deployment: true,
-            cache_redis_enabled: false,
-            cookie_redis_enabled: true,
             raft_enabled: true,
         };
-        assert_eq!(local.single_node_deployment, !local.cache_redis_enabled);
-        assert!(local.cookie_redis_enabled);
+        assert!(local.single_node_deployment);
         assert!(local.raft_enabled);
 
         let distributed = BootstrapCapabilities {
             single_node_deployment: false,
-            cache_redis_enabled: true,
-            cookie_redis_enabled: false,
             raft_enabled: false,
         };
-        assert_eq!(distributed.single_node_deployment, !distributed.cache_redis_enabled);
-        assert!(!distributed.cookie_redis_enabled);
+        assert!(!distributed.single_node_deployment);
         assert!(!distributed.raft_enabled);
     }
 
@@ -717,7 +590,6 @@ mod tests {
     fn raft_rocksdb_state_bootstrap_no_redis() {
         let mut config = sample_config();
         config.cache.backend = Some(crate::common::model::config::CacheBackendKind::RaftRocksdb);
-        config.cache.redis = None;
 
         let profile_store = Arc::new(
             ProfileControlPlaneStore::open_temp("raft-test")
@@ -726,13 +598,13 @@ mod tests {
 
         let coordination = CoordinationServices::build(
             &config,
-            None, // no Redis pool
+            None,
             None,
             profile_store.clone(),
             Some(crate::common::model::config::CacheBackendKind::RaftRocksdb),
         );
 
-        // Verify cache backend is functional (no Redis)
+        // Verify cache backend is functional.
         assert_eq!(coordination.cache_service.namespace(), "demo:cache");
         assert!(coordination.cookie_service.is_none());
     }
@@ -741,7 +613,6 @@ mod tests {
     async fn raft_rocksdb_cache_lock_rate_limit_status_smoke() {
         let mut config = sample_config();
         config.cache.backend = Some(crate::common::model::config::CacheBackendKind::RaftRocksdb);
-        config.cache.redis = None;
 
         let profile_store = Arc::new(
             ProfileControlPlaneStore::open_temp("raft-smoke")
@@ -816,7 +687,6 @@ mod tests {
     async fn raft_rocksdb_state_uses_raft_rate_limit_backend() {
         let mut config = sample_config();
         config.cache.backend = Some(crate::common::model::config::CacheBackendKind::RaftRocksdb);
-        config.cache.redis = None;
 
         let profile_store = Arc::new(
             ProfileControlPlaneStore::open_temp("raft-rl-test")
@@ -849,16 +719,15 @@ mod tests {
         assert!(wait2 > 0, "expected wait time on second request, got {wait2}");
     }
 
-    // ── Full-stack no-redis RaftRocksDB integration tests ──
+    // ── Full-stack RaftRocksDB integration tests ──
 
-    /// Build a full `State` with SQLite in-memory, no Redis, RaftRocksDB backend.
+    /// Build a full `State` with SQLite in-memory and RaftRocksDB backend.
     /// Exercises cache, lock, rate-limit, and status tracker all together.
     #[tokio::test]
     async fn raft_rocksdb_full_state_integration() {
         let mut config = sample_config();
         config.db.url = Some("sqlite::memory:".to_string());
         config.cache.backend = Some(crate::common::model::config::CacheBackendKind::RaftRocksdb);
-        config.cache.redis = None;
 
         let profile_store = Arc::new(
             ProfileControlPlaneStore::open_temp("raft-full")
@@ -891,7 +760,6 @@ mod tests {
             profile_store,
             raft_runtime_config: None,
             raft_runtime: None,
-            redis: None,
         };
 
         // 1. Cache: write and read
@@ -957,7 +825,6 @@ mod tests {
             "second rate-limit call must see wait time (proof of Raft-backed state), got {wait2}"
         );
 
-        // 6. Verify no Redis pool present (raft_rocksdb is truly no-redis)
-        assert!(state.redis.is_none(), "Redis pool must be None in raft_rocksdb mode");
+        assert!(state.is_single_node_deployment());
     }
 }

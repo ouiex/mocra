@@ -39,22 +39,8 @@ collect_test "test_lib" cargo test --lib || TOTAL_PASS=false
 collect_test "raft_rocksdb_backend" cargo test raft_rocksdb --lib -- --nocapture || TOTAL_PASS=false
 
 echo
-echo "Running legacy hot-path static check"
-collect_test "check_legacy" bash "$REPO_ROOT/scripts/check_legacy_hot_path.sh" || TOTAL_PASS=false
-
-# ── Optional Redis tests ───────────────────────────────────────────────
-
-require_redis_tests="${MOCRA_REQUIRE_REDIS_CONTRACT_TESTS:-0}"
-if [[ -n "${REDIS_URL:-}" || -n "${MOCRA_REDIS_TEST_URL:-}" ]]; then
-    echo
-    echo "Running optional Redis integration tests"
-    collect_test "test_redis" cargo test redis_ -- --nocapture || TOTAL_PASS=false
-elif [[ "$require_redis_tests" == "1" ]]; then
-    echo "MOCRA_REQUIRE_REDIS_CONTRACT_TESTS=1 but REDIS_URL/MOCRA_REDIS_TEST_URL is not set"
-    TOTAL_PASS=false
-else
-    echo "Skipping optional Redis integration tests (set REDIS_URL or MOCRA_REDIS_TEST_URL to enable)"
-fi
+echo "Running typed hot-path static check"
+collect_test "check_typed_hot_path" bash "$REPO_ROOT/scripts/check_typed_hot_path.sh" || TOTAL_PASS=false
 
 # ── Write summary ──────────────────────────────────────────────────────
 

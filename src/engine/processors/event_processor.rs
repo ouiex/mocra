@@ -508,7 +508,7 @@ where
     }
 }
 
-// Empty marker type kept for static method access compatibility.
+// Empty marker type for static method access.
 struct Dummy;
 
 pub trait EventProcessorTrait<Input, Output>: ProcessorTrait<Input, Output> {

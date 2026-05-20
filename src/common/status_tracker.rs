@@ -249,9 +249,9 @@ impl StatusTracker {
         let request_key = format!("request:{}:download", request_id);
 
         // [OPTIMIZATION]
-        // If the request succeeded, we don't need to load stats from Redis just to update an in-memory object we throw away.
+        // If the request succeeded, we don't need to load persisted stats just to update an in-memory object we throw away.
         // We only need to clear any cached error state for this request.
-        // If there were errors in Redis, they will expire naturally (TTL).
+        // Persisted error counters expire naturally by TTL.
 
         if self.cache.contains_key(&request_key) {
             self.cache.remove(&request_key);
@@ -338,7 +338,7 @@ impl StatusTracker {
     pub async fn record_parse_success(&self, request_id: &str) -> Result<()> {
         let request_key = format!("request:{}:parse", request_id);
 
-        // [OPTIMIZATION] Skip loading stats from Redis. Just clear local cache.
+        // [OPTIMIZATION] Skip loading persisted stats. Just clear local cache.
         if self.cache.contains_key(&request_key) {
             self.cache.remove(&request_key);
         }
@@ -550,7 +550,7 @@ impl StatusTracker {
             .map_err(|e| Error::new(crate::errors::ErrorKind::CacheService, Some(e)));
 
         // SKIP UPDATING BIG JSON.
-        // We sacrifice "errors_by_category" visibility in Redis for speed.
+        // We sacrifice detailed "errors_by_category" visibility for speed.
 
         Ok(total)
     }

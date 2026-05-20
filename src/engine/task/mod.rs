@@ -7,8 +7,6 @@ pub mod module_dag_orchestrator;
 pub mod module_dag_processor;
 pub mod module_node_dag_adapter;
 pub mod module_node_runtime_bridge;
-#[cfg(any(test, feature = "legacy-chain"))]
-pub mod module_processor_with_chain;
 pub mod node_context_adapter;
 pub mod parser_error_adapter;
 pub mod profile_loader;
