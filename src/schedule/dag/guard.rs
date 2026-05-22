@@ -63,4 +63,3 @@ impl DagRunGuard for InMemoryDagRunGuard {
         Ok(())
     }
 }
-

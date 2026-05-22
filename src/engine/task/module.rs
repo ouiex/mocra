@@ -12,16 +12,16 @@ use crate::engine::task::module_dag_orchestrator::ModuleDagOrchestrator;
 use crate::engine::task::module_dag_processor::ModuleDagProcessor;
 use crate::engine::task::module_node_dag_adapter::scheduler_parser_error_message;
 use crate::engine::task::module_node_runtime_bridge::{
-    decode_parser_output_payload, decode_request_batch_payload,
     SchedulerNodeGenerateRuntimeInput, SchedulerNodeParserRuntimeInput,
+    decode_parser_output_payload, decode_request_batch_payload,
 };
 use crate::engine::task::parser_error_adapter::TypedParserOutput;
 use crate::errors::ModuleError;
 use crate::errors::RequestError;
 use crate::errors::Result;
+use crate::schedule::dag::DagNodeDispatcher;
 use futures::StreamExt;
 use log::warn;
-use crate::schedule::dag::DagNodeDispatcher;
 use serde::ser::SerializeStruct;
 use serde::{Serialize, Serializer};
 use serde_json::Map;
@@ -294,8 +294,8 @@ impl Module {
                     .await
                     .map_err(|err| ModuleError::Model(err.into()))
                     .and_then(|report| {
-                        decode_request_batch_payload(
-                            report.outputs.get(&node_id).ok_or_else(|| {
+                        decode_request_batch_payload(report.outputs.get(&node_id).ok_or_else(
+                            || {
                                 ModuleError::Model(
                                     std::io::Error::other(format!(
                                         "scheduler generate output missing for node '{}'",
@@ -303,8 +303,8 @@ impl Module {
                                     ))
                                     .into(),
                                 )
-                            })?,
-                        )
+                            },
+                        )?)
                         .map_err(|err| ModuleError::Model(err.into()))
                     });
 
@@ -339,8 +339,7 @@ impl Module {
             .into());
         } else {
             (
-                Box::pin(futures::stream::empty::<Request>())
-                    as SyncBoxStream<'static, Request>,
+                Box::pin(futures::stream::empty::<Request>()) as SyncBoxStream<'static, Request>,
                 None,
             )
         };
@@ -464,10 +463,7 @@ impl Module {
     }
 
     /// Parses response at the routed DAG node and handles terminal lifecycle hook.
-    pub async fn parser(
-        &self,
-        response: Response,
-    ) -> Result<TypedParserOutput> {
+    pub async fn parser(&self, response: Response) -> Result<TypedParserOutput> {
         let mut data = if let Some((dag, node_id, hint)) = self
             .processor
             .compile_parse_node_dag(&response)
@@ -520,11 +516,7 @@ impl Module {
                     }
 
                     self.processor
-                        .route_parsed_output(
-                            response,
-                            node_id,
-                            parsed.into_node_parse_output(),
-                        )
+                        .route_parsed_output(response, node_id, parsed.into_node_parse_output())
                         .await?
                 }
                 Err(err) => {
@@ -654,9 +646,8 @@ impl ModuleEntity {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
     use super::*;
-    use crate::cacheable::CacheService;
+    use crate::cacheable::{CacheService, CacheServiceConfig};
     use crate::common::interface::{
         ModuleNodeTrait, ModuleTrait, NodeGenerateContext, NodeParseContext, ToSyncBoxStream,
     };
@@ -669,12 +660,12 @@ mod tests {
     use crate::engine::task::module_dag_compiler::{ModuleDagDefinition, ModuleDagNodeDef};
     use crate::engine::task::module_dag_processor::ModuleDagProcessor;
     use crate::schedule::dag::{
-        DagError, DagNodeDispatcher, DagNodeTrait, NodeExecutionContext, NodePlacement,
-        TaskPayload,
+        DagError, DagNodeDispatcher, DagNodeTrait, NodeExecutionContext, NodePlacement, TaskPayload,
     };
     use async_trait::async_trait;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::collections::BTreeMap;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     struct LoginRequiredTestModule;
     struct SingleRequestTestNode;
@@ -942,7 +933,10 @@ mod tests {
             ctx: NodeGenerateContext<'_>,
         ) -> Result<crate::common::interface::SyncBoxStream<'static, Request>> {
             let request = Request::new("https://example.com/common", "GET")
-                .add_meta("ctx_cache_enabled", ctx.config.common.response_cache_enabled)
+                .add_meta(
+                    "ctx_cache_enabled",
+                    ctx.config.common.response_cache_enabled,
+                )
                 .add_meta(
                     "ctx_cache_ttl_secs",
                     ctx.config.common.response_cache_ttl_secs,
@@ -1561,7 +1555,7 @@ mod tests {
             locker_ttl: 0,
             processor: ModuleDagProcessor::new(
                 "acc-pf-login_required_test".to_string(),
-                Arc::new(CacheService::new(None, "test".to_string(), None, None)),
+                Arc::new(CacheService::new(CacheServiceConfig::local("test"))),
                 Uuid::now_v7(),
                 60,
             ),
@@ -1607,10 +1601,7 @@ mod tests {
 
     fn build_test_workflow() -> Arc<WorkflowDefinition> {
         Arc::new(WorkflowDefinition {
-            metadata: BTreeMap::from([(
-                "dag_version".to_string(),
-                "test-dag-version".to_string(),
-            )]),
+            metadata: BTreeMap::from([("dag_version".to_string(), "test-dag-version".to_string())]),
             ..WorkflowDefinition::default()
         })
     }
@@ -1646,7 +1637,11 @@ mod tests {
         })
     }
 
-    fn build_test_profile(module_name: &str, node_id: &str, version: u64) -> Arc<TaskProfileSnapshot> {
+    fn build_test_profile(
+        module_name: &str,
+        node_id: &str,
+        version: u64,
+    ) -> Arc<TaskProfileSnapshot> {
         build_test_profile_for_nodes(
             module_name,
             &[node_id],
@@ -1676,10 +1671,15 @@ mod tests {
         let mut module = build_test_module(Arc::new(SingleRequestTestModule), None);
         module.profile = Some(build_test_profile(module.module.name(), "page", 9));
 
-        let runtime_input = module.build_scheduler_generate_runtime_input("page", Map::new(), None).expect("typed generate runtime input should build");
+        let runtime_input = module
+            .build_scheduler_generate_runtime_input("page", Map::new(), None)
+            .expect("typed generate runtime input should build");
 
         assert_eq!(runtime_input.config.profile_version, 9);
-        assert_eq!(runtime_input.config.node_config.schema_id, "typed.node_config");
+        assert_eq!(
+            runtime_input.config.node_config.schema_id,
+            "typed.node_config"
+        );
         assert_eq!(runtime_input.exec.profile_version, 9);
     }
 
@@ -1689,10 +1689,15 @@ mod tests {
         module.profile = Some(build_test_profile(module.module.name(), "page", 11));
         let response = build_test_response(module.module.name(), "page");
 
-        let runtime_input = module.build_scheduler_parse_runtime_input("page", &response).expect("typed parser runtime input should build");
+        let runtime_input = module
+            .build_scheduler_parse_runtime_input("page", &response)
+            .expect("typed parser runtime input should build");
 
         assert_eq!(runtime_input.config.profile_version, 11);
-        assert_eq!(runtime_input.config.node_config.schema_id, "typed.node_config");
+        assert_eq!(
+            runtime_input.config.node_config.schema_id,
+            "typed.node_config"
+        );
         assert_eq!(runtime_input.exec.profile_version, 11);
     }
 
@@ -1844,11 +1849,15 @@ mod tests {
 
         assert_eq!(requests.len(), 1);
         assert_eq!(
-            requests[0].meta.get_trait_config::<bool>("ctx_cache_enabled"),
+            requests[0]
+                .meta
+                .get_trait_config::<bool>("ctx_cache_enabled"),
             Some(true)
         );
         assert_eq!(
-            requests[0].meta.get_trait_config::<Option<u64>>("ctx_cache_ttl_secs"),
+            requests[0]
+                .meta
+                .get_trait_config::<Option<u64>>("ctx_cache_ttl_secs"),
             Some(Some(60))
         );
     }
@@ -1885,9 +1894,7 @@ mod tests {
         module.add_step().await;
 
         let _ = module
-            .parser(
-                build_test_response(module.module.name(), "page"),
-            )
+            .parser(build_test_response(module.module.name(), "page"))
             .await
             .expect("parser should succeed through remote dispatcher");
 
@@ -1917,9 +1924,7 @@ mod tests {
         module.add_step().await;
 
         let err = match module
-            .parser(
-                build_test_response(module.module.name(), "page"),
-            )
+            .parser(build_test_response(module.module.name(), "page"))
             .await
         {
             Ok(_) => panic!("parser should fail when remote placement has no dispatcher"),
@@ -1961,9 +1966,7 @@ mod tests {
         module.add_step().await;
 
         let err = match module
-            .parser(
-                build_test_response(module.module.name(), "page"),
-            )
+            .parser(build_test_response(module.module.name(), "page"))
             .await
         {
             Ok(_) => panic!("parser should fail-closed when remote dispatcher execution fails"),
@@ -1985,9 +1988,7 @@ mod tests {
         module.add_step().await;
 
         let err = match module
-            .parser(
-                build_test_response(module.module.name(), "page"),
-            )
+            .parser(build_test_response(module.module.name(), "page"))
             .await
         {
             Ok(_) => panic!("parser should fail-closed when remote network dispatch fails"),
@@ -2027,9 +2028,7 @@ mod tests {
         module.add_step().await;
 
         let result = module
-            .parser(
-                build_test_response(module.module.name(), "page"),
-            )
+            .parser(build_test_response(module.module.name(), "page"))
             .await
             .expect("parser should succeed through local scheduler execution");
 
@@ -2043,9 +2042,7 @@ mod tests {
         module.add_step().await;
 
         let result = module
-            .parser(
-                build_test_response(module.module.name(), "page"),
-            )
+            .parser(build_test_response(module.module.name(), "page"))
             .await
             .expect("parser with data should succeed through local scheduler execution");
 
@@ -2062,9 +2059,7 @@ mod tests {
         module.add_step().await;
 
         let err = module
-            .parser(
-                build_test_response(module.module.name(), "page"),
-            )
+            .parser(build_test_response(module.module.name(), "page"))
             .await
             .expect_err("parser should fail-closed when scheduler bridge fails");
 
@@ -2080,9 +2075,7 @@ mod tests {
         module.add_step().await;
 
         let result = module
-            .parser(
-                build_test_response(module.module.name(), "page"),
-            )
+            .parser(build_test_response(module.module.name(), "page"))
             .await
             .expect("parser node error should be converted into error seed");
 
@@ -2103,9 +2096,7 @@ mod tests {
         module.add_step().await;
 
         let result = module
-            .parser(
-                build_test_response(module.module.name(), "page"),
-            )
+            .parser(build_test_response(module.module.name(), "page"))
             .await
             .expect("remote parser node error should be converted into error seed");
 
@@ -2123,9 +2114,7 @@ mod tests {
         module.add_step().await;
 
         let result = module
-            .parser(
-                build_test_response(module.module.name(), "page"),
-            )
+            .parser(build_test_response(module.module.name(), "page"))
             .await
             .expect("fanout parser should succeed through scheduler bridge");
 
@@ -2147,9 +2136,7 @@ mod tests {
         module.add_step().await;
 
         let result = module
-            .parser(
-                build_test_response(module.module.name(), "page"),
-            )
+            .parser(build_test_response(module.module.name(), "page"))
             .await
             .expect("stop parser should succeed through scheduler bridge");
 
@@ -2168,9 +2155,7 @@ mod tests {
         module.add_step().await;
 
         let result = module
-            .parser(
-                build_test_response(module.module.name(), "page"),
-            )
+            .parser(build_test_response(module.module.name(), "page"))
             .await
             .expect("remote stop parser should succeed through scheduler bridge");
 
@@ -2186,16 +2171,12 @@ mod tests {
         module.add_step().await;
 
         let first = module
-            .parser(
-                build_test_response(module.module.name(), "page"),
-            )
+            .parser(build_test_response(module.module.name(), "page"))
             .await
             .expect("first fanout parser call should succeed through scheduler bridge");
 
         let second = module
-            .parser(
-                build_test_response(module.module.name(), "page"),
-            )
+            .parser(build_test_response(module.module.name(), "page"))
             .await
             .expect("second fanout parser call should also succeed through scheduler bridge");
 
@@ -2213,11 +2194,11 @@ mod tests {
         module.add_step().await;
 
         let result = module
-            .parser(
-                build_test_response(module.module.name(), "page"),
-            )
+            .parser(build_test_response(module.module.name(), "page"))
             .await
-            .expect("failing fanout parser should return same-node error seed through scheduler bridge");
+            .expect(
+                "failing fanout parser should return same-node error seed through scheduler bridge",
+            );
 
         let error = result.error.expect("error seed should be present");
         assert!(result.next_dispatches.is_empty());
@@ -2237,9 +2218,7 @@ mod tests {
         module.add_step().await;
 
         let result = module
-            .parser(
-                build_test_response(module.module.name(), "page"),
-            )
+            .parser(build_test_response(module.module.name(), "page"))
             .await
             .expect("remote fanout parser should succeed through scheduler bridge");
 
@@ -2291,18 +2270,16 @@ mod tests {
         module.add_step().await;
 
         let first = module
-            .parser(
-                build_test_response(module.module.name(), "page"),
-            )
+            .parser(build_test_response(module.module.name(), "page"))
             .await
             .expect("first remote fanout parser call should succeed through scheduler bridge");
 
         let second = module
-            .parser(
-                build_test_response(module.module.name(), "page"),
-            )
+            .parser(build_test_response(module.module.name(), "page"))
             .await
-            .expect("second remote fanout parser call should also succeed through scheduler bridge");
+            .expect(
+                "second remote fanout parser call should also succeed through scheduler bridge",
+            );
 
         assert_eq!(dispatcher.remote_dispatches.load(Ordering::SeqCst), 2);
         assert_eq!(first.next_dispatches.len(), 2);
@@ -2344,7 +2321,9 @@ mod tests {
         module.add_step().await;
 
         let err = match module.generate(Map::new(), None).await {
-            Ok(_) => panic!("generate should fail-closed when cutover cannot resolve the target node"),
+            Ok(_) => {
+                panic!("generate should fail-closed when cutover cannot resolve the target node")
+            }
             Err(err) => err,
         };
 

@@ -3,8 +3,8 @@ use crate::errors::Result;
 use crate::errors::error::QueueError;
 use crate::queue::contract::split_explicit_topic_namespace;
 use crate::queue::{
-    AckAction, DlqRecord, HEADER_ATTEMPT, HEADER_NACK_REASON, Message, MqBackend,
-    NackDisposition, NackPolicy, decide_nack, parse_attempt,
+    AckAction, DlqRecord, HEADER_ATTEMPT, HEADER_NACK_REASON, Message, MqBackend, NackDisposition,
+    NackPolicy, decide_nack, parse_attempt,
 };
 use async_trait::async_trait;
 use log::{error, info, warn};
@@ -46,47 +46,53 @@ pub struct KafkaQueue {
     nack_policy: NackPolicy,
 }
 
+pub struct KafkaQueueConfig<'a> {
+    pub kafka_config: &'a KafkaConfig,
+    pub minid_time: u64,
+    pub namespace: &'a str,
+    pub nack_policy: NackPolicy,
+}
+
 impl KafkaQueue {
-    pub fn new(
-        kafka_config: &KafkaConfig,
-        minid_time: u64,
-        namespace: &str,
-        nack_policy: NackPolicy,
-    ) -> Result<Self> {
-        let mut config = ClientConfig::new();
-        config.set("bootstrap.servers", kafka_config.brokers.as_str());
-        config.set("message.timeout.ms", "5000");
+    pub fn new(config: KafkaQueueConfig<'_>) -> Result<Self> {
+        let kafka_config = config.kafka_config;
+        let mut client_config = ClientConfig::new();
+        client_config.set("bootstrap.servers", kafka_config.brokers.as_str());
+        client_config.set("message.timeout.ms", "5000");
 
         let use_tls = kafka_config.tls.unwrap_or(false);
 
         if let (Some(user), Some(pass)) = (&kafka_config.username, &kafka_config.password) {
             if use_tls {
-                config.set("security.protocol", "SASL_SSL");
+                client_config.set("security.protocol", "SASL_SSL");
             } else {
-                config.set("security.protocol", "SASL_PLAINTEXT");
+                client_config.set("security.protocol", "SASL_PLAINTEXT");
             }
-            config
+            client_config
                 .set("sasl.mechanism", "PLAIN")
                 .set("sasl.username", user)
                 .set("sasl.password", pass);
         } else if use_tls {
-            config.set("security.protocol", "SSL");
+            client_config.set("security.protocol", "SSL");
         }
 
-        let producer: FutureProducer = config.create().map_err(|_| QueueError::ConnectionFailed)?;
-        let admin_client: AdminClient<DefaultClientContext> =
-            config.create().map_err(|_| QueueError::ConnectionFailed)?;
+        let producer: FutureProducer = client_config
+            .create()
+            .map_err(|_| QueueError::ConnectionFailed)?;
+        let admin_client: AdminClient<DefaultClientContext> = client_config
+            .create()
+            .map_err(|_| QueueError::ConnectionFailed)?;
 
         Ok(Self {
             producer,
             admin_client: Arc::new(admin_client),
             bootstrap_servers: kafka_config.brokers.clone(),
-            group_id: format!("{}-crawler_group", namespace),
-            minid_time,
-            namespace: namespace.to_string(),
+            group_id: format!("{}-crawler_group", config.namespace),
+            minid_time: config.minid_time,
+            namespace: config.namespace.to_string(),
             known_topics: Arc::new(RwLock::new(HashSet::new())),
             config: kafka_config.clone(),
-            nack_policy,
+            nack_policy: config.nack_policy,
         })
     }
 
@@ -671,11 +677,7 @@ impl MqBackend for KafkaQueue {
         }
     }
 
-    async fn read_dlq(
-        &self,
-        _topic: &str,
-        _count: usize,
-    ) -> Result<Vec<DlqRecord>> {
+    async fn read_dlq(&self, _topic: &str, _count: usize) -> Result<Vec<DlqRecord>> {
         // Kafka DLQ inspection requires a consumer which is heavy.
         // Not implemented for now.
         warn!("DLQ inspection not implemented for KafkaQueue yet");

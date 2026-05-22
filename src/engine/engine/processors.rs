@@ -1,13 +1,13 @@
 use super::*;
 use crate::common::model::{PipelineStage, TaskStatus};
-use crate::engine::task::task_dispatch_adapter::{
-    decode_task_dispatch, processor_context_from_dispatch,
+use crate::engine::task::parser_error_adapter::{
+    extract_error_envelope_seed, extract_parser_dispatch_seed,
 };
 use crate::engine::task::request_response_adapter::{
     decode_request_dispatch, decode_response_dispatch,
 };
-use crate::engine::task::parser_error_adapter::{
-    extract_error_envelope_seed, extract_parser_dispatch_seed,
+use crate::engine::task::task_dispatch_adapter::{
+    decode_task_dispatch, processor_context_from_dispatch,
 };
 
 impl Engine {
@@ -25,7 +25,14 @@ impl Engine {
         let ip = get_primary_local_ip()
             .map(|ip| ip.to_string())
             .unwrap_or_else(|_| "127.0.0.1".to_string());
-        let api_port = self.state.config.read().await.api.as_ref().map(|api| api.port);
+        let api_port = self
+            .state
+            .config
+            .read()
+            .await
+            .api
+            .as_ref()
+            .map(|api| api.port);
 
         loop {
             tokio::select! {
@@ -65,13 +72,13 @@ impl Engine {
         F: Fn(T) -> Fut + Send + Sync + 'static + Clone,
         Fut: Future<Output = ()> + Send,
     {
-        let runner = ProcessorRunner::new(
-            name,
-            self.shutdown_tx.subscribe(),
-            self.pause_tx.subscribe(),
+        let runner = ProcessorRunner::new(ProcessorRunnerConfig {
+            name: name.to_string(),
+            shutdown_rx: self.shutdown_tx.subscribe(),
+            pause_rx: self.pause_tx.subscribe(),
             concurrency,
-            self.inflight_counter.clone(),
-        );
+            inflight_counter: self.inflight_counter.clone(),
+        });
 
         runner.run(receiver, execute_fn).await;
     }
@@ -151,10 +158,10 @@ impl Engine {
                             if let Some(comp) = &queue_manager.compensator {
                                 let _ = comp.remove_task("task", &id).await;
                             }
-                            if let Some(f) = ack_fn.take() {
-                                if let Err(e) = f().await {
-                                    error!("Failed to ack task {}: {}", id, e);
-                                }
+                            if let Some(f) = ack_fn.take()
+                                && let Err(e) = f().await
+                            {
+                                error!("Failed to ack task {}: {}", id, e);
                             }
                         }
                         crate::common::processors::processor::ProcessorResult::RetryableFailure(
@@ -170,16 +177,16 @@ impl Engine {
                                     retry_policy.reason.clone(),
                                 )
                                 .await;
-                            Self::handle_policy_retry(
-                                &policy_resolver,
-                                &queue_manager,
-                                "task",
-                                "task_model",
-                                &task_for_dlq,
-                                &retry_policy,
-                                &mut ack_fn,
-                                &mut nack_fn,
-                            )
+                            Self::handle_policy_retry(PolicyRetryRequest {
+                                policy_resolver: &policy_resolver,
+                                queue_manager: &queue_manager,
+                                topic: "task",
+                                event_type: "task_model",
+                                item: &task_for_dlq,
+                                retry_policy: &retry_policy,
+                                ack_fn: &mut ack_fn,
+                                nack_fn: &mut nack_fn,
+                            })
                             .await;
                         }
                         crate::common::processors::processor::ProcessorResult::FatalFailure(
@@ -195,16 +202,16 @@ impl Engine {
                                     Some(err.to_string()),
                                 )
                                 .await;
-                            Self::handle_policy_failure(
-                                &policy_resolver,
-                                &queue_manager,
-                                "task",
-                                "task_model",
-                                &task_for_dlq,
-                                &err,
-                                &mut ack_fn,
-                                &mut nack_fn,
-                            )
+                            Self::handle_policy_failure(PolicyFailureRequest {
+                                policy_resolver: &policy_resolver,
+                                queue_manager: &queue_manager,
+                                topic: "task",
+                                event_type: "task_model",
+                                item: &task_for_dlq,
+                                err: &err,
+                                ack_fn: &mut ack_fn,
+                                nack_fn: &mut nack_fn,
+                            })
                             .await;
                         }
                     }
@@ -337,11 +344,10 @@ impl Engine {
                             if let Some(comp) = &queue_manager.compensator {
                                 let _ = comp.remove_task("request", &id).await;
                             }
-                            if let Some(f) = ack_fn.take() {
-                                if let Err(e) = f().await {
+                            if let Some(f) = ack_fn.take()
+                                && let Err(e) = f().await {
                                     error!("Failed to ack request {}: {}", id, e);
                                 }
-                            }
                         }
                         crate::common::processors::processor::ProcessorResult::RetryableFailure(retry_policy) => {
                             let _ = status_tracker
@@ -354,16 +360,16 @@ impl Engine {
                                     retry_policy.reason.clone(),
                                 )
                                 .await;
-                            Self::handle_policy_retry(
-                                &policy_resolver,
-                                &queue_manager,
-                                "request",
-                                "download",
-                                &request_dispatch_for_dlq,
-                                &retry_policy,
-                                &mut ack_fn,
-                                &mut nack_fn,
-                            )
+                            Self::handle_policy_retry(PolicyRetryRequest {
+                                policy_resolver: &policy_resolver,
+                                queue_manager: &queue_manager,
+                                topic: "request",
+                                event_type: "download",
+                                item: &request_dispatch_for_dlq,
+                                retry_policy: &retry_policy,
+                                ack_fn: &mut ack_fn,
+                                nack_fn: &mut nack_fn,
+                            })
                             .await;
                         }
                         crate::common::processors::processor::ProcessorResult::FatalFailure(err) => {
@@ -377,16 +383,16 @@ impl Engine {
                                     Some(err.to_string()),
                                 )
                                 .await;
-                            Self::handle_policy_failure(
-                                &policy_resolver,
-                                &queue_manager,
-                                "request",
-                                "download",
-                                &request_dispatch_for_dlq,
-                                &err,
-                                &mut ack_fn,
-                                &mut nack_fn,
-                            )
+                            Self::handle_policy_failure(PolicyFailureRequest {
+                                policy_resolver: &policy_resolver,
+                                queue_manager: &queue_manager,
+                                topic: "request",
+                                event_type: "download",
+                                item: &request_dispatch_for_dlq,
+                                err: &err,
+                                ack_fn: &mut ack_fn,
+                                nack_fn: &mut nack_fn,
+                            })
                             .await;
                         }
                     }
@@ -444,7 +450,10 @@ impl Engine {
                             )
                             .await;
                         if let Some(f) = nack_fn.take() {
-                            let _ = f(format!("parser task envelope seed extraction failed: {err}")).await;
+                            let _ = f(format!(
+                                "parser task envelope seed extraction failed: {err}"
+                            ))
+                            .await;
                         }
                         return;
                     }
@@ -470,7 +479,9 @@ impl Engine {
                         )
                         .await;
                     match result {
-                        crate::common::processors::processor::ProcessorResult::Success(mut stream) => {
+                        crate::common::processors::processor::ProcessorResult::Success(
+                            mut stream,
+                        ) => {
                             while stream.next().await.is_some() {}
                             let _ = status_tracker
                                 .update_status(
@@ -486,13 +497,15 @@ impl Engine {
                                 let _ = comp.remove_task("parser_task", &id).await;
                             }
 
-                            if let Some(f) = ack_fn.take() {
-                                if let Err(e) = f().await {
-                                    error!("Failed to ack parser task {}: {}", id, e);
-                                }
+                            if let Some(f) = ack_fn.take()
+                                && let Err(e) = f().await
+                            {
+                                error!("Failed to ack parser task {}: {}", id, e);
                             }
                         }
-                        crate::common::processors::processor::ProcessorResult::RetryableFailure(retry_policy) => {
+                        crate::common::processors::processor::ProcessorResult::RetryableFailure(
+                            retry_policy,
+                        ) => {
                             let _ = status_tracker
                                 .update_status(
                                     &status_task_id,
@@ -503,19 +516,21 @@ impl Engine {
                                     retry_policy.reason.clone(),
                                 )
                                 .await;
-                            Self::handle_policy_retry(
-                                &policy_resolver,
-                                &queue_manager,
-                                "parser_task",
-                                "parser_dispatch",
-                                &task_for_dlq,
-                                &retry_policy,
-                                &mut ack_fn,
-                                &mut nack_fn,
-                            )
+                            Self::handle_policy_retry(PolicyRetryRequest {
+                                policy_resolver: &policy_resolver,
+                                queue_manager: &queue_manager,
+                                topic: "parser_task",
+                                event_type: "parser_dispatch",
+                                item: &task_for_dlq,
+                                retry_policy: &retry_policy,
+                                ack_fn: &mut ack_fn,
+                                nack_fn: &mut nack_fn,
+                            })
                             .await;
                         }
-                        crate::common::processors::processor::ProcessorResult::FatalFailure(err) => {
+                        crate::common::processors::processor::ProcessorResult::FatalFailure(
+                            err,
+                        ) => {
                             let _ = status_tracker
                                 .update_status(
                                     &status_task_id,
@@ -526,16 +541,16 @@ impl Engine {
                                     Some(err.to_string()),
                                 )
                                 .await;
-                            Self::handle_policy_failure(
-                                &policy_resolver,
-                                &queue_manager,
-                                "parser_task",
-                                "parser_dispatch",
-                                &task_for_dlq,
-                                &err,
-                                &mut ack_fn,
-                                &mut nack_fn,
-                            )
+                            Self::handle_policy_failure(PolicyFailureRequest {
+                                policy_resolver: &policy_resolver,
+                                queue_manager: &queue_manager,
+                                topic: "parser_task",
+                                event_type: "parser_dispatch",
+                                item: &task_for_dlq,
+                                err: &err,
+                                ack_fn: &mut ack_fn,
+                                nack_fn: &mut nack_fn,
+                            })
                             .await;
                         }
                     }
@@ -580,10 +595,7 @@ impl Engine {
                     let error_seed = match extract_error_envelope_seed(&task_envelope) {
                         Ok(seed) => seed,
                         Err(err) => {
-                            error!(
-                                "Failed to extract error task seed {}: {}",
-                                dispatch_id, err
-                            );
+                            error!("Failed to extract error task seed {}: {}", dispatch_id, err);
                             let _ = status_tracker
                                 .update_status(
                                     &dispatch_run_id,
@@ -595,7 +607,9 @@ impl Engine {
                                 )
                                 .await;
                             if let Some(f) = nack_fn.take() {
-                                let _ = f(format!("error task envelope seed extraction failed: {err}")).await;
+                                let _ =
+                                    f(format!("error task envelope seed extraction failed: {err}"))
+                                        .await;
                             }
                             return;
                         }
@@ -637,10 +651,10 @@ impl Engine {
                             if let Some(comp) = &queue_manager.compensator {
                                 let _ = comp.remove_task("error_task", &id).await;
                             }
-                            if let Some(f) = ack_fn.take() {
-                                if let Err(e) = f().await {
-                                    error!("Failed to ack error task {}: {}", id, e);
-                                }
+                            if let Some(f) = ack_fn.take()
+                                && let Err(e) = f().await
+                            {
+                                error!("Failed to ack error task {}: {}", id, e);
                             }
                         }
                         crate::common::processors::processor::ProcessorResult::RetryableFailure(
@@ -656,16 +670,16 @@ impl Engine {
                                     retry_policy.reason.clone(),
                                 )
                                 .await;
-                            Self::handle_policy_retry(
-                                &policy_resolver,
-                                &queue_manager,
-                                "error_task",
-                                "system_error",
-                                &task_for_dlq,
-                                &retry_policy,
-                                &mut ack_fn,
-                                &mut nack_fn,
-                            )
+                            Self::handle_policy_retry(PolicyRetryRequest {
+                                policy_resolver: &policy_resolver,
+                                queue_manager: &queue_manager,
+                                topic: "error_task",
+                                event_type: "system_error",
+                                item: &task_for_dlq,
+                                retry_policy: &retry_policy,
+                                ack_fn: &mut ack_fn,
+                                nack_fn: &mut nack_fn,
+                            })
                             .await;
                         }
                         crate::common::processors::processor::ProcessorResult::FatalFailure(
@@ -681,16 +695,16 @@ impl Engine {
                                     Some(err.to_string()),
                                 )
                                 .await;
-                            Self::handle_policy_failure(
-                                &policy_resolver,
-                                &queue_manager,
-                                "error_task",
-                                "system_error",
-                                &task_for_dlq,
-                                &err,
-                                &mut ack_fn,
-                                &mut nack_fn,
-                            )
+                            Self::handle_policy_failure(PolicyFailureRequest {
+                                policy_resolver: &policy_resolver,
+                                queue_manager: &queue_manager,
+                                topic: "error_task",
+                                event_type: "system_error",
+                                item: &task_for_dlq,
+                                err: &err,
+                                ack_fn: &mut ack_fn,
+                                nack_fn: &mut nack_fn,
+                            })
                             .await;
                         }
                     }
@@ -793,10 +807,10 @@ impl Engine {
                             if let Some(comp) = &queue_manager.compensator {
                                 let _ = comp.remove_task("response", &id).await;
                             }
-                            if let Some(f) = ack_fn.take() {
-                                if let Err(e) = f().await {
-                                    error!("Failed to ack response {}: {}", id, e);
-                                }
+                            if let Some(f) = ack_fn.take()
+                                && let Err(e) = f().await
+                            {
+                                error!("Failed to ack response {}: {}", id, e);
                             }
                         }
                         crate::common::processors::processor::ProcessorResult::RetryableFailure(
@@ -812,16 +826,16 @@ impl Engine {
                                     retry_policy.reason.clone(),
                                 )
                                 .await;
-                            Self::handle_policy_retry(
-                                &policy_resolver,
-                                &queue_manager,
-                                "response",
-                                "parser",
-                                &response_dispatch_for_dlq,
-                                &retry_policy,
-                                &mut ack_fn,
-                                &mut nack_fn,
-                            )
+                            Self::handle_policy_retry(PolicyRetryRequest {
+                                policy_resolver: &policy_resolver,
+                                queue_manager: &queue_manager,
+                                topic: "response",
+                                event_type: "parser",
+                                item: &response_dispatch_for_dlq,
+                                retry_policy: &retry_policy,
+                                ack_fn: &mut ack_fn,
+                                nack_fn: &mut nack_fn,
+                            })
                             .await;
                         }
                         crate::common::processors::processor::ProcessorResult::FatalFailure(
@@ -837,16 +851,16 @@ impl Engine {
                                     Some(err.to_string()),
                                 )
                                 .await;
-                            Self::handle_policy_failure(
-                                &policy_resolver,
-                                &queue_manager,
-                                "response",
-                                "parser",
-                                &response_dispatch_for_dlq,
-                                &err,
-                                &mut ack_fn,
-                                &mut nack_fn,
-                            )
+                            Self::handle_policy_failure(PolicyFailureRequest {
+                                policy_resolver: &policy_resolver,
+                                queue_manager: &queue_manager,
+                                topic: "response",
+                                event_type: "parser",
+                                item: &response_dispatch_for_dlq,
+                                err: &err,
+                                ack_fn: &mut ack_fn,
+                                nack_fn: &mut nack_fn,
+                            })
                             .await;
                         }
                     }
@@ -900,11 +914,10 @@ impl Engine {
                         EventPhase::Completed,
                     );
 
-                    if let Some(event_bus) = &event_bus {
-                        if let Err(e) = event_bus.publish(health_event).await {
+                    if let Some(event_bus) = &event_bus
+                        && let Err(e) = event_bus.publish(health_event).await {
                             error!("Failed to publish health check event: {e}");
                         }
-                    }
                 }
             }
         }

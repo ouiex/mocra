@@ -19,3 +19,8 @@ monitoring/tmp/
 logs/
 raft_data/
 *.pyc
+docker-compose.kafka.yml
+docker-compose.monitoring.yml
+development_docs/
+.claude/
+.cargo/

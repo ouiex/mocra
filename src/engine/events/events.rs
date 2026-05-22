@@ -283,19 +283,15 @@ mod tests {
         assert_eq!(parser_evt.platform, "pf");
         assert_eq!(parser_evt.modules, Some(vec!["m1".to_string()]));
 
-        let error_envelope = NodeErrorEnvelope::new(
-            routing,
-            exec,
-            PipelineStage::ParserTask,
-            "err",
-        )
-        .with_error_context(ErrorDispatchContext {
-            modules: Some(vec!["m1".to_string()]),
-            metadata: json!({"e":"x"}).as_object().cloned().unwrap_or_default(),
-            context: ExecutionMark::default(),
-            prefix_request_id: Some(parent_request_id),
-            runtime_node: None,
-        });
+        let error_envelope =
+            NodeErrorEnvelope::new(routing, exec, PipelineStage::ParserTask, "err")
+                .with_error_context(ErrorDispatchContext {
+                    modules: Some(vec!["m1".to_string()]),
+                    metadata: json!({"e":"x"}).as_object().cloned().unwrap_or_default(),
+                    context: ExecutionMark::default(),
+                    prefix_request_id: Some(parent_request_id),
+                    runtime_node: None,
+                });
         let error_evt = ParserDispatchEvent::from(&error_envelope);
         assert_eq!(error_evt.account, "acc");
         assert_eq!(error_evt.platform, "pf");

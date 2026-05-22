@@ -8,14 +8,14 @@ use crate::engine::processors::event_processor::{EventAwareTypedChain, EventProc
 use log::info;
 use log::{debug, error, warn};
 
-use crate::common::model::chain_key;
 use crate::common::metrics as metrics_facade;
+use crate::common::model::chain_key;
 use crate::common::model::message::{TaskEvent, UnifiedTaskInput};
 use crate::common::model::workflow_profile::TaskProfileSnapshot;
 use crate::common::model::{
-    ErrorDispatchContext, ExecutionMeta, ModuleConfig, NodeDispatchEnvelope,
-    NodeErrorEnvelope, NodeInput, ParserDispatchContext, PayloadCodec, Request, RoutingMeta,
-    RuntimeNodeRoutingHint, TypedEnvelope,
+    ErrorDispatchContext, ExecutionMeta, ModuleConfig, NodeDispatchEnvelope, NodeErrorEnvelope,
+    NodeInput, ParserDispatchContext, PayloadCodec, Request, RoutingMeta, RuntimeNodeRoutingHint,
+    TypedEnvelope,
 };
 use crate::common::state::State;
 use crate::errors::{Error, ModuleError, RequestError, Result};
@@ -122,7 +122,9 @@ mod threshold_decision_tests {
 
 #[cfg(test)]
 mod task_routing_policy_tests {
-    use super::{derive_generate_retry_policy, local_fast_path_error, module_matches_pending_context};
+    use super::{
+        derive_generate_retry_policy, local_fast_path_error, module_matches_pending_context,
+    };
     use crate::common::model::{ExecutionMark, RuntimeNodeRoutingHint};
     use crate::common::processors::processor::{ProcessorContext, RetryPolicy};
     use crate::errors::RequestError;
@@ -144,7 +146,10 @@ mod task_routing_policy_tests {
         )
         .expect("remote placement should be rejected on the local fast path");
 
-        assert!(err.to_string().contains("local fast path cannot execute remote-placed node"));
+        assert!(
+            err.to_string()
+                .contains("local fast path cannot execute remote-placed node")
+        );
     }
 
     #[test]
@@ -171,7 +176,13 @@ mod task_routing_policy_tests {
         assert_eq!(retry_policy.max_retries, 5);
         assert_eq!(retry_policy.retry_delay, 250);
         assert_eq!(retry_policy.current_retry, 2);
-        assert!(retry_policy.reason.as_deref().unwrap_or_default().contains("request error"));
+        assert!(
+            retry_policy
+                .reason
+                .as_deref()
+                .unwrap_or_default()
+                .contains("request error")
+        );
     }
 }
 
@@ -190,15 +201,11 @@ fn module_matches_pending_context(
     target_module_id == module_id
 }
 
-fn local_fast_path_error(
-    module_id: &str,
-    hint: &RuntimeNodeRoutingHint,
-) -> Option<Error> {
+fn local_fast_path_error(module_id: &str, hint: &RuntimeNodeRoutingHint) -> Option<Error> {
     match hint.placement.as_ref() {
         Some(NodePlacement::Remote { worker_group }) => Some(
             RequestError::InvalidMetaForRemote(
-                std::io::Error::new(
-                    std::io::ErrorKind::Other,
+                std::io::Error::other(
                     format!(
                         "local fast path cannot execute remote-placed node '{}' for module '{}' (worker_group='{}')",
                         hint.node_key, module_id, worker_group
@@ -279,7 +286,8 @@ impl ThresholdDecisionService for StatusTrackerThresholdDecisionService {
             input.run_id,
         );
 
-        let parse_error: Error = ModuleError::ModuleNotFound(input.error_message.clone().into()).into();
+        let parse_error: Error =
+            ModuleError::ModuleNotFound(input.error_message.clone().into()).into();
         let mut retry_after: Option<std::time::Duration> = None;
 
         if let Some(modules) = &input.task_model.module {
@@ -570,7 +578,10 @@ impl TaskModelProcessor {
             run_id: parser_seed.run_id,
             prefix_request: parser_seed.prefix_request,
         };
-        let envelope = match build_error_envelope_from_seed(&error_msg, self.queue_manager.namespace.clone()) {
+        let envelope = match build_error_envelope_from_seed(
+            &error_msg,
+            self.queue_manager.namespace.clone(),
+        ) {
             Ok(envelope) => envelope,
             Err(err) => return ProcessorResult::FatalFailure(err),
         };
@@ -681,7 +692,8 @@ impl TaskModelProcessor {
                 })
                 .action_applied()
                 {
-                    self.persist_terminate_mark(&error_seed, None, &reason).await;
+                    self.persist_terminate_mark(&error_seed, None, &reason)
+                        .await;
                 }
                 self.emit_threshold_terminated_event(&error_seed, "terminate_task", &reason)
                     .await;
@@ -690,7 +702,10 @@ impl TaskModelProcessor {
                     .send_to_dlq("error_task", &input, &reason)
                     .await
                 {
-                    error!("[TaskModelProcessor<ErrorEnvelope>] failed to send to DLQ: {}", err);
+                    error!(
+                        "[TaskModelProcessor<ErrorEnvelope>] failed to send to DLQ: {}",
+                        err
+                    );
                 }
                 return ProcessorResult::FatalFailure(
                     ModuleError::TaskMaxError(reason.into()).into(),
@@ -846,10 +861,15 @@ impl ProcessorTrait<TaskEvent, Task> for TaskModelProcessor {
             run_id: input.run_id,
             prefix_request: Uuid::nil(),
         };
-        let envelope = match build_error_envelope_from_seed(&error_msg, self.queue_manager.namespace.clone()) {
+        let envelope = match build_error_envelope_from_seed(
+            &error_msg,
+            self.queue_manager.namespace.clone(),
+        ) {
             Ok(envelope) => envelope,
             Err(err) => {
-                error!("[TaskModelProcessor<TaskModel>] failed to build ErrorTaskModel envelope: {err}");
+                error!(
+                    "[TaskModelProcessor<TaskModel>] failed to build ErrorTaskModel envelope: {err}"
+                );
                 return ProcessorResult::FatalFailure(
                     ModuleError::ModuleNotFound("Failed to load task, re-queued".into()).into(),
                 );
@@ -1204,7 +1224,10 @@ impl ProcessorTrait<Module, SyncBoxStream<'static, Request>> for TaskProcessor {
             input.module.name()
         );
 
-        let runtime_hint = input.processor.resolve_runtime_hint(&input.pending_ctx).await;
+        let runtime_hint = input
+            .processor
+            .resolve_runtime_hint(&input.pending_ctx)
+            .await;
         if let Some(err) = runtime_hint
             .as_ref()
             .and_then(|hint| local_fast_path_error(&input.id(), hint))
@@ -1373,8 +1396,7 @@ impl ProcessorTrait<Request, ()> for RequestPublish {
                     .increment(1);
                 let retry_reason = format!(
                     "request queue closed: request_id={} module_id={}",
-                    request_id,
-                    module_id
+                    request_id, module_id
                 );
                 error!("[RequestPublish] {retry_reason}");
                 let mut retry_policy = context.retry_policy.unwrap_or_default();
@@ -1467,7 +1489,12 @@ impl ProcessorTrait<Request, (Request, Arc<TaskProfileSnapshot>)> for ConfigProc
         let profile = self
             .state
             .profile_store
-            .get_profile(&self.namespace, &input.account, &input.platform, &input.module)
+            .get_profile(
+                &self.namespace,
+                &input.account,
+                &input.platform,
+                &input.module,
+            )
             .unwrap_or_default();
         ProcessorResult::Success((input, Arc::new(profile)))
     }
@@ -1855,6 +1882,17 @@ pub struct UnifiedTaskIngressChain {
     state: Option<Arc<State>>,
 }
 
+struct SchedulerGenerateRuntimeInputRequest<'a> {
+    module_id: &'a str,
+    profile: Option<&'a crate::common::model::TaskProfileSnapshot>,
+    routing: &'a RoutingMeta,
+    module_name: &'a str,
+    node_id: &'a str,
+    metadata: serde_json::Map<String, serde_json::Value>,
+    login_info: Option<crate::common::model::login_info::LoginInfo>,
+    prefix_request: Option<Uuid>,
+}
+
 impl UnifiedTaskIngressChain {
     const FALLBACK_FAILURE_GATE_BLOCKED: &'static str = "failure_gate_blocked";
     const FALLBACK_GRAY_GATE_BLOCKED: &'static str = "gray_gate_blocked";
@@ -1956,10 +1994,7 @@ impl UnifiedTaskIngressChain {
                 counter!("mocra_scheduler_ingress_total", "path" => "parser", "result" => "bridge_missing").increment(1);
                 self.record_scheduler_ingress_result("parser", "bridge_missing");
                 self.record_scheduler_ingress_error("parser", "bridge_missing");
-                return Some(self.scheduler_bridge_missing_result(
-                    "parser",
-                    module_name.as_str(),
-                ));
+                return Some(self.scheduler_bridge_missing_result("parser", module_name.as_str()));
             }
         };
 
@@ -1971,11 +2006,7 @@ impl UnifiedTaskIngressChain {
             )
             .await
         {
-            self.record_scheduler_ingress_fallback(
-                "parser",
-                reason,
-                Some(module_name.as_str()),
-            );
+            self.record_scheduler_ingress_fallback("parser", reason, Some(module_name.as_str()));
             task_manager.record_module_dag_cutover_failure(&module_name);
             return Some(ProcessorResult::RetryableFailure(
                 RetryPolicy::default()
@@ -2003,7 +2034,8 @@ impl UnifiedTaskIngressChain {
                 self.record_scheduler_ingress_error("parser", "load_failed");
                 task_manager.record_module_dag_cutover_failure(&module_name);
                 return Some(ProcessorResult::RetryableFailure(
-                    RetryPolicy::default().with_reason(format!("scheduler parser load failed: {err}")),
+                    RetryPolicy::default()
+                        .with_reason(format!("scheduler parser load failed: {err}")),
                 ));
             }
         };
@@ -2040,14 +2072,16 @@ impl UnifiedTaskIngressChain {
         let prefix_request = self.resolve_parser_prefix_request(dispatch, parser_ctx);
 
         let runtime_input = match Self::build_scheduler_generate_runtime_input(
-            &module_id,
-            profile.as_deref(),
-            &dispatch.routing,
-            &module_name,
-            node_id,
-            metadata,
-            login_info,
-            prefix_request,
+            SchedulerGenerateRuntimeInputRequest {
+                module_id: &module_id,
+                profile: profile.as_deref(),
+                routing: &dispatch.routing,
+                module_name: &module_name,
+                node_id,
+                metadata,
+                login_info,
+                prefix_request,
+            },
         ) {
             Ok(runtime_input) => runtime_input,
             Err(err) => {
@@ -2056,9 +2090,8 @@ impl UnifiedTaskIngressChain {
                 self.record_scheduler_ingress_error("parser", "runtime_input_invalid");
                 task_manager.record_module_dag_cutover_failure(&module_name);
                 return Some(ProcessorResult::RetryableFailure(
-                    RetryPolicy::default().with_reason(format!(
-                        "scheduler parser runtime input invalid: {err}"
-                    )),
+                    RetryPolicy::default()
+                        .with_reason(format!("scheduler parser runtime input invalid: {err}")),
                 ));
             }
         };
@@ -2107,7 +2140,8 @@ impl UnifiedTaskIngressChain {
                     self.record_scheduler_ingress_error("parser", "decode_error");
                     task_manager.record_module_dag_cutover_failure(&module_name);
                     return Some(ProcessorResult::RetryableFailure(
-                        RetryPolicy::default().with_reason(format!("scheduler parser output decode failed: {err}")),
+                        RetryPolicy::default()
+                            .with_reason(format!("scheduler parser output decode failed: {err}")),
                     ));
                 }
             },
@@ -2129,11 +2163,12 @@ impl UnifiedTaskIngressChain {
             }
         }
 
-        counter!("mocra_scheduler_ingress_total", "path" => "parser", "result" => "success").increment(1);
+        counter!("mocra_scheduler_ingress_total", "path" => "parser", "result" => "success")
+            .increment(1);
         self.record_scheduler_ingress_result("parser", "success");
         task_manager.record_module_dag_cutover_success(&module_name);
         Some(ProcessorResult::Success(
-            Box::pin(futures::stream::empty()) as SyncBoxStream<'static, ()>,
+            Box::pin(futures::stream::empty()) as SyncBoxStream<'static, ()>
         ))
     }
 
@@ -2181,10 +2216,7 @@ impl UnifiedTaskIngressChain {
                 counter!("mocra_scheduler_ingress_total", "path" => "error", "result" => "bridge_missing").increment(1);
                 self.record_scheduler_ingress_result("error", "bridge_missing");
                 self.record_scheduler_ingress_error("error", "bridge_missing");
-                return Some(self.scheduler_bridge_missing_result(
-                    "error",
-                    module_name.as_str(),
-                ));
+                return Some(self.scheduler_bridge_missing_result("error", module_name.as_str()));
             }
         };
 
@@ -2196,11 +2228,7 @@ impl UnifiedTaskIngressChain {
             )
             .await
         {
-            self.record_scheduler_ingress_fallback(
-                "error",
-                reason,
-                Some(module_name.as_str()),
-            );
+            self.record_scheduler_ingress_fallback("error", reason, Some(module_name.as_str()));
             task_manager.record_module_dag_cutover_failure(&module_name);
             return Some(ProcessorResult::RetryableFailure(
                 RetryPolicy::default()
@@ -2227,7 +2255,8 @@ impl UnifiedTaskIngressChain {
                 self.record_scheduler_ingress_error("error", "load_failed");
                 task_manager.record_module_dag_cutover_failure(&module_name);
                 return Some(ProcessorResult::RetryableFailure(
-                    RetryPolicy::default().with_reason(format!("scheduler error load failed: {err}")),
+                    RetryPolicy::default()
+                        .with_reason(format!("scheduler error load failed: {err}")),
                 ));
             }
         };
@@ -2264,14 +2293,16 @@ impl UnifiedTaskIngressChain {
         let prefix_request = self.resolve_error_prefix_request(envelope, error_ctx);
 
         let runtime_input = match Self::build_scheduler_generate_runtime_input(
-            &module_id,
-            profile.as_deref(),
-            &envelope.routing,
-            &module_name,
-            node_id,
-            metadata,
-            login_info,
-            prefix_request,
+            SchedulerGenerateRuntimeInputRequest {
+                module_id: &module_id,
+                profile: profile.as_deref(),
+                routing: &envelope.routing,
+                module_name: &module_name,
+                node_id,
+                metadata,
+                login_info,
+                prefix_request,
+            },
         ) {
             Ok(runtime_input) => runtime_input,
             Err(err) => {
@@ -2280,9 +2311,8 @@ impl UnifiedTaskIngressChain {
                 self.record_scheduler_ingress_error("error", "runtime_input_invalid");
                 task_manager.record_module_dag_cutover_failure(&module_name);
                 return Some(ProcessorResult::RetryableFailure(
-                    RetryPolicy::default().with_reason(format!(
-                        "scheduler error runtime input invalid: {err}"
-                    )),
+                    RetryPolicy::default()
+                        .with_reason(format!("scheduler error runtime input invalid: {err}")),
                 ));
             }
         };
@@ -2331,7 +2361,8 @@ impl UnifiedTaskIngressChain {
                     self.record_scheduler_ingress_error("error", "decode_error");
                     task_manager.record_module_dag_cutover_failure(&module_name);
                     return Some(ProcessorResult::RetryableFailure(
-                        RetryPolicy::default().with_reason(format!("scheduler error output decode failed: {err}")),
+                        RetryPolicy::default()
+                            .with_reason(format!("scheduler error output decode failed: {err}")),
                     ));
                 }
             },
@@ -2352,11 +2383,12 @@ impl UnifiedTaskIngressChain {
             }
         }
 
-        counter!("mocra_scheduler_ingress_total", "path" => "error", "result" => "success").increment(1);
+        counter!("mocra_scheduler_ingress_total", "path" => "error", "result" => "success")
+            .increment(1);
         self.record_scheduler_ingress_result("error", "success");
         task_manager.record_module_dag_cutover_success(&module_name);
         Some(ProcessorResult::Success(
-            Box::pin(futures::stream::empty()) as SyncBoxStream<'static, ()>,
+            Box::pin(futures::stream::empty()) as SyncBoxStream<'static, ()>
         ))
     }
 
@@ -2370,12 +2402,9 @@ impl UnifiedTaskIngressChain {
     }
 
     fn requires_remote_dispatch_hint(hints: &[RuntimeNodeRoutingHint]) -> bool {
-        hints.iter().any(|hint| {
-            matches!(
-                hint.placement,
-                Some(NodePlacement::Remote { .. })
-            )
-        })
+        hints
+            .iter()
+            .any(|hint| matches!(hint.placement, Some(NodePlacement::Remote { .. })))
     }
 
     fn scheduler_dispatch_failed_result(
@@ -2388,9 +2417,7 @@ impl UnifiedTaskIngressChain {
         self.record_scheduler_ingress_result(path, "scheduler_error");
         self.record_scheduler_ingress_error(path, "scheduler_error");
         ProcessorResult::RetryableFailure(
-            RetryPolicy::default().with_reason(format!(
-                "scheduler {path} execution failed: {err}"
-            )),
+            RetryPolicy::default().with_reason(format!("scheduler {path} execution failed: {err}")),
         )
     }
 
@@ -2412,11 +2439,9 @@ impl UnifiedTaskIngressChain {
         path: &'static str,
         module_name: &str,
     ) -> ProcessorResult<SyncBoxStream<'static, ()>> {
-        ProcessorResult::RetryableFailure(
-            RetryPolicy::default().with_reason(format!(
-                "scheduler {path} execution failed: precompiled DAG missing for module '{module_name}'"
-            )),
-        )
+        ProcessorResult::RetryableFailure(RetryPolicy::default().with_reason(format!(
+            "scheduler {path} execution failed: precompiled DAG missing for module '{module_name}'"
+        )))
     }
 
     fn scheduler_bridge_missing_result(
@@ -2452,7 +2477,10 @@ impl UnifiedTaskIngressChain {
     ) -> Option<String> {
         parser_ctx
             .and_then(|ctx| ctx.context.node_id.clone())
-            .or_else(|| (!dispatch.dispatch.target_node.is_empty()).then(|| dispatch.dispatch.target_node.clone()))
+            .or_else(|| {
+                (!dispatch.dispatch.target_node.is_empty())
+                    .then(|| dispatch.dispatch.target_node.clone())
+            })
             .or_else(|| {
                 (!dispatch.dispatch.input.target_node.is_empty())
                     .then(|| dispatch.dispatch.input.target_node.clone())
@@ -2467,7 +2495,9 @@ impl UnifiedTaskIngressChain {
     ) -> Option<String> {
         parser_ctx
             .and_then(|ctx| ctx.modules.as_ref().and_then(|mods| mods.first().cloned()))
-            .or_else(|| (!dispatch.routing.module.is_empty()).then(|| dispatch.routing.module.clone()))
+            .or_else(|| {
+                (!dispatch.routing.module.is_empty()).then(|| dispatch.routing.module.clone())
+            })
     }
 
     /// Metadata stays on the typed context path when present.
@@ -2497,7 +2527,9 @@ impl UnifiedTaskIngressChain {
     ) -> Option<String> {
         error_ctx
             .and_then(|ctx| ctx.context.node_id.clone())
-            .or_else(|| (!envelope.routing.node_key.is_empty()).then(|| envelope.routing.node_key.clone()))
+            .or_else(|| {
+                (!envelope.routing.node_key.is_empty()).then(|| envelope.routing.node_key.clone())
+            })
     }
 
     /// Resolution order is strictly typed context -> transport envelope.
@@ -2508,7 +2540,9 @@ impl UnifiedTaskIngressChain {
     ) -> Option<String> {
         error_ctx
             .and_then(|ctx| ctx.modules.as_ref().and_then(|mods| mods.first().cloned()))
-            .or_else(|| (!envelope.routing.module.is_empty()).then(|| envelope.routing.module.clone()))
+            .or_else(|| {
+                (!envelope.routing.module.is_empty()).then(|| envelope.routing.module.clone())
+            })
     }
 
     /// Metadata stays on the typed context path when present.
@@ -2531,30 +2565,23 @@ impl UnifiedTaskIngressChain {
     }
 
     fn build_scheduler_generate_runtime_input(
-        module_id: &str,
-        profile: Option<&crate::common::model::TaskProfileSnapshot>,
-        routing: &RoutingMeta,
-        module_name: &str,
-        node_id: &str,
-        metadata: serde_json::Map<String, serde_json::Value>,
-        login_info: Option<crate::common::model::login_info::LoginInfo>,
-        prefix_request: Option<Uuid>,
+        request: SchedulerGenerateRuntimeInputRequest<'_>,
     ) -> Result<SchedulerNodeGenerateRuntimeInput> {
-        let _ = module_id;
-        let profile = profile.ok_or_else(|| {
+        let _ = request.module_id;
+        let profile = request.profile.ok_or_else(|| {
             ModuleError::Model(
                 std::io::Error::other(format!(
                     "scheduler ingress requires loaded profile for node '{}' in module '{}'",
-                    node_id, module_name
+                    request.node_id, request.module_name
                 ))
                 .into(),
             )
         })?;
-        let Some(resolved_config) = profile.resolve_node_config(node_id) else {
+        let Some(resolved_config) = profile.resolve_node_config(request.node_id) else {
             return Err(ModuleError::Model(
                 std::io::Error::other(format!(
                     "profile node config missing for scheduler ingress node '{}'",
-                    node_id
+                    request.node_id
                 ))
                 .into(),
             )
@@ -2566,15 +2593,15 @@ impl UnifiedTaskIngressChain {
             .as_millis() as i64;
         Ok(SchedulerNodeGenerateRuntimeInput {
             routing: RoutingMeta {
-                namespace: routing.namespace.clone(),
-                account: routing.account.clone(),
-                platform: routing.platform.clone(),
-                module: module_name.to_string(),
-                node_key: node_id.to_string(),
-                run_id: routing.run_id,
+                namespace: request.routing.namespace.clone(),
+                account: request.routing.account.clone(),
+                platform: request.routing.platform.clone(),
+                module: request.module_name.to_string(),
+                node_key: request.node_id.to_string(),
+                run_id: request.routing.run_id,
                 request_id: Uuid::now_v7(),
-                parent_request_id: prefix_request,
-                priority: routing.priority,
+                parent_request_id: request.prefix_request,
+                priority: request.routing.priority,
             },
             exec: ExecutionMeta {
                 profile_version: resolved_config.profile_version,
@@ -2584,15 +2611,16 @@ impl UnifiedTaskIngressChain {
             },
             config: resolved_config,
             input: NodeInput::new(
-                node_id,
+                request.node_id,
                 TypedEnvelope::new(
                     "mocra.node_input.v1",
                     1,
                     PayloadCodec::Json,
-                    serde_json::to_vec(&serde_json::Value::Object(metadata)).unwrap_or_default(),
+                    serde_json::to_vec(&serde_json::Value::Object(request.metadata))
+                        .unwrap_or_default(),
                 ),
             ),
-            login_info,
+            login_info: request.login_info,
         })
     }
 
@@ -2666,7 +2694,9 @@ impl UnifiedTaskIngressChain {
                 let config = state.config.read().await;
                 config.crawler.scheduler_ingress_cutover_gate_config()
             }
-            None => crate::common::model::config::SchedulerIngressCutoverGateConfigResolved::default(),
+            None => {
+                crate::common::model::config::SchedulerIngressCutoverGateConfigResolved::default()
+            }
         }
     }
 
@@ -2853,18 +2883,22 @@ pub async fn create_unified_task_ingress_chain(
     );
 
     UnifiedTaskIngressChain::new(task_chain, parser_chain, error_chain, ingress_namespace)
-        .with_scheduler_bridge(scheduler_task_manager, scheduler_queue_manager, scheduler_state)
+        .with_scheduler_bridge(
+            scheduler_task_manager,
+            scheduler_queue_manager,
+            scheduler_state,
+        )
 }
 
 #[cfg(test)]
 mod scheduler_ingress_tests {
-    use std::net::TcpListener;
-    use std::time::Duration;
     use std::collections::BTreeMap;
+    use std::net::TcpListener;
     use std::sync::{Arc, Mutex};
+    use std::time::Duration;
 
     use super::*;
-    use crate::cacheable::CacheService;
+    use crate::cacheable::{CacheService, CacheServiceConfig};
     use crate::common::interface::{
         ModuleNodeTrait, ModuleTrait, NodeGenerateContext, NodeParseContext, ToSyncBoxStream,
     };
@@ -2901,10 +2935,7 @@ mod scheduler_ingress_tests {
         }
     }
 
-    fn make_dispatch_envelope(
-        module: &str,
-        node_id: Option<&str>,
-    ) -> NodeDispatchEnvelope {
+    fn make_dispatch_envelope(module: &str, node_id: Option<&str>) -> NodeDispatchEnvelope {
         let routing = make_routing(module);
         let payload = TypedEnvelope::new(
             "transport.parser_dispatch",
@@ -2933,10 +2964,7 @@ mod scheduler_ingress_tests {
         envelope
     }
 
-    fn make_error_envelope(
-        module: &str,
-        node_id: Option<&str>,
-    ) -> NodeErrorEnvelope {
+    fn make_error_envelope(module: &str, node_id: Option<&str>) -> NodeErrorEnvelope {
         let routing = make_routing(module);
         let mut envelope = NodeErrorEnvelope::new(
             routing,
@@ -3006,8 +3034,8 @@ mod scheduler_ingress_tests {
         let parser_chain = Arc::new(
             EventAwareTypedChain::<NodeDispatchEnvelope, NodeDispatchEnvelope>::new(None)
                 .then::<SyncBoxStream<'static, ()>, _>(RecordingParserTerminalProcessor {
-                    seen: parser_seen,
-                }),
+                seen: parser_seen,
+            }),
         );
         let error_chain = Arc::new(
             EventAwareTypedChain::<NodeErrorEnvelope, NodeErrorEnvelope>::new(None)
@@ -3095,7 +3123,8 @@ mod scheduler_ingress_tests {
         let db = sea_orm::Database::connect("sqlite::memory:")
             .await
             .expect("in-memory sqlite should connect");
-        let profile_store = Arc::new(ProfileControlPlaneStore::open_temp("scheduler-ingress").unwrap());
+        let profile_store =
+            Arc::new(ProfileControlPlaneStore::open_temp("scheduler-ingress").unwrap());
         Arc::new(AppState {
             db: Arc::new(db),
             config: Arc::new(RwLock::new(scheduler_test_config(
@@ -3147,10 +3176,8 @@ mod scheduler_ingress_tests {
     ) -> Arc<AppState> {
         build_scheduler_test_state_with_cache_service(
             Arc::new(CacheService::new(
-                None,
-                "test:cache".to_string(),
-                Some(Duration::from_secs(60)),
-                None,
+                CacheServiceConfig::local("test:cache")
+                    .with_default_ttl(Some(Duration::from_secs(60))),
             )),
             scheduler_ingress_cutover_gate,
         )
@@ -3252,12 +3279,24 @@ mod scheduler_ingress_tests {
             "CREATE TABLE IF NOT EXISTS base.rel_account_platform (account_id INTEGER NOT NULL REFERENCES account(id) ON DELETE CASCADE, platform_id INTEGER NOT NULL REFERENCES platform(id) ON DELETE CASCADE, enabled BOOLEAN NOT NULL DEFAULT 1, config TEXT NOT NULL DEFAULT '{}', created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY (account_id, platform_id))",
             "CREATE TABLE IF NOT EXISTS base.rel_module_account (module_id INTEGER NOT NULL REFERENCES module(id) ON DELETE CASCADE, account_id INTEGER NOT NULL REFERENCES account(id) ON DELETE CASCADE, priority INTEGER NOT NULL DEFAULT 0, enabled BOOLEAN NOT NULL DEFAULT 1, config TEXT NOT NULL DEFAULT '{}', created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY (module_id, account_id))",
             "CREATE TABLE IF NOT EXISTS base.rel_module_platform (module_id INTEGER NOT NULL REFERENCES module(id) ON DELETE CASCADE, platform_id INTEGER NOT NULL REFERENCES platform(id) ON DELETE CASCADE, priority INTEGER NOT NULL DEFAULT 0, enabled BOOLEAN NOT NULL DEFAULT 1, config TEXT NOT NULL DEFAULT '{}', created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY (module_id, platform_id))",
-            &format!("INSERT OR IGNORE INTO base.module (name, version, priority, enabled) VALUES ('{module_name}', 1, 5, 1)"),
-            &format!("INSERT OR IGNORE INTO base.account (name, enabled, priority) VALUES ('{account}', 1, 5)"),
-            &format!("INSERT OR IGNORE INTO base.platform (name, description, enabled) VALUES ('{platform}', 'scheduler ingress test', 1)"),
-            &format!("INSERT OR IGNORE INTO base.rel_module_account (module_id, account_id, priority, enabled) SELECT m.id, a.id, 5, 1 FROM base.module m, base.account a WHERE m.name = '{module_name}' AND a.name = '{account}'"),
-            &format!("INSERT OR IGNORE INTO base.rel_module_platform (module_id, platform_id, priority, enabled) SELECT m.id, p.id, 5, 1 FROM base.module m, base.platform p WHERE m.name = '{module_name}' AND p.name = '{platform}'"),
-            &format!("INSERT OR IGNORE INTO base.rel_account_platform (account_id, platform_id, enabled) SELECT a.id, p.id, 1 FROM base.account a, base.platform p WHERE a.name = '{account}' AND p.name = '{platform}'"),
+            &format!(
+                "INSERT OR IGNORE INTO base.module (name, version, priority, enabled) VALUES ('{module_name}', 1, 5, 1)"
+            ),
+            &format!(
+                "INSERT OR IGNORE INTO base.account (name, enabled, priority) VALUES ('{account}', 1, 5)"
+            ),
+            &format!(
+                "INSERT OR IGNORE INTO base.platform (name, description, enabled) VALUES ('{platform}', 'scheduler ingress test', 1)"
+            ),
+            &format!(
+                "INSERT OR IGNORE INTO base.rel_module_account (module_id, account_id, priority, enabled) SELECT m.id, a.id, 5, 1 FROM base.module m, base.account a WHERE m.name = '{module_name}' AND a.name = '{account}'"
+            ),
+            &format!(
+                "INSERT OR IGNORE INTO base.rel_module_platform (module_id, platform_id, priority, enabled) SELECT m.id, p.id, 5, 1 FROM base.module m, base.platform p WHERE m.name = '{module_name}' AND p.name = '{platform}'"
+            ),
+            &format!(
+                "INSERT OR IGNORE INTO base.rel_account_platform (account_id, platform_id, enabled) SELECT a.id, p.id, 1 FROM base.account a, base.platform p WHERE a.name = '{account}' AND p.name = '{platform}'"
+            ),
         ];
 
         for sql in statements {
@@ -3265,7 +3304,9 @@ mod scheduler_ingress_tests {
                 .db
                 .execute(Statement::from_string(DbBackend::Sqlite, sql.to_string()))
                 .await
-                .unwrap_or_else(|err| panic!("failed to seed scheduler ingress sqlite state: {err}; sql={sql}"));
+                .unwrap_or_else(|err| {
+                    panic!("failed to seed scheduler ingress sqlite state: {err}; sql={sql}")
+                });
         }
     }
 
@@ -3282,7 +3323,9 @@ mod scheduler_ingress_tests {
         .await;
         seed_scheduler_task_factory_state(&state, "fast_path_mod", "acc", "plt").await;
         let task_manager = Arc::new(TaskManager::new(state.clone()));
-        task_manager.add_module(Arc::new(FastPathSuccessModule)).await;
+        task_manager
+            .add_module(Arc::new(FastPathSuccessModule))
+            .await;
         let queue_manager = Arc::new(QueueManager::new(None, 16));
         (
             chain.with_scheduler_bridge(task_manager.clone(), queue_manager.clone(), state),
@@ -3308,7 +3351,9 @@ mod scheduler_ingress_tests {
         .await;
         seed_scheduler_task_factory_state(&state, "fast_path_mod", "acc", "plt").await;
         let task_manager = Arc::new(TaskManager::new(state.clone()));
-        task_manager.add_module(Arc::new(FastPathSuccessModule)).await;
+        task_manager
+            .add_module(Arc::new(FastPathSuccessModule))
+            .await;
         let queue_manager = Arc::new(QueueManager::new(None, 16));
         (
             chain.with_scheduler_bridge(task_manager.clone(), queue_manager.clone(), state),
@@ -3320,15 +3365,18 @@ mod scheduler_ingress_tests {
     #[test]
     fn scheduler_generate_runtime_input_prefers_profile_node_config() {
         let routing = make_routing("catalog");
+        let profile = make_profile("catalog", "step_0", 17);
         let runtime_input = UnifiedTaskIngressChain::build_scheduler_generate_runtime_input(
-            "acc-plt-catalog",
-            Some(&make_profile("catalog", "step_0", 17)),
-            &routing,
-            "catalog",
-            "step_0",
-            Default::default(),
-            None,
-            None,
+            SchedulerGenerateRuntimeInputRequest {
+                module_id: "acc-plt-catalog",
+                profile: Some(&profile),
+                routing: &routing,
+                module_name: "catalog",
+                node_id: "step_0",
+                metadata: Default::default(),
+                login_info: None,
+                prefix_request: None,
+            },
         )
         .expect("typed scheduler runtime input should build");
 
@@ -3336,7 +3384,10 @@ mod scheduler_ingress_tests {
         assert_eq!(runtime_input.routing.module, "catalog");
         assert_eq!(runtime_input.routing.node_key, "step_0");
         assert_eq!(runtime_input.config.profile_version, 17);
-        assert_eq!(runtime_input.config.node_config.schema_id, "typed.node_config");
+        assert_eq!(
+            runtime_input.config.node_config.schema_id,
+            "typed.node_config"
+        );
         assert_eq!(runtime_input.exec.profile_version, 17);
     }
 
@@ -3344,14 +3395,16 @@ mod scheduler_ingress_tests {
     fn scheduler_generate_runtime_input_errors_when_profile_missing() {
         let routing = make_routing("catalog");
         let err = UnifiedTaskIngressChain::build_scheduler_generate_runtime_input(
-            "acc-plt-catalog",
-            None,
-            &routing,
-            "catalog",
-            "step_0",
-            Default::default(),
-            None,
-            None,
+            SchedulerGenerateRuntimeInputRequest {
+                module_id: "acc-plt-catalog",
+                profile: None,
+                routing: &routing,
+                module_name: "catalog",
+                node_id: "step_0",
+                metadata: Default::default(),
+                login_info: None,
+                prefix_request: None,
+            },
         )
         .expect_err("missing scheduler ingress profile should fail closed");
 
@@ -3365,15 +3418,18 @@ mod scheduler_ingress_tests {
     #[test]
     fn scheduler_generate_runtime_input_errors_when_profile_node_config_missing() {
         let routing = make_routing("catalog");
+        let profile = make_profile("catalog", "other", 17);
         let err = UnifiedTaskIngressChain::build_scheduler_generate_runtime_input(
-            "acc-plt-catalog",
-            Some(&make_profile("catalog", "other", 17)),
-            &routing,
-            "catalog",
-            "step_0",
-            Default::default(),
-            None,
-            None,
+            SchedulerGenerateRuntimeInputRequest {
+                module_id: "acc-plt-catalog",
+                profile: Some(&profile),
+                routing: &routing,
+                module_name: "catalog",
+                node_id: "step_0",
+                metadata: Default::default(),
+                login_info: None,
+                prefix_request: None,
+            },
         )
         .expect_err("missing profile node config should fail closed");
 
@@ -3405,12 +3461,24 @@ mod scheduler_ingress_tests {
     }
 
     #[async_trait]
-    impl<T: Send + Sync + Clone + 'static> EventProcessorTrait<T, SyncBoxStream<'static, ()>> for StubTerminalProcessor {
-        fn pre_status(&self, _: &T) -> Option<EventEnvelope> { None }
-        fn finish_status(&self, _: &T, _: &SyncBoxStream<'static, ()>) -> Option<EventEnvelope> { None }
-        fn working_status(&self, _: &T) -> Option<EventEnvelope> { None }
-        fn error_status(&self, _: &T, _: &Error) -> Option<EventEnvelope> { None }
-        fn retry_status(&self, _: &T, _: &RetryPolicy) -> Option<EventEnvelope> { None }
+    impl<T: Send + Sync + Clone + 'static> EventProcessorTrait<T, SyncBoxStream<'static, ()>>
+        for StubTerminalProcessor
+    {
+        fn pre_status(&self, _: &T) -> Option<EventEnvelope> {
+            None
+        }
+        fn finish_status(&self, _: &T, _: &SyncBoxStream<'static, ()>) -> Option<EventEnvelope> {
+            None
+        }
+        fn working_status(&self, _: &T) -> Option<EventEnvelope> {
+            None
+        }
+        fn error_status(&self, _: &T, _: &Error) -> Option<EventEnvelope> {
+            None
+        }
+        fn retry_status(&self, _: &T, _: &RetryPolicy) -> Option<EventEnvelope> {
+            None
+        }
     }
 
     struct RecordingParserTerminalProcessor {
@@ -3430,7 +3498,10 @@ mod scheduler_ingress_tests {
             input: NodeDispatchEnvelope,
             _context: ProcessorContext,
         ) -> ProcessorResult<SyncBoxStream<'static, ()>> {
-            self.seen.lock().expect("parser recorder mutex poisoned").push(input);
+            self.seen
+                .lock()
+                .expect("parser recorder mutex poisoned")
+                .push(input);
             ProcessorResult::Success(Box::pin(futures::stream::empty()))
         }
     }
@@ -3439,7 +3510,9 @@ mod scheduler_ingress_tests {
     impl EventProcessorTrait<NodeDispatchEnvelope, SyncBoxStream<'static, ()>>
         for RecordingParserTerminalProcessor
     {
-        fn pre_status(&self, _: &NodeDispatchEnvelope) -> Option<EventEnvelope> { None }
+        fn pre_status(&self, _: &NodeDispatchEnvelope) -> Option<EventEnvelope> {
+            None
+        }
         fn finish_status(
             &self,
             _: &NodeDispatchEnvelope,
@@ -3447,15 +3520,13 @@ mod scheduler_ingress_tests {
         ) -> Option<EventEnvelope> {
             None
         }
-        fn working_status(&self, _: &NodeDispatchEnvelope) -> Option<EventEnvelope> { None }
+        fn working_status(&self, _: &NodeDispatchEnvelope) -> Option<EventEnvelope> {
+            None
+        }
         fn error_status(&self, _: &NodeDispatchEnvelope, _: &Error) -> Option<EventEnvelope> {
             None
         }
-        fn retry_status(
-            &self,
-            _: &NodeDispatchEnvelope,
-            _: &RetryPolicy,
-        ) -> Option<EventEnvelope> {
+        fn retry_status(&self, _: &NodeDispatchEnvelope, _: &RetryPolicy) -> Option<EventEnvelope> {
             None
         }
     }
@@ -3477,7 +3548,10 @@ mod scheduler_ingress_tests {
             input: NodeErrorEnvelope,
             _context: ProcessorContext,
         ) -> ProcessorResult<SyncBoxStream<'static, ()>> {
-            self.seen.lock().expect("error recorder mutex poisoned").push(input);
+            self.seen
+                .lock()
+                .expect("error recorder mutex poisoned")
+                .push(input);
             ProcessorResult::Success(Box::pin(futures::stream::empty()))
         }
     }
@@ -3486,7 +3560,9 @@ mod scheduler_ingress_tests {
     impl EventProcessorTrait<NodeErrorEnvelope, SyncBoxStream<'static, ()>>
         for RecordingErrorTerminalProcessor
     {
-        fn pre_status(&self, _: &NodeErrorEnvelope) -> Option<EventEnvelope> { None }
+        fn pre_status(&self, _: &NodeErrorEnvelope) -> Option<EventEnvelope> {
+            None
+        }
         fn finish_status(
             &self,
             _: &NodeErrorEnvelope,
@@ -3494,15 +3570,13 @@ mod scheduler_ingress_tests {
         ) -> Option<EventEnvelope> {
             None
         }
-        fn working_status(&self, _: &NodeErrorEnvelope) -> Option<EventEnvelope> { None }
+        fn working_status(&self, _: &NodeErrorEnvelope) -> Option<EventEnvelope> {
+            None
+        }
         fn error_status(&self, _: &NodeErrorEnvelope, _: &Error) -> Option<EventEnvelope> {
             None
         }
-        fn retry_status(
-            &self,
-            _: &NodeErrorEnvelope,
-            _: &RetryPolicy,
-        ) -> Option<EventEnvelope> {
+        fn retry_status(&self, _: &NodeErrorEnvelope, _: &RetryPolicy) -> Option<EventEnvelope> {
             None
         }
     }
@@ -3653,7 +3727,8 @@ mod scheduler_ingress_tests {
     }
 
     #[tokio::test]
-    async fn parser_dispatch_with_attached_bridge_remote_hint_dispatcher_backend_failure_is_retryable_and_fail_closed() {
+    async fn parser_dispatch_with_attached_bridge_remote_hint_dispatcher_backend_failure_is_retryable_and_fail_closed()
+     {
         let parser_seen = Arc::new(Mutex::new(Vec::new()));
         let error_seen = Arc::new(Mutex::new(Vec::new()));
         let (chain, _task_manager, queue_manager) =
@@ -3688,16 +3763,19 @@ mod scheduler_ingress_tests {
 
         assert!(parser_seen.lock().unwrap().is_empty());
         assert!(error_seen.lock().unwrap().is_empty());
-        assert!(queue_manager
-            .get_request_pop_channel()
-            .lock()
-            .await
-            .try_recv()
-            .is_err());
+        assert!(
+            queue_manager
+                .get_request_pop_channel()
+                .lock()
+                .await
+                .try_recv()
+                .is_err()
+        );
     }
 
     #[tokio::test]
-    async fn error_envelope_with_attached_bridge_remote_hint_dispatcher_backend_failure_is_retryable_and_fail_closed() {
+    async fn error_envelope_with_attached_bridge_remote_hint_dispatcher_backend_failure_is_retryable_and_fail_closed()
+     {
         let parser_seen = Arc::new(Mutex::new(Vec::new()));
         let error_seen = Arc::new(Mutex::new(Vec::new()));
         let (chain, _task_manager, queue_manager) =
@@ -3732,12 +3810,14 @@ mod scheduler_ingress_tests {
 
         assert!(parser_seen.lock().unwrap().is_empty());
         assert!(error_seen.lock().unwrap().is_empty());
-        assert!(queue_manager
-            .get_request_pop_channel()
-            .lock()
-            .await
-            .try_recv()
-            .is_err());
+        assert!(
+            queue_manager
+                .get_request_pop_channel()
+                .lock()
+                .await
+                .try_recv()
+                .is_err()
+        );
     }
 
     #[tokio::test]
@@ -3936,15 +4016,11 @@ mod scheduler_ingress_tests {
         let dispatch = make_dispatch_envelope("transport_mod", None);
 
         assert_eq!(
-            chain
-                .resolve_parser_node_id(&dispatch, None)
-                .as_deref(),
+            chain.resolve_parser_node_id(&dispatch, None).as_deref(),
             Some("step_0")
         );
         assert_eq!(
-            chain
-                .resolve_parser_module_name(&dispatch, None)
-                .as_deref(),
+            chain.resolve_parser_module_name(&dispatch, None).as_deref(),
             Some("transport_mod")
         );
     }
@@ -3956,15 +4032,11 @@ mod scheduler_ingress_tests {
         dispatch.dispatch.input.payload.bytes = b"not-valid-transport-seed".to_vec();
 
         assert_eq!(
-            chain
-                .resolve_parser_node_id(&dispatch, None)
-                .as_deref(),
+            chain.resolve_parser_node_id(&dispatch, None).as_deref(),
             Some("step_0")
         );
         assert_eq!(
-            chain
-                .resolve_parser_module_name(&dispatch, None)
-                .as_deref(),
+            chain.resolve_parser_module_name(&dispatch, None).as_deref(),
             Some("transport_mod")
         );
     }
@@ -3975,15 +4047,11 @@ mod scheduler_ingress_tests {
         let envelope = make_error_envelope("transport_mod", None);
 
         assert_eq!(
-            chain
-                .resolve_error_node_id(&envelope, None)
-                .as_deref(),
+            chain.resolve_error_node_id(&envelope, None).as_deref(),
             Some("step_0")
         );
         assert_eq!(
-            chain
-                .resolve_error_module_name(&envelope, None)
-                .as_deref(),
+            chain.resolve_error_module_name(&envelope, None).as_deref(),
             Some("transport_mod")
         );
     }
@@ -3996,17 +4064,16 @@ mod scheduler_ingress_tests {
         let transport_prefix = Uuid::now_v7();
         dispatch.routing.parent_request_id = Some(transport_prefix);
         if let Some(ctx) = dispatch.parser_context.as_mut() {
-            ctx.metadata.insert("typed".to_string(), serde_json::Value::from(1));
+            ctx.metadata
+                .insert("typed".to_string(), serde_json::Value::from(1));
             ctx.prefix_request_id = Some(typed_prefix);
         }
 
         let metadata = chain
             .resolve_parser_metadata(dispatch.parser_context.as_ref())
             .expect("typed parser metadata should exist");
-        let prefix = chain.resolve_parser_prefix_request(
-            &dispatch,
-            dispatch.parser_context.as_ref(),
-        );
+        let prefix =
+            chain.resolve_parser_prefix_request(&dispatch, dispatch.parser_context.as_ref());
 
         assert_eq!(metadata.get("typed"), Some(&serde_json::Value::from(1)));
         assert_eq!(prefix, Some(typed_prefix));
@@ -4037,17 +4104,15 @@ mod scheduler_ingress_tests {
         let transport_prefix = Uuid::now_v7();
         envelope.routing.parent_request_id = Some(transport_prefix);
         if let Some(ctx) = envelope.error_context.as_mut() {
-            ctx.metadata.insert("typed".to_string(), serde_json::Value::from(1));
+            ctx.metadata
+                .insert("typed".to_string(), serde_json::Value::from(1));
             ctx.prefix_request_id = Some(typed_prefix);
         }
 
         let metadata = chain
             .resolve_error_metadata(envelope.error_context.as_ref())
             .expect("typed error metadata should exist");
-        let prefix = chain.resolve_error_prefix_request(
-            &envelope,
-            envelope.error_context.as_ref(),
-        );
+        let prefix = chain.resolve_error_prefix_request(&envelope, envelope.error_context.as_ref());
 
         assert_eq!(metadata.get("typed"), Some(&serde_json::Value::from(1)));
         assert_eq!(prefix, Some(typed_prefix));
@@ -4126,16 +4191,20 @@ mod scheduler_ingress_tests {
 
     #[test]
     fn gray_gate_blocked_fallback_does_not_count_as_stage_error() {
-        assert!(!UnifiedTaskIngressChain::scheduler_ingress_fallback_counts_as_error(
-            UnifiedTaskIngressChain::FALLBACK_GRAY_GATE_BLOCKED,
-        ));
+        assert!(
+            !UnifiedTaskIngressChain::scheduler_ingress_fallback_counts_as_error(
+                UnifiedTaskIngressChain::FALLBACK_GRAY_GATE_BLOCKED,
+            )
+        );
     }
 
     #[test]
     fn failure_gate_blocked_fallback_does_not_count_as_stage_error() {
-        assert!(!UnifiedTaskIngressChain::scheduler_ingress_fallback_counts_as_error(
-            UnifiedTaskIngressChain::FALLBACK_FAILURE_GATE_BLOCKED,
-        ));
+        assert!(
+            !UnifiedTaskIngressChain::scheduler_ingress_fallback_counts_as_error(
+                UnifiedTaskIngressChain::FALLBACK_FAILURE_GATE_BLOCKED,
+            )
+        );
     }
 
     #[test]
@@ -4163,11 +4232,7 @@ mod scheduler_ingress_tests {
     #[test]
     fn parser_task_module_not_found_is_retryable_and_fail_closed() {
         let chain = make_ingress_chain_no_bridge();
-        let result = chain.scheduler_task_module_not_found_result(
-            "parser",
-            "catalog",
-            "step_0",
-        );
+        let result = chain.scheduler_task_module_not_found_result("parser", "catalog", "step_0");
 
         match result {
             ProcessorResult::RetryableFailure(policy) => {
@@ -4176,14 +4241,8 @@ mod scheduler_ingress_tests {
                     reason.contains("scheduler parser execution failed"),
                     "unexpected reason: {reason}"
                 );
-                assert!(
-                    reason.contains("catalog"),
-                    "unexpected reason: {reason}"
-                );
-                assert!(
-                    reason.contains("step_0"),
-                    "unexpected reason: {reason}"
-                );
+                assert!(reason.contains("catalog"), "unexpected reason: {reason}");
+                assert!(reason.contains("step_0"), "unexpected reason: {reason}");
             }
             _ => panic!("expected retryable failure"),
         }
@@ -4192,11 +4251,7 @@ mod scheduler_ingress_tests {
     #[test]
     fn error_task_module_not_found_is_retryable_and_fail_closed() {
         let chain = make_ingress_chain_no_bridge();
-        let result = chain.scheduler_task_module_not_found_result(
-            "error",
-            "catalog",
-            "step_0",
-        );
+        let result = chain.scheduler_task_module_not_found_result("error", "catalog", "step_0");
 
         match result {
             ProcessorResult::RetryableFailure(policy) => {
@@ -4205,14 +4260,8 @@ mod scheduler_ingress_tests {
                     reason.contains("scheduler error execution failed"),
                     "unexpected reason: {reason}"
                 );
-                assert!(
-                    reason.contains("catalog"),
-                    "unexpected reason: {reason}"
-                );
-                assert!(
-                    reason.contains("step_0"),
-                    "unexpected reason: {reason}"
-                );
+                assert!(reason.contains("catalog"), "unexpected reason: {reason}");
+                assert!(reason.contains("step_0"), "unexpected reason: {reason}");
             }
             _ => panic!("expected retryable failure"),
         }
@@ -4234,10 +4283,7 @@ mod scheduler_ingress_tests {
                     reason.contains("precompiled DAG missing"),
                     "unexpected reason: {reason}"
                 );
-                assert!(
-                    reason.contains("catalog"),
-                    "unexpected reason: {reason}"
-                );
+                assert!(reason.contains("catalog"), "unexpected reason: {reason}");
             }
             _ => panic!("expected retryable failure"),
         }
@@ -4259,10 +4305,7 @@ mod scheduler_ingress_tests {
                     reason.contains("precompiled DAG missing"),
                     "unexpected reason: {reason}"
                 );
-                assert!(
-                    reason.contains("catalog"),
-                    "unexpected reason: {reason}"
-                );
+                assert!(reason.contains("catalog"), "unexpected reason: {reason}");
             }
             _ => panic!("expected retryable failure"),
         }
@@ -4270,20 +4313,28 @@ mod scheduler_ingress_tests {
 
     #[test]
     fn requires_remote_dispatch_hint_detects_remote_placement() {
-        let hints = vec![RuntimeNodeRoutingHint::new("node_a").with_placement(
-            crate::schedule::dag::NodePlacement::remote("wg-test"),
-        )];
-        assert!(UnifiedTaskIngressChain::requires_remote_dispatch_hint(&hints));
+        let hints = vec![
+            RuntimeNodeRoutingHint::new("node_a")
+                .with_placement(crate::schedule::dag::NodePlacement::remote("wg-test")),
+        ];
+        assert!(UnifiedTaskIngressChain::requires_remote_dispatch_hint(
+            &hints
+        ));
     }
 
     #[test]
     fn requires_remote_dispatch_hint_ignores_local_or_empty_hints() {
-        let local_hints = vec![RuntimeNodeRoutingHint::new("node_a").with_placement(
-            crate::schedule::dag::NodePlacement::local(),
-        )];
+        let local_hints = vec![
+            RuntimeNodeRoutingHint::new("node_a")
+                .with_placement(crate::schedule::dag::NodePlacement::local()),
+        ];
         let empty_hints: Vec<RuntimeNodeRoutingHint> = vec![];
 
-        assert!(!UnifiedTaskIngressChain::requires_remote_dispatch_hint(&local_hints));
-        assert!(!UnifiedTaskIngressChain::requires_remote_dispatch_hint(&empty_hints));
+        assert!(!UnifiedTaskIngressChain::requires_remote_dispatch_hint(
+            &local_hints
+        ));
+        assert!(!UnifiedTaskIngressChain::requires_remote_dispatch_hint(
+            &empty_hints
+        ));
     }
 }

@@ -130,21 +130,22 @@ mod tests {
     use super::{
         DlqActionParams, DlqParams, delete_dlq_message, get_dlq_messages, requeue_dlq_message,
     };
-    use crate::cacheable::CacheService;
-    use crate::common::model::message::TaskEvent;
+    use crate::cacheable::{CacheService, CacheServiceConfig};
     use crate::common::model::config::{
         BlobStorageConfig, CacheConfig, ChannelConfig, Config, CrawlerConfig, DatabaseConfig,
         DownloadConfig,
     };
+    use crate::common::model::message::TaskEvent;
     use crate::common::model::{
-        DeadLetterEnvelope, ExecutionMark, PayloadCodec, Priority, Request, Response,
+        DeadLetterEnvelope, DeadLetterEnvelopeConfig, ExecutionMark, PayloadCodec, Priority,
+        Request, Response,
     };
     use crate::common::state::State as AppState;
     use crate::engine::api::profile_store::ProfileControlPlaneStore;
     use crate::engine::api::state::ApiState;
     use crate::engine::task::parser_error_adapter::{
-        build_error_envelope_from_seed, build_parser_dispatch_from_seed, ErrorEnvelopeSeed,
-        ParserDispatchSeed,
+        ErrorEnvelopeSeed, ParserDispatchSeed, build_error_envelope_from_seed,
+        build_parser_dispatch_from_seed,
     };
     use crate::engine::task::request_response_adapter::{
         build_request_dispatch, build_response_dispatch,
@@ -258,11 +259,7 @@ mod tests {
                 .cloned())
         }
 
-        async fn delete_dlq(
-            &self,
-            topic: &str,
-            record_id: &str,
-        ) -> crate::errors::Result<bool> {
+        async fn delete_dlq(&self, topic: &str, record_id: &str) -> crate::errors::Result<bool> {
             self.deleted
                 .lock()
                 .unwrap()
@@ -351,22 +348,18 @@ mod tests {
             db: Arc::new(db),
             config: Arc::new(RwLock::new(sample_config())),
             cache_service: Arc::new(CacheService::new(
-                None,
-                "demo:cache".to_string(),
-                Some(Duration::from_secs(60)),
-                None,
+                CacheServiceConfig::local("demo:cache")
+                    .with_default_ttl(Some(Duration::from_secs(60))),
             )),
             cookie_service: None,
             locker: Arc::new(crate::utils::distributed_lock::DistributedLockManager::new(
-                None,
-                "demo",
+                None, "demo",
             )),
             limiter: Arc::new(
                 crate::utils::distributed_rate_limit::DistributedSlidingWindowRateLimiter::new(
                     None,
                     Arc::new(crate::utils::distributed_lock::DistributedLockManager::new(
-                        None,
-                        "demo",
+                        None, "demo",
                     )),
                     "demo",
                     crate::utils::distributed_rate_limit::RateLimitConfig {
@@ -480,26 +473,27 @@ mod tests {
         let api_state = build_api_state(backend.clone()).await;
 
         let request = Request::new("http://example.com", "GET");
-        let dispatch = build_request_dispatch(&request, "origin").expect("request dispatch should build");
+        let dispatch =
+            build_request_dispatch(&request, "origin").expect("request dispatch should build");
         let payload = queue_codec()
             .encode(&dispatch)
             .expect("dispatch payload should encode");
-        let envelope = DeadLetterEnvelope::new(
-            "demo".to_string(),
-            crate::common::model::QueueTopicKind::Request,
-            "request-normal".to_string(),
-            dispatch.get_id(),
-            "poison".to_string(),
-            0,
-            1,
-            crate::common::model::QueueEnvelope::new(
+        let envelope = DeadLetterEnvelope::new(DeadLetterEnvelopeConfig {
+            namespace: "demo".to_string(),
+            topic: crate::common::model::QueueTopicKind::Request,
+            source_topic: "request-normal".to_string(),
+            source_message_id: dispatch.get_id(),
+            reason: "poison".to_string(),
+            attempt: 0,
+            failed_at_ms: 1,
+            payload: crate::common::model::QueueEnvelope::new(
                 "queue.request",
                 1,
                 PayloadCodec::MsgPack,
                 payload,
             )
             .expect("queue envelope should build"),
-        );
+        });
         backend.records.lock().unwrap().push(DlqRecord {
             id: "dlq-req-1".to_string(),
             payload: queue_codec()
@@ -538,22 +532,22 @@ mod tests {
         let payload = queue_codec()
             .encode(&dispatch)
             .expect("dispatch payload should encode");
-        let envelope = DeadLetterEnvelope::new(
-            "demo".to_string(),
-            crate::common::model::QueueTopicKind::Response,
-            "origin::response-normal".to_string(),
-            dispatch.get_id(),
-            "retry me".to_string(),
-            0,
-            1,
-            crate::common::model::QueueEnvelope::new(
+        let envelope = DeadLetterEnvelope::new(DeadLetterEnvelopeConfig {
+            namespace: "demo".to_string(),
+            topic: crate::common::model::QueueTopicKind::Response,
+            source_topic: "origin::response-normal".to_string(),
+            source_message_id: dispatch.get_id(),
+            reason: "retry me".to_string(),
+            attempt: 0,
+            failed_at_ms: 1,
+            payload: crate::common::model::QueueEnvelope::new(
                 "queue.response",
                 1,
                 PayloadCodec::MsgPack,
                 payload,
             )
             .expect("queue envelope should build"),
-        );
+        });
         backend.records.lock().unwrap().push(DlqRecord {
             id: "dlq-res-1".to_string(),
             payload: queue_codec()
@@ -737,7 +731,10 @@ mod tests {
         let replayed_dispatch = queue_codec()
             .decode::<crate::common::model::NodeDispatchEnvelope>(&replays[0].2)
             .expect("replayed payload should remain a parser dispatch envelope");
-        assert_eq!(replayed_dispatch.routing.request_id, dispatch.routing.request_id);
+        assert_eq!(
+            replayed_dispatch.routing.request_id,
+            dispatch.routing.request_id
+        );
         assert_eq!(replayed_dispatch.routing.module, "catalog");
     }
 
@@ -788,7 +785,10 @@ mod tests {
         let replayed_envelope = queue_codec()
             .decode::<crate::common::model::NodeErrorEnvelope>(&replays[0].2)
             .expect("replayed payload should remain an error dispatch envelope");
-        assert_eq!(replayed_envelope.routing.request_id, envelope.routing.request_id);
+        assert_eq!(
+            replayed_envelope.routing.request_id,
+            envelope.routing.request_id
+        );
         assert_eq!(replayed_envelope.routing.module, "catalog");
         assert_eq!(replayed_envelope.error_message, "retry me");
     }
@@ -842,7 +842,10 @@ mod tests {
         let replayed_envelope = queue_codec()
             .decode::<crate::common::model::TaskDispatchEnvelope>(&replays[0].2)
             .expect("replayed payload should remain a task dispatch envelope");
-        assert_eq!(replayed_envelope.routing.request_id, envelope.routing.request_id);
+        assert_eq!(
+            replayed_envelope.routing.request_id,
+            envelope.routing.request_id
+        );
         assert_eq!(replayed_envelope.routing.module, "catalog");
     }
 
@@ -872,10 +875,12 @@ mod tests {
 
         assert_eq!(status, StatusCode::NO_CONTENT);
 
-        let deleted = backend.deleted.lock().unwrap();
-        assert_eq!(deleted.len(), 1);
-        assert_eq!(deleted[0].0, "parser_task-normal");
-        assert_eq!(deleted[0].1, "dlq-1");
+        {
+            let deleted = backend.deleted.lock().unwrap();
+            assert_eq!(deleted.len(), 1);
+            assert_eq!(deleted[0].0, "parser_task-normal");
+            assert_eq!(deleted[0].1, "dlq-1");
+        }
 
         let Json(messages) = get_dlq_messages(
             State(api_state),

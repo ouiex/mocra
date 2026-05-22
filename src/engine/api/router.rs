@@ -2,17 +2,17 @@ use crate::common::model::message::TaskEvent;
 use crate::engine::api::auth::auth_middleware;
 use crate::engine::api::config::{
     create_account, create_middleware, create_module, create_platform, create_profile,
-    delete_account, delete_middleware, delete_module, delete_platform, get_account,
-    get_middleware, get_module, get_platform, get_profile, list_accounts, list_middlewares,
-    list_modules, list_platforms, list_profiles, patch_account, patch_middleware, patch_module,
-    patch_platform, patch_profile,
+    delete_account, delete_middleware, delete_module, delete_platform, get_account, get_middleware,
+    get_module, get_platform, get_profile, list_accounts, list_middlewares, list_modules,
+    list_platforms, list_profiles, patch_account, patch_middleware, patch_module, patch_platform,
+    patch_profile,
 };
 use crate::engine::api::control::{
     get_cluster_leader, get_module_fallback_gate, get_nodes, pause_engine, resume_engine,
 };
 use crate::engine::api::debug::{
-    get_debug_cached_response, get_debug_config, get_debug_profile, get_debug_status, get_debug_status_counts,
-    list_debug_status_by_stage,
+    get_debug_cached_response, get_debug_config, get_debug_profile, get_debug_status,
+    get_debug_status_counts, list_debug_status_by_stage,
 };
 use crate::engine::api::dlq::{delete_dlq_message, get_dlq_messages, requeue_dlq_message};
 use crate::engine::api::health;
@@ -65,10 +65,15 @@ pub fn router(state: ApiState) -> Router {
             "/config/accounts/{name}",
             get(get_account).patch(patch_account).delete(delete_account),
         )
-        .route("/config/platforms", get(list_platforms).post(create_platform))
+        .route(
+            "/config/platforms",
+            get(list_platforms).post(create_platform),
+        )
         .route(
             "/config/platforms/{name}",
-            get(get_platform).patch(patch_platform).delete(delete_platform),
+            get(get_platform)
+                .patch(patch_platform)
+                .delete(delete_platform),
         )
         .route("/config/modules", get(list_modules).post(create_module))
         .route(
@@ -94,9 +99,15 @@ pub fn router(state: ApiState) -> Router {
         .route("/dlq/messages/{id}/requeue", post(requeue_dlq_message))
         .route("/dlq/messages/{id}", delete(delete_dlq_message))
         .route("/debug/status/counts", get(get_debug_status_counts))
-        .route("/debug/status/stage/{stage}", get(list_debug_status_by_stage))
+        .route(
+            "/debug/status/stage/{stage}",
+            get(list_debug_status_by_stage),
+        )
         .route("/debug/status/{task_id}", get(get_debug_status))
-        .route("/debug/cache/response/{cache_key}", get(get_debug_cached_response))
+        .route(
+            "/debug/cache/response/{cache_key}",
+            get(get_debug_cached_response),
+        )
         .route(
             "/debug/config/{account}/{platform}/{module}",
             get(get_debug_config),
@@ -107,17 +118,18 @@ pub fn router(state: ApiState) -> Router {
         )
         .route("/control/pause", post(pause_engine))
         .route("/control/resume", post(resume_engine))
-        .route("/control/fallback-gates/{module}", get(get_module_fallback_gate))
+        .route(
+            "/control/fallback-gates/{module}",
+            get(get_module_fallback_gate),
+        )
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             auth_middleware,
         ));
 
-    let rate_limited_protected_routes = protected_routes
-        .route_layer(middleware::from_fn_with_state(
-            state.clone(),
-            limit::rate_limit_middleware,
-        ));
+    let rate_limited_protected_routes = protected_routes.route_layer(
+        middleware::from_fn_with_state(state.clone(), limit::rate_limit_middleware),
+    );
 
     let public_routes = Router::new()
         .route("/metrics", get(metrics_handler))
@@ -182,13 +194,7 @@ fn record_dispatch_status(action: &str, status: StatusCode, started: Instant) {
         started.elapsed().as_secs_f64(),
     );
     if result == "error" {
-        crate::common::metrics::inc_error(
-            "control_plane",
-            "dispatch",
-            "http",
-            status.as_str(),
-            1,
-        );
+        crate::common::metrics::inc_error("control_plane", "dispatch", "http", status.as_str(), 1);
     }
 }
 use crate::engine::task::task_dispatch_adapter::build_task_dispatch;

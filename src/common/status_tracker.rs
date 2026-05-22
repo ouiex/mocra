@@ -1,5 +1,7 @@
 #![allow(unused)]
 
+use crate::common::model::{PipelineStage, StatusEntry, TaskStatus};
+use crate::engine::api::profile_store::ProfileControlPlaneStore;
 /// Multi-level error tracking used by task, module, and request workflows.
 ///
 /// Core semantics:
@@ -8,8 +10,6 @@
 /// - Success clears request-local cached state and does not rewrite historical task/module failures.
 /// - Thresholds can lead to `Skip` (request) or `Terminate` (module/task).
 use crate::errors::{Error, Result};
-use crate::engine::api::profile_store::ProfileControlPlaneStore;
-use crate::common::model::{PipelineStage, StatusEntry, TaskStatus};
 use log::warn;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -164,10 +164,7 @@ pub struct StatusTracker {
 }
 
 impl StatusTracker {
-    pub fn new(
-        config: ErrorTrackerConfig,
-        profile_store: Arc<ProfileControlPlaneStore>,
-    ) -> Self {
+    pub fn new(config: ErrorTrackerConfig, profile_store: Arc<ProfileControlPlaneStore>) -> Self {
         Self {
             config,
             profile_store,
@@ -615,13 +612,15 @@ impl StatusTracker {
     }
 
     pub async fn is_module_locker(&self, module_id: &str, ttl: u64) -> bool {
-        self.profile_store.get_module_lock(module_id).is_some_and(|locker| {
-            let now = SystemTime::now()
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .unwrap()
-                .as_secs();
-            now.saturating_sub(locker.locked_at) <= ttl
-        })
+        self.profile_store
+            .get_module_lock(module_id)
+            .is_some_and(|locker| {
+                let now = SystemTime::now()
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs();
+                now.saturating_sub(locker.locked_at) <= ttl
+            })
     }
 
     pub async fn release_module_locker(&self, module_id: &str) {
@@ -639,7 +638,6 @@ impl StatusTracker {
     ) -> Result<()> {
         let mut cached = self.cached_stats(task_id).unwrap_or_default();
         cached.is_task_terminated = self.profile_store.is_task_terminated(task_id);
-        cached.is_module_terminated = cached.is_module_terminated;
         self.cache.insert(
             task_id.to_string(),
             (cached, Instant::now() + Duration::from_secs(10)),
@@ -681,9 +679,11 @@ mod tests {
 
     #[test]
     fn test_error_stats_calculations() {
-        let mut stats = ErrorStats::default();
-        stats.total_errors = 3;
-        stats.success_count = 7;
+        let mut stats = ErrorStats {
+            total_errors: 3,
+            success_count: 7,
+            ..ErrorStats::default()
+        };
 
         assert_eq!(stats.error_rate(), 0.3);
         assert!(stats.health_score() > 0.6);
@@ -723,6 +723,9 @@ mod tests {
             store.get_status_counter("module:module-1:download:total_errors"),
             1
         );
-        assert_eq!(store.get_status_counter("task:task-1:total:total_errors"), 1);
+        assert_eq!(
+            store.get_status_counter("task:task-1:total:total_errors"),
+            1
+        );
     }
 }

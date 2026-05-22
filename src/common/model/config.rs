@@ -75,7 +75,7 @@ pub struct DownloadConfig {
 }
 
 /// Synchronization Configuration
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
 pub struct SyncConfig {
     /// Kafka configuration for synchronization
     pub kafka: Option<KafkaConfig>,
@@ -86,15 +86,6 @@ pub struct SyncConfig {
 
 fn default_sync_envelope_enabled() -> bool {
     false
-}
-
-impl Default for SyncConfig {
-    fn default() -> Self {
-        Self {
-            kafka: None,
-            envelope_enabled: false,
-        }
-    }
 }
 
 /// Explicit cache backend kind.
@@ -182,11 +173,18 @@ impl Default for SchedulerIngressCutoverGateConfigResolved {
 }
 
 impl CrawlerConfig {
-    pub fn scheduler_ingress_cutover_gate_config(&self) -> SchedulerIngressCutoverGateConfigResolved {
+    pub fn scheduler_ingress_cutover_gate_config(
+        &self,
+    ) -> SchedulerIngressCutoverGateConfigResolved {
         let mut resolved = SchedulerIngressCutoverGateConfigResolved::default();
         if let Some(cfg) = self.scheduler_ingress_cutover_gate.as_ref() {
-            resolved.failure_threshold = cfg.failure_threshold.unwrap_or(resolved.failure_threshold).max(1);
-            resolved.recovery_window_secs = cfg.recovery_window_secs.unwrap_or(resolved.recovery_window_secs);
+            resolved.failure_threshold = cfg
+                .failure_threshold
+                .unwrap_or(resolved.failure_threshold)
+                .max(1);
+            resolved.recovery_window_secs = cfg
+                .recovery_window_secs
+                .unwrap_or(resolved.recovery_window_secs);
             resolved.gray_ratio = cfg
                 .gray_ratio
                 .unwrap_or(resolved.gray_ratio)
@@ -319,7 +317,7 @@ pub struct RaftConfig {
     pub data_dir: Option<String>,
 }
 
-/// Logger Queue Configuration (Deprecated, replaced by LoggerConfig in separate file)
+// Logger Queue Configuration (Deprecated, replaced by LoggerConfig in separate file)
 // #[derive(Serialize, Deserialize, Debug, Clone)]
 // pub struct LoggerConfig {
 //     ...
@@ -536,7 +534,9 @@ mod tests {
 
         let mut without_override = config.clone();
         without_override.crawler.scheduler_ingress_cutover_gate = None;
-        let default_gate = without_override.crawler.scheduler_ingress_cutover_gate_config();
+        let default_gate = without_override
+            .crawler
+            .scheduler_ingress_cutover_gate_config();
         assert_eq!(default_gate.failure_threshold, 3);
         assert_eq!(default_gate.recovery_window_secs, 60);
         assert_eq!(default_gate.gray_ratio, 1.0);

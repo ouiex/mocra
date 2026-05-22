@@ -1,9 +1,9 @@
 use crate::common::interface::storage::{BlobStorage, Offloadable};
 use crate::common::model::config::{ChannelConfig, Config};
 use crate::common::model::{
-    DeadLetterEnvelope, NodeDispatchEnvelope, NodeErrorEnvelope, Prioritizable, Priority,
-    QueueEnvelope, QueueTopicKind, RequestDispatchEnvelope, ResponseDispatchEnvelope,
-    TaskDispatchEnvelope,
+    DeadLetterEnvelope, DeadLetterEnvelopeConfig, NodeDispatchEnvelope, NodeErrorEnvelope,
+    Prioritizable, Priority, QueueEnvelope, QueueTopicKind, RequestDispatchEnvelope,
+    ResponseDispatchEnvelope, TaskDispatchEnvelope,
 };
 use crate::common::policy::PolicyResolver;
 use crate::errors::ErrorKind;
@@ -15,7 +15,7 @@ use crate::queue::compression::{compress_payload_owned, decompress_payload};
 use crate::queue::contract::{
     LARGE_PAYLOAD_BYTES, QueueRoute, QueueRouteContract, qualify_topic_namespace,
 };
-use crate::queue::kafka::KafkaQueue;
+use crate::queue::kafka::{KafkaQueue, KafkaQueueConfig};
 use crate::queue::{HEADER_ATTEMPT, HEADER_CREATED_AT, MqBackend, NackPolicy, QueuedItem};
 use crate::utils::logger::LogModel;
 use crate::utils::storage::FileSystemBlobStorage;
@@ -103,12 +103,12 @@ impl QueueManager {
         };
 
         let mut queue_manager = if let Some(kafka_config) = &channel_config.kafka {
-            match KafkaQueue::new(
+            match KafkaQueue::new(KafkaQueueConfig {
                 kafka_config,
-                channel_config.minid_time,
+                minid_time: channel_config.minid_time,
                 namespace,
                 nack_policy,
-            ) {
+            }) {
                 Ok(kafka_queue) => {
                     info!("KafkaQueue initialized successfully");
                     QueueManager::new(Some(Arc::new(kafka_queue)), channel_config.capacity)
@@ -139,12 +139,12 @@ impl QueueManager {
             queue_manager.with_compression_threshold(threshold);
         }
 
-        if let Some(blob_config) = &channel_config.blob_storage {
-            if let Some(path) = &blob_config.path {
-                let storage = Arc::new(FileSystemBlobStorage::new(path));
-                queue_manager.with_blob_storage(storage);
-                info!("BlobStorage initialized at: {}", path);
-            }
+        if let Some(blob_config) = &channel_config.blob_storage
+            && let Some(path) = &blob_config.path
+        {
+            let storage = Arc::new(FileSystemBlobStorage::new(path));
+            queue_manager.with_blob_storage(storage);
+            info!("BlobStorage initialized at: {}", path);
         }
 
         queue_manager.install_default_compensator(channel_config, namespace);
@@ -526,36 +526,41 @@ impl QueueManager {
                         match result {
                             Ok(mut item) => {
                                 // Reload content from blob storage if necessary
-                                if let Some(storage) = storage {
-                                    if let Err(e) = item.reload(&storage).await {
-                                         error!("Failed to reload item content from storage for topic {}: {}", topic, e);
-                                         if let Err(e) = msg.nack("Blob reload failed").await {
-                                             error!("Failed to NACK message: {}", e);
-                                         }
-                                         return None;
+                                if let Some(storage) = storage
+                                    && let Err(e) = item.reload(&storage).await {
+                                        error!(
+                                            "Failed to reload item content from storage for topic {}: {}",
+                                            topic, e
+                                        );
+                                        if let Err(e) = msg.nack("Blob reload failed").await {
+                                            error!("Failed to NACK message: {}", e);
+                                        }
+                                        return None;
                                     }
-                                }
 
                                 let id = item.get_id();
-                                
-                                if let Some(comp) = compensator {
-                                     if let Err(e) = comp.add_task(&topic, &id, msg.payload.clone()).await {
+
+                                if let Some(comp) = compensator
+                                    && let Err(e) =
+                                        comp.add_task(&topic, &id, msg.payload.clone()).await
+                                    {
                                         error!(
                                             "Failed to add task to compensation queue for topic {}: {}",
                                             topic, e
                                         );
-                                     }
-                                }
-                                
+                                    }
+
                                 let msg_ack = msg.clone();
                                 let msg_nack = msg.clone();
-                
+
                                 let queued_item = QueuedItem::with_ack(
                                     item,
                                     move || Box::pin(async move { msg_ack.ack().await }),
-                                    move |reason| Box::pin(async move { msg_nack.nack(reason).await })
+                                    move |reason| {
+                                        Box::pin(async move { msg_nack.nack(reason).await })
+                                    },
                                 );
-                                
+
                                 Some((msg, queued_item))
                             }
                             Err(e) => {
@@ -582,11 +587,9 @@ impl QueueManager {
 
                 let results = join_all(tasks).await;
 
-                for res in results {
-                    if let Some((msg, item)) = res {
-                        if let Err(_e) = sender.send(item).await {
-                            let _ = msg.nack("Channel closed").await;
-                        }
+                for (msg, item) in results.into_iter().flatten() {
+                    if let Err(_e) = sender.send(item).await {
+                        let _ = msg.nack("Channel closed").await;
                     }
                 }
             }
@@ -673,7 +676,9 @@ impl QueueManager {
     pub fn get_task_pop_channel(&self) -> Arc<Mutex<Receiver<QueuedItem<TaskDispatchEnvelope>>>> {
         Arc::clone(&self.channel.task_receiver)
     }
-    pub fn get_request_pop_channel(&self) -> Arc<Mutex<Receiver<QueuedItem<RequestDispatchEnvelope>>>> {
+    pub fn get_request_pop_channel(
+        &self,
+    ) -> Arc<Mutex<Receiver<QueuedItem<RequestDispatchEnvelope>>>> {
         self.channel.download_request_receiver.clone()
     }
     pub fn get_request_push_channel(&self) -> Sender<QueuedItem<RequestDispatchEnvelope>> {
@@ -700,10 +705,7 @@ impl QueueManager {
         Some(namespace.to_string())
     }
 
-    pub fn should_use_local_response_fast_path(
-        &self,
-        dispatch: &ResponseDispatchEnvelope,
-    ) -> bool {
+    pub fn should_use_local_response_fast_path(&self, dispatch: &ResponseDispatchEnvelope) -> bool {
         self.backend.is_none() || self.response_namespace_override(dispatch).is_none()
     }
 
@@ -713,17 +715,19 @@ impl QueueManager {
     pub fn try_send_local_response(
         &self,
         item: QueuedItem<ResponseDispatchEnvelope>,
-    ) -> Result<
-        (),
-        tokio::sync::mpsc::error::TrySendError<QueuedItem<ResponseDispatchEnvelope>>,
-    > {
+    ) -> Result<(), tokio::sync::mpsc::error::TrySendError<QueuedItem<ResponseDispatchEnvelope>>>
+    {
         self.channel.remote_response_sender.try_send(item)
     }
 
-    pub fn get_response_pop_channel(&self) -> Arc<Mutex<Receiver<QueuedItem<ResponseDispatchEnvelope>>>> {
+    pub fn get_response_pop_channel(
+        &self,
+    ) -> Arc<Mutex<Receiver<QueuedItem<ResponseDispatchEnvelope>>>> {
         Arc::clone(&self.channel.remote_response_receiver)
     }
-    pub fn get_parser_task_pop_channel(&self) -> Arc<Mutex<Receiver<QueuedItem<NodeDispatchEnvelope>>>> {
+    pub fn get_parser_task_pop_channel(
+        &self,
+    ) -> Arc<Mutex<Receiver<QueuedItem<NodeDispatchEnvelope>>>> {
         self.channel.remote_parser_task_receiver.clone()
     }
     pub fn get_parser_task_push_channel(&self) -> Sender<QueuedItem<NodeDispatchEnvelope>> {
@@ -800,11 +804,11 @@ impl QueueManager {
         if let Some(storage) = &blob_storage {
             // We iterate mutably to potentially modify items (offload content)
             for item in &mut items {
-                if item.inner.should_offload(LARGE_PAYLOAD_BYTES) {
-                    if let Err(e) = item.inner.offload(storage).await {
-                        error!("Failed to offload item payload to blob storage: {}", e);
-                        // Continue, hoping it might still pass or fail later
-                    }
+                if item.inner.should_offload(LARGE_PAYLOAD_BYTES)
+                    && let Err(e) = item.inner.offload(storage).await
+                {
+                    error!("Failed to offload item payload to blob storage: {}", e);
+                    // Continue, hoping it might still pass or fail later
                 }
             }
         }
@@ -842,7 +846,10 @@ impl QueueManager {
 
         let mut groups: HashMap<(Priority, Option<String>), Vec<QueuedItem<T>>> = HashMap::new();
         for item in items {
-            let route_key = (item.get_priority(), item.namespace_override().map(str::to_owned));
+            let route_key = (
+                item.get_priority(),
+                item.namespace_override().map(str::to_owned),
+            );
             groups.entry(route_key).or_default().push(item);
         }
 
@@ -981,7 +988,8 @@ impl QueueManager {
             let payload = queue_codec()
                 .encode(item)
                 .map_err(|e| crate::errors::error::QueueError::OperationFailed(Box::new(e)))?;
-            let envelope = self.build_dead_letter_envelope(topic, &item.get_id(), payload, reason, 0)?;
+            let envelope =
+                self.build_dead_letter_envelope(topic, &item.get_id(), payload, reason, 0)?;
             let dlq_payload = queue_codec()
                 .encode(&envelope)
                 .map_err(|e| crate::errors::error::QueueError::OperationFailed(Box::new(e)))?;
@@ -1094,19 +1102,17 @@ impl QueueManager {
         )
         .map_err(|e| crate::errors::Error::new(crate::errors::ErrorKind::Queue, Some(e)))?;
 
-        Ok(
-            DeadLetterEnvelope::new(
-                self.namespace.clone(),
-                topic_kind,
-                topic.to_string(),
-                source_message_id.to_string(),
-                reason.to_string(),
-                attempt,
-                Self::current_time_ms(),
-                payload,
-            )
-            .with_headers(Self::headers_for_attempt(attempt)),
-        )
+        Ok(DeadLetterEnvelope::new(DeadLetterEnvelopeConfig {
+            namespace: self.namespace.clone(),
+            topic: topic_kind,
+            source_topic: topic.to_string(),
+            source_message_id: source_message_id.to_string(),
+            reason: reason.to_string(),
+            attempt,
+            failed_at_ms: Self::current_time_ms(),
+            payload,
+        })
+        .with_headers(Self::headers_for_attempt(attempt)))
     }
 
     async fn read_dlq_record(

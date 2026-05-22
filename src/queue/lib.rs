@@ -1,9 +1,9 @@
 pub mod batcher;
 pub mod channel;
 pub mod codec;
-pub mod contract;
 pub mod compensation;
 pub mod compression;
+pub mod contract;
 pub mod kafka;
 pub mod manager;
 
@@ -51,7 +51,7 @@ pub struct DlqRecord {
     pub attempt: Option<u32>,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct NackPolicy {
     pub max_retries: u32,
     pub backoff_ms: u64,
@@ -61,15 +61,6 @@ pub struct NackPolicy {
 pub enum NackDisposition {
     Retry { next_attempt: u32 },
     Dlq,
-}
-
-impl Default for NackPolicy {
-    fn default() -> Self {
-        Self {
-            max_retries: 0,
-            backoff_ms: 0,
-        }
-    }
 }
 
 pub(crate) fn parse_attempt(headers: &HashMap<String, String>) -> u32 {
@@ -267,18 +258,22 @@ pub trait MqBackend: Send + Sync {
     /// Read a single DLQ record by backend record id.
     async fn read_dlq_record(&self, topic: &str, record_id: &str) -> Result<Option<DlqRecord>> {
         let _ = (topic, record_id);
-        Err(crate::errors::error::QueueError::OperationFailed(Box::new(io::Error::other(
-            "DLQ record inspection is not supported by this backend",
-        )))
-        .into())
+        Err(
+            crate::errors::error::QueueError::OperationFailed(Box::new(io::Error::other(
+                "DLQ record inspection is not supported by this backend",
+            )))
+            .into(),
+        )
     }
 
     /// Delete a single DLQ record by backend record id.
     async fn delete_dlq(&self, topic: &str, record_id: &str) -> Result<bool> {
         let _ = (topic, record_id);
-        Err(crate::errors::error::QueueError::OperationFailed(Box::new(io::Error::other(
-            "DLQ record deletion is not supported by this backend",
-        )))
-        .into())
+        Err(
+            crate::errors::error::QueueError::OperationFailed(Box::new(io::Error::other(
+                "DLQ record deletion is not supported by this backend",
+            )))
+            .into(),
+        )
     }
 }

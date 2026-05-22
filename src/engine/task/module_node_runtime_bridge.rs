@@ -1,16 +1,17 @@
 use crate::common::interface::module::NodeGenerateContext;
 use crate::common::interface::module::NodeParseContext;
-use crate::common::model::login_info::LoginInfo;
 #[cfg(test)]
 use crate::common::model::ModuleConfig;
+use crate::common::model::login_info::LoginInfo;
 use crate::common::model::{
-    data::{DataEvent, DataFrameStore, DataType, DataframeStoreData, FileStore, StoreContext},
     ExecutionMeta, NodeDispatch, NodeInput, NodeParseOutput, ParsedData, Request,
     ResolvedNodeConfig, Response, RoutingMeta,
+    data::{DataEvent, DataFrameStore, DataType, DataframeStoreData, FileStore, StoreContext},
 };
 #[cfg(test)]
 use crate::engine::task::node_context_adapter::{
-    build_module_config_generate_context, build_module_config_parse_context,
+    ModuleConfigGenerateContextInput, build_module_config_generate_context,
+    build_module_config_parse_context,
 };
 use crate::schedule::dag::{DagError, TaskPayload};
 use serde::{Deserialize, Serialize};
@@ -29,15 +30,8 @@ const REQUEST_BATCH_SCHEMA_ID: &str = "mocra.scheduler.request_batch";
 const RUNTIME_BRIDGE_SCHEMA_VERSION: &str = "1";
 
 fn has_runtime_bridge_schema(payload: &TaskPayload, expected_schema: &str) -> bool {
-    payload
-        .metadata
-        .get("schema")
-        .map(String::as_str)
-        == Some(expected_schema)
-        && payload
-            .metadata
-            .get("version")
-            .map(String::as_str)
+    payload.metadata.get("schema").map(String::as_str) == Some(expected_schema)
+        && payload.metadata.get("version").map(String::as_str)
             == Some(RUNTIME_BRIDGE_SCHEMA_VERSION)
 }
 
@@ -247,26 +241,31 @@ impl SchedulerNodeParserRuntimeOutput {
 }
 
 #[cfg(test)]
+pub(crate) struct ModuleConfigGenerateRuntimeInput<'a> {
+    pub(crate) module_id: &'a str,
+    pub(crate) run_id: Uuid,
+    pub(crate) node_key: &'a str,
+    pub(crate) base_common: crate::common::model::ResolvedCommonConfig,
+    pub(crate) config: &'a ModuleConfig,
+    pub(crate) params: Map<String, Value>,
+    pub(crate) login_info: Option<LoginInfo>,
+    pub(crate) parent_request_id: Option<Uuid>,
+}
+
+#[cfg(test)]
 pub(crate) fn build_module_config_generate_runtime_input(
-    module_id: &str,
-    run_id: Uuid,
-    node_key: &str,
-    base_common: crate::common::model::ResolvedCommonConfig,
-    config: &ModuleConfig,
-    params: Map<String, Value>,
-    login_info: Option<LoginInfo>,
-    parent_request_id: Option<Uuid>,
+    input: ModuleConfigGenerateRuntimeInput<'_>,
 ) -> SchedulerNodeGenerateRuntimeInput {
-    let context = build_module_config_generate_context(
-        module_id,
-        run_id,
-        node_key,
-        base_common,
-        config,
-        params,
-        login_info,
-        parent_request_id,
-    );
+    let context = build_module_config_generate_context(ModuleConfigGenerateContextInput {
+        module_id: input.module_id,
+        run_id: input.run_id,
+        node_key: input.node_key,
+        base_common: input.base_common,
+        config: input.config,
+        params: input.params,
+        login_info: input.login_info,
+        parent_request_id: input.parent_request_id,
+    });
 
     SchedulerNodeGenerateRuntimeInput {
         routing: context.routing,
@@ -285,13 +284,8 @@ pub(crate) fn build_module_config_parse_runtime_input(
     config: Option<&ModuleConfig>,
     response: &Response,
 ) -> SchedulerNodeParserRuntimeInput {
-    let context = build_module_config_parse_context(
-        module_id,
-        node_key,
-        base_common,
-        config,
-        response,
-    );
+    let context =
+        build_module_config_parse_context(module_id, node_key, base_common, config, response);
 
     SchedulerNodeParserRuntimeInput {
         routing: context.routing,
@@ -305,8 +299,9 @@ pub(crate) fn build_module_config_parse_runtime_input(
 pub(crate) fn encode_generate_runtime_input(
     input: &SchedulerNodeGenerateRuntimeInput,
 ) -> Result<TaskPayload, DagError> {
-    let bytes = serde_json::to_vec(input)
-        .map_err(|e| DagError::InvalidPayloadEnvelope(format!("encode generate runtime input: {e}")))?;
+    let bytes = serde_json::to_vec(input).map_err(|e| {
+        DagError::InvalidPayloadEnvelope(format!("encode generate runtime input: {e}"))
+    })?;
     Ok(TaskPayload::from_bytes(bytes)
         .with_content_type(GENERATE_INPUT_CONTENT_TYPE)
         .with_meta("schema", GENERATE_INPUT_SCHEMA_ID)
@@ -316,17 +311,23 @@ pub(crate) fn encode_generate_runtime_input(
 pub(crate) fn decode_generate_runtime_input(
     payload: &TaskPayload,
 ) -> Result<SchedulerNodeGenerateRuntimeInput, DagError> {
-    validate_runtime_bridge_payload(payload, GENERATE_INPUT_CONTENT_TYPE, GENERATE_INPUT_SCHEMA_ID)?;
+    validate_runtime_bridge_payload(
+        payload,
+        GENERATE_INPUT_CONTENT_TYPE,
+        GENERATE_INPUT_SCHEMA_ID,
+    )?;
 
-    serde_json::from_slice(&payload.bytes)
-        .map_err(|e| DagError::InvalidPayloadEnvelope(format!("decode generate runtime input: {e}")))
+    serde_json::from_slice(&payload.bytes).map_err(|e| {
+        DagError::InvalidPayloadEnvelope(format!("decode generate runtime input: {e}"))
+    })
 }
 
 pub(crate) fn encode_parser_runtime_input(
     input: &SchedulerNodeParserRuntimeInput,
 ) -> Result<TaskPayload, DagError> {
-    let bytes = serde_json::to_vec(input)
-        .map_err(|e| DagError::InvalidPayloadEnvelope(format!("encode parser runtime input: {e}")))?;
+    let bytes = serde_json::to_vec(input).map_err(|e| {
+        DagError::InvalidPayloadEnvelope(format!("encode parser runtime input: {e}"))
+    })?;
     Ok(TaskPayload::from_bytes(bytes)
         .with_content_type(PARSER_INPUT_CONTENT_TYPE)
         .with_meta("schema", PARSER_INPUT_SCHEMA_ID)
@@ -383,7 +384,9 @@ pub(crate) fn encode_request_batch_payload(requests: &[Request]) -> Result<TaskP
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
-pub(crate) fn decode_request_batch_payload(payload: &TaskPayload) -> Result<Vec<Request>, DagError> {
+pub(crate) fn decode_request_batch_payload(
+    payload: &TaskPayload,
+) -> Result<Vec<Request>, DagError> {
     validate_runtime_bridge_payload(payload, REQUEST_BATCH_CONTENT_TYPE, REQUEST_BATCH_SCHEMA_ID)?;
 
     serde_json::from_slice(&payload.bytes)
@@ -393,20 +396,19 @@ pub(crate) fn decode_request_batch_payload(payload: &TaskPayload) -> Result<Vec<
 #[cfg(test)]
 mod tests {
     use super::{
-        SchedulerNodeGenerateRuntimeInput, SchedulerNodeParserRuntimeInput,
-        build_module_config_generate_runtime_input,
-        build_module_config_parse_runtime_input,
-        decode_generate_runtime_input, decode_parser_output_payload, decode_parser_runtime_input,
-        decode_request_batch_payload, encode_generate_runtime_input,
-        encode_parser_output_payload, encode_parser_runtime_input, encode_request_batch_payload,
-        is_generate_runtime_input, is_parser_runtime_input,
+        ModuleConfigGenerateRuntimeInput, SchedulerNodeGenerateRuntimeInput,
+        SchedulerNodeParserRuntimeInput, build_module_config_generate_runtime_input,
+        build_module_config_parse_runtime_input, decode_generate_runtime_input,
+        decode_parser_output_payload, decode_parser_runtime_input, decode_request_batch_payload,
+        encode_generate_runtime_input, encode_parser_output_payload, encode_parser_runtime_input,
+        encode_request_batch_payload, is_generate_runtime_input, is_parser_runtime_input,
     };
     use crate::common::model::ModuleConfig;
     use crate::common::model::{
-        data::{DataType, FileStore, StoreContext},
         ExecutionMark, ExecutionMeta, NodeDispatch, NodeInput, NodeParseOutput, PayloadCodec,
         Priority, Request, ResolvedCommonConfig, ResolvedNodeConfig, Response, RoutingMeta,
         TypedEnvelope,
+        data::{DataType, FileStore, StoreContext},
     };
     use serde_json::Map;
     use uuid::Uuid;
@@ -605,7 +607,10 @@ mod tests {
         assert_eq!(decoded.next[0].target_node, "detail");
         assert_eq!(decoded.data.len(), 1);
         assert_eq!(decoded.data[0].module, "catalog");
-        assert_eq!(decoded.data[0].data_middleware, vec!["object_store".to_string()]);
+        assert_eq!(
+            decoded.data[0].data_middleware,
+            vec!["object_store".to_string()]
+        );
         match &decoded.data[0].data {
             DataType::File(store) => {
                 assert_eq!(store.file_name, "detail.json");
@@ -641,16 +646,16 @@ mod tests {
 
     #[test]
     fn build_module_config_generate_runtime_input_matches_context_shape() {
-        let input = build_module_config_generate_runtime_input(
-            "account-a-platform-x-catalog",
-            Uuid::now_v7(),
-            "detail",
-            crate::common::model::ResolvedCommonConfig::default(),
-            &ModuleConfig::default(),
-            Map::new(),
-            None,
-            None,
-        );
+        let input = build_module_config_generate_runtime_input(ModuleConfigGenerateRuntimeInput {
+            module_id: "account-a-platform-x-catalog",
+            run_id: Uuid::now_v7(),
+            node_key: "detail",
+            base_common: crate::common::model::ResolvedCommonConfig::default(),
+            config: &ModuleConfig::default(),
+            params: Map::new(),
+            login_info: None,
+            parent_request_id: None,
+        });
 
         assert_eq!(input.routing.account, "account");
         assert_eq!(input.routing.platform, "a");

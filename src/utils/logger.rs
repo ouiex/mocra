@@ -513,15 +513,16 @@ impl LoggerConfig {
     }
 
     pub fn for_app(namespace: &str) -> Self {
-        let mut config = Self::default();
-        config.outputs = vec![
-            LogOutputConfig::Console {},
-            LogOutputConfig::File {
-                path: PathBuf::from("logs").join(format!("mocra.{namespace}.log")),
-                rotation: Some("daily".to_string()),
-            },
-        ];
-        config
+        Self {
+            outputs: vec![
+                LogOutputConfig::Console {},
+                LogOutputConfig::File {
+                    path: PathBuf::from("logs").join(format!("mocra.{namespace}.log")),
+                    rotation: Some("daily".to_string()),
+                },
+            ],
+            ..Self::default()
+        }
     }
 }
 
@@ -614,7 +615,7 @@ fn build_sinks(config: &LoggerConfig) -> Result<Vec<Arc<dyn LogSink>>, LogError>
 
     for output in &config.outputs {
         match output {
-            LogOutputConfig::Console {} => {
+            LogOutputConfig::Console => {
                 sinks.push(Arc::new(ConsoleSink::new(base_level)));
             }
             LogOutputConfig::File { path, rotation } => {
@@ -631,7 +632,7 @@ fn build_sinks(config: &LoggerConfig) -> Result<Vec<Arc<dyn LogSink>>, LogError>
                     rotation,
                 )?));
             }
-            LogOutputConfig::Mq {} => {
+            LogOutputConfig::Mq => {
                 sinks.push(Arc::new(DynamicMqSink::new(base_level)));
             }
         }
@@ -669,7 +670,7 @@ fn build_allowlist_filter(level: &str) -> String {
 
 fn base_level_from_filter(level: &str) -> Option<Level> {
     let candidate = level
-        .split(|ch| ch == ',' || ch == ';')
+        .split([',', ';'])
         .next()
         .map(|value| value.trim())
         .filter(|value| !value.is_empty())?;

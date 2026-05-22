@@ -10,8 +10,8 @@ pub mod module_node_runtime_bridge;
 pub mod node_context_adapter;
 pub mod parser_error_adapter;
 pub mod profile_loader;
-pub mod request_response_adapter;
 pub mod repository;
+pub mod request_response_adapter;
 #[allow(clippy::module_inception)]
 pub mod task;
 pub mod task_dispatch_adapter;

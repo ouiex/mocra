@@ -40,14 +40,14 @@ pub use runtime_context::{
 };
 pub use status_entry::{StatusEntry, TaskStatus};
 pub use transport_envelope::{
-    DeadLetterEnvelope, ErrorDispatchContext, NodeDispatchEnvelope, NodeErrorEnvelope,
-    ParserDispatchContext, PipelineStage, QueueEnvelope, QueueTopicKind,
+    DeadLetterEnvelope, DeadLetterEnvelopeConfig, ErrorDispatchContext, NodeDispatchEnvelope,
+    NodeErrorEnvelope, ParserDispatchContext, PipelineStage, QueueEnvelope, QueueTopicKind,
     RequestDispatchEnvelope, ResponseDispatchEnvelope, TaskDispatchEnvelope,
     TransportEnvelopeError,
 };
 pub use workflow_profile::{
-    extract_runtime_node_hint, insert_runtime_node_hint, EdgeSpec, MiddlewareBinding,
-    MiddlewareType, NodeSpec, PayloadCodec, ResolvedCommonConfig, ResolvedNodeConfig,
+    EdgeSpec, MiddlewareBinding, MiddlewareType, NodeSpec, PayloadCodec,
+    RUNTIME_NODE_HINT_METADATA_KEY, ResolvedCommonConfig, ResolvedNodeConfig,
     RuntimeNodeRoutingHint, TaskProfileSnapshot, TypedEnvelope, WorkflowDefinition,
-    WorkflowDefinitionError, RUNTIME_NODE_HINT_METADATA_KEY,
+    WorkflowDefinitionError, extract_runtime_node_hint, insert_runtime_node_hint,
 };

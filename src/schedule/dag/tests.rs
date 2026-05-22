@@ -156,7 +156,10 @@ impl DagRunStateStore for InMemoryRunStateStore {
     }
 
     async fn load_state(&self, run_key: &str) -> Result<Option<DagRunState>, DagError> {
-        Ok(self.snapshots.get(run_key).map(|state| state.value().clone()))
+        Ok(self
+            .snapshots
+            .get(run_key)
+            .map(|state| state.value().clone()))
     }
 
     async fn save_state(&self, run_key: &str, state: &DagRunState) -> Result<(), DagError> {
@@ -292,7 +295,7 @@ fn add_node_rewires_terminal_edge_to_end() {
         .unwrap();
     let b = dag
         .add_node_with_id(
-            Some(&[a.clone()]),
+            Some(std::slice::from_ref(&a)),
             "B",
             node(|_ctx| async move { Ok(i64_to_payload(2)) }),
         )
@@ -315,13 +318,13 @@ fn add_node_uses_pointer_flow_without_manual_id() {
         .unwrap();
     let b = dag
         .add_node(
-            Some(&[a.clone()]),
+            Some(std::slice::from_ref(&a)),
             node(|_ctx| async move { Ok(i64_to_payload(20)) }),
         )
         .unwrap();
     let c = dag
         .add_node(
-            Some(&[b.clone()]),
+            Some(std::slice::from_ref(&b)),
             node(|_ctx| async move { Ok(i64_to_payload(30)) }),
         )
         .unwrap();
@@ -407,7 +410,7 @@ async fn execute_parallel_file_lifecycle_validates_dag_node_trait_genericity() {
 
     let write = dag
         .add_node(
-            Some(&[create.clone()]),
+            Some(std::slice::from_ref(&create)),
             node({
                 let expected_content = expected_content.clone();
                 move |ctx| {
@@ -438,7 +441,7 @@ async fn execute_parallel_file_lifecycle_validates_dag_node_trait_genericity() {
 
     let read = dag
         .add_node(
-            Some(&[write.clone()]),
+            Some(std::slice::from_ref(&write)),
             node(|ctx| async move {
                 let path = ctx
                     .upstream_outputs
@@ -509,7 +512,7 @@ async fn execute_parallel_fan_in_waits_for_all_upstream() {
     let b = {
         let b_done = b_done.clone();
         dag.add_node_with_id(
-            Some(&[a.clone()]),
+            Some(std::slice::from_ref(&a)),
             "B",
             node(move |_ctx| {
                 let b_done = b_done.clone();
@@ -573,7 +576,7 @@ async fn execute_parallel_simulated_full_workflow() {
 
     let x = dag
         .add_node_with_id(
-            Some(&[source.clone()]),
+            Some(std::slice::from_ref(&source)),
             "X",
             node(|ctx| async move {
                 let source = ctx
@@ -1379,8 +1382,10 @@ async fn execute_parallel_runtime_override_retargets_dispatch_worker() {
     let dispatcher = Arc::new(DashMapWorkerDispatcher::default());
     let scheduler = DagScheduler::new(dag)
         .with_dispatcher(dispatcher.clone())
-        .with_runtime_overrides(vec![DagNodeRuntimeOverride::new("OVERRIDE_STEP")
-            .with_placement(NodePlacement::remote("wg-override"))]);
+        .with_runtime_overrides(vec![
+            DagNodeRuntimeOverride::new("OVERRIDE_STEP")
+                .with_placement(NodePlacement::remote("wg-override")),
+        ]);
 
     let report = scheduler.execute_parallel().await.unwrap();
 
@@ -1459,11 +1464,7 @@ async fn execute_parallel_runtime_override_injects_runtime_input() {
     dag.add_node_with_id(
         None,
         "RUNTIME_INPUT_STEP",
-        node(|ctx| async move {
-            Ok(ctx
-                .runtime_input
-                .expect("runtime input should be present"))
-        }),
+        node(|ctx| async move { Ok(ctx.runtime_input.expect("runtime input should be present")) }),
     )
     .unwrap();
 
@@ -1814,7 +1815,10 @@ async fn execute_parallel_resumes_from_run_state_store_snapshot() {
                 run_id: "resume-run-1".to_string(),
                 run_fencing_token: Some(123),
                 runtime_identity: std::iter::once(("profile_version".to_string(), "7".to_string()))
-                    .chain(std::iter::once(("dag_version".to_string(), "dag-v1".to_string())))
+                    .chain(std::iter::once((
+                        "dag_version".to_string(),
+                        "dag-v1".to_string(),
+                    )))
                     .collect(),
                 succeeded_outputs: std::iter::once(("RS_A".to_string(), i64_to_payload(10)))
                     .collect(),
@@ -1882,7 +1886,10 @@ async fn execute_parallel_discards_resume_snapshot_when_runtime_identity_changes
                 run_id: "resume-run-identity-1".to_string(),
                 run_fencing_token: Some(321),
                 runtime_identity: std::iter::once(("profile_version".to_string(), "7".to_string()))
-                    .chain(std::iter::once(("dag_version".to_string(), "dag-v1".to_string())))
+                    .chain(std::iter::once((
+                        "dag_version".to_string(),
+                        "dag-v1".to_string(),
+                    )))
                     .collect(),
                 succeeded_outputs: std::iter::once(("RI_A".to_string(), i64_to_payload(10)))
                     .collect(),
@@ -2050,16 +2057,17 @@ async fn execute_parallel_stop_signal_prevents_new_dispatch_and_persists_state()
 
     let scheduler_task = tokio::spawn(async move { scheduler.execute_parallel().await });
     tokio::time::sleep(Duration::from_millis(30)).await;
-    store.request_stop(
-        "stop-key-1",
-        DagStopSignal {
-            requested_by: "tester".to_string(),
-            reason: "manual stop".to_string(),
-            requested_at_ms: 1,
-        },
-    )
-    .await
-    .unwrap();
+    store
+        .request_stop(
+            "stop-key-1",
+            DagStopSignal {
+                requested_by: "tester".to_string(),
+                reason: "manual stop".to_string(),
+                requested_at_ms: 1,
+            },
+        )
+        .await
+        .unwrap();
 
     let err = scheduler_task
         .await
@@ -2078,7 +2086,10 @@ async fn execute_parallel_stop_signal_prevents_new_dispatch_and_persists_state()
     assert_eq!(state.completed_nodes, vec!["STOP_A".to_string()]);
     assert_eq!(state.ready_nodes, vec!["STOP_B".to_string()]);
     assert_eq!(
-        state.stop_signal.as_ref().map(|signal| signal.reason.as_str()),
+        state
+            .stop_signal
+            .as_ref()
+            .map(|signal| signal.reason.as_str()),
         Some("manual stop")
     );
 }

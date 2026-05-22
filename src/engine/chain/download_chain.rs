@@ -1,6 +1,6 @@
 use crate::common::interface::middleware_manager::MiddlewareManager;
-use crate::common::model::workflow_profile::TaskProfileSnapshot;
 use crate::common::model::download_config::DownloadConfig;
+use crate::common::model::workflow_profile::TaskProfileSnapshot;
 use crate::common::model::{Request, Response};
 use crate::common::processors::processor::{
     ProcessorContext, ProcessorResult, ProcessorTrait, RetryPolicy,
@@ -202,8 +202,10 @@ impl
         }
 
         info!("[DownloadProcessor] loading config: request_id={}", _req_id);
-        let download_config =
-            DownloadConfig::load_from_profile(&input.1, &self.state.config.read().await.download_config);
+        let download_config = DownloadConfig::load_from_profile(
+            &input.1,
+            &self.state.config.read().await.download_config,
+        );
         info!(
             "[DownloadProcessor] getting downloader: request_id={}",
             _req_id
@@ -357,7 +359,10 @@ impl
         (Option<Response>, Arc<TaskProfileSnapshot>),
     > for DownloadProcessor
 {
-    fn pre_status(&self, input: &(Option<Request>, Arc<TaskProfileSnapshot>)) -> Option<EventEnvelope> {
+    fn pre_status(
+        &self,
+        input: &(Option<Request>, Arc<TaskProfileSnapshot>),
+    ) -> Option<EventEnvelope> {
         match &input.0 {
             Some(request) => {
                 let ev: DownloadEvent = request.into();
@@ -511,7 +516,9 @@ impl ProcessorTrait<Option<Response>, ()> for ResponsePublishProcessor {
                 return ProcessorResult::RetryableFailure(retry_policy);
             }
         };
-        let use_local_fast_path = self.queue_manager.should_use_local_response_fast_path(&dispatch);
+        let use_local_fast_path = self
+            .queue_manager
+            .should_use_local_response_fast_path(&dispatch);
         let item = match self.queue_manager.response_namespace_override(&dispatch) {
             Some(namespace) => QueuedItem::new(dispatch).with_namespace(namespace),
             None => QueuedItem::new(dispatch),
@@ -718,7 +725,8 @@ pub struct RequestMiddlewareProcessor {
     pub(crate) middleware_manager: Arc<MiddlewareManager>,
 }
 #[async_trait]
-impl ProcessorTrait<(Request, Arc<TaskProfileSnapshot>), (Option<Request>, Arc<TaskProfileSnapshot>)>
+impl
+    ProcessorTrait<(Request, Arc<TaskProfileSnapshot>), (Option<Request>, Arc<TaskProfileSnapshot>)>
     for RequestMiddlewareProcessor
 {
     fn name(&self) -> &'static str {
@@ -743,8 +751,11 @@ impl ProcessorTrait<(Request, Arc<TaskProfileSnapshot>), (Option<Request>, Arc<T
     }
 }
 #[async_trait]
-impl EventProcessorTrait<(Request, Arc<TaskProfileSnapshot>), (Option<Request>, Arc<TaskProfileSnapshot>)>
-    for RequestMiddlewareProcessor
+impl
+    EventProcessorTrait<
+        (Request, Arc<TaskProfileSnapshot>),
+        (Option<Request>, Arc<TaskProfileSnapshot>),
+    > for RequestMiddlewareProcessor
 {
     fn pre_status(&self, input: &(Request, Arc<TaskProfileSnapshot>)) -> Option<EventEnvelope> {
         Some(EventEnvelope::engine(
@@ -1013,7 +1024,10 @@ impl EventProcessorTrait<(Request, Arc<TaskProfileSnapshot>), (Request, Arc<Task
         None
     }
 
-    fn working_status(&self, _input: &(Request, Arc<TaskProfileSnapshot>)) -> Option<EventEnvelope> {
+    fn working_status(
+        &self,
+        _input: &(Request, Arc<TaskProfileSnapshot>),
+    ) -> Option<EventEnvelope> {
         None
     }
 

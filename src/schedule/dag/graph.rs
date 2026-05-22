@@ -52,6 +52,12 @@ pub struct Dag {
     pub(crate) metadata: HashMap<String, String>,
 }
 
+impl Default for Dag {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Dag {
     pub const CONTROL_START_NODE: &'static str = "__start__";
     pub const CONTROL_END_NODE: &'static str = "__end__";
@@ -189,7 +195,7 @@ impl Dag {
 
         let preceding_ids: Vec<String> = match preceding_nodes {
             None => vec![Self::CONTROL_START_NODE.to_string()],
-            Some(list) if list.is_empty() => vec![Self::CONTROL_START_NODE.to_string()],
+            Some([]) => vec![Self::CONTROL_START_NODE.to_string()],
             Some(list) => {
                 let mut ids = Vec::with_capacity(list.len());
                 for p in list {
@@ -234,7 +240,7 @@ impl Dag {
             .get(&node_id)
             .cloned()
             .map(Arc::new)
-            .ok_or_else(|| DagError::NodeNotFound(node_id))
+            .ok_or(DagError::NodeNotFound(node_id))
     }
 
     fn connect(&mut self, from: impl AsRef<str>, to: impl AsRef<str>) -> Result<(), DagError> {
@@ -253,10 +259,10 @@ impl Dag {
             tos.push(to.clone());
         }
 
-        if let Some(node) = self.nodes.get_mut(&to) {
-            if !node.predecessors.iter().any(|p| p == &from) {
-                node.predecessors.push(from);
-            }
+        if let Some(node) = self.nodes.get_mut(&to)
+            && !node.predecessors.iter().any(|p| p == &from)
+        {
+            node.predecessors.push(from);
         }
 
         Ok(())
@@ -313,7 +319,9 @@ impl Dag {
             return Ok(());
         }
         if Self::is_control_node(&runtime_override.node_id) {
-            return Err(DagError::ReservedControlNode(runtime_override.node_id.clone()));
+            return Err(DagError::ReservedControlNode(
+                runtime_override.node_id.clone(),
+            ));
         }
 
         let record = self

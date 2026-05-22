@@ -2,12 +2,14 @@ use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
 use std::time::Duration;
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use rocksdb::{ColumnFamily, ColumnFamilyDescriptor, DB, Direction, IteratorMode, Options, WriteBatch};
-use serde::{Deserialize, Serialize};
 use log::warn;
+use rocksdb::{
+    ColumnFamily, ColumnFamilyDescriptor, DB, Direction, IteratorMode, Options, WriteBatch,
+};
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::sync::watch;
 
@@ -15,9 +17,9 @@ use crate::common::model::config::Config;
 use crate::common::model::control_plane_profile::{DefaultConfigScope, LockRecord};
 use crate::common::model::{
     ControlPlaneApply, ControlPlaneRaftCommand, DefaultConfigUpsert, MiddlewareBinding,
-    MiddlewareType, MiddlewareUpsert, PipelineStage, ProfileValidationError,
-    ResolvedCommonConfig, StatusEntry, TaskProfileIdentity, TaskProfileSnapshot, TaskProfileUpsert,
-    TaskStatus, TypedEnvelope,
+    MiddlewareType, MiddlewareUpsert, PipelineStage, ProfileValidationError, ResolvedCommonConfig,
+    StatusEntry, TaskProfileIdentity, TaskProfileSnapshot, TaskProfileUpsert, TaskStatus,
+    TypedEnvelope,
 };
 use crate::common::registry::NodeInfo;
 use crate::sync::RaftRuntime;
@@ -272,7 +274,9 @@ impl ProfileControlPlaneStore {
             .as_ref()
             .and_then(|raft| raft.data_dir.clone())
             .unwrap_or_else(|| "./raft_data".to_string());
-        let data_dir = Path::new(&base_dir).join(&config.name).join("control_plane");
+        let data_dir = Path::new(&base_dir)
+            .join(&config.name)
+            .join("control_plane");
         Self::open(config.name.clone(), data_dir)
     }
 
@@ -379,7 +383,11 @@ impl ProfileControlPlaneStore {
                     && module.is_none_or(|value| record.snapshot.module == value)
             })
             .collect();
-        records.sort_by(|left, right| left.snapshot.profile_key().cmp(&right.snapshot.profile_key()));
+        records.sort_by(|left, right| {
+            left.snapshot
+                .profile_key()
+                .cmp(&right.snapshot.profile_key())
+        });
         records
     }
 
@@ -409,7 +417,10 @@ impl ProfileControlPlaneStore {
         &self,
         upsert: TaskProfileUpsert,
     ) -> Result<TaskProfileSnapshot, ControlPlaneStoreError> {
-        let snapshot = upsert.into_snapshot(self.last_applied_index().saturating_add(1), current_time_ms())?;
+        let snapshot = upsert.into_snapshot(
+            self.last_applied_index().saturating_add(1),
+            current_time_ms(),
+        )?;
         self.submit_command(ControlPlaneRaftCommand::UpsertTaskProfile {
             snapshot: snapshot.clone(),
         })
@@ -474,14 +485,21 @@ impl ProfileControlPlaneStore {
             download_middleware: patch
                 .download_middleware
                 .unwrap_or(existing.snapshot.download_middleware),
-            data_middleware: patch.data_middleware.unwrap_or(existing.snapshot.data_middleware),
+            data_middleware: patch
+                .data_middleware
+                .unwrap_or(existing.snapshot.data_middleware),
             middleware_configs: patch
                 .middleware_configs
                 .unwrap_or(existing.snapshot.middleware_configs),
-            debug_layers_json: patch.debug_layers_json.or(existing.snapshot.debug_layers_json),
+            debug_layers_json: patch
+                .debug_layers_json
+                .or(existing.snapshot.debug_layers_json),
             updated_by: patch.updated_by.unwrap_or(existing.snapshot.updated_by),
         }
-        .into_snapshot(self.last_applied_index().saturating_add(1), current_time_ms())?;
+        .into_snapshot(
+            self.last_applied_index().saturating_add(1),
+            current_time_ms(),
+        )?;
 
         self.submit_command(ControlPlaneRaftCommand::UpsertTaskProfile {
             snapshot: snapshot.clone(),
@@ -620,10 +638,12 @@ impl ProfileControlPlaneStore {
                 previous_stage,
             })
             .await?;
-        Ok(self.get_status_entry(&entry.task_id).unwrap_or(StoredStatusEntryRecord {
-            entry,
-            version: log_index,
-        }))
+        Ok(self
+            .get_status_entry(&entry.task_id)
+            .unwrap_or(StoredStatusEntryRecord {
+                entry,
+                version: log_index,
+            }))
     }
 
     pub fn get_status_entry(&self, task_id: &str) -> Option<StoredStatusEntryRecord> {
@@ -686,8 +706,12 @@ impl ProfileControlPlaneStore {
             updated_at: current_time_ms(),
         };
         let command = match scope {
-            DefaultConfigScope::Account => ControlPlaneRaftCommand::UpsertAccountDefault { default },
-            DefaultConfigScope::Platform => ControlPlaneRaftCommand::UpsertPlatformDefault { default },
+            DefaultConfigScope::Account => {
+                ControlPlaneRaftCommand::UpsertAccountDefault { default }
+            }
+            DefaultConfigScope::Platform => {
+                ControlPlaneRaftCommand::UpsertPlatformDefault { default }
+            }
             DefaultConfigScope::Module => ControlPlaneRaftCommand::UpsertModuleDefault { default },
         };
         let log_index = self.submit_command(command).await?;
@@ -838,12 +862,11 @@ impl ProfileControlPlaneStore {
         };
         self.submit_command(ControlPlaneRaftCommand::UpsertMiddleware { middleware })
             .await?;
-        Ok(self
-            .get_middleware(
-                &record.middleware.namespace,
-                &record.middleware.name,
-                record.middleware.middleware_type,
-            ))
+        Ok(self.get_middleware(
+            &record.middleware.namespace,
+            &record.middleware.name,
+            record.middleware.middleware_type,
+        ))
     }
 
     pub async fn disable_middleware(
@@ -872,7 +895,8 @@ impl ProfileControlPlaneStore {
         middleware_type: MiddlewareType,
         names: &[String],
     ) -> BTreeMap<String, TypedEnvelope> {
-        names.iter()
+        names
+            .iter()
             .filter_map(|name| {
                 self.get_middleware(namespace, name, middleware_type)
                     .filter(|record| record.enabled)
@@ -1019,7 +1043,10 @@ impl ProfileControlPlaneStore {
                 .map_err(ControlPlaneStoreError::Raft);
         }
 
-        let _guard = self.write_lock.lock().expect("control-plane write lock poisoned");
+        let _guard = self
+            .write_lock
+            .lock()
+            .expect("control-plane write lock poisoned");
         let log_index = self.next_log_index()?;
         self.commit_command_locked(command, log_index)?;
         Ok(log_index)
@@ -1030,20 +1057,32 @@ impl ProfileControlPlaneStore {
         command: ControlPlaneRaftCommand,
         log_index: u64,
     ) -> Result<(), ControlPlaneStoreError> {
-        let _guard = self.write_lock.lock().expect("control-plane write lock poisoned");
+        let _guard = self
+            .write_lock
+            .lock()
+            .expect("control-plane write lock poisoned");
         self.commit_command_locked(command, log_index)
     }
 
     pub fn reset_replicated_state(&self) -> Result<(), ControlPlaneStoreError> {
-        let _guard = self.write_lock.lock().expect("control-plane write lock poisoned");
+        let _guard = self
+            .write_lock
+            .lock()
+            .expect("control-plane write lock poisoned");
         let mut batch = WriteBatch::default();
 
-        for entry in self.db.iterator_cf(self.cf(CF_RAFT_LOG), IteratorMode::Start) {
+        for entry in self
+            .db
+            .iterator_cf(self.cf(CF_RAFT_LOG), IteratorMode::Start)
+        {
             let (key, _) = entry?;
             batch.delete_cf(self.cf(CF_RAFT_LOG), key);
         }
 
-        for entry in self.db.iterator_cf(self.cf(CF_STATE_MACHINE), IteratorMode::Start) {
+        for entry in self
+            .db
+            .iterator_cf(self.cf(CF_STATE_MACHINE), IteratorMode::Start)
+        {
             let (key, _) = entry?;
             batch.delete_cf(self.cf(CF_STATE_MACHINE), key);
         }
@@ -1062,10 +1101,12 @@ impl ProfileControlPlaneStore {
     ) -> Result<(), ControlPlaneStoreError> {
         let command_bytes = encode(&command)?;
         let apply_models = command.apply_models()?;
-        let pause_state = apply_models.iter().find_map(|apply_model| match apply_model {
-            ControlPlaneApply::SetPauseState { paused, .. } => Some(*paused),
-            _ => None,
-        });
+        let pause_state = apply_models
+            .iter()
+            .find_map(|apply_model| match apply_model {
+                ControlPlaneApply::SetPauseState { paused, .. } => Some(*paused),
+                _ => None,
+            });
         let mut batch = WriteBatch::default();
         let index_bytes = log_index.to_be_bytes();
 
@@ -1270,7 +1311,10 @@ impl ProfileControlPlaneStore {
                 );
             }
             // ── Cache backend apply ──
-            ControlPlaneApply::CacheKvUpsert { state_key, mut value } => {
+            ControlPlaneApply::CacheKvUpsert {
+                state_key,
+                mut value,
+            } => {
                 value.version = raft_index;
                 value.updated_at_ms = updated_at;
                 batch.put_cf(
@@ -1284,14 +1328,15 @@ impl ProfileControlPlaneStore {
                     })?,
                 );
             }
-            ControlPlaneApply::CacheKvUpsertNx { state_key, value, request_id } => {
+            ControlPlaneApply::CacheKvUpsertNx {
+                state_key,
+                value,
+                request_id,
+            } => {
                 let exists = self
                     .get_state::<StoredCacheEntry>(&state_key)
                     .is_some_and(|entry| !is_expired(entry.expires_at));
-                let ns = state_key
-                    .split(':')
-                    .next()
-                    .unwrap_or("default");
+                let ns = state_key.split(':').next().unwrap_or("default");
                 if exists {
                     let outcome_key = format!("{}:control:outcome:{}", ns, request_id);
                     batch.put_cf(
@@ -1362,7 +1407,12 @@ impl ProfileControlPlaneStore {
                     })?,
                 );
             }
-            ControlPlaneApply::CacheCounterIncr { state_key, delta, expires_at_ms, request_id } => {
+            ControlPlaneApply::CacheCounterIncr {
+                state_key,
+                delta,
+                expires_at_ms,
+                request_id,
+            } => {
                 let current = self
                     .get_state::<StoredCacheCounter>(&state_key)
                     .map(|c| c.value)
@@ -1378,10 +1428,7 @@ impl ProfileControlPlaneStore {
                         updated_at,
                     })?,
                 );
-                let ns = state_key
-                    .split(':')
-                    .next()
-                    .unwrap_or("default");
+                let ns = state_key.split(':').next().unwrap_or("default");
                 let outcome_key = format!("{}:control:outcome:{}", ns, request_id);
                 batch.put_cf(
                     self.cf(CF_STATE_MACHINE),
@@ -1393,7 +1440,10 @@ impl ProfileControlPlaneStore {
                     })?,
                 );
             }
-            ControlPlaneApply::CacheZSetEntryUpsert { state_key, mut entry } => {
+            ControlPlaneApply::CacheZSetEntryUpsert {
+                state_key,
+                mut entry,
+            } => {
                 entry.version = raft_index;
                 entry.updated_at_ms = updated_at;
                 // Deduplicate: remove old score entry for same member via member index
@@ -1403,15 +1453,18 @@ impl ProfileControlPlaneStore {
                     let ns = parts[0];
                     let zk = parts[3];
                     let idx_key = format!("{}:cache:zset_idx:{}:{}", ns, zk, member_hex);
-                    if let Ok(Some(raw)) = self.db.get_cf(self.cf(CF_STATE_MACHINE), idx_key.as_bytes()) {
-                        if let Some(old_score) = crate::common::model::control_plane_profile::f64_from_be_bytes(&raw) {
-                            let old_score_hex = hex::encode(crate::common::model::control_plane_profile::f64_to_be_bytes(old_score));
-                            let old_entry_key = format!(
-                                "{}:cache:zset:{}:{}:{}",
-                                ns, zk, old_score_hex, member_hex
-                            );
-                            batch.delete_cf(self.cf(CF_STATE_MACHINE), old_entry_key.as_bytes());
-                        }
+                    if let Ok(Some(raw)) = self
+                        .db
+                        .get_cf(self.cf(CF_STATE_MACHINE), idx_key.as_bytes())
+                        && let Some(old_score) =
+                            crate::common::model::control_plane_profile::f64_from_be_bytes(&raw)
+                    {
+                        let old_score_hex = hex::encode(
+                            crate::common::model::control_plane_profile::f64_to_be_bytes(old_score),
+                        );
+                        let old_entry_key =
+                            format!("{}:cache:zset:{}:{}:{}", ns, zk, old_score_hex, member_hex);
+                        batch.delete_cf(self.cf(CF_STATE_MACHINE), old_entry_key.as_bytes());
                     }
                 }
                 batch.put_cf(
@@ -1445,14 +1498,20 @@ impl ProfileControlPlaneStore {
                     if !key.starts_with(prefix_bytes) {
                         break;
                     }
-                    if let Ok(stored) = rmp_serde::from_slice::<StoredZSetEntry>(&value) {
-                        if hex::encode(&stored.member) == member_hex {
-                            batch.delete_cf(self.cf(CF_STATE_MACHINE), &key);
-                        }
+                    if let Ok(stored) = rmp_serde::from_slice::<StoredZSetEntry>(&value)
+                        && hex::encode(&stored.member) == member_hex
+                    {
+                        batch.delete_cf(self.cf(CF_STATE_MACHINE), &key);
                     }
                 }
             }
-            ControlPlaneApply::CacheZSetRangeDelete { namespace, prefix, min, max, request_id } => {
+            ControlPlaneApply::CacheZSetRangeDelete {
+                namespace,
+                prefix,
+                min,
+                max,
+                request_id,
+            } => {
                 let prefix_bytes = prefix.as_bytes();
                 let iter = self.db.iterator_cf(
                     self.cf(CF_STATE_MACHINE),
@@ -1468,11 +1527,12 @@ impl ProfileControlPlaneStore {
                     if !key.starts_with(prefix_bytes) {
                         break;
                     }
-                    if let Ok(stored) = rmp_serde::from_slice::<StoredZSetEntry>(&value) {
-                        if stored.score >= min && stored.score <= max {
-                            keys_to_delete.push(key.to_vec());
-                            member_hexes.push(hex::encode(&stored.member));
-                        }
+                    if let Ok(stored) = rmp_serde::from_slice::<StoredZSetEntry>(&value)
+                        && stored.score >= min
+                        && stored.score <= max
+                    {
+                        keys_to_delete.push(key.to_vec());
+                        member_hexes.push(hex::encode(&stored.member));
                     }
                 }
                 let count = keys_to_delete.len() as i64;
@@ -1486,10 +1546,7 @@ impl ProfileControlPlaneStore {
                     batch.delete_cf(self.cf(CF_STATE_MACHINE), idx_key.as_bytes());
                 }
                 // Write outcome with count
-                let outcome_key = format!(
-                    "{}:control:outcome:{}",
-                    namespace, request_id
-                );
+                let outcome_key = format!("{}:control:outcome:{}", namespace, request_id);
                 batch.put_cf(
                     self.cf(CF_STATE_MACHINE),
                     outcome_key.as_bytes(),
@@ -1501,7 +1558,10 @@ impl ProfileControlPlaneStore {
                 );
             }
             // ── Lock apply ──
-            ControlPlaneApply::LockUpsert { state_key, mut record } => {
+            ControlPlaneApply::LockUpsert {
+                state_key,
+                mut record,
+            } => {
                 record.version = raft_index;
                 batch.put_cf(
                     self.cf(CF_STATE_MACHINE),
@@ -1515,7 +1575,11 @@ impl ProfileControlPlaneStore {
                     })?,
                 );
             }
-            ControlPlaneApply::LockUpsertConditional { state_key, mut record, request_id } => {
+            ControlPlaneApply::LockUpsertConditional {
+                state_key,
+                mut record,
+                request_id,
+            } => {
                 let now = updated_at;
                 let existing = self.get_state::<StoredLockRecord>(&state_key);
                 let can_acquire = match existing {
@@ -1525,10 +1589,7 @@ impl ProfileControlPlaneStore {
                     }
                     _ => true, // No lock or expired — can acquire
                 };
-                let ns = state_key
-                    .split(':')
-                    .next()
-                    .unwrap_or("default");
+                let ns = state_key.split(':').next().unwrap_or("default");
                 if can_acquire {
                     record.version = raft_index;
                     batch.put_cf(
@@ -1554,16 +1615,18 @@ impl ProfileControlPlaneStore {
                     })?,
                 );
             }
-            ControlPlaneApply::LockRenewConditional { state_key, owner_token, ttl_ms, request_id } => {
+            ControlPlaneApply::LockRenewConditional {
+                state_key,
+                owner_token,
+                ttl_ms,
+                request_id,
+            } => {
                 let now = updated_at;
                 let existing = self.get_state::<StoredLockRecord>(&state_key);
                 let can_renew = existing
                     .as_ref()
                     .is_some_and(|r| r.owner_token == owner_token && r.expires_at_ms > now);
-                let ns = state_key
-                    .split(':')
-                    .next()
-                    .unwrap_or("default");
+                let ns = state_key.split(':').next().unwrap_or("default");
                 if can_renew {
                     let rec = existing.unwrap();
                     let new_expires = now.saturating_add(ttl_ms as i64);
@@ -1590,11 +1653,12 @@ impl ProfileControlPlaneStore {
                     })?,
                 );
             }
-            ControlPlaneApply::LockDelete { state_key, owner_token, request_id } => {
-                let ns = state_key
-                    .split(':')
-                    .next()
-                    .unwrap_or("default");
+            ControlPlaneApply::LockDelete {
+                state_key,
+                owner_token,
+                request_id,
+            } => {
+                let ns = state_key.split(':').next().unwrap_or("default");
                 let should_delete = self
                     .get_state::<StoredLockRecord>(&state_key)
                     .is_some_and(|r| r.owner_token == owner_token);
@@ -1780,11 +1844,7 @@ impl ProfileControlPlaneStore {
     pub fn read_cache_counter(&self, namespace: &str, key: &str) -> Option<i64> {
         let ck = Self::counter_key(namespace, key);
         self.get_state::<StoredCacheCounter>(&ck)
-            .filter(|c| {
-                c.expires_at
-                    .map(|e| e > current_time_ms())
-                    .unwrap_or(true)
-            })
+            .filter(|c| c.expires_at.map(|e| e > current_time_ms()).unwrap_or(true))
             .map(|c| c.value)
     }
 
@@ -1812,14 +1872,15 @@ impl ProfileControlPlaneStore {
             if !key_bytes.starts_with(prefix_bytes) {
                 break;
             }
-            if let Ok(stored) = rmp_serde::from_slice::<StoredZSetEntry>(&value_bytes) {
-                if stored.score >= min && stored.score <= max {
-                    results.push(stored.member);
-                    if let Some(lim) = limit {
-                        if results.len() >= lim {
-                            break;
-                        }
-                    }
+            if let Ok(stored) = rmp_serde::from_slice::<StoredZSetEntry>(&value_bytes)
+                && stored.score >= min
+                && stored.score <= max
+            {
+                results.push(stored.member);
+                if let Some(lim) = limit
+                    && results.len() >= lim
+                {
+                    break;
                 }
             }
         }
@@ -2070,7 +2131,8 @@ fn read_initial_pause_state(db: &DB, namespace: &str) -> Result<bool, ControlPla
 }
 
 fn encode<T: Serialize>(value: &T) -> Result<Vec<u8>, ControlPlaneStoreError> {
-    rmp_serde::to_vec(value).map_err(|error| ControlPlaneStoreError::Serialization(error.to_string()))
+    rmp_serde::to_vec(value)
+        .map_err(|error| ControlPlaneStoreError::Serialization(error.to_string()))
 }
 
 fn decode<T>(bytes: &[u8]) -> Result<T, ControlPlaneStoreError>
@@ -2193,7 +2255,10 @@ mod tests {
     async fn upsert_and_patch_profile_generates_new_versions() {
         let store = ProfileControlPlaneStore::open_temp("demo").expect("open temp store");
 
-        let first = store.upsert_profile(sample_upsert()).await.expect("first snapshot");
+        let first = store
+            .upsert_profile(sample_upsert())
+            .await
+            .expect("first snapshot");
         assert_eq!(first.version, 1);
         assert_eq!(store.last_applied_index(), 1);
 
@@ -2734,14 +2799,8 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(
-            store.read_cache_value("ns-a", "key1"),
-            Some(b"a".to_vec())
-        );
-        assert_eq!(
-            store.read_cache_value("ns-b", "key1"),
-            Some(b"b".to_vec())
-        );
+        assert_eq!(store.read_cache_value("ns-a", "key1"), Some(b"a".to_vec()));
+        assert_eq!(store.read_cache_value("ns-b", "key1"), Some(b"b".to_vec()));
     }
 
     // ── Apply-result / concurrent safety tests ──
@@ -2785,7 +2844,10 @@ mod tests {
         // Each apply reads current counter and adds delta serially.
         // The larger value reflects the final state; both are positive.
         assert!(v1 > 0 && v2 > 0, "v1={v1} v2={v2}");
-        assert!(v1 != v2, "expected distinct apply-ordered values, got v1={v1} v2={v2}");
+        assert!(
+            v1 != v2,
+            "expected distinct apply-ordered values, got v1={v1} v2={v2}"
+        );
         // Final counter value must be 3
         let final_val = store.read_cache_counter("ns", "counter").unwrap();
         assert_eq!(final_val, 3, "v1={v1} v2={v2}");

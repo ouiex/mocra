@@ -26,8 +26,8 @@ use crate::common::interface::{
 };
 use crate::common::model::message::UnifiedTaskInput;
 use crate::common::processors::processor::{ProcessorContext, RetryPolicy};
-use crate::engine::runner::ProcessorRunner;
-use crate::engine::scheduler::CronScheduler;
+use crate::engine::runner::{ProcessorRunner, ProcessorRunnerConfig};
+use crate::engine::scheduler::{CronScheduler, CronSchedulerConfig};
 use crate::engine::task::TaskManager;
 use crate::proxy::ProxyManager;
 use crate::schedule::dag::Dag;
@@ -92,6 +92,28 @@ pub struct Engine {
     pub cron_scheduler: Arc<CronScheduler>,
     /// Shared counter tracking in-flight tasks across all processors.
     pub inflight_counter: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+struct PolicyFailureRequest<'a, T> {
+    policy_resolver: &'a PolicyResolver,
+    queue_manager: &'a QueueManager,
+    topic: &'a str,
+    event_type: &'a str,
+    item: &'a T,
+    err: &'a crate::errors::Error,
+    ack_fn: &'a mut Option<crate::queue::AckFn>,
+    nack_fn: &'a mut Option<crate::queue::NackFn>,
+}
+
+struct PolicyRetryRequest<'a, T> {
+    policy_resolver: &'a PolicyResolver,
+    queue_manager: &'a QueueManager,
+    topic: &'a str,
+    event_type: &'a str,
+    item: &'a T,
+    retry_policy: &'a RetryPolicy,
+    ack_fn: &'a mut Option<crate::queue::AckFn>,
+    nack_fn: &'a mut Option<crate::queue::NackFn>,
 }
 
 impl Engine {
@@ -192,20 +214,16 @@ impl Engine {
     /// - retry via `nack` with reason,
     /// - DLQ handoff + `ack`,
     /// - direct `ack`.
-    async fn handle_policy_failure<T>(
-        policy_resolver: &PolicyResolver,
-        queue_manager: &QueueManager,
-        topic: &str,
-        event_type: &str,
-        item: &T,
-        err: &crate::errors::Error,
-        ack_fn: &mut Option<crate::queue::AckFn>,
-        nack_fn: &mut Option<crate::queue::NackFn>,
-    ) where
+    async fn handle_policy_failure<T>(request: PolicyFailureRequest<'_, T>)
+    where
         T: serde::Serialize + Identifiable + Send + Sync,
     {
-        let decision =
-            policy_resolver.resolve_with_error("engine", Some(event_type), Some("failed"), err);
+        let decision = request.policy_resolver.resolve_with_error(
+            "engine",
+            Some(request.event_type),
+            Some("failed"),
+            request.err,
+        );
         let action = if decision.policy.retryable {
             "retry"
         } else if decision.policy.dlq == DlqPolicy::Never {
@@ -214,8 +232,8 @@ impl Engine {
             "dlq"
         };
 
-        let event_label = Self::policy_event_label(event_type);
-        let kind_label = Self::policy_kind_label(err.kind());
+        let event_label = Self::policy_event_label(request.event_type);
+        let kind_label = Self::policy_kind_label(request.err.kind());
 
         counter!(
             "mocra_policy_decisions_total",
@@ -227,22 +245,25 @@ impl Engine {
         )
         .increment(1);
 
-        let reason = format!("{}: {}", decision.reason, err);
+        let reason = format!("{}: {}", decision.reason, request.err);
 
         match action {
             "retry" => {
-                if let Some(f) = nack_fn.take() {
+                if let Some(f) = request.nack_fn.take() {
                     let _ = f(reason).await;
                 }
             }
             "dlq" => {
-                let _ = queue_manager.send_to_dlq(topic, item, &reason).await;
-                if let Some(f) = ack_fn.take() {
+                let _ = request
+                    .queue_manager
+                    .send_to_dlq(request.topic, request.item, &reason)
+                    .await;
+                if let Some(f) = request.ack_fn.take() {
                     let _ = f().await;
                 }
             }
             _ => {
-                if let Some(f) = ack_fn.take() {
+                if let Some(f) = request.ack_fn.take() {
                     let _ = f().await;
                 }
             }
@@ -253,32 +274,26 @@ impl Engine {
     ///
     /// Retryable outcomes are converted into a synthetic `ProcessorChain` error shape
     /// so policy matching stays consistent with normal error handling.
-    async fn handle_policy_retry<T>(
-        policy_resolver: &PolicyResolver,
-        queue_manager: &QueueManager,
-        topic: &str,
-        event_type: &str,
-        item: &T,
-        retry_policy: &RetryPolicy,
-        ack_fn: &mut Option<crate::queue::AckFn>,
-        nack_fn: &mut Option<crate::queue::NackFn>,
-    ) where
+    async fn handle_policy_retry<T>(request: PolicyRetryRequest<'_, T>)
+    where
         T: serde::Serialize + Identifiable + Send + Sync,
     {
-        let reason = retry_policy
+        let reason = request
+            .retry_policy
             .reason
             .clone()
             .unwrap_or_else(|| "retryable failure".to_string());
         let err = crate::errors::Error::new(
             crate::errors::ErrorKind::ProcessorChain,
-            Some(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                reason.clone(),
-            )),
+            Some(std::io::Error::other(reason.clone())),
         );
 
-        let decision =
-            policy_resolver.resolve_with_error("engine", Some(event_type), Some("retry"), &err);
+        let decision = request.policy_resolver.resolve_with_error(
+            "engine",
+            Some(request.event_type),
+            Some("retry"),
+            &err,
+        );
         let action = if decision.policy.retryable {
             "retry"
         } else if decision.policy.dlq == DlqPolicy::Never {
@@ -287,7 +302,7 @@ impl Engine {
             "dlq"
         };
 
-        let event_label = Self::policy_event_label(event_type);
+        let event_label = Self::policy_event_label(request.event_type);
         let kind_label = Self::policy_kind_label(err.kind());
 
         counter!(
@@ -304,18 +319,21 @@ impl Engine {
 
         match action {
             "retry" => {
-                if let Some(f) = nack_fn.take() {
+                if let Some(f) = request.nack_fn.take() {
                     let _ = f(reason).await;
                 }
             }
             "dlq" => {
-                let _ = queue_manager.send_to_dlq(topic, item, &reason).await;
-                if let Some(f) = ack_fn.take() {
+                let _ = request
+                    .queue_manager
+                    .send_to_dlq(request.topic, request.item, &reason)
+                    .await;
+                if let Some(f) = request.ack_fn.take() {
                     let _ = f().await;
                 }
             }
             _ => {
-                if let Some(f) = ack_fn.take() {
+                if let Some(f) = request.ack_fn.take() {
                     let _ = f().await;
                 }
             }
@@ -324,10 +342,7 @@ impl Engine {
 
     /// Initializes queue manager with optional log topic derived from logger outputs.
     fn init_queue_manager(cfg: &crate::common::model::config::Config) -> Arc<QueueManager> {
-        let log_topic = cfg
-            .logger
-            .as_ref()
-            .and_then(|logger| Self::first_mq_topic(logger));
+        let log_topic = cfg.logger.as_ref().and_then(Self::first_mq_topic);
         QueueManager::from_config_with_log_topic(cfg, log_topic.as_deref())
     }
 
@@ -372,25 +387,25 @@ impl Engine {
         config.outputs = logger
             .outputs
             .iter()
-            .filter_map(|output| match output {
-                crate::common::model::logger_config::LogOutputConfig::Console {} => {
-                    Some(AppLogOutputConfig::Console)
+            .map(|output| match output {
+                crate::common::model::logger_config::LogOutputConfig::Console => {
+                    AppLogOutputConfig::Console
                 }
                 crate::common::model::logger_config::LogOutputConfig::File {
                     path,
                     rotation,
                     ..
-                } => Some(AppLogOutputConfig::File {
+                } => AppLogOutputConfig::File {
                     path: PathBuf::from(path),
                     rotation: rotation.clone(),
-                }),
+                },
                 crate::common::model::logger_config::LogOutputConfig::Mq { format, .. } => {
                     if let Some(format) = format
                         && format.to_lowercase() != "json"
                     {
                         eprintln!("logger.outputs.mq.format only supports json, got {format}");
                     }
-                    Some(AppLogOutputConfig::Mq)
+                    AppLogOutputConfig::Mq
                 }
             })
             .collect();
@@ -410,7 +425,7 @@ impl Engine {
 
     fn base_level_from_filter(level: &str) -> Option<&str> {
         level
-            .split(|ch| ch == ',' || ch == ';')
+            .split([',', ';'])
             .map(|value| value.trim())
             .find(|value| !value.is_empty())
     }
@@ -467,11 +482,13 @@ impl Engine {
         let prometheus_handle = builder.install_recorder().ok();
 
         // Create event bus when enabled by configuration.
-        let event_bus = if let Some(conf) = &state.config.read().await.event_bus {
-            Some(Arc::new(EventBus::new(conf.capacity, conf.concurrency)))
-        } else {
-            None
-        };
+        let event_bus = state
+            .config
+            .read()
+            .await
+            .event_bus
+            .as_ref()
+            .map(|conf| Arc::new(EventBus::new(conf.capacity, conf.concurrency)));
         // Create global shutdown signal channel.
         let (shutdown_tx, _shutdown_rx) = broadcast::channel(1);
 
@@ -499,15 +516,14 @@ impl Engine {
             Self::init_queue_manager(&cfg)
         };
 
-        if let Some(logger_config) = &cfg.logger {
-            if logger_config.enabled.unwrap_or(true) {
-                let app_config = Self::build_app_logger_config(logger_config, &namespace);
-                let log_sender =
-                    Self::setup_mq_log_sender(logger_config, queue_manager.clone()).await;
-                let _ = app_logger::init_logger(app_config).await;
-                if let Some(sender) = log_sender {
-                    let _ = app_logger::set_log_sender(sender);
-                }
+        if let Some(logger_config) = &cfg.logger
+            && logger_config.enabled.unwrap_or(true)
+        {
+            let app_config = Self::build_app_logger_config(logger_config, &namespace);
+            let log_sender = Self::setup_mq_log_sender(logger_config, queue_manager.clone()).await;
+            let _ = app_logger::init_logger(app_config).await;
+            if let Some(sender) = log_sender {
+                let _ = app_logger::set_log_sender(sender);
             }
         }
 
@@ -529,7 +545,7 @@ impl Engine {
                                 .await;
                             info!("Registered MQ Logger for EventBus");
                         }
-                        LogOutputConfig::Console { .. } => {
+                        LogOutputConfig::Console => {
                             let rx = event_bus.subscribe("*".to_string()).await;
                             let level = log_config
                                 .level
@@ -576,17 +592,21 @@ impl Engine {
         let leadership_gate = Self::init_leadership_gate(&state, &namespace);
 
         let cron_scheduler = Arc::new(
-            CronScheduler::new(
-                task_manager.clone(),
-                state.clone(),
-                queue_manager.clone(),
-                shutdown_tx.subscribe(),
+            CronScheduler::new(CronSchedulerConfig {
+                task_manager: task_manager.clone(),
+                state: state.clone(),
+                queue_manager: queue_manager.clone(),
+                shutdown_rx: shutdown_tx.subscribe(),
                 leadership_gate,
-            )
+            })
             .await,
         );
 
-        Self::spawn_pause_state_watcher(Arc::clone(&state.profile_store), pause_tx.clone(), &shutdown_tx);
+        Self::spawn_pause_state_watcher(
+            Arc::clone(&state.profile_store),
+            pause_tx.clone(),
+            &shutdown_tx,
+        );
 
         Ok(Self {
             queue_manager,

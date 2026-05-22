@@ -68,7 +68,7 @@ pub struct ModuleDagDefinition {
 impl ModuleDagDefinition {
     /// Returns a fluent builder.
     ///
-    /// ```
+    /// ```ignore
     /// let dag = ModuleDagDefinition::builder()
     ///     .edge(&login_node, &cate_list_node)
     ///     .edge(&cate_list_node, &brand_rank_downloader)
@@ -308,10 +308,7 @@ impl ModuleDagCompiler {
                 dag.add_node_with_id(Some(&pred_ptrs), &node_id, adapter)?
             };
 
-            if let Some(policy) = node_def
-                .policy_override
-                .or_else(|| default_policy.clone())
-            {
+            if let Some(policy) = node_def.policy_override.or_else(|| default_policy.clone()) {
                 dag.set_node_execution_policy(&ptr, policy)?;
             }
             if let Some(placement) = node_def.placement_override {

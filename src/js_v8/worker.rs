@@ -93,7 +93,7 @@ impl JsWorker {
                 let _ = ready_tx.send(Ok(()));
 
                 while let Ok(job) = rx.recv() {
-                    let res = Self::call_engine(&mut engine, &job.func, &job.args).map_err(|e| e);
+                    let res = Self::call_engine(&mut engine, &job.func, &job.args);
                     let _ = job.reply.send(res);
                 }
             })

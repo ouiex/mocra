@@ -2,18 +2,22 @@ use crate::common::model::config::RaftConfig as AppRaftConfig;
 use crate::common::model::control_plane_profile::ControlPlaneRaftCommand;
 use crate::engine::api::profile_store::ProfileControlPlaneStore;
 use async_trait::async_trait;
-use futures::StreamExt;
 use axum::extract::State as AxumState;
 use axum::http::StatusCode;
 use axum::routing::post;
 use axum::{Json, Router};
+use futures::StreamExt;
 use log::{error, info};
 use openraft::async_runtime::WatchReceiver;
-use openraft::error::{InitializeError, RaftError, RPCError, StreamingError};
+use openraft::error::{InitializeError, RPCError, RaftError, StreamingError};
 use openraft::errors::{NetworkError, ReplicationClosed};
 use openraft::network::{RPCOption, RaftNetworkFactory, RaftNetworkV2};
-use openraft::storage::{IOFlushed, RaftLogReader, RaftLogStorage, RaftSnapshotBuilder, RaftStateMachine};
-use openraft::type_config::alias::{EntryOf, LogIdOf, SnapshotMetaOf, SnapshotOf, StoredMembershipOf, VoteOf};
+use openraft::storage::{
+    IOFlushed, RaftLogReader, RaftLogStorage, RaftSnapshotBuilder, RaftStateMachine,
+};
+use openraft::type_config::alias::{
+    EntryOf, LogIdOf, SnapshotMetaOf, SnapshotOf, StoredMembershipOf, VoteOf,
+};
 use openraft::{BasicNode, EntryPayload, LogState, Raft};
 use rocksdb::{DB, Direction, IteratorMode, Options, WriteBatch};
 use serde::de::DeserializeOwned;
@@ -109,7 +113,10 @@ impl RaftRuntimeConfig {
 
             let replaced = peers.insert(peer_id, BasicNode::new(peer_addr));
             if replaced.is_some() {
-                return Err(format!("duplicate raft peer id generated for '{}': {}", peer_addr, peer_id));
+                return Err(format!(
+                    "duplicate raft peer id generated for '{}': {}",
+                    peer_addr, peer_id
+                ));
             }
         }
 
@@ -263,21 +270,11 @@ struct AppliedRequestRecord {
     request: ControlPlaneRaftRequest,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct StateMachineData {
     last_applied_log: Option<MocraLogId>,
     last_membership: MocraStoredMembership,
     applied_requests: Vec<AppliedRequestRecord>,
-}
-
-impl Default for StateMachineData {
-    fn default() -> Self {
-        Self {
-            last_applied_log: None,
-            last_membership: MocraStoredMembership::default(),
-            applied_requests: Vec::new(),
-        }
-    }
 }
 
 #[derive(Debug)]
@@ -293,7 +290,10 @@ pub struct RocksRaftStore {
 }
 
 impl RocksRaftStore {
-    pub fn open(path: &PathBuf, profile_store: Option<Arc<ProfileControlPlaneStore>>) -> Result<Self, String> {
+    pub fn open(
+        path: &PathBuf,
+        profile_store: Option<Arc<ProfileControlPlaneStore>>,
+    ) -> Result<Self, String> {
         std::fs::create_dir_all(path).map_err(|err| err.to_string())?;
 
         let mut options = Options::default();
@@ -341,7 +341,11 @@ impl RocksRaftStore {
         }
     }
 
-    fn put_serialized<T: Serialize>(batch: &mut WriteBatch, key: &[u8], value: &T) -> Result<(), io::Error> {
+    fn put_serialized<T: Serialize>(
+        batch: &mut WriteBatch,
+        key: &[u8],
+        value: &T,
+    ) -> Result<(), io::Error> {
         batch.put(key, Self::serialize(value)?);
         Ok(())
     }
@@ -366,7 +370,10 @@ impl RocksRaftStore {
     }
 
     fn read_snapshot_data(&self) -> Result<Option<Vec<u8>>, io::Error> {
-        self.db().get(KEY_SNAPSHOT_DATA).map_err(io::Error::other).map(|opt| opt.map(|v| v.to_vec()))
+        self.db()
+            .get(KEY_SNAPSHOT_DATA)
+            .map_err(io::Error::other)
+            .map(|opt| opt.map(|v| v.to_vec()))
     }
 
     fn save_snapshot(&self, meta: &MocraSnapshotMeta, bytes: &[u8]) -> Result<(), io::Error> {
@@ -376,9 +383,14 @@ impl RocksRaftStore {
         self.db().write(batch).map_err(io::Error::other)
     }
 
-    fn iter_log_entries(&self) -> impl Iterator<Item = Result<(Box<[u8]>, Box<[u8]>), rocksdb::Error>> + '_ {
+    fn iter_log_entries(
+        &self,
+    ) -> impl Iterator<Item = Result<(Box<[u8]>, Box<[u8]>), rocksdb::Error>> + '_ {
         self.db()
-            .iterator(IteratorMode::From(LOG_PREFIX.as_bytes(), Direction::Forward))
+            .iterator(IteratorMode::From(
+                LOG_PREFIX.as_bytes(),
+                Direction::Forward,
+            ))
             .take_while(|entry| match entry {
                 Ok((key, _)) => key.starts_with(LOG_PREFIX.as_bytes()),
                 Err(_) => true,
@@ -434,7 +446,7 @@ impl RocksRaftStore {
         for item in self.iter_log_entries() {
             let (_, value) = item.map_err(io::Error::other)?;
             let entry: MocraEntry = Self::deserialize(&value)?;
-            last = Some(entry.log_id.clone());
+            last = Some(entry.log_id);
         }
         Ok(last)
     }
@@ -485,7 +497,11 @@ impl RaftLogStorage<MocraRaftTypeConfig> for RocksRaftStore {
         self.get_optional(KEY_COMMITTED)
     }
 
-    async fn append<I>(&mut self, entries: I, callback: IOFlushed<MocraRaftTypeConfig>) -> Result<(), io::Error>
+    async fn append<I>(
+        &mut self,
+        entries: I,
+        callback: IOFlushed<MocraRaftTypeConfig>,
+    ) -> Result<(), io::Error>
     where
         I: IntoIterator<Item = MocraEntry> + openraft::OptionalSend,
         I::IntoIter: openraft::OptionalSend,
@@ -497,7 +513,12 @@ impl RaftLogStorage<MocraRaftTypeConfig> for RocksRaftStore {
         }
 
         let result = self.db().write(batch).map_err(io::Error::other);
-        callback.io_completed(result.as_ref().map(|_| ()).map_err(|err| io::Error::other(err.to_string())));
+        callback.io_completed(
+            result
+                .as_ref()
+                .map(|_| ())
+                .map_err(|err| io::Error::other(err.to_string())),
+        );
         result
     }
 
@@ -544,11 +565,14 @@ impl RaftSnapshotBuilder<MocraRaftTypeConfig> for RocksSnapshotBuilder {
         let data = self.store.read_state_machine_data()?;
         let bytes = RocksRaftStore::serialize(&data)?;
         let meta = MocraSnapshotMeta {
-            last_log_id: data.last_applied_log.clone(),
+            last_log_id: data.last_applied_log,
             last_membership: data.last_membership.clone(),
             snapshot_id: format!(
                 "{}-{}",
-                data.last_applied_log.as_ref().map(|log_id| log_id.index).unwrap_or_default(),
+                data.last_applied_log
+                    .as_ref()
+                    .map(|log_id| log_id.index)
+                    .unwrap_or_default(),
                 Uuid::new_v4()
             ),
         };
@@ -563,15 +587,18 @@ impl RaftSnapshotBuilder<MocraRaftTypeConfig> for RocksSnapshotBuilder {
 impl RaftStateMachine<MocraRaftTypeConfig> for RocksRaftStore {
     type SnapshotBuilder = RocksSnapshotBuilder;
 
-    async fn applied_state(&mut self) -> Result<(Option<MocraLogId>, MocraStoredMembership), io::Error> {
+    async fn applied_state(
+        &mut self,
+    ) -> Result<(Option<MocraLogId>, MocraStoredMembership), io::Error> {
         let data = self.read_state_machine_data()?;
         Ok((data.last_applied_log, data.last_membership))
     }
 
     async fn apply<Strm>(&mut self, mut entries: Strm) -> Result<(), io::Error>
     where
-        Strm: futures::Stream<Item = Result<openraft::storage::EntryResponder<MocraRaftTypeConfig>, io::Error>>
-            + Unpin
+        Strm: futures::Stream<
+                Item = Result<openraft::storage::EntryResponder<MocraRaftTypeConfig>, io::Error>,
+            > + Unpin
             + openraft::OptionalSend,
     {
         let mut buffered = Vec::new();
@@ -583,18 +610,15 @@ impl RaftStateMachine<MocraRaftTypeConfig> for RocksRaftStore {
         let mut data = self.read_state_machine_data()?;
 
         for (entry, responder) in buffered {
-            data.last_applied_log = Some(entry.log_id.clone());
+            data.last_applied_log = Some(entry.log_id);
 
             let response = match &entry.payload {
                 EntryPayload::Blank => ControlPlaneRaftResponse::default(),
                 EntryPayload::Normal(request) => {
                     match request {
                         ControlPlaneRaftRequest::Apply(command) => {
-                            if let Some(profile_store) = self
-                                .inner
-                                .profile_store
-                                .as_ref()
-                                .and_then(Weak::upgrade)
+                            if let Some(profile_store) =
+                                self.inner.profile_store.as_ref().and_then(Weak::upgrade)
                             {
                                 profile_store
                                     .apply_replicated_command(command.clone(), entry.log_id.index)
@@ -603,16 +627,14 @@ impl RaftStateMachine<MocraRaftTypeConfig> for RocksRaftStore {
                         }
                     }
                     data.applied_requests.push(AppliedRequestRecord {
-                        log_id: entry.log_id.clone(),
+                        log_id: entry.log_id,
                         request: request.clone(),
                     });
                     ControlPlaneRaftResponse { accepted: true }
                 }
                 EntryPayload::Membership(membership) => {
-                    data.last_membership = MocraStoredMembership::new(
-                        Some(entry.log_id.clone()),
-                        membership.clone(),
-                    );
+                    data.last_membership =
+                        MocraStoredMembership::new(Some(entry.log_id), membership.clone());
                     ControlPlaneRaftResponse::default()
                 }
             };
@@ -635,7 +657,11 @@ impl RaftStateMachine<MocraRaftTypeConfig> for RocksRaftStore {
         Ok(Cursor::new(Vec::new()))
     }
 
-    async fn install_snapshot(&mut self, meta: &MocraSnapshotMeta, snapshot: Cursor<Vec<u8>>) -> Result<(), io::Error> {
+    async fn install_snapshot(
+        &mut self,
+        meta: &MocraSnapshotMeta,
+        snapshot: Cursor<Vec<u8>>,
+    ) -> Result<(), io::Error> {
         let _guard = self.lock_write()?;
         let bytes = snapshot.into_inner();
         let data: StateMachineData = RocksRaftStore::deserialize(&bytes)?;
@@ -643,7 +669,9 @@ impl RaftStateMachine<MocraRaftTypeConfig> for RocksRaftStore {
         self.save_snapshot(meta, &bytes)?;
 
         if let Some(profile_store) = self.inner.profile_store.as_ref().and_then(Weak::upgrade) {
-            profile_store.reset_replicated_state().map_err(io::Error::other)?;
+            profile_store
+                .reset_replicated_state()
+                .map_err(io::Error::other)?;
             for record in &data.applied_requests {
                 match &record.request {
                     ControlPlaneRaftRequest::Apply(command) => {
@@ -777,7 +805,11 @@ impl RaftRuntime {
         .await
         .map_err(|err| err.to_string())?;
 
-        let runtime = Self { config, raft, store };
+        let runtime = Self {
+            config,
+            raft,
+            store,
+        };
         runtime.start_rpc_server().await?;
         runtime.bootstrap_single_node().await?;
         runtime.join_existing_cluster().await?;
@@ -895,7 +927,11 @@ impl RaftRuntime {
             format!(
                 "failed to join raft cluster for node {} using peers {:?}",
                 self.config.node_id,
-                self.config.peers.values().map(|node| node.addr.clone()).collect::<Vec<_>>()
+                self.config
+                    .peers
+                    .values()
+                    .map(|node| node.addr.clone())
+                    .collect::<Vec<_>>()
             )
         }))
     }
@@ -958,7 +994,11 @@ impl RaftRuntime {
             }
 
             let response = client
-                .post(format!("{}{}", http_base_url(&target), RAFT_CLIENT_WRITE_PATH))
+                .post(format!(
+                    "{}{}",
+                    http_base_url(&target),
+                    RAFT_CLIENT_WRITE_PATH
+                ))
                 .json(&ClientWriteRequest {
                     command: command.clone(),
                 })
@@ -1252,7 +1292,10 @@ mod tests {
             openraft::SnapshotPolicy::LogsSinceLast(321)
         ));
         assert_eq!(runtime.cluster_nodes.len(), 3);
-        assert_eq!(runtime.data_dir, PathBuf::from("./raft_data/test-namespace"));
+        assert_eq!(
+            runtime.data_dir,
+            PathBuf::from("./raft_data/test-namespace")
+        );
     }
 
     #[test]
@@ -1276,27 +1319,33 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn runtime_bootstraps_single_node_cluster() {
         let temp_dir = tempdir().expect("temp dir should create");
-        let runtime = RaftRuntime::start(Arc::new(
-            RaftRuntimeConfig::from_app_config(
-                "raft-single-node-test",
-                &AppRaftConfig {
-                    addr: "127.0.0.1:7901".to_string(),
-                    peers: vec![],
-                    heartbeat_interval_ms: Some(50),
-                    election_timeout_ms: Some(150),
-                    snapshot_interval: Some(64),
-                    data_dir: Some(temp_dir.path().to_string_lossy().to_string()),
-                },
-            )
-            .expect("runtime config should build"),
-        ), None)
+        let runtime = RaftRuntime::start(
+            Arc::new(
+                RaftRuntimeConfig::from_app_config(
+                    "raft-single-node-test",
+                    &AppRaftConfig {
+                        addr: "127.0.0.1:7901".to_string(),
+                        peers: vec![],
+                        heartbeat_interval_ms: Some(50),
+                        election_timeout_ms: Some(150),
+                        snapshot_interval: Some(64),
+                        data_dir: Some(temp_dir.path().to_string_lossy().to_string()),
+                    },
+                )
+                .expect("runtime config should build"),
+            ),
+            None,
+        )
         .await
         .expect("runtime should start");
 
         runtime
             .raft()
             .wait(Some(Duration::from_secs(5)))
-            .state(ServerState::Leader, "single-node bootstrap should elect a leader")
+            .state(
+                ServerState::Leader,
+                "single-node bootstrap should elect a leader",
+            )
             .await
             .expect("single node should become leader");
 
@@ -1311,20 +1360,23 @@ mod tests {
         let follower_addr = allocate_local_addr();
 
         let leader = Arc::new(
-            RaftRuntime::start(Arc::new(
-                RaftRuntimeConfig::from_app_config(
-                    "raft-join-test",
-                    &AppRaftConfig {
-                        addr: leader_addr.clone(),
-                        peers: vec![],
-                        heartbeat_interval_ms: Some(50),
-                        election_timeout_ms: Some(150),
-                        snapshot_interval: Some(64),
-                        data_dir: Some(leader_dir.path().to_string_lossy().to_string()),
-                    },
-                )
-                .expect("leader config should build"),
-            ), None)
+            RaftRuntime::start(
+                Arc::new(
+                    RaftRuntimeConfig::from_app_config(
+                        "raft-join-test",
+                        &AppRaftConfig {
+                            addr: leader_addr.clone(),
+                            peers: vec![],
+                            heartbeat_interval_ms: Some(50),
+                            election_timeout_ms: Some(150),
+                            snapshot_interval: Some(64),
+                            data_dir: Some(leader_dir.path().to_string_lossy().to_string()),
+                        },
+                    )
+                    .expect("leader config should build"),
+                ),
+                None,
+            )
             .await
             .expect("leader runtime should start"),
         );
@@ -1332,24 +1384,30 @@ mod tests {
         leader
             .raft()
             .wait(Some(Duration::from_secs(5)))
-            .state(ServerState::Leader, "leader should become leader before join")
+            .state(
+                ServerState::Leader,
+                "leader should become leader before join",
+            )
             .await
             .expect("leader should become leader");
 
-        let _follower = RaftRuntime::start(Arc::new(
-            RaftRuntimeConfig::from_app_config(
-                "raft-join-test",
-                &AppRaftConfig {
-                    addr: follower_addr.clone(),
-                    peers: vec![leader_addr.clone()],
-                    heartbeat_interval_ms: Some(50),
-                    election_timeout_ms: Some(150),
-                    snapshot_interval: Some(64),
-                    data_dir: Some(follower_dir.path().to_string_lossy().to_string()),
-                },
-            )
-            .expect("follower config should build"),
-        ), None)
+        let _follower = RaftRuntime::start(
+            Arc::new(
+                RaftRuntimeConfig::from_app_config(
+                    "raft-join-test",
+                    &AppRaftConfig {
+                        addr: follower_addr.clone(),
+                        peers: vec![leader_addr.clone()],
+                        heartbeat_interval_ms: Some(50),
+                        election_timeout_ms: Some(150),
+                        snapshot_interval: Some(64),
+                        data_dir: Some(follower_dir.path().to_string_lossy().to_string()),
+                    },
+                )
+                .expect("follower config should build"),
+            ),
+            None,
+        )
         .await
         .expect("follower runtime should join cluster");
 
@@ -1358,7 +1416,10 @@ mod tests {
                 let contains_follower = {
                     let metrics = leader.raft().metrics();
                     let borrowed = metrics.borrow_watched();
-                    borrowed.membership_config.voter_ids().any(|id| id == node_id_from_addr(&follower_addr))
+                    borrowed
+                        .membership_config
+                        .voter_ids()
+                        .any(|id| id == node_id_from_addr(&follower_addr))
                 };
                 if contains_follower {
                     break;
@@ -1373,7 +1434,8 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn client_write_updates_profile_store_state() {
         let temp_dir = tempdir().expect("temp dir should create");
-        let profile_store = Arc::new(ProfileControlPlaneStore::open_temp("demo").expect("open temp store"));
+        let profile_store =
+            Arc::new(ProfileControlPlaneStore::open_temp("demo").expect("open temp store"));
         let runtime = Arc::new(
             RaftRuntime::start(
                 Arc::new(
@@ -1400,7 +1462,10 @@ mod tests {
         runtime
             .raft()
             .wait(Some(Duration::from_secs(5)))
-            .state(ServerState::Leader, "single-node bootstrap should elect a leader")
+            .state(
+                ServerState::Leader,
+                "single-node bootstrap should elect a leader",
+            )
             .await
             .expect("single node should become leader");
 
@@ -1451,7 +1516,10 @@ mod tests {
         leader
             .raft()
             .wait(Some(Duration::from_secs(5)))
-            .state(ServerState::Leader, "leader should become leader before forwarding test")
+            .state(
+                ServerState::Leader,
+                "leader should become leader before forwarding test",
+            )
             .await
             .expect("leader should become leader");
 

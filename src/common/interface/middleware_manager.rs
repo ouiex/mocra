@@ -2,8 +2,8 @@
 use crate::common::interface::middleware::{
     DataMiddlewareHandle, DataStoreMiddlewareHandle, DownloadMiddlewareHandle,
 };
-use crate::common::model::workflow_profile::TaskProfileSnapshot;
 use crate::common::model::data::DataEvent;
+use crate::common::model::workflow_profile::TaskProfileSnapshot;
 use crate::common::model::{Request, Response};
 use crate::common::state::State;
 use crate::errors::Result;
@@ -122,17 +122,17 @@ impl MiddlewareManager {
         let index = self.download_index.read().await;
         let mut out = Vec::with_capacity(middleware_name.len());
         for name in middleware_name {
-            if let Some(&pos) = index.get(name) {
-                if let Some(handle) = middlewares.get(pos) {
-                    let middleware_guard = handle.lock().await;
-                    let middleware_weight = profile
-                        .download_middleware
-                        .iter()
-                        .find(|b| b.name == *name)
-                        .map(|b| b.weight as u32)
-                        .unwrap_or_else(|| middleware_guard.weight());
-                    out.push((handle.clone(), middleware_weight));
-                }
+            if let Some(&pos) = index.get(name)
+                && let Some(handle) = middlewares.get(pos)
+            {
+                let middleware_guard = handle.lock().await;
+                let middleware_weight = profile
+                    .download_middleware
+                    .iter()
+                    .find(|b| b.name == *name)
+                    .map(|b| b.weight as u32)
+                    .unwrap_or_else(|| middleware_guard.weight());
+                out.push((handle.clone(), middleware_weight));
             }
         }
         out
@@ -146,17 +146,17 @@ impl MiddlewareManager {
         let index = self.data_index.read().await;
         let mut out = Vec::with_capacity(middleware_name.len());
         for name in middleware_name {
-            if let Some(&pos) = index.get(name) {
-                if let Some(handle) = middlewares.get(pos) {
-                    let middleware_guard = handle.lock().await;
-                    let middleware_weight = profile
-                        .data_middleware
-                        .iter()
-                        .find(|b| b.name == *name)
-                        .map(|b| b.weight as u32)
-                        .unwrap_or_else(|| middleware_guard.weight());
-                    out.push((handle.clone(), middleware_weight));
-                }
+            if let Some(&pos) = index.get(name)
+                && let Some(handle) = middlewares.get(pos)
+            {
+                let middleware_guard = handle.lock().await;
+                let middleware_weight = profile
+                    .data_middleware
+                    .iter()
+                    .find(|b| b.name == *name)
+                    .map(|b| b.weight as u32)
+                    .unwrap_or_else(|| middleware_guard.weight());
+                out.push((handle.clone(), middleware_weight));
             }
         }
         out
@@ -170,10 +170,10 @@ impl MiddlewareManager {
         let index = self.store_index.read().await;
         let mut out = Vec::with_capacity(middleware_name.len());
         for name in middleware_name {
-            if let Some(&pos) = index.get(name) {
-                if let Some(handle) = middlewares.get(pos) {
-                    out.push(handle.clone());
-                }
+            if let Some(&pos) = index.get(name)
+                && let Some(handle) = middlewares.get(pos)
+            {
+                out.push(handle.clone());
             }
         }
         out

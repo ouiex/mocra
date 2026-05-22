@@ -87,10 +87,10 @@ impl MetaData {
             self.trait_meta = Value::Object(serde_json::Map::new());
         }
 
-        if let Some(map) = self.trait_meta.as_object_mut() {
-            if let Ok(value) = serde_json::to_value(value) {
-                map.insert(key.as_ref().into(), value);
-            }
+        if let Some(map) = self.trait_meta.as_object_mut()
+            && let Ok(value) = serde_json::to_value(value)
+        {
+            map.insert(key.as_ref().into(), value);
         }
 
         self

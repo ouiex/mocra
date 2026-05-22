@@ -50,17 +50,16 @@ impl Engine {
 
         self.downloader_manager.clone().start_background_cleaner();
 
-        if let Some(event_bus) = &self.event_bus {
-            if let Err(e) = event_bus
+        if let Some(event_bus) = &self.event_bus
+            && let Err(e) = event_bus
                 .publish(EventEnvelope::engine(
                     EventType::SystemHealth,
                     EventPhase::Started,
                     serde_json::json!({ "event": "system_started" }),
                 ))
                 .await
-            {
-                error!("Failed to publish system started event: {e}");
-            }
+        {
+            error!("Failed to publish system started event: {e}");
         }
 
         let shutdown_tx = self.shutdown_tx.clone();
@@ -116,7 +115,7 @@ impl Engine {
                             // Always log state every 5 seconds for diagnostics
                             static TICK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
                             let tick = TICK.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            if tick % 5 == 0 {
+                            if tick.is_multiple_of(5) {
                                 info!("[IdleMonitor] tick={} pending=[t={} d={} r={} p={} e={} rt={}] inflight={} cron={}",
                                     tick, task, download, response, parser, error, remote_task, inflight, has_running_cron_tasks);
                             }
@@ -127,7 +126,7 @@ impl Engine {
                             }
 
                             let idle_elapsed = last_active.elapsed().as_secs();
-                            if idle_elapsed > 0 && idle_elapsed % 10 == 0 {
+                            if idle_elapsed > 0 && idle_elapsed.is_multiple_of(10) {
                                 info!("[IdleStop] idle for {}s / {}s (pending={} inflight={} cron={})",
                                     idle_elapsed, idle_stop_secs, pending, inflight, has_running_cron_tasks);
                             }
@@ -226,7 +225,12 @@ impl Engine {
     pub async fn shutdown(&self) {
         info!("Shutting down Schedule");
 
-        if let Err(e) = self.state.profile_store.deregister_node(&self.node_id).await {
+        if let Err(e) = self
+            .state
+            .profile_store
+            .deregister_node(&self.node_id)
+            .await
+        {
             warn!("Failed to deregister node: {}", e);
         }
         let _ = self.shutdown_tx.send(());
@@ -297,7 +301,6 @@ impl Engine {
                 }
                 Err(e) => {
                     error!("API server error: {:?}", e);
-                    return;
                 }
             }
         });

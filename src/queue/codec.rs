@@ -1,7 +1,7 @@
-use crate::common::model::config::Config;
 use crate::common::model::PayloadCodec;
 #[cfg(test)]
 use crate::common::model::QueueEnvelope;
+use crate::common::model::config::Config;
 use once_cell::sync::OnceCell;
 use rmp_serde as rmps;
 use serde::Serialize;
@@ -112,8 +112,13 @@ impl QueueMessageCodec {
         value: &T,
     ) -> crate::errors::Result<QueueEnvelope> {
         let payload = self.encode(value)?;
-        QueueEnvelope::new(schema_id, schema_version, self.codec.payload_codec(), payload)
-            .map_err(|e| crate::errors::Error::new(crate::errors::ErrorKind::Queue, Some(e)))
+        QueueEnvelope::new(
+            schema_id,
+            schema_version,
+            self.codec.payload_codec(),
+            payload,
+        )
+        .map_err(|e| crate::errors::Error::new(crate::errors::ErrorKind::Queue, Some(e)))
     }
 
     #[cfg(test)]
@@ -160,8 +165,9 @@ mod tests {
 
         let json_codec = QueueMessageCodec::from_name("json");
         let json_bytes = json_codec.encode(&sample).expect("json encode should work");
-        let json_roundtrip: SamplePayload =
-            json_codec.decode(&json_bytes).expect("json decode should work");
+        let json_roundtrip: SamplePayload = json_codec
+            .decode(&json_bytes)
+            .expect("json decode should work");
         assert_eq!(json_roundtrip, sample);
 
         let msgpack_codec = QueueMessageCodec::from_name("msgpack");

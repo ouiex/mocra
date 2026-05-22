@@ -1,26 +1,24 @@
 use crate::cacheable::{CacheAble, CacheService};
-use crate::common::response_cache::{
-    ResponseCacheRemoteClient,
-    annotate_response_cache_metadata as annotate_shared_response_cache_metadata,
-    current_owner_api_base_url,
-    current_time_ms as response_cache_current_time_ms,
-    persist_response_cache_entry,
-    resolve_response_cache_expires_at as resolve_response_cache_expires_at_with_fallback,
-    RESPONSE_CACHE_LOOKUP_KEY,
-};
 use crate::common::model::cookies::CookieItem;
 use crate::common::model::download_config::DownloadConfig;
 use crate::common::model::headers::HeaderItem;
 use crate::common::model::{Cookies, Headers, Request, Response};
-use crate::engine::api::profile_store::ProfileControlPlaneStore;
+use crate::common::response_cache::{
+    RESPONSE_CACHE_LOOKUP_KEY, ResponseCachePersistRequest, ResponseCacheRemoteClient,
+    annotate_response_cache_metadata as annotate_shared_response_cache_metadata,
+    current_owner_api_base_url, current_time_ms as response_cache_current_time_ms,
+    persist_response_cache_entry,
+    resolve_response_cache_expires_at as resolve_response_cache_expires_at_with_fallback,
+};
 use crate::downloader::Downloader;
+use crate::engine::api::profile_store::ProfileControlPlaneStore;
 use crate::errors::{CacheError, DownloadError, RequestError, Result};
-use crate::utils::distributed_rate_limit::DistributedSlidingWindowRateLimiter;
 use crate::utils::distributed_lock::DistributedLockManager;
+use crate::utils::distributed_rate_limit::DistributedSlidingWindowRateLimiter;
 use dashmap::DashMap;
 use futures::StreamExt;
 use log::{info, warn};
-use rand::Rng;
+use rand::RngExt;
 use reqwest::Client;
 use reqwest::Method;
 use reqwest::Proxy;
@@ -29,8 +27,8 @@ use semver::Version;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::str::FromStr;
-use std::sync::{Arc, RwLock};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 use url::Url;
 const ACTIVE_NODE_HEARTBEAT_TTL_SECS: u64 = 30;
@@ -87,6 +85,19 @@ pub struct RequestDownloader {
     max_response_size: usize,
 }
 
+#[derive(Clone)]
+pub struct RequestDownloaderConfig {
+    pub limiter: Arc<DistributedSlidingWindowRateLimiter>,
+    pub locker: Arc<DistributedLockManager>,
+    pub cache_service: Arc<CacheService>,
+    pub owner_namespace: String,
+    pub owner_node_id: Option<String>,
+    pub profile_store: Arc<ProfileControlPlaneStore>,
+    pub api_key: Option<String>,
+    pub pool_size: usize,
+    pub max_response_size: usize,
+}
+
 impl RequestDownloader {
     #[inline]
     fn is_session_enabled(&self, request: &Request) -> bool {
@@ -103,21 +114,11 @@ impl RequestDownloader {
         format!("{}:{}", request.module_id(), request.run_id)
     }
 
-    pub fn new(
-        limit: Arc<DistributedSlidingWindowRateLimiter>,
-        locker: Arc<DistributedLockManager>,
-        sync: Arc<CacheService>,
-        owner_namespace: impl Into<String>,
-        owner_node_id: Option<String>,
-        profile_store: Arc<ProfileControlPlaneStore>,
-        api_key: Option<String>,
-        pool_size: usize,
-        max_response_size: usize,
-    ) -> Self {
-        let owner_namespace = owner_namespace.into();
+    pub fn new(config: RequestDownloaderConfig) -> Self {
+        let owner_namespace = config.owner_namespace;
         let default_client = Client::builder()
             .pool_idle_timeout(Duration::from_secs(90))
-            .pool_max_idle_per_host(pool_size)
+            .pool_max_idle_per_host(config.pool_size)
             .tcp_keepalive(Duration::from_secs(60))
             .tcp_nodelay(true)
             .connect_timeout(Duration::from_secs(10))
@@ -141,33 +142,35 @@ impl RequestDownloader {
 
         let remote_cache_client: Option<Arc<dyn ResponseCacheRemoteClient>> = Some(Arc::new(
             crate::downloader::response_cache_remote::HttpResponseCacheRemoteClient::new(
-                owner_namespace.clone(),
-                owner_node_id.clone(),
-                profile_store.clone(),
-                api_key.clone(),
-                HashMap::new(),
-                default_client.clone(),
+                crate::downloader::response_cache_remote::HttpResponseCacheRemoteClientConfig {
+                    owner_namespace: owner_namespace.clone(),
+                    owner_node_id: config.owner_node_id.clone(),
+                    profile_store: config.profile_store.clone(),
+                    api_key: config.api_key.clone(),
+                    federation_endpoints: HashMap::new(),
+                    http_client: default_client.clone(),
+                },
             ),
         ));
 
         RequestDownloader {
-            limit,
-            locker,
-            cache_service: sync,
+            limit: config.limiter,
+            locker: config.locker,
+            cache_service: config.cache_service,
             enable_session: Arc::new(AtomicBool::new(false)),
             enable_locker: Arc::new(AtomicBool::new(false)),
             enable_rate_limit: Arc::new(AtomicBool::new(true)),
             owner_namespace,
-            owner_node_id,
-            profile_store,
-            api_key,
+            owner_node_id: config.owner_node_id,
+            profile_store: config.profile_store,
+            api_key: config.api_key,
             federation_response_cache_api_endpoints: HashMap::new(),
             remote_cache_client,
             response_cache_ttl_secs: Arc::new(RwLock::new(None)),
             proxy_clients,
             default_client,
-            pool_size,
-            max_response_size,
+            pool_size: config.pool_size,
+            max_response_size: config.max_response_size,
         }
     }
 
@@ -178,21 +181,20 @@ impl RequestDownloader {
         self.federation_response_cache_api_endpoints = endpoints.clone();
         self.remote_cache_client = Some(Arc::new(
             crate::downloader::response_cache_remote::HttpResponseCacheRemoteClient::new(
-                self.owner_namespace.clone(),
-                self.owner_node_id.clone(),
-                self.profile_store.clone(),
-                self.api_key.clone(),
-                endpoints,
-                self.default_client.clone(),
+                crate::downloader::response_cache_remote::HttpResponseCacheRemoteClientConfig {
+                    owner_namespace: self.owner_namespace.clone(),
+                    owner_node_id: self.owner_node_id.clone(),
+                    profile_store: self.profile_store.clone(),
+                    api_key: self.api_key.clone(),
+                    federation_endpoints: endpoints,
+                    http_client: self.default_client.clone(),
+                },
             ),
         ));
         self
     }
 
-    fn merge_json_value_preserving_base(
-        base: &mut serde_json::Value,
-        overlay: &serde_json::Value,
-    ) {
+    fn merge_json_value_preserving_base(base: &mut serde_json::Value, overlay: &serde_json::Value) {
         if overlay.is_null() {
             return;
         }
@@ -209,7 +211,11 @@ impl RequestDownloader {
         }
     }
 
-    fn merge_metadata_preserving_base(&self, mut base: crate::common::model::meta::MetaData, overlay: &crate::common::model::meta::MetaData) -> crate::common::model::meta::MetaData {
+    fn merge_metadata_preserving_base(
+        &self,
+        mut base: crate::common::model::meta::MetaData,
+        overlay: &crate::common::model::meta::MetaData,
+    ) -> crate::common::model::meta::MetaData {
         Self::merge_json_value_preserving_base(&mut base.task, &overlay.task);
         Self::merge_json_value_preserving_base(&mut base.login_info, &overlay.login_info);
         Self::merge_json_value_preserving_base(&mut base.module_config, &overlay.module_config);
@@ -261,7 +267,10 @@ impl RequestDownloader {
         &self,
         metadata: &crate::common::model::meta::MetaData,
     ) -> Option<i64> {
-        resolve_response_cache_expires_at_with_fallback(metadata, self.response_cache_ttl_fallback())
+        resolve_response_cache_expires_at_with_fallback(
+            metadata,
+            self.response_cache_ttl_fallback(),
+        )
     }
 
     fn response_cache_ttl_fallback(&self) -> Option<Duration> {
@@ -275,16 +284,16 @@ impl RequestDownloader {
 
     async fn store_response_cache(&self, response: &Response) {
         let owner_api_base_url = self.local_owner_api_base_url();
-        let _ = persist_response_cache_entry(
+        let _ = persist_response_cache_entry(ResponseCachePersistRequest {
             response,
-            &self.owner_namespace,
-            self.owner_node_id.as_deref(),
-            owner_api_base_url.as_deref(),
-            self.response_cache_ttl_fallback(),
-            &self.cache_service,
-            &self.profile_store,
-            "request_downloader",
-        )
+            owner_namespace: &self.owner_namespace,
+            owner_node_id: self.owner_node_id.as_deref(),
+            owner_api_base_url: owner_api_base_url.as_deref(),
+            fallback_ttl: self.response_cache_ttl_fallback(),
+            cache_service: &self.cache_service,
+            profile_store: &self.profile_store,
+            context: "request_downloader",
+        })
         .await;
     }
 
@@ -357,11 +366,7 @@ impl RequestDownloader {
         {
             warn!(
                 "Failed to clear stale response cache owner: cache_key={} owner_namespace={} owner_node_id={:?} reason={} error={:?}",
-                cache_key,
-                owner_namespace,
-                owner_node_id,
-                reason,
-                err
+                cache_key, owner_namespace, owner_node_id, reason, err
             );
         }
     }
@@ -375,10 +380,7 @@ impl RequestDownloader {
     ) {
         warn!(
             "Remote cached response lookup skipped: cache_key={} owner_namespace={} owner_node_id={:?} reason={}",
-            cache_key,
-            owner_namespace,
-            owner_node_id,
-            reason
+            cache_key, owner_namespace, owner_node_id, reason
         );
     }
 
@@ -392,11 +394,7 @@ impl RequestDownloader {
     ) {
         warn!(
             "Remote cached response lookup failed: cache_key={} owner_namespace={} endpoint={} reason={} error={:?}",
-            cache_key,
-            owner_namespace,
-            endpoint,
-            reason,
-            error
+            cache_key, owner_namespace, endpoint, reason, error
         );
     }
 
@@ -409,10 +407,7 @@ impl RequestDownloader {
     ) {
         warn!(
             "Remote cached response lookup returned non-success: cache_key={} owner_namespace={} endpoint={} reason=http_status status={}",
-            cache_key,
-            owner_namespace,
-            endpoint,
-            status
+            cache_key, owner_namespace, endpoint, status
         );
     }
 
@@ -429,11 +424,7 @@ impl RequestDownloader {
         {
             warn!(
                 "Cached response returned mismatched request_hash: source={} cache_key={} response_request_hash={} owner_namespace={:?} endpoint={:?}",
-                source,
-                cache_key,
-                response_hash,
-                owner_namespace,
-                endpoint
+                source, cache_key, response_hash, owner_namespace, endpoint
             );
             return false;
         }
@@ -446,11 +437,7 @@ impl RequestDownloader {
         {
             warn!(
                 "Cached response returned mismatched lookup_key: source={} cache_key={} response_lookup_key={} owner_namespace={:?} endpoint={:?}",
-                source,
-                cache_key,
-                lookup_key,
-                owner_namespace,
-                endpoint
+                source, cache_key, lookup_key, owner_namespace, endpoint
             );
             return false;
         }
@@ -544,8 +531,8 @@ impl RequestDownloader {
             };
             push_remote_endpoint(
                 format!(
-                "http://{}:{}/debug/cache/response/{}",
-                node.ip, api_port, encoded_cache_key
+                    "http://{}:{}/debug/cache/response/{}",
+                    node.ip, api_port, encoded_cache_key
                 ),
                 true,
             );
@@ -631,7 +618,7 @@ impl RequestDownloader {
                     cache_key,
                     &owner.owner_namespace,
                     &endpoint,
-                    response.status()
+                    response.status(),
                 );
                 continue;
             }
@@ -679,8 +666,7 @@ impl RequestDownloader {
                 if let Err(err) = Response::delete(cache_key, &self.cache_service).await {
                     warn!(
                         "Failed to delete mismatched local cached response: cache_key={} error={:?}",
-                        cache_key,
-                        err
+                        cache_key, err
                     );
                 }
             }
@@ -688,22 +674,19 @@ impl RequestDownloader {
             Err(CacheError::Serde(err)) => {
                 warn!(
                     "Failed to decode local cached response, deleting corrupt entry: cache_key={} error={:?}",
-                    cache_key,
-                    err
+                    cache_key, err
                 );
                 if let Err(delete_err) = Response::delete(cache_key, &self.cache_service).await {
                     warn!(
                         "Failed to delete corrupt local cached response: cache_key={} error={:?}",
-                        cache_key,
-                        delete_err
+                        cache_key, delete_err
                     );
                 }
             }
             Err(err) => {
                 warn!(
                     "Local cached response lookup failed: cache_key={} error={:?}",
-                    cache_key,
-                    err
+                    cache_key, err
                 );
             }
         }
@@ -713,7 +696,8 @@ impl RequestDownloader {
         } else {
             self.try_load_remote_cached_response(cache_key).await?
         };
-        response.metadata = self.annotate_response_cache_metadata(response.metadata, Some(cache_key));
+        response.metadata =
+            self.annotate_response_cache_metadata(response.metadata, Some(cache_key));
         if response.request_hash.is_none() {
             response.request_hash = Some(cache_key.to_string());
         }
@@ -783,10 +767,11 @@ impl RequestDownloader {
             if c.max_age == Some(0) {
                 return false;
             }
-            if let Some(exp) = c.expires {
-                if exp > 0 && exp < now_secs {
-                    return false;
-                }
+            if let Some(exp) = c.expires
+                && exp > 0
+                && exp < now_secs
+            {
+                return false;
             }
             true
         });
@@ -918,14 +903,14 @@ impl RequestDownloader {
             .collect();
 
         let content_length = response.content_length();
-        if let Some(len) = content_length {
-            if len > self.max_response_size as u64 {
-                warn!(
-                    "Response size {} exceeds limit {}, aborting download for {}",
-                    len, self.max_response_size, request.url
-                );
-                return Err(DownloadError::DownloadFailed("Response too large".into()).into());
-            }
+        if let Some(len) = content_length
+            && len > self.max_response_size as u64
+        {
+            warn!(
+                "Response size {} exceeds limit {}, aborting download for {}",
+                len, self.max_response_size, request.url
+            );
+            return Err(DownloadError::DownloadFailed("Response too large".into()).into());
         }
 
         // Stream the body to enforce size limit during download.
@@ -1276,11 +1261,7 @@ impl Downloader for RequestDownloader {
             );
             self.save_session_state_for_cached_response(&request, &response)
                 .await;
-            return Ok(self.build_cached_hit_response(
-                &request,
-                response,
-                request_hash.clone(),
-            ));
+            return Ok(self.build_cached_hit_response(&request, response, request_hash.clone()));
         }
 
         // Determine if locking is enabled: prefer request-level config, fallback to global config
@@ -1333,17 +1314,55 @@ impl Downloader for RequestDownloader {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cacheable::CacheServiceConfig;
     use crate::common::model::ExecutionMark;
     use crate::common::response_cache::{
         RESPONSE_CACHE_EXPIRES_AT_KEY, RESPONSE_CACHE_LOOKUP_KEY,
-        RESPONSE_CACHE_OWNER_API_BASE_URL_KEY,
-        RESPONSE_CACHE_OWNER_NAMESPACE_KEY, RESPONSE_CACHE_OWNER_NODE_ID_KEY,
+        RESPONSE_CACHE_OWNER_API_BASE_URL_KEY, RESPONSE_CACHE_OWNER_NAMESPACE_KEY,
+        RESPONSE_CACHE_OWNER_NODE_ID_KEY,
     };
     use crate::engine::api::profile_store::ProfileControlPlaneStore;
-    use std::time::SystemTime;
     use crate::utils::distributed_rate_limit::RateLimitConfig;
     use std::sync::Arc;
+    use std::time::SystemTime;
     use uuid::Uuid;
+
+    macro_rules! cache_service_config {
+        ($pool:expr, $namespace:expr, $default_ttl:expr, $compression_threshold:expr $(,)?) => {
+            CacheService::new(
+                CacheServiceConfig::local($namespace)
+                    .with_pool($pool)
+                    .with_default_ttl($default_ttl)
+                    .with_compression_threshold($compression_threshold),
+            )
+        };
+    }
+
+    macro_rules! test_downloader {
+        (
+            $limiter:expr,
+            $locker:expr,
+            $cache_service:expr,
+            $owner_namespace:expr,
+            $owner_node_id:expr,
+            $profile_store:expr,
+            $api_key:expr,
+            $pool_size:expr,
+            $max_response_size:expr $(,)?
+        ) => {
+            RequestDownloader::new(RequestDownloaderConfig {
+                limiter: $limiter,
+                locker: $locker,
+                cache_service: $cache_service,
+                owner_namespace: $owner_namespace.to_string(),
+                owner_node_id: $owner_node_id,
+                profile_store: $profile_store,
+                api_key: $api_key,
+                pool_size: $pool_size,
+                max_response_size: $max_response_size,
+            })
+        };
+    }
 
     #[tokio::test]
     async fn test_downloader_creation() {
@@ -1355,10 +1374,10 @@ mod tests {
             "test",
             config,
         ));
-        let cache_service = Arc::new(CacheService::new(None, "test".to_string(), None, None));
+        let cache_service = Arc::new(cache_service_config!(None, "test".to_string(), None, None));
         let profile_store = Arc::new(ProfileControlPlaneStore::open_temp("test").unwrap());
 
-        let downloader = RequestDownloader::new(
+        let downloader = test_downloader!(
             limiter,
             lock_manager,
             cache_service,
@@ -1382,10 +1401,10 @@ mod tests {
             "test_exec",
             config,
         ));
-        let cache_service = Arc::new(CacheService::new(None, "test".to_string(), None, None));
+        let cache_service = Arc::new(cache_service_config!(None, "test".to_string(), None, None));
         let profile_store = Arc::new(ProfileControlPlaneStore::open_temp("test_exec").unwrap());
 
-        let downloader = RequestDownloader::new(
+        let downloader = test_downloader!(
             limiter.clone(),
             lock_manager,
             cache_service,
@@ -1450,9 +1469,14 @@ mod tests {
             "cache_write",
             RateLimitConfig::new(10.0),
         ));
-        let cache_service = Arc::new(CacheService::new(None, "test:cache".to_string(), None, None));
+        let cache_service = Arc::new(cache_service_config!(
+            None,
+            "test:cache".to_string(),
+            None,
+            None,
+        ));
         let profile_store = Arc::new(ProfileControlPlaneStore::open_temp("cache_write").unwrap());
-        let downloader = RequestDownloader::new(
+        let downloader = test_downloader!(
             limiter,
             lock_manager,
             cache_service.clone(),
@@ -1466,7 +1490,8 @@ mod tests {
 
         let hash = "cache-key-1".to_string();
         let mut response = sample_cached_response(Some(hash.clone()));
-        response.metadata = downloader.annotate_response_cache_metadata(response.metadata, Some(&hash));
+        response.metadata =
+            downloader.annotate_response_cache_metadata(response.metadata, Some(&hash));
 
         downloader.store_response_cache(&response).await;
 
@@ -1519,7 +1544,12 @@ mod tests {
             "cache_write_endpoint",
             RateLimitConfig::new(10.0),
         ));
-        let cache_service = Arc::new(CacheService::new(None, "test:cache".to_string(), None, None));
+        let cache_service = Arc::new(cache_service_config!(
+            None,
+            "test:cache".to_string(),
+            None,
+            None,
+        ));
         let profile_store = Arc::new(ProfileControlPlaneStore::open_temp("test").unwrap());
         profile_store
             .heartbeat_node(crate::common::registry::NodeInfo {
@@ -1535,7 +1565,7 @@ mod tests {
             })
             .await
             .expect("node heartbeat should be recorded");
-        let downloader = RequestDownloader::new(
+        let downloader = test_downloader!(
             limiter,
             lock_manager,
             cache_service.clone(),
@@ -1549,7 +1579,8 @@ mod tests {
 
         let hash = "cache-key-endpoint".to_string();
         let mut response = sample_cached_response(Some(hash.clone()));
-        response.metadata = downloader.annotate_response_cache_metadata(response.metadata, Some(&hash));
+        response.metadata =
+            downloader.annotate_response_cache_metadata(response.metadata, Some(&hash));
 
         downloader.store_response_cache(&response).await;
 
@@ -1583,9 +1614,15 @@ mod tests {
             "cache_write_ttl",
             RateLimitConfig::new(10.0),
         ));
-        let cache_service = Arc::new(CacheService::new(None, "test:cache".to_string(), None, None));
-        let profile_store = Arc::new(ProfileControlPlaneStore::open_temp("cache_write_ttl").unwrap());
-        let downloader = RequestDownloader::new(
+        let cache_service = Arc::new(cache_service_config!(
+            None,
+            "test:cache".to_string(),
+            None,
+            None,
+        ));
+        let profile_store =
+            Arc::new(ProfileControlPlaneStore::open_temp("cache_write_ttl").unwrap());
+        let downloader = test_downloader!(
             limiter,
             lock_manager,
             cache_service.clone(),
@@ -1617,7 +1654,8 @@ mod tests {
             .as_millis() as i64;
         let hash = "cache-key-ttl".to_string();
         let mut response = sample_cached_response(Some(hash.clone()));
-        response.metadata = downloader.annotate_response_cache_metadata(response.metadata, Some(&hash));
+        response.metadata =
+            downloader.annotate_response_cache_metadata(response.metadata, Some(&hash));
 
         downloader.store_response_cache(&response).await;
 
@@ -1641,16 +1679,25 @@ mod tests {
 
     #[tokio::test]
     async fn response_cache_write_prefers_explicit_expiry_over_configured_ttl() {
-        let lock_manager = Arc::new(DistributedLockManager::new(None, "cache_write_explicit_ttl"));
+        let lock_manager = Arc::new(DistributedLockManager::new(
+            None,
+            "cache_write_explicit_ttl",
+        ));
         let limiter = Arc::new(DistributedSlidingWindowRateLimiter::new(
             None,
             lock_manager.clone(),
             "cache_write_explicit_ttl",
             RateLimitConfig::new(10.0),
         ));
-        let cache_service = Arc::new(CacheService::new(None, "test:cache".to_string(), None, None));
-        let profile_store = Arc::new(ProfileControlPlaneStore::open_temp("cache_write_explicit_ttl").unwrap());
-        let downloader = RequestDownloader::new(
+        let cache_service = Arc::new(cache_service_config!(
+            None,
+            "test:cache".to_string(),
+            None,
+            None,
+        ));
+        let profile_store =
+            Arc::new(ProfileControlPlaneStore::open_temp("cache_write_explicit_ttl").unwrap());
+        let downloader = test_downloader!(
             limiter,
             lock_manager,
             cache_service.clone(),
@@ -1702,7 +1749,9 @@ mod tests {
             .expect("sync should succeed")
             .expect("cached response should exist");
         assert_eq!(
-            cached.metadata.get_trait_config::<i64>(RESPONSE_CACHE_EXPIRES_AT_KEY),
+            cached
+                .metadata
+                .get_trait_config::<i64>(RESPONSE_CACHE_EXPIRES_AT_KEY),
             Some(explicit_expires_at)
         );
     }
@@ -1716,7 +1765,12 @@ mod tests {
             "expired_owner_record",
             RateLimitConfig::new(10.0),
         ));
-        let cache_service = Arc::new(CacheService::new(None, "test:cache".to_string(), None, None));
+        let cache_service = Arc::new(cache_service_config!(
+            None,
+            "test:cache".to_string(),
+            None,
+            None,
+        ));
         let profile_store = Arc::new(ProfileControlPlaneStore::open_temp("origin-app").unwrap());
         profile_store
             .upsert_response_cache_owner_with_expiry(
@@ -1728,7 +1782,7 @@ mod tests {
             .await
             .expect("cache owner should be recorded");
 
-        let downloader = RequestDownloader::new(
+        let downloader = test_downloader!(
             limiter,
             lock_manager,
             cache_service,
@@ -1746,7 +1800,11 @@ mod tests {
                 .await
                 .is_none()
         );
-        assert!(profile_store.get_response_cache_owner("cache-key-1").is_none());
+        assert!(
+            profile_store
+                .get_response_cache_owner("cache-key-1")
+                .is_none()
+        );
     }
 
     #[tokio::test]
@@ -1758,9 +1816,14 @@ mod tests {
             "cache_hit",
             RateLimitConfig::new(10.0),
         ));
-        let cache_service = Arc::new(CacheService::new(None, "test:cache".to_string(), None, None));
+        let cache_service = Arc::new(cache_service_config!(
+            None,
+            "test:cache".to_string(),
+            None,
+            None,
+        ));
         let profile_store = Arc::new(ProfileControlPlaneStore::open_temp("cache_hit").unwrap());
-        let downloader = RequestDownloader::new(
+        let downloader = test_downloader!(
             limiter,
             lock_manager,
             cache_service.clone(),
@@ -1791,7 +1854,10 @@ mod tests {
             .await
             .expect("cache write should succeed");
 
-        let response = downloader.download(request.clone()).await.expect("cache hit should succeed");
+        let response = downloader
+            .download(request.clone())
+            .await
+            .expect("cache hit should succeed");
         assert_eq!(response.prefix_request, request.prefix_request);
         assert_ne!(cached_prefix, request.prefix_request);
         assert_eq!(
@@ -1833,9 +1899,15 @@ mod tests {
             "local_cache_mismatch",
             RateLimitConfig::new(10.0),
         ));
-        let cache_service = Arc::new(CacheService::new(None, "test:cache".to_string(), None, None));
-        let profile_store = Arc::new(ProfileControlPlaneStore::open_temp("local_cache_mismatch").unwrap());
-        let downloader = RequestDownloader::new(
+        let cache_service = Arc::new(cache_service_config!(
+            None,
+            "test:cache".to_string(),
+            None,
+            None,
+        ));
+        let profile_store =
+            Arc::new(ProfileControlPlaneStore::open_temp("local_cache_mismatch").unwrap());
+        let downloader = test_downloader!(
             limiter,
             lock_manager,
             cache_service.clone(),
@@ -1858,7 +1930,12 @@ mod tests {
             .await
             .expect("cache write should succeed");
 
-        assert!(downloader.try_load_cached_response(&cache_key).await.is_none());
+        assert!(
+            downloader
+                .try_load_cached_response(&cache_key)
+                .await
+                .is_none()
+        );
         assert!(
             Response::sync(&cache_key, &cache_service)
                 .await
@@ -1876,9 +1953,15 @@ mod tests {
             "local_cache_corrupt",
             RateLimitConfig::new(10.0),
         ));
-        let cache_service = Arc::new(CacheService::new(None, "test:cache".to_string(), None, None));
-        let profile_store = Arc::new(ProfileControlPlaneStore::open_temp("local_cache_corrupt").unwrap());
-        let downloader = RequestDownloader::new(
+        let cache_service = Arc::new(cache_service_config!(
+            None,
+            "test:cache".to_string(),
+            None,
+            None,
+        ));
+        let profile_store =
+            Arc::new(ProfileControlPlaneStore::open_temp("local_cache_corrupt").unwrap());
+        let downloader = test_downloader!(
             limiter,
             lock_manager,
             cache_service.clone(),
@@ -1897,7 +1980,12 @@ mod tests {
             .await
             .expect("corrupt cache write should succeed");
 
-        assert!(downloader.try_load_cached_response(&cache_key).await.is_none());
+        assert!(
+            downloader
+                .try_load_cached_response(&cache_key)
+                .await
+                .is_none()
+        );
         assert!(
             cache_service
                 .get(&raw_cache_key)
@@ -1909,21 +1997,29 @@ mod tests {
 
     #[tokio::test]
     async fn mismatched_self_owned_local_cache_clears_stale_owner_record() {
-        let lock_manager = Arc::new(DistributedLockManager::new(None, "mismatched_self_owned_local"));
+        let lock_manager = Arc::new(DistributedLockManager::new(
+            None,
+            "mismatched_self_owned_local",
+        ));
         let limiter = Arc::new(DistributedSlidingWindowRateLimiter::new(
             None,
             lock_manager.clone(),
             "mismatched_self_owned_local",
             RateLimitConfig::new(10.0),
         ));
-        let cache_service = Arc::new(CacheService::new(None, "test:cache".to_string(), None, None));
+        let cache_service = Arc::new(cache_service_config!(
+            None,
+            "test:cache".to_string(),
+            None,
+            None,
+        ));
         let profile_store = Arc::new(ProfileControlPlaneStore::open_temp("origin-app").unwrap());
         profile_store
             .upsert_response_cache_owner("cache-key-1", "origin-app", Some("node-local"))
             .await
             .expect("cache owner should be recorded");
 
-        let downloader = RequestDownloader::new(
+        let downloader = test_downloader!(
             limiter,
             lock_manager,
             cache_service.clone(),
@@ -1946,7 +2042,12 @@ mod tests {
             .await
             .expect("cache write should succeed");
 
-        assert!(downloader.try_load_cached_response(&cache_key).await.is_none());
+        assert!(
+            downloader
+                .try_load_cached_response(&cache_key)
+                .await
+                .is_none()
+        );
         assert!(
             Response::sync(&cache_key, &cache_service)
                 .await
@@ -1958,21 +2059,29 @@ mod tests {
 
     #[tokio::test]
     async fn corrupt_self_owned_local_cache_clears_stale_owner_record() {
-        let lock_manager = Arc::new(DistributedLockManager::new(None, "corrupt_self_owned_local"));
+        let lock_manager = Arc::new(DistributedLockManager::new(
+            None,
+            "corrupt_self_owned_local",
+        ));
         let limiter = Arc::new(DistributedSlidingWindowRateLimiter::new(
             None,
             lock_manager.clone(),
             "corrupt_self_owned_local",
             RateLimitConfig::new(10.0),
         ));
-        let cache_service = Arc::new(CacheService::new(None, "test:cache".to_string(), None, None));
+        let cache_service = Arc::new(cache_service_config!(
+            None,
+            "test:cache".to_string(),
+            None,
+            None,
+        ));
         let profile_store = Arc::new(ProfileControlPlaneStore::open_temp("origin-app").unwrap());
         profile_store
             .upsert_response_cache_owner("cache-key-1", "origin-app", Some("node-local"))
             .await
             .expect("cache owner should be recorded");
 
-        let downloader = RequestDownloader::new(
+        let downloader = test_downloader!(
             limiter,
             lock_manager,
             cache_service.clone(),
@@ -1991,7 +2100,12 @@ mod tests {
             .await
             .expect("corrupt cache write should succeed");
 
-        assert!(downloader.try_load_cached_response(&cache_key).await.is_none());
+        assert!(
+            downloader
+                .try_load_cached_response(&cache_key)
+                .await
+                .is_none()
+        );
         assert!(
             cache_service
                 .get(&raw_cache_key)
@@ -2026,15 +2140,24 @@ mod tests {
             }))
         }
 
-        let lock_manager = Arc::new(DistributedLockManager::new(None, "corrupt_local_remote_recover"));
+        let lock_manager = Arc::new(DistributedLockManager::new(
+            None,
+            "corrupt_local_remote_recover",
+        ));
         let limiter = Arc::new(DistributedSlidingWindowRateLimiter::new(
             None,
             lock_manager.clone(),
             "corrupt_local_remote_recover",
             RateLimitConfig::new(10.0),
         ));
-        let cache_service = Arc::new(CacheService::new(None, "test:cache".to_string(), None, None));
-        let profile_store = Arc::new(ProfileControlPlaneStore::open_temp("corrupt_local_remote_recover").unwrap());
+        let cache_service = Arc::new(cache_service_config!(
+            None,
+            "test:cache".to_string(),
+            None,
+            None,
+        ));
+        let profile_store =
+            Arc::new(ProfileControlPlaneStore::open_temp("corrupt_local_remote_recover").unwrap());
 
         let mut request = Request::new("http://example.com", "GET").enable_response_cache(true);
         request.account = "account-a".to_string();
@@ -2051,7 +2174,10 @@ mod tests {
         let mut remote_response = sample_cached_response(Some(cache_key.clone()));
         remote_response.content = b"remote-recovered".to_vec();
         remote_response.metadata = crate::common::model::meta::MetaData::default()
-            .add_trait_config(RESPONSE_CACHE_OWNER_NAMESPACE_KEY, "corrupt_local_remote_recover")
+            .add_trait_config(
+                RESPONSE_CACHE_OWNER_NAMESPACE_KEY,
+                "corrupt_local_remote_recover",
+            )
             .add_trait_config(RESPONSE_CACHE_OWNER_NODE_ID_KEY, "node-remote")
             .add_trait_config(RESPONSE_CACHE_LOOKUP_KEY, cache_key.clone())
             .add_trait_config("remote_only", "yes");
@@ -2061,7 +2187,10 @@ mod tests {
             .expect("listener should bind");
         let port = listener.local_addr().expect("listener local addr").port();
         let app = Router::new()
-            .route("/debug/cache/response/{cache_key}", get(remote_cached_response))
+            .route(
+                "/debug/cache/response/{cache_key}",
+                get(remote_cached_response),
+            )
             .with_state(RemoteResponseState {
                 cache_key: cache_key.clone(),
                 response: remote_response,
@@ -2085,11 +2214,15 @@ mod tests {
             .await
             .expect("heartbeat should succeed");
         profile_store
-            .upsert_response_cache_owner(&cache_key, "corrupt_local_remote_recover", Some("node-remote"))
+            .upsert_response_cache_owner(
+                &cache_key,
+                "corrupt_local_remote_recover",
+                Some("node-remote"),
+            )
             .await
             .expect("cache owner should be recorded");
 
-        let downloader = RequestDownloader::new(
+        let downloader = test_downloader!(
             limiter,
             lock_manager,
             cache_service.clone(),
@@ -2164,8 +2297,14 @@ mod tests {
             "remote_cache_hit",
             RateLimitConfig::new(10.0),
         ));
-        let cache_service = Arc::new(CacheService::new(None, "test:cache".to_string(), None, None));
-        let profile_store = Arc::new(ProfileControlPlaneStore::open_temp("remote_cache_hit").unwrap());
+        let cache_service = Arc::new(cache_service_config!(
+            None,
+            "test:cache".to_string(),
+            None,
+            None,
+        ));
+        let profile_store =
+            Arc::new(ProfileControlPlaneStore::open_temp("remote_cache_hit").unwrap());
 
         let mut request = Request::new("http://example.com", "GET").enable_response_cache(true);
         request.account = "account-a".to_string();
@@ -2187,7 +2326,10 @@ mod tests {
             .expect("listener should bind");
         let port = listener.local_addr().expect("listener local addr").port();
         let app = Router::new()
-            .route("/debug/cache/response/{cache_key}", get(remote_cached_response))
+            .route(
+                "/debug/cache/response/{cache_key}",
+                get(remote_cached_response),
+            )
             .with_state(RemoteResponseState {
                 cache_key: cache_key.clone(),
                 response: remote_response,
@@ -2215,7 +2357,7 @@ mod tests {
             .await
             .expect("cache owner should be recorded");
 
-        let downloader = RequestDownloader::new(
+        let downloader = test_downloader!(
             limiter,
             lock_manager,
             cache_service.clone(),
@@ -2297,8 +2439,14 @@ mod tests {
             "remote_cache_hit_expiry",
             RateLimitConfig::new(10.0),
         ));
-        let cache_service = Arc::new(CacheService::new(None, "test:cache".to_string(), None, None));
-        let profile_store = Arc::new(ProfileControlPlaneStore::open_temp("remote_cache_hit_expiry").unwrap());
+        let cache_service = Arc::new(cache_service_config!(
+            None,
+            "test:cache".to_string(),
+            None,
+            None,
+        ));
+        let profile_store =
+            Arc::new(ProfileControlPlaneStore::open_temp("remote_cache_hit_expiry").unwrap());
 
         let mut request = Request::new("http://example.com", "GET").enable_response_cache(true);
         request.account = "account-a".to_string();
@@ -2324,7 +2472,10 @@ mod tests {
             .expect("listener should bind");
         let port = listener.local_addr().expect("listener local addr").port();
         let app = Router::new()
-            .route("/debug/cache/response/{cache_key}", get(remote_cached_response))
+            .route(
+                "/debug/cache/response/{cache_key}",
+                get(remote_cached_response),
+            )
             .with_state(RemoteResponseState {
                 cache_key: cache_key.clone(),
                 response: remote_response,
@@ -2352,7 +2503,7 @@ mod tests {
             .await
             .expect("cache owner should be recorded");
 
-        let downloader = RequestDownloader::new(
+        let downloader = test_downloader!(
             limiter,
             lock_manager,
             cache_service.clone(),
@@ -2384,7 +2535,9 @@ mod tests {
             .expect("remote cache hit should succeed");
         assert_eq!(response.content, b"remote-explicit-expiry".to_vec());
         assert_eq!(
-            response.metadata.get_trait_config::<i64>(RESPONSE_CACHE_EXPIRES_AT_KEY),
+            response
+                .metadata
+                .get_trait_config::<i64>(RESPONSE_CACHE_EXPIRES_AT_KEY),
             Some(explicit_expires_at)
         );
 
@@ -2393,7 +2546,9 @@ mod tests {
             .expect("cache lookup should succeed")
             .expect("local cache should be warmed");
         assert_eq!(
-            warmed.metadata.get_trait_config::<i64>(RESPONSE_CACHE_EXPIRES_AT_KEY),
+            warmed
+                .metadata
+                .get_trait_config::<i64>(RESPONSE_CACHE_EXPIRES_AT_KEY),
             Some(explicit_expires_at)
         );
 
@@ -2427,20 +2582,32 @@ mod tests {
             }))
         }
 
-        let lock_manager = Arc::new(DistributedLockManager::new(None, "mismatched_remote_payload"));
+        let lock_manager = Arc::new(DistributedLockManager::new(
+            None,
+            "mismatched_remote_payload",
+        ));
         let limiter = Arc::new(DistributedSlidingWindowRateLimiter::new(
             None,
             lock_manager.clone(),
             "mismatched_remote_payload",
             RateLimitConfig::new(10.0),
         ));
-        let cache_service = Arc::new(CacheService::new(None, "test:cache".to_string(), None, None));
-        let profile_store = Arc::new(ProfileControlPlaneStore::open_temp("mismatched_remote_payload").unwrap());
+        let cache_service = Arc::new(cache_service_config!(
+            None,
+            "test:cache".to_string(),
+            None,
+            None,
+        ));
+        let profile_store =
+            Arc::new(ProfileControlPlaneStore::open_temp("mismatched_remote_payload").unwrap());
 
         let cache_key = "cache-key-1".to_string();
         let mut remote_response = sample_cached_response(Some("other-cache-key".to_string()));
         remote_response.metadata = crate::common::model::meta::MetaData::default()
-            .add_trait_config(RESPONSE_CACHE_OWNER_NAMESPACE_KEY, "mismatched_remote_payload")
+            .add_trait_config(
+                RESPONSE_CACHE_OWNER_NAMESPACE_KEY,
+                "mismatched_remote_payload",
+            )
             .add_trait_config(RESPONSE_CACHE_OWNER_NODE_ID_KEY, "node-remote")
             .add_trait_config(RESPONSE_CACHE_LOOKUP_KEY, "other-cache-key")
             .add_trait_config("remote_only", "wrong");
@@ -2450,7 +2617,10 @@ mod tests {
             .expect("listener should bind");
         let port = listener.local_addr().expect("listener local addr").port();
         let app = Router::new()
-            .route("/debug/cache/response/{cache_key}", get(remote_cached_response))
+            .route(
+                "/debug/cache/response/{cache_key}",
+                get(remote_cached_response),
+            )
             .with_state(RemoteResponseState {
                 cache_key: cache_key.clone(),
                 response: remote_response,
@@ -2474,11 +2644,15 @@ mod tests {
             .await
             .expect("heartbeat should succeed");
         profile_store
-            .upsert_response_cache_owner(&cache_key, "mismatched_remote_payload", Some("node-remote"))
+            .upsert_response_cache_owner(
+                &cache_key,
+                "mismatched_remote_payload",
+                Some("node-remote"),
+            )
             .await
             .expect("cache owner should be recorded");
 
-        let downloader = RequestDownloader::new(
+        let downloader = test_downloader!(
             limiter,
             lock_manager,
             cache_service.clone(),
@@ -2490,7 +2664,12 @@ mod tests {
             1024 * 1024 * 10,
         );
 
-        assert!(downloader.try_load_cached_response(&cache_key).await.is_none());
+        assert!(
+            downloader
+                .try_load_cached_response(&cache_key)
+                .await
+                .is_none()
+        );
         assert!(
             Response::sync(&cache_key, &cache_service)
                 .await
@@ -2513,14 +2692,19 @@ mod tests {
             "missing_owner_node_id",
             RateLimitConfig::new(10.0),
         ));
-        let cache_service = Arc::new(CacheService::new(None, "test:cache".to_string(), None, None));
+        let cache_service = Arc::new(cache_service_config!(
+            None,
+            "test:cache".to_string(),
+            None,
+            None,
+        ));
         let profile_store = Arc::new(ProfileControlPlaneStore::open_temp("origin-app").unwrap());
         profile_store
             .upsert_response_cache_owner("cache-key-1", "origin-app", None)
             .await
             .expect("cache owner should be recorded");
 
-        let downloader = RequestDownloader::new(
+        let downloader = test_downloader!(
             limiter,
             lock_manager,
             cache_service,
@@ -2554,7 +2738,12 @@ mod tests {
             "missing_api_port",
             RateLimitConfig::new(10.0),
         ));
-        let cache_service = Arc::new(CacheService::new(None, "test:cache".to_string(), None, None));
+        let cache_service = Arc::new(cache_service_config!(
+            None,
+            "test:cache".to_string(),
+            None,
+            None,
+        ));
         let profile_store = Arc::new(ProfileControlPlaneStore::open_temp("origin-app").unwrap());
         profile_store
             .heartbeat_node(crate::common::registry::NodeInfo {
@@ -2575,7 +2764,7 @@ mod tests {
             .await
             .expect("cache owner should be recorded");
 
-        let downloader = RequestDownloader::new(
+        let downloader = test_downloader!(
             limiter,
             lock_manager,
             cache_service,
@@ -2609,7 +2798,12 @@ mod tests {
             "missing_api_key",
             RateLimitConfig::new(10.0),
         ));
-        let cache_service = Arc::new(CacheService::new(None, "test:cache".to_string(), None, None));
+        let cache_service = Arc::new(cache_service_config!(
+            None,
+            "test:cache".to_string(),
+            None,
+            None,
+        ));
         let profile_store = Arc::new(ProfileControlPlaneStore::open_temp("origin-app").unwrap());
         profile_store
             .heartbeat_node(crate::common::registry::NodeInfo {
@@ -2630,7 +2824,7 @@ mod tests {
             .await
             .expect("cache owner should be recorded");
 
-        let downloader = RequestDownloader::new(
+        let downloader = test_downloader!(
             limiter,
             lock_manager,
             cache_service.clone(),
@@ -2663,9 +2857,9 @@ mod tests {
 
     #[tokio::test]
     async fn remote_cache_server_error_keeps_owner_record() {
+        use axum::Router;
         use axum::http::StatusCode;
         use axum::routing::get;
-        use axum::Router;
         use tokio::net::TcpListener;
 
         async fn server_error() -> StatusCode {
@@ -2679,7 +2873,12 @@ mod tests {
             "remote_cache_500",
             RateLimitConfig::new(10.0),
         ));
-        let cache_service = Arc::new(CacheService::new(None, "test:cache".to_string(), None, None));
+        let cache_service = Arc::new(cache_service_config!(
+            None,
+            "test:cache".to_string(),
+            None,
+            None,
+        ));
         let profile_store = Arc::new(ProfileControlPlaneStore::open_temp("origin-app").unwrap());
 
         let listener = TcpListener::bind("127.0.0.1:0")
@@ -2710,7 +2909,7 @@ mod tests {
             .await
             .expect("cache owner should be recorded");
 
-        let downloader = RequestDownloader::new(
+        let downloader = test_downloader!(
             limiter,
             lock_manager,
             cache_service.clone(),
@@ -2722,7 +2921,12 @@ mod tests {
             1024 * 1024 * 10,
         );
 
-        assert!(downloader.try_load_cached_response("cache-key-1").await.is_none());
+        assert!(
+            downloader
+                .try_load_cached_response("cache-key-1")
+                .await
+                .is_none()
+        );
         assert!(
             Response::sync("cache-key-1", &cache_service)
                 .await
@@ -2738,23 +2942,31 @@ mod tests {
 
     #[tokio::test]
     async fn remote_cache_decode_failure_keeps_owner_record() {
+        use axum::Router;
         use axum::response::IntoResponse;
         use axum::routing::get;
-        use axum::Router;
         use tokio::net::TcpListener;
 
         async fn invalid_json() -> impl IntoResponse {
             ([("content-type", "application/json")], "not-json")
         }
 
-        let lock_manager = Arc::new(DistributedLockManager::new(None, "remote_cache_decode_failure"));
+        let lock_manager = Arc::new(DistributedLockManager::new(
+            None,
+            "remote_cache_decode_failure",
+        ));
         let limiter = Arc::new(DistributedSlidingWindowRateLimiter::new(
             None,
             lock_manager.clone(),
             "remote_cache_decode_failure",
             RateLimitConfig::new(10.0),
         ));
-        let cache_service = Arc::new(CacheService::new(None, "test:cache".to_string(), None, None));
+        let cache_service = Arc::new(cache_service_config!(
+            None,
+            "test:cache".to_string(),
+            None,
+            None,
+        ));
         let profile_store = Arc::new(ProfileControlPlaneStore::open_temp("origin-app").unwrap());
 
         let listener = TcpListener::bind("127.0.0.1:0")
@@ -2785,7 +2997,7 @@ mod tests {
             .await
             .expect("cache owner should be recorded");
 
-        let downloader = RequestDownloader::new(
+        let downloader = test_downloader!(
             limiter,
             lock_manager,
             cache_service.clone(),
@@ -2797,7 +3009,12 @@ mod tests {
             1024 * 1024 * 10,
         );
 
-        assert!(downloader.try_load_cached_response("cache-key-1").await.is_none());
+        assert!(
+            downloader
+                .try_load_cached_response("cache-key-1")
+                .await
+                .is_none()
+        );
         assert!(
             Response::sync("cache-key-1", &cache_service)
                 .await
@@ -2815,14 +3032,22 @@ mod tests {
     async fn remote_cache_connection_failure_keeps_owner_record() {
         use tokio::net::TcpListener;
 
-        let lock_manager = Arc::new(DistributedLockManager::new(None, "remote_cache_connect_failure"));
+        let lock_manager = Arc::new(DistributedLockManager::new(
+            None,
+            "remote_cache_connect_failure",
+        ));
         let limiter = Arc::new(DistributedSlidingWindowRateLimiter::new(
             None,
             lock_manager.clone(),
             "remote_cache_connect_failure",
             RateLimitConfig::new(10.0),
         ));
-        let cache_service = Arc::new(CacheService::new(None, "test:cache".to_string(), None, None));
+        let cache_service = Arc::new(cache_service_config!(
+            None,
+            "test:cache".to_string(),
+            None,
+            None,
+        ));
         let profile_store = Arc::new(ProfileControlPlaneStore::open_temp("origin-app").unwrap());
 
         let listener = TcpListener::bind("127.0.0.1:0")
@@ -2850,7 +3075,7 @@ mod tests {
             .await
             .expect("cache owner should be recorded");
 
-        let downloader = RequestDownloader::new(
+        let downloader = test_downloader!(
             limiter,
             lock_manager,
             cache_service.clone(),
@@ -2862,7 +3087,12 @@ mod tests {
             1024 * 1024 * 10,
         );
 
-        assert!(downloader.try_load_cached_response("cache-key-1").await.is_none());
+        assert!(
+            downloader
+                .try_load_cached_response("cache-key-1")
+                .await
+                .is_none()
+        );
         assert!(
             Response::sync("cache-key-1", &cache_service)
                 .await
@@ -2885,14 +3115,19 @@ mod tests {
             "foreign_owner",
             RateLimitConfig::new(10.0),
         ));
-        let cache_service = Arc::new(CacheService::new(None, "test:cache".to_string(), None, None));
+        let cache_service = Arc::new(cache_service_config!(
+            None,
+            "test:cache".to_string(),
+            None,
+            None,
+        ));
         let profile_store = Arc::new(ProfileControlPlaneStore::open_temp("foreign_owner").unwrap());
         profile_store
             .upsert_response_cache_owner("cache-key-1", "download-pool", Some("node-remote"))
             .await
             .expect("cache owner should be recorded");
 
-        let downloader = RequestDownloader::new(
+        let downloader = test_downloader!(
             limiter,
             lock_manager,
             cache_service,
@@ -2930,7 +3165,12 @@ mod tests {
             "foreign_connect_failure",
             RateLimitConfig::new(10.0),
         ));
-        let cache_service = Arc::new(CacheService::new(None, "test:cache".to_string(), None, None));
+        let cache_service = Arc::new(cache_service_config!(
+            None,
+            "test:cache".to_string(),
+            None,
+            None,
+        ));
         let profile_store = Arc::new(ProfileControlPlaneStore::open_temp("download-pool").unwrap());
 
         let listener = TcpListener::bind("127.0.0.1:0")
@@ -2944,7 +3184,7 @@ mod tests {
             .await
             .expect("cache owner should be recorded");
 
-        let downloader = RequestDownloader::new(
+        let downloader = test_downloader!(
             limiter,
             lock_manager,
             cache_service.clone(),
@@ -2960,7 +3200,12 @@ mod tests {
             format!("http://{}:{}", addr.ip(), addr.port()),
         )]));
 
-        assert!(downloader.try_load_cached_response("cache-key-1").await.is_none());
+        assert!(
+            downloader
+                .try_load_cached_response("cache-key-1")
+                .await
+                .is_none()
+        );
         assert!(
             Response::sync("cache-key-1", &cache_service)
                 .await
@@ -2983,14 +3228,19 @@ mod tests {
             "stale_local_owner",
             RateLimitConfig::new(10.0),
         ));
-        let cache_service = Arc::new(CacheService::new(None, "test:cache".to_string(), None, None));
+        let cache_service = Arc::new(cache_service_config!(
+            None,
+            "test:cache".to_string(),
+            None,
+            None,
+        ));
         let profile_store = Arc::new(ProfileControlPlaneStore::open_temp("origin-app").unwrap());
         profile_store
             .upsert_response_cache_owner("cache-key-1", "origin-app", Some("node-local"))
             .await
             .expect("cache owner should be recorded");
 
-        let downloader = RequestDownloader::new(
+        let downloader = test_downloader!(
             limiter,
             lock_manager,
             cache_service,
@@ -3008,7 +3258,11 @@ mod tests {
                 .await
                 .is_none()
         );
-        assert!(profile_store.get_response_cache_owner("cache-key-1").is_none());
+        assert!(
+            profile_store
+                .get_response_cache_owner("cache-key-1")
+                .is_none()
+        );
     }
 
     #[tokio::test]
@@ -3020,14 +3274,19 @@ mod tests {
             "inactive_owner",
             RateLimitConfig::new(10.0),
         ));
-        let cache_service = Arc::new(CacheService::new(None, "test:cache".to_string(), None, None));
+        let cache_service = Arc::new(cache_service_config!(
+            None,
+            "test:cache".to_string(),
+            None,
+            None,
+        ));
         let profile_store = Arc::new(ProfileControlPlaneStore::open_temp("origin-app").unwrap());
         profile_store
             .upsert_response_cache_owner("cache-key-1", "origin-app", Some("node-missing"))
             .await
             .expect("cache owner should be recorded");
 
-        let downloader = RequestDownloader::new(
+        let downloader = test_downloader!(
             limiter,
             lock_manager,
             cache_service,
@@ -3045,14 +3304,18 @@ mod tests {
                 .await
                 .is_none()
         );
-        assert!(profile_store.get_response_cache_owner("cache-key-1").is_none());
+        assert!(
+            profile_store
+                .get_response_cache_owner("cache-key-1")
+                .is_none()
+        );
     }
 
     #[tokio::test]
     async fn remote_cache_not_found_clears_stale_owner_record() {
+        use axum::Router;
         use axum::http::StatusCode;
         use axum::routing::get;
-        use axum::Router;
         use std::collections::HashMap;
         use tokio::net::TcpListener;
 
@@ -3067,7 +3330,12 @@ mod tests {
             "stale_remote_owner",
             RateLimitConfig::new(10.0),
         ));
-        let cache_service = Arc::new(CacheService::new(None, "test:cache".to_string(), None, None));
+        let cache_service = Arc::new(cache_service_config!(
+            None,
+            "test:cache".to_string(),
+            None,
+            None,
+        ));
         let profile_store = Arc::new(ProfileControlPlaneStore::open_temp("download-pool").unwrap());
 
         let listener = TcpListener::bind("127.0.0.1:0")
@@ -3084,7 +3352,7 @@ mod tests {
             .await
             .expect("cache owner should be recorded");
 
-        let downloader = RequestDownloader::new(
+        let downloader = test_downloader!(
             limiter,
             lock_manager,
             cache_service,
@@ -3106,7 +3374,11 @@ mod tests {
                 .await
                 .is_none()
         );
-        assert!(profile_store.get_response_cache_owner("cache-key-1").is_none());
+        assert!(
+            profile_store
+                .get_response_cache_owner("cache-key-1")
+                .is_none()
+        );
     }
 
     #[tokio::test]
@@ -3141,7 +3413,12 @@ mod tests {
             "foreign_namespace_hit",
             RateLimitConfig::new(10.0),
         ));
-        let cache_service = Arc::new(CacheService::new(None, "test:cache".to_string(), None, None));
+        let cache_service = Arc::new(cache_service_config!(
+            None,
+            "test:cache".to_string(),
+            None,
+            None,
+        ));
         let profile_store = Arc::new(ProfileControlPlaneStore::open_temp("download-pool").unwrap());
 
         let mut request = Request::new("http://example.com", "GET").enable_response_cache(true);
@@ -3163,7 +3440,10 @@ mod tests {
             .expect("listener should bind");
         let addr = listener.local_addr().expect("listener local addr");
         let app = Router::new()
-            .route("/debug/cache/response/{cache_key}", get(remote_cached_response))
+            .route(
+                "/debug/cache/response/{cache_key}",
+                get(remote_cached_response),
+            )
             .with_state(RemoteResponseState {
                 cache_key: cache_key.clone(),
                 response: remote_response,
@@ -3177,7 +3457,7 @@ mod tests {
             .await
             .expect("cache owner should be recorded");
 
-        let downloader = RequestDownloader::new(
+        let downloader = test_downloader!(
             limiter,
             lock_manager,
             cache_service.clone(),
@@ -3257,14 +3537,22 @@ mod tests {
             }))
         }
 
-        let lock_manager = Arc::new(DistributedLockManager::new(None, "foreign_owner_endpoint_hit"));
+        let lock_manager = Arc::new(DistributedLockManager::new(
+            None,
+            "foreign_owner_endpoint_hit",
+        ));
         let limiter = Arc::new(DistributedSlidingWindowRateLimiter::new(
             None,
             lock_manager.clone(),
             "foreign_owner_endpoint_hit",
             RateLimitConfig::new(10.0),
         ));
-        let cache_service = Arc::new(CacheService::new(None, "test:cache".to_string(), None, None));
+        let cache_service = Arc::new(cache_service_config!(
+            None,
+            "test:cache".to_string(),
+            None,
+            None,
+        ));
         let profile_store = Arc::new(ProfileControlPlaneStore::open_temp("download-pool").unwrap());
 
         let mut request = Request::new("http://example.com", "GET").enable_response_cache(true);
@@ -3286,7 +3574,10 @@ mod tests {
             .expect("listener should bind");
         let addr = listener.local_addr().expect("listener local addr");
         let app = Router::new()
-            .route("/debug/cache/response/{cache_key}", get(remote_cached_response))
+            .route(
+                "/debug/cache/response/{cache_key}",
+                get(remote_cached_response),
+            )
             .with_state(RemoteResponseState {
                 cache_key: cache_key.clone(),
                 response: remote_response,
@@ -3307,7 +3598,7 @@ mod tests {
             .await
             .expect("cache owner should be recorded");
 
-        let downloader = RequestDownloader::new(
+        let downloader = test_downloader!(
             limiter,
             lock_manager,
             cache_service.clone(),
@@ -3376,14 +3667,22 @@ mod tests {
             }))
         }
 
-        let lock_manager = Arc::new(DistributedLockManager::new(None, "foreign_owner_endpoint_fallback"));
+        let lock_manager = Arc::new(DistributedLockManager::new(
+            None,
+            "foreign_owner_endpoint_fallback",
+        ));
         let limiter = Arc::new(DistributedSlidingWindowRateLimiter::new(
             None,
             lock_manager.clone(),
             "foreign_owner_endpoint_fallback",
             RateLimitConfig::new(10.0),
         ));
-        let cache_service = Arc::new(CacheService::new(None, "test:cache".to_string(), None, None));
+        let cache_service = Arc::new(cache_service_config!(
+            None,
+            "test:cache".to_string(),
+            None,
+            None,
+        ));
         let profile_store = Arc::new(ProfileControlPlaneStore::open_temp("download-pool").unwrap());
 
         let mut request = Request::new("http://example.com", "GET").enable_response_cache(true);
@@ -3395,7 +3694,9 @@ mod tests {
         let stale_listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("stale listener should bind");
-        let stale_addr = stale_listener.local_addr().expect("stale listener local addr");
+        let stale_addr = stale_listener
+            .local_addr()
+            .expect("stale listener local addr");
         let stale_app = Router::new().route(
             "/debug/cache/response/{cache_key}",
             get(missing_cached_response),
@@ -3421,7 +3722,10 @@ mod tests {
             .local_addr()
             .expect("mapping listener local addr");
         let mapping_app = Router::new()
-            .route("/debug/cache/response/{cache_key}", get(remote_cached_response))
+            .route(
+                "/debug/cache/response/{cache_key}",
+                get(remote_cached_response),
+            )
             .with_state(RemoteResponseState {
                 cache_key: cache_key.clone(),
                 response: remote_response,
@@ -3443,7 +3747,7 @@ mod tests {
             .await
             .expect("cache owner should be recorded");
 
-        let downloader = RequestDownloader::new(
+        let downloader = test_downloader!(
             limiter,
             lock_manager,
             cache_service.clone(),

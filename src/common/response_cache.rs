@@ -35,8 +35,9 @@ pub fn resolve_response_cache_expires_at(
     metadata: &MetaData,
     fallback_ttl: Option<Duration>,
 ) -> Option<i64> {
-    response_cache_expires_at(metadata)
-        .or_else(|| fallback_ttl.map(|ttl| current_time_ms().saturating_add(ttl.as_millis() as i64)))
+    response_cache_expires_at(metadata).or_else(|| {
+        fallback_ttl.map(|ttl| current_time_ms().saturating_add(ttl.as_millis() as i64))
+    })
 }
 
 pub fn current_owner_api_base_url(
@@ -139,31 +140,34 @@ pub fn localize_response_cache_entry(
     Some((localized, expires_at))
 }
 
+pub struct ResponseCachePersistRequest<'a> {
+    pub response: &'a Response,
+    pub owner_namespace: &'a str,
+    pub owner_node_id: Option<&'a str>,
+    pub owner_api_base_url: Option<&'a str>,
+    pub fallback_ttl: Option<Duration>,
+    pub cache_service: &'a CacheService,
+    pub profile_store: &'a ProfileControlPlaneStore,
+    pub context: &'a str,
+}
+
 pub async fn persist_response_cache_entry(
-    response: &Response,
-    owner_namespace: &str,
-    owner_node_id: Option<&str>,
-    owner_api_base_url: Option<&str>,
-    fallback_ttl: Option<Duration>,
-    cache_service: &CacheService,
-    profile_store: &ProfileControlPlaneStore,
-    context: &str,
+    request: ResponseCachePersistRequest<'_>,
 ) -> Option<Response> {
-    let (localized_response, expires_at) =
-        localize_response_cache_entry(
-            response,
-            owner_namespace,
-            owner_node_id,
-            owner_api_base_url,
-            fallback_ttl,
-        )?;
+    let (localized_response, expires_at) = localize_response_cache_entry(
+        request.response,
+        request.owner_namespace,
+        request.owner_node_id,
+        request.owner_api_base_url,
+        request.fallback_ttl,
+    )?;
     let request_hash = localized_response.request_hash.as_deref()?;
 
     let cache_write = if let Some(expires_at) = expires_at {
         let Some(ttl) = remaining_ttl_from_expires_at(expires_at) else {
             warn!(
                 "Skipping expired response cache persist: context={} request_id={} module_id={} cache_key={} expires_at={}",
-                context,
+                request.context,
                 localized_response.id,
                 localized_response.module_id(),
                 request_hash,
@@ -172,18 +176,18 @@ pub async fn persist_response_cache_entry(
             return None;
         };
         localized_response
-            .send_with_ttl(request_hash, cache_service, ttl)
+            .send_with_ttl(request_hash, request.cache_service, ttl)
             .await
     } else {
         localized_response
-            .send_persistent(request_hash, cache_service)
+            .send_persistent(request_hash, request.cache_service)
             .await
     };
 
     if let Err(err) = cache_write {
         warn!(
             "Failed to persist response cache entry: context={} request_id={} module_id={} cache_key={} error={:?}",
-            context,
+            request.context,
             localized_response.id,
             localized_response.module_id(),
             request_hash,
@@ -192,19 +196,20 @@ pub async fn persist_response_cache_entry(
         return None;
     }
 
-    if let Err(err) = profile_store
+    if let Err(err) = request
+        .profile_store
         .upsert_response_cache_owner_with_details(
             request_hash,
-            owner_namespace,
-            owner_node_id,
-            owner_api_base_url,
+            request.owner_namespace,
+            request.owner_node_id,
+            request.owner_api_base_url,
             expires_at,
         )
         .await
     {
         warn!(
             "Failed to record response cache owner: context={} request_id={} module_id={} cache_key={} error={:?}",
-            context,
+            request.context,
             localized_response.id,
             localized_response.module_id(),
             request_hash,

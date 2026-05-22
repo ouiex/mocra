@@ -161,8 +161,8 @@ impl TaskRepository {
 
         let db_backend = self.db.get_database_backend();
         if db_backend == DbBackend::Sqlite {
-            let platform_escaped = platform_name.replace('"', "\"").replace('\'', "''");
-            let account_escaped = account_name.replace('"', "\"").replace('\'', "''");
+            let platform_escaped = platform_name.replace('\'', "''");
+            let account_escaped = account_name.replace('\'', "''");
             let sql = format!(
                 r#"
         select a.* from base.module as a
@@ -256,11 +256,11 @@ impl TaskRepository {
 
         let db_backend = self.db.get_database_backend();
         if db_backend == DbBackend::Sqlite {
-            let platform_escaped = platform_name.replace('"', "\"").replace('\'', "''");
-            let account_escaped = account_name.replace('"', "\"").replace('\'', "''");
+            let platform_escaped = platform_name.replace('\'', "''");
+            let account_escaped = account_name.replace('\'', "''");
             let module_list = module_name
                 .iter()
-                .map(|name| format!("'{}'", name.replace('"', "\"").replace('\'', "''")))
+                .map(|name| format!("'{}'", name.replace('\'', "''")))
                 .collect::<Vec<_>>()
                 .join(", ");
 

@@ -6,9 +6,9 @@ use uuid::Uuid;
 use crate::common::interface::storage::{BlobStorage, Offloadable};
 use crate::common::model::data::DataEvent;
 use crate::common::model::{
-    extract_runtime_node_hint, insert_runtime_node_hint, ErrorDispatchContext, ExecutionMeta,
-    NodeDispatch, NodeDispatchEnvelope, NodeErrorEnvelope, NodeInput, ParserDispatchContext,
-    PayloadCodec, PipelineStage, Priority, RoutingMeta, TypedEnvelope,
+    ErrorDispatchContext, ExecutionMeta, NodeDispatch, NodeDispatchEnvelope, NodeErrorEnvelope,
+    NodeInput, ParserDispatchContext, PayloadCodec, PipelineStage, Priority, RoutingMeta,
+    TypedEnvelope, extract_runtime_node_hint, insert_runtime_node_hint,
 };
 use crate::errors::{Error, ErrorKind, Result};
 use crate::queue::Identifiable;
@@ -335,8 +335,7 @@ mod tests {
     use super::*;
     use crate::common::model::message::TaskEvent;
     use crate::common::model::{
-        extract_runtime_node_hint, insert_runtime_node_hint, ExecutionMark,
-        RuntimeNodeRoutingHint,
+        ExecutionMark, RuntimeNodeRoutingHint, extract_runtime_node_hint, insert_runtime_node_hint,
     };
 
     #[test]
@@ -364,11 +363,15 @@ mod tests {
             dispatch: None,
         };
 
-        let envelope = build_parser_dispatch_from_seed(&seed, "demo").expect("dispatch should build");
+        let envelope =
+            build_parser_dispatch_from_seed(&seed, "demo").expect("dispatch should build");
         assert_eq!(envelope.routing.namespace, "demo");
         assert_eq!(envelope.routing.node_key, "detail");
         assert!(envelope.parser_context.is_some());
-        assert_eq!(envelope.dispatch.input.payload.schema_id, TRANSPORT_PARSER_DISPATCH_SCHEMA_ID);
+        assert_eq!(
+            envelope.dispatch.input.payload.schema_id,
+            TRANSPORT_PARSER_DISPATCH_SCHEMA_ID
+        );
 
         let seed = extract_parser_dispatch_seed(&envelope).expect("seed should extract");
         assert_eq!(seed.task_model.account, "account-a");
@@ -417,7 +420,8 @@ mod tests {
             prefix_request: uuid::Uuid::nil(),
         };
 
-        let envelope = build_error_envelope_from_seed(&seed, "demo").expect("envelope should build");
+        let envelope =
+            build_error_envelope_from_seed(&seed, "demo").expect("envelope should build");
         assert_eq!(envelope.routing.namespace, "demo");
         assert_eq!(envelope.error_message, "boom");
         assert!(envelope.detail.is_none());
@@ -464,7 +468,8 @@ mod tests {
             dispatch: None,
         };
 
-        let mut envelope = build_parser_dispatch_from_seed(&seed, "demo").expect("dispatch should build");
+        let mut envelope =
+            build_parser_dispatch_from_seed(&seed, "demo").expect("dispatch should build");
         envelope.dispatch.input.payload.bytes = b"not-msgpack".to_vec();
 
         let seed = extract_parser_dispatch_seed(&envelope).expect("typed context should decode");
@@ -490,10 +495,12 @@ mod tests {
             dispatch: None,
         };
 
-        let mut envelope = build_parser_dispatch_from_seed(&seed, "demo").expect("dispatch should build");
+        let mut envelope =
+            build_parser_dispatch_from_seed(&seed, "demo").expect("dispatch should build");
         envelope.parser_context = None;
 
-        let err = extract_parser_dispatch_seed(&envelope).expect_err("missing typed context should fail");
+        let err =
+            extract_parser_dispatch_seed(&envelope).expect_err("missing typed context should fail");
         assert!(err.to_string().contains("missing parser dispatch context"));
     }
 
@@ -516,7 +523,8 @@ mod tests {
             prefix_request: uuid::Uuid::nil(),
         };
 
-        let mut envelope = build_error_envelope_from_seed(&seed, "demo").expect("envelope should build");
+        let mut envelope =
+            build_error_envelope_from_seed(&seed, "demo").expect("envelope should build");
         envelope.detail = Some(TypedEnvelope::new(
             "transport.error_detail",
             1,
@@ -524,8 +532,7 @@ mod tests {
             b"not-json".to_vec(),
         ));
 
-        let seed =
-            extract_error_envelope_seed(&envelope).expect("typed context should decode");
+        let seed = extract_error_envelope_seed(&envelope).expect("typed context should decode");
         assert_eq!(seed.context.node_id.as_deref(), Some("typed_error_node"));
     }
 
@@ -548,10 +555,12 @@ mod tests {
             prefix_request: uuid::Uuid::nil(),
         };
 
-        let mut envelope = build_error_envelope_from_seed(&seed, "demo").expect("envelope should build");
+        let mut envelope =
+            build_error_envelope_from_seed(&seed, "demo").expect("envelope should build");
         envelope.error_context = None;
 
-        let err = extract_error_envelope_seed(&envelope).expect_err("missing typed context should fail");
+        let err =
+            extract_error_envelope_seed(&envelope).expect_err("missing typed context should fail");
         assert!(err.to_string().contains("missing error dispatch context"));
     }
 }

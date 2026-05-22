@@ -23,8 +23,7 @@ pub enum QueueTopicKind {
 impl QueueTopicKind {
     pub fn from_topic_name(topic: &str) -> Option<Self> {
         let normalized = topic
-            .replace('{', "")
-            .replace('}', "")
+            .replace(['{', '}'], "")
             .trim_end_matches(":dlq")
             .trim_end_matches("-dlq")
             .to_string();
@@ -156,11 +155,7 @@ pub struct RequestDispatchEnvelope {
 }
 
 impl RequestDispatchEnvelope {
-    pub fn new(
-        routing: RoutingMeta,
-        exec: ExecutionMeta,
-        request: TypedEnvelope,
-    ) -> Self {
+    pub fn new(routing: RoutingMeta, exec: ExecutionMeta, request: TypedEnvelope) -> Self {
         Self {
             routing,
             exec,
@@ -307,28 +302,30 @@ pub struct DeadLetterEnvelope {
     pub payload: QueueEnvelope,
 }
 
+pub struct DeadLetterEnvelopeConfig {
+    pub namespace: String,
+    pub topic: QueueTopicKind,
+    pub source_topic: String,
+    pub source_message_id: String,
+    pub reason: String,
+    pub attempt: u32,
+    pub failed_at_ms: i64,
+    pub payload: QueueEnvelope,
+}
+
 impl DeadLetterEnvelope {
-    pub fn new(
-        namespace: impl Into<String>,
-        topic: QueueTopicKind,
-        source_topic: impl Into<String>,
-        source_message_id: impl Into<String>,
-        reason: impl Into<String>,
-        attempt: u32,
-        failed_at_ms: i64,
-        payload: QueueEnvelope,
-    ) -> Self {
+    pub fn new(config: DeadLetterEnvelopeConfig) -> Self {
         Self {
             id: Uuid::now_v7(),
-            namespace: namespace.into(),
-            topic,
-            source_topic: source_topic.into(),
-            source_message_id: source_message_id.into(),
-            reason: reason.into(),
-            attempt,
-            failed_at_ms,
+            namespace: config.namespace,
+            topic: config.topic,
+            source_topic: config.source_topic,
+            source_message_id: config.source_message_id,
+            reason: config.reason,
+            attempt: config.attempt,
+            failed_at_ms: config.failed_at_ms,
             headers: HashMap::new(),
-            payload,
+            payload: config.payload,
         }
     }
 
@@ -430,7 +427,8 @@ mod tests {
             vec![3_u8, 4_u8],
         );
 
-        let request_envelope = RequestDispatchEnvelope::new(routing.clone(), exec.clone(), request.clone());
+        let request_envelope =
+            RequestDispatchEnvelope::new(routing.clone(), exec.clone(), request.clone());
         let response_envelope =
             ResponseDispatchEnvelope::new(routing.clone(), exec.clone(), response.clone());
 
@@ -450,16 +448,16 @@ mod tests {
             vec![4_u8, 5_u8, 6_u8],
         )
         .expect("queue envelope should build");
-        let dead_letter = DeadLetterEnvelope::new(
-            "demo",
-            QueueTopicKind::Error,
-            "error_task-normal",
-            "msg-1",
-            "deserialization failed",
-            3,
-            1_700_000_000_000,
-            payload.clone(),
-        );
+        let dead_letter = DeadLetterEnvelope::new(DeadLetterEnvelopeConfig {
+            namespace: "demo".to_string(),
+            topic: QueueTopicKind::Error,
+            source_topic: "error_task-normal".to_string(),
+            source_message_id: "msg-1".to_string(),
+            reason: "deserialization failed".to_string(),
+            attempt: 3,
+            failed_at_ms: 1_700_000_000_000,
+            payload: payload.clone(),
+        });
 
         assert_eq!(dead_letter.namespace, "demo");
         assert_eq!(dead_letter.topic, QueueTopicKind::Error);
@@ -534,7 +532,10 @@ mod tests {
         )
         .with_parser_context(parser_context.clone());
 
-        assert_eq!(parser_envelope.parser_context.as_ref(), Some(&parser_context));
+        assert_eq!(
+            parser_envelope.parser_context.as_ref(),
+            Some(&parser_context)
+        );
 
         let error_context = ErrorDispatchContext {
             modules: parser_context.modules.clone(),

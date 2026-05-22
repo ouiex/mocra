@@ -3,8 +3,8 @@ use rmp_serde as rmps;
 use std::sync::Arc;
 use uuid::Uuid;
 
-use crate::common::model::meta::MetaSource;
 use crate::common::interface::storage::{BlobStorage, Offloadable};
+use crate::common::model::meta::MetaSource;
 use crate::common::model::{
     ExecutionMark, ExecutionMeta, PayloadCodec, Prioritizable, Priority, Request,
     RequestDispatchEnvelope, Response, ResponseDispatchEnvelope, RoutingMeta, TypedEnvelope,
@@ -42,7 +42,10 @@ fn transport_parent_request(prefix_request: Uuid) -> Option<Uuid> {
 }
 
 fn extract_profile_version_from_request(request: &Request) -> u64 {
-    request.meta.get_task_config::<u64>("profile_version").unwrap_or(0)
+    request
+        .meta
+        .get_task_config::<u64>("profile_version")
+        .unwrap_or(0)
 }
 
 fn extract_profile_version_from_response(response: &Response) -> u64 {
@@ -267,8 +270,12 @@ mod tests {
         dispatch.request.codec = PayloadCodec::Json;
         dispatch.request.bytes = serde_json::to_vec(&request).expect("json bytes");
 
-        let err = decode_request_dispatch(dispatch).expect_err("json transport codec should be rejected");
-        assert!(err.to_string().contains("unsupported request dispatch codec"));
+        let err =
+            decode_request_dispatch(dispatch).expect_err("json transport codec should be rejected");
+        assert!(
+            err.to_string()
+                .contains("unsupported request dispatch codec")
+        );
     }
 
     #[test]
@@ -337,12 +344,17 @@ mod tests {
             priority: Priority::Normal,
         };
 
-        let mut dispatch = build_response_dispatch(&response, "demo").expect("dispatch should build");
+        let mut dispatch =
+            build_response_dispatch(&response, "demo").expect("dispatch should build");
         dispatch.response.codec = PayloadCodec::Json;
         dispatch.response.bytes = serde_json::to_vec(&response).expect("json bytes");
 
-        let err = decode_response_dispatch(dispatch).expect_err("json transport codec should be rejected");
-        assert!(err.to_string().contains("unsupported response dispatch codec"));
+        let err = decode_response_dispatch(dispatch)
+            .expect_err("json transport codec should be rejected");
+        assert!(
+            err.to_string()
+                .contains("unsupported response dispatch codec")
+        );
     }
 
     #[test]
@@ -353,7 +365,8 @@ mod tests {
         request.module = "catalog".to_string();
         let request_dispatch =
             build_request_dispatch(&request, "origin-ns").expect("request dispatch should build");
-        let request = decode_request_dispatch(request_dispatch).expect("request dispatch should decode");
+        let request =
+            decode_request_dispatch(request_dispatch).expect("request dispatch should decode");
 
         let response = Response {
             id: request.id,

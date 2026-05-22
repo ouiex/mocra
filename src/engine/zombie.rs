@@ -59,20 +59,20 @@ async fn clean_zombies(
     let affected = res.rows_affected();
 
     // Remove compensation records only for rows actually transitioned.
-    if affected > 0 {
-        if let Some(comp) = compensator {
-            let select_sql = format!(
-                "SELECT id FROM base.task_result WHERE status = 'Failed' AND error = 'Zombie Task Detected (Timeout)' AND updated_at < '{}'",
-                formatted_time
-            );
-            if let Ok(rows) = txn
-                .query_all(Statement::from_string(backend, select_sql))
-                .await
-            {
-                for row in &rows {
-                    if let Ok(id) = row.try_get::<String>("", "id") {
-                        let _ = comp.remove_task("task", &id).await;
-                    }
+    if affected > 0
+        && let Some(comp) = compensator
+    {
+        let select_sql = format!(
+            "SELECT id FROM base.task_result WHERE status = 'Failed' AND error = 'Zombie Task Detected (Timeout)' AND updated_at < '{}'",
+            formatted_time
+        );
+        if let Ok(rows) = txn
+            .query_all(Statement::from_string(backend, select_sql))
+            .await
+        {
+            for row in &rows {
+                if let Ok(id) = row.try_get::<String>("", "id") {
+                    let _ = comp.remove_task("task", &id).await;
                 }
             }
         }

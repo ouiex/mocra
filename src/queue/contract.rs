@@ -4,9 +4,7 @@ pub(crate) const LARGE_PAYLOAD_BYTES: usize = 64 * 1024;
 pub(crate) const EXPLICIT_TOPIC_NAMESPACE_DELIMITER: &str = "::";
 
 pub(crate) fn qualify_topic_namespace(namespace: &str, topic: &str) -> String {
-    format!(
-        "{namespace}{EXPLICIT_TOPIC_NAMESPACE_DELIMITER}{topic}"
-    )
+    format!("{namespace}{EXPLICIT_TOPIC_NAMESPACE_DELIMITER}{topic}")
 }
 
 pub(crate) fn split_explicit_topic_namespace(topic: &str) -> Option<(&str, &str)> {
@@ -202,7 +200,8 @@ mod tests {
     #[test]
     fn explicit_namespace_topic_helpers_preserve_route_topic() {
         let contract = QueueRouteContract::new(QueueRoute::Response, "log");
-        let topic = qualify_topic_namespace("origin", &contract.topic_for_priority(Priority::Normal));
+        let topic =
+            qualify_topic_namespace("origin", &contract.topic_for_priority(Priority::Normal));
 
         assert_eq!(topic, "origin::response-normal");
         assert_eq!(

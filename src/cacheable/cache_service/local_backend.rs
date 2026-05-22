@@ -22,12 +22,12 @@ impl CacheBackend for LocalBackend {
     async fn get(&self, key: &str) -> Result<Option<Vec<u8>>, CacheError> {
         if let Some(entry) = self.store.get(key) {
             let (val, expires_at) = entry.value();
-            if let Some(exp) = expires_at {
-                if Instant::now() > *exp {
-                    drop(entry);
-                    self.store.remove(key);
-                    return Ok(None);
-                }
+            if let Some(exp) = expires_at
+                && Instant::now() > *exp
+            {
+                drop(entry);
+                self.store.remove(key);
+                return Ok(None);
             }
             return Ok(Some(val.clone()));
         }
@@ -75,13 +75,13 @@ impl CacheBackend for LocalBackend {
             }
             let key = entry.key();
             let (_, expires_at) = entry.value();
-            if let Some(exp) = expires_at {
-                if now > *exp {
-                    let key_to_remove = key.clone();
-                    drop(entry);
-                    self.store.remove(&key_to_remove);
-                    continue;
-                }
+            if let Some(exp) = expires_at
+                && now > *exp
+            {
+                let key_to_remove = key.clone();
+                drop(entry);
+                self.store.remove(&key_to_remove);
+                continue;
             }
             if key.starts_with(prefix) {
                 keys.push(key.clone());
@@ -165,7 +165,7 @@ impl CacheBackend for LocalBackend {
     }
 
     async fn zadd(&self, key: &str, score: f64, member: &[u8]) -> Result<i64, CacheError> {
-        let mut entry = self.zstore.entry(key.to_string()).or_insert(Vec::new());
+        let mut entry = self.zstore.entry(key.to_string()).or_default();
         let vec = entry.value_mut();
 
         let mut removed = false;
@@ -207,5 +207,4 @@ impl CacheBackend for LocalBackend {
         }
         Ok(0)
     }
-
 }

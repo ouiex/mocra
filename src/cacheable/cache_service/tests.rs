@@ -1,4 +1,4 @@
-use super::{CacheAble, CacheService};
+use super::{CacheAble, CacheService, CacheServiceConfig};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
@@ -17,10 +17,7 @@ impl CacheAble for MyConfig {
 #[tokio::test]
 async fn cacheable_send_and_sync_roundtrip() {
     let sync_service = CacheService::new(
-        None,
-        "myapp".to_string(),
-        Some(Duration::from_secs(60)),
-        None,
+        CacheServiceConfig::local("myapp").with_default_ttl(Some(Duration::from_secs(60))),
     );
 
     let config = MyConfig {
@@ -28,11 +25,11 @@ async fn cacheable_send_and_sync_roundtrip() {
         value: 123,
     };
 
-    if let Err(e) = config.send(&"test", &sync_service).await {
+    if let Err(e) = config.send("test", &sync_service).await {
         eprintln!("Failed to send: {}", e);
     }
 
-    match MyConfig::sync(&"test", &sync_service).await {
+    match MyConfig::sync("test", &sync_service).await {
         Ok(Some(fetched)) => {
             assert_eq!(fetched.name, "test");
             assert_eq!(fetched.value, 123);
@@ -45,10 +42,7 @@ async fn cacheable_send_and_sync_roundtrip() {
 #[tokio::test]
 async fn local_backend_kv_ttl_and_nx_work() {
     let cache = CacheService::new(
-        None,
-        "single-node".to_string(),
-        Some(Duration::from_secs(60)),
-        None,
+        CacheServiceConfig::local("single-node").with_default_ttl(Some(Duration::from_secs(60))),
     );
 
     cache
@@ -77,10 +71,7 @@ async fn local_backend_kv_ttl_and_nx_work() {
 #[tokio::test]
 async fn local_backend_zset_interfaces_behave_as_expected() {
     let cache = CacheService::new(
-        None,
-        "single-node".to_string(),
-        Some(Duration::from_secs(60)),
-        None,
+        CacheServiceConfig::local("single-node").with_default_ttl(Some(Duration::from_secs(60))),
     );
 
     cache
@@ -101,5 +92,4 @@ async fn local_backend_zset_interfaces_behave_as_expected() {
         .await
         .expect("zrangebyscore should succeed");
     assert_eq!(members, vec![b"m1".to_vec(), b"m2".to_vec()]);
-
 }

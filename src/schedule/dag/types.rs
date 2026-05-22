@@ -420,11 +420,7 @@ impl DagAdvanceGate {
             || self.arrived_predecessors.len() == self.expected_predecessors.len()
     }
 
-    pub fn record_arrival(
-        &mut self,
-        predecessor: impl AsRef<str>,
-        timestamp_ms: u64,
-    ) -> bool {
+    pub fn record_arrival(&mut self, predecessor: impl AsRef<str>, timestamp_ms: u64) -> bool {
         let predecessor = predecessor.as_ref();
         if !self
             .expected_predecessors
@@ -710,7 +706,11 @@ impl DagRunState {
     ) {
         let node_id = node_id.as_ref().to_string();
         self.ready_nodes.retain(|ready| ready != &node_id);
-        if !self.completed_nodes.iter().any(|completed| completed == &node_id) {
+        if !self
+            .completed_nodes
+            .iter()
+            .any(|completed| completed == &node_id)
+        {
             self.completed_nodes.push(node_id.clone());
             self.completed_nodes.sort();
         }
@@ -870,7 +870,10 @@ pub trait DagRunStateStore: Send + Sync {
     async fn clear(&self, run_key: &str) -> Result<(), DagError>;
 
     async fn load_state(&self, run_key: &str) -> Result<Option<DagRunState>, DagError> {
-        Ok(self.load(run_key).await?.map(DagRunResumeState::into_run_state))
+        Ok(self
+            .load(run_key)
+            .await?
+            .map(DagRunResumeState::into_run_state))
     }
 
     async fn save_state(&self, run_key: &str, state: &DagRunState) -> Result<(), DagError> {
@@ -879,10 +882,13 @@ pub trait DagRunStateStore: Send + Sync {
     }
 
     async fn request_stop(&self, run_key: &str, signal: DagStopSignal) -> Result<(), DagError> {
-        let mut state = self.load_state(run_key).await?.unwrap_or_else(|| DagRunState {
-            run_id: run_key.to_string(),
-            ..DagRunState::default()
-        });
+        let mut state = self
+            .load_state(run_key)
+            .await?
+            .unwrap_or_else(|| DagRunState {
+                run_id: run_key.to_string(),
+                ..DagRunState::default()
+            });
         state.apply_stop_signal(signal);
         self.save_state(run_key, &state).await
     }
@@ -1000,7 +1006,11 @@ mod tests {
     fn dag_advance_gate_opens_after_all_predecessors_arrive() {
         let mut gate = DagAdvanceGate::new(
             "detail",
-            vec!["page_b".to_string(), "page_a".to_string(), "page_a".to_string()],
+            vec![
+                "page_b".to_string(),
+                "page_a".to_string(),
+                "page_a".to_string(),
+            ],
         );
 
         assert!(!gate.is_open());
@@ -1023,7 +1033,11 @@ mod tests {
         let mut state = DagRunState::new(
             "run-1",
             Some(7),
-            vec!["entry_b".to_string(), "entry_a".to_string(), "entry_a".to_string()],
+            vec![
+                "entry_b".to_string(),
+                "entry_a".to_string(),
+                "entry_a".to_string(),
+            ],
             100,
         );
 
@@ -1051,7 +1065,10 @@ mod tests {
             Some(DagNodeStatus::Succeeded)
         );
         assert_eq!(
-            state.stop_signal.as_ref().map(|signal| signal.reason.as_str()),
+            state
+                .stop_signal
+                .as_ref()
+                .map(|signal| signal.reason.as_str()),
             Some("manual stop")
         );
     }
@@ -1064,7 +1081,12 @@ mod tests {
     #[async_trait]
     impl DagRunStateStore for ResumeOnlyStore {
         async fn load(&self, run_key: &str) -> Result<Option<DagRunResumeState>, DagError> {
-            Ok(self.state.lock().expect("lock poisoned").get(run_key).cloned())
+            Ok(self
+                .state
+                .lock()
+                .expect("lock poisoned")
+                .get(run_key)
+                .cloned())
         }
 
         async fn save(&self, run_key: &str, state: &DagRunResumeState) -> Result<(), DagError> {

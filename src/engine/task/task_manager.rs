@@ -1,6 +1,9 @@
 #![allow(unused)]
 use super::{
-    assembler::ModuleAssembler, factory::TaskFactory, module::Module, repository::TaskRepository,
+    assembler::ModuleAssembler,
+    factory::{TaskFactory, TaskFactoryConfig},
+    module::Module,
+    repository::TaskRepository,
     task::Task,
 };
 use crate::cacheable::{CacheAble, CacheService};
@@ -187,13 +190,13 @@ impl TaskManager {
         let repository = TaskRepository::new((*state.db).clone());
 
         let module_assembler = Arc::new(RwLock::new(ModuleAssembler::new()));
-        let factory = TaskFactory::new(
+        let factory = TaskFactory::new(TaskFactoryConfig {
             repository,
-            Arc::clone(&state.cache_service),
-            state.cookie_service.clone(),
-            Arc::clone(&module_assembler),
-            Arc::clone(&state),
-        );
+            cache_service: Arc::clone(&state.cache_service),
+            cookie_service: state.cookie_service.clone(),
+            module_assembler: Arc::clone(&module_assembler),
+            state: Arc::clone(&state),
+        });
 
         Self {
             factory,
@@ -211,7 +214,7 @@ impl TaskManager {
             let mut assembler = self.module_assembler.write().await;
             assembler.register_module(work.clone());
         }
-        self.precompile_module_dag(&name, work).await;
+        self.precompile_module_dag(name, work).await;
     }
 
     /// Registers multiple module implementations and pre-compiles their DAGs.
@@ -224,7 +227,7 @@ impl TaskManager {
         }
         for work in works {
             let name = work.name();
-            self.precompile_module_dag(&name, work).await;
+            self.precompile_module_dag(name, work).await;
         }
     }
 
@@ -496,7 +499,9 @@ mod tests {
         tracker.record_cutover_failure(scope);
         tracker.record_cutover_failure(scope);
 
-        let failure_state = tracker.failure_state(scope).expect("failure state should exist");
+        let failure_state = tracker
+            .failure_state(scope)
+            .expect("failure state should exist");
         assert_eq!(failure_state.streak, 2);
         assert_eq!(failure_state.last_failure_ms, 100);
 

@@ -18,21 +18,23 @@ pub struct ProcessorRunner {
     pub inflight_counter: Arc<AtomicUsize>,
 }
 
+pub struct ProcessorRunnerConfig {
+    pub name: String,
+    pub shutdown_rx: broadcast::Receiver<()>,
+    pub pause_rx: watch::Receiver<bool>,
+    pub concurrency: usize,
+    pub inflight_counter: Arc<AtomicUsize>,
+}
+
 impl ProcessorRunner {
     /// Creates a named runner with pause/shutdown controls and max concurrency.
-    pub fn new(
-        name: &str,
-        shutdown_rx: broadcast::Receiver<()>,
-        pause_rx: watch::Receiver<bool>,
-        concurrency: usize,
-        inflight_counter: Arc<AtomicUsize>,
-    ) -> Self {
+    pub fn new(config: ProcessorRunnerConfig) -> Self {
         Self {
-            name: name.to_string(),
-            shutdown_rx,
-            pause_rx,
-            concurrency,
-            inflight_counter,
+            name: config.name,
+            shutdown_rx: config.shutdown_rx,
+            pause_rx: config.pause_rx,
+            concurrency: config.concurrency,
+            inflight_counter: config.inflight_counter,
         }
     }
 
@@ -92,7 +94,7 @@ impl ProcessorRunner {
                             }
 
                             loop_count += items.len() as u64;
-                            if loop_count % 1000 == 0 {
+                            if loop_count.is_multiple_of(1000) {
                                 debug!("Processor {}: processed {} items", self.name, loop_count);
                             }
                             // Diagnostic: log each received item so we can verify delivery
@@ -203,13 +205,13 @@ mod tests {
         let (shutdown_tx, shutdown_rx) = broadcast::channel(1);
         let (pause_tx, pause_rx) = watch::channel(false);
 
-        let runner = ProcessorRunner::new(
-            "Test",
+        let runner = ProcessorRunner::new(ProcessorRunnerConfig {
+            name: "Test".to_string(),
             shutdown_rx,
             pause_rx,
-            2,
-            Arc::new(AtomicUsize::new(0)),
-        );
+            concurrency: 2,
+            inflight_counter: Arc::new(AtomicUsize::new(0)),
+        });
 
         let handle = tokio::spawn(async move {
             runner

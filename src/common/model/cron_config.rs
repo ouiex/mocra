@@ -38,14 +38,13 @@ impl CronConfig {
 
     /// Executes once immediately, without cron scheduling.
     pub fn right_now() -> Self {
-        let config = Self {
+        Self {
             schedule: Schedule::from_str("0 0 0 1 1 ? *").unwrap(), // Expression that never triggers.
             expression: "right_now".to_string(),
             enable: true,
             right_now: true,
             run_now_and_schedule: false,
-        };
-        config
+        }
     }
 
     /// Executes once immediately, then continues cron scheduling.

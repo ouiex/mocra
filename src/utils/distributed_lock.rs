@@ -220,7 +220,10 @@ impl DistributedLockManager {
                     Ok(true) => {
                         self.local_locks.insert(
                             lock_name.to_string(),
-                            (token.clone(), Instant::now() + Duration::from_secs(ttl_seconds)),
+                            (
+                                token.clone(),
+                                Instant::now() + Duration::from_secs(ttl_seconds),
+                            ),
                         );
                         return Ok(true);
                     }
@@ -252,7 +255,8 @@ impl DistributedLockManager {
     }
 
     pub async fn acquire_lock_default(&self, lock_name: &str) -> Result<bool, LockError> {
-        self.acquire_lock(lock_name, 5, Duration::from_secs(10)).await
+        self.acquire_lock(lock_name, 5, Duration::from_secs(10))
+            .await
     }
 
     pub async fn release_lock(&self, lock_name: &str) -> Result<bool, LockError> {
@@ -262,13 +266,13 @@ impl DistributedLockManager {
             return lock.release().await;
         }
 
-        if let Some(backend) = &self.backend {
-            if let Some((_, (token, _))) = self.local_locks.remove(lock_name) {
-                return backend
-                    .release(&full_lock_name, &token)
-                    .await
-                    .map_err(LockError::InvalidOperation);
-            }
+        if let Some(backend) = &self.backend
+            && let Some((_, (token, _))) = self.local_locks.remove(lock_name)
+        {
+            return backend
+                .release(&full_lock_name, &token)
+                .await
+                .map_err(LockError::InvalidOperation);
         }
 
         Ok(false)
@@ -312,6 +316,12 @@ pub trait LockBackend: Send + Sync + std::fmt::Debug {
 #[derive(Debug)]
 pub struct LocalLockBackend {
     locks: Arc<DashMap<String, (String, Instant)>>,
+}
+
+impl Default for LocalLockBackend {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl LocalLockBackend {

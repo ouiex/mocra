@@ -1,8 +1,8 @@
 use crate::common::interface::middleware_manager::MiddlewareManager;
+use crate::common::model::Response;
 use crate::common::model::data::DataEvent;
 use crate::common::model::message::TaskEvent;
 use crate::common::model::workflow_profile::TaskProfileSnapshot;
-use crate::common::model::Response;
 use crate::common::state::State;
 use crate::common::status_tracker::ErrorDecision;
 use crate::engine::events::{
@@ -22,11 +22,13 @@ use crate::common::processors::processor::{
 use crate::common::processors::processor_chain::ErrorStrategy;
 #[cfg(test)]
 use crate::common::response_cache::localize_response_cache_entry;
-use crate::common::response_cache::{current_owner_api_base_url, persist_response_cache_entry};
+use crate::common::response_cache::{
+    ResponseCachePersistRequest, current_owner_api_base_url, persist_response_cache_entry,
+};
 use crate::engine::chain::backpressure::{BackpressureSendState, send_with_backpressure};
 use crate::engine::task::module::Module;
 use crate::engine::task::parser_error_adapter::{
-    build_error_envelope_from_seed, build_parser_dispatch_from_seed, ErrorEnvelopeSeed,
+    ErrorEnvelopeSeed, build_error_envelope_from_seed, build_parser_dispatch_from_seed,
 };
 use crate::queue::{QueueManager, QueuedItem};
 use log::{debug, error, info, warn};
@@ -52,21 +54,18 @@ async fn persist_parser_side_response_cache_entry(
     cache_service: &CacheService,
     profile_store: &crate::engine::api::profile_store::ProfileControlPlaneStore,
 ) {
-    let owner_api_base_url = current_owner_api_base_url(
-        profile_store,
-        local_node_id,
-        Duration::from_secs(30),
-    );
-    let _ = persist_response_cache_entry(
+    let owner_api_base_url =
+        current_owner_api_base_url(profile_store, local_node_id, Duration::from_secs(30));
+    let _ = persist_response_cache_entry(ResponseCachePersistRequest {
         response,
-        local_namespace,
-        local_node_id,
-        owner_api_base_url.as_deref(),
-        cache_service.default_ttl(),
+        owner_namespace: local_namespace,
+        owner_node_id: local_node_id,
+        owner_api_base_url: owner_api_base_url.as_deref(),
+        fallback_ttl: cache_service.default_ttl(),
         cache_service,
         profile_store,
-        "parser_side_refresh",
-    )
+        context: "parser_side_refresh",
+    })
     .await;
 }
 
@@ -169,9 +168,7 @@ impl ProcessorTrait<Response, (Response, Arc<Module>, Option<LoginInfo>)>
         let task: Result<(Arc<Module>, Option<LoginInfo>)> =
             self.task_manager.load_module_with_response(&input).await;
         match task {
-            Ok((module, login_info)) => {
-                ProcessorResult::Success((input, module, login_info))
-            }
+            Ok((module, login_info)) => ProcessorResult::Success((input, module, login_info)),
             Err(e) => {
                 warn!(
                     "[ResponseModuleProcessor] load_with_response failed, will retry: account={} platform={} request_id={} err={e}",
@@ -443,7 +440,11 @@ impl ProcessorTrait<(Response, Arc<Module>, Option<LoginInfo>), Vec<DataEvent>>
                 dispatch_seed.task_model.account,
                 dispatch_seed.task_model.platform,
                 dispatch_seed.run_id,
-                dispatch_seed.context.module_id.as_deref().unwrap_or("unknown")
+                dispatch_seed
+                    .context
+                    .module_id
+                    .as_deref()
+                    .unwrap_or("unknown")
             );
             let dispatch = match build_parser_dispatch_from_seed(
                 &dispatch_seed,
@@ -514,19 +515,17 @@ impl ProcessorTrait<(Response, Arc<Module>, Option<LoginInfo>), Vec<DataEvent>>
                 input.0.id,
                 input.0.module_id()
             );
-            let envelope = match build_error_envelope_from_seed(
-                &msg,
-                self.queue_manager.namespace.clone(),
-            ) {
-                Ok(envelope) => envelope,
-                Err(err) => {
-                    error!(
-                        "[ResponseParserProcessor] failed to build parser error envelope: {}",
-                        err
-                    );
-                    return ProcessorResult::Success(data.data);
-                }
-            };
+            let envelope =
+                match build_error_envelope_from_seed(&msg, self.queue_manager.namespace.clone()) {
+                    Ok(envelope) => envelope,
+                    Err(err) => {
+                        error!(
+                            "[ResponseParserProcessor] failed to build parser error envelope: {}",
+                            err
+                        );
+                        return ProcessorResult::Success(data.data);
+                    }
+                };
             if !self
                 .send_with_backpressure(&queue, QueuedItem::new(envelope), "error", &context)
                 .await
@@ -654,16 +653,18 @@ impl ProcessorTrait<(Response, Arc<Module>, Option<LoginInfo>), Vec<DataEvent>>
             input.0.id,
             input.0.module_id()
         );
-        let envelope = match build_error_envelope_from_seed(&error_task, self.queue_manager.namespace.clone()) {
-            Ok(envelope) => envelope,
-            Err(err) => {
-                error!(
-                    "[ResponseParserProcessor] failed to build ErrorTaskModel envelope: {}",
-                    err
-                );
-                return ProcessorResult::FatalFailure(error);
-            }
-        };
+        let envelope =
+            match build_error_envelope_from_seed(&error_task, self.queue_manager.namespace.clone())
+            {
+                Ok(envelope) => envelope,
+                Err(err) => {
+                    error!(
+                        "[ResponseParserProcessor] failed to build ErrorTaskModel envelope: {}",
+                        err
+                    );
+                    return ProcessorResult::FatalFailure(error);
+                }
+            };
         if !self
             .send_with_backpressure(&queue, QueuedItem::new(envelope), "error", &context)
             .await
@@ -685,11 +686,8 @@ impl ProcessorTrait<(Response, Arc<Module>, Option<LoginInfo>), Vec<DataEvent>>
         ProcessorResult::FatalFailure(error)
     }
 }
-impl
-    EventProcessorTrait<
-        (Response, Arc<Module>, Option<LoginInfo>),
-        Vec<DataEvent>,
-    > for ResponseParserProcessor
+impl EventProcessorTrait<(Response, Arc<Module>, Option<LoginInfo>), Vec<DataEvent>>
+    for ResponseParserProcessor
 {
     fn pre_status(
         &self,
@@ -1024,9 +1022,7 @@ pub async fn create_parser_chain(
     let data_store_processor = DataStoreProcessor { middleware_manager };
 
     EventAwareTypedChain::<Response, Response>::new(event_bus)
-        .then::<(Response, Arc<Module>, Option<LoginInfo>), _>(
-            response_module_processor,
-        )
+        .then::<(Response, Arc<Module>, Option<LoginInfo>), _>(response_module_processor)
         .then::<Vec<DataEvent>, _>(response_parser_processor)
         .then_map_vec_parallel_with_strategy_silent::<DataEvent, _>(
             data_middleware_processor,
@@ -1045,13 +1041,13 @@ mod tests {
     use super::{
         localize_parser_side_response_cache_entry, persist_parser_side_response_cache_entry,
     };
-    use crate::cacheable::{CacheAble, CacheService};
+    use crate::cacheable::{CacheAble, CacheService, CacheServiceConfig};
     use crate::common::model::meta::MetaData;
     use crate::common::model::{ExecutionMark, Priority, Response};
     use crate::common::registry::NodeInfo;
     use crate::common::response_cache::{
-        current_time_ms, RESPONSE_CACHE_EXPIRES_AT_KEY, RESPONSE_CACHE_OWNER_API_BASE_URL_KEY,
-        RESPONSE_CACHE_OWNER_NAMESPACE_KEY, RESPONSE_CACHE_OWNER_NODE_ID_KEY,
+        RESPONSE_CACHE_EXPIRES_AT_KEY, RESPONSE_CACHE_OWNER_API_BASE_URL_KEY,
+        RESPONSE_CACHE_OWNER_NAMESPACE_KEY, RESPONSE_CACHE_OWNER_NODE_ID_KEY, current_time_ms,
     };
     use crate::engine::api::profile_store::ProfileControlPlaneStore;
     use std::sync::Arc;
@@ -1151,7 +1147,7 @@ mod tests {
 
     #[tokio::test]
     async fn parser_side_cache_refresh_records_local_owner_index() {
-        let cache_service = Arc::new(CacheService::new(None, "parser-cache".to_string(), None, None));
+        let cache_service = Arc::new(CacheService::new(CacheServiceConfig::local("parser-cache")));
         let profile_store = Arc::new(ProfileControlPlaneStore::open_temp("origin-app").unwrap());
         let mut response = sample_response();
         response.metadata = response
@@ -1189,10 +1185,8 @@ mod tests {
     #[tokio::test]
     async fn parser_side_cache_refresh_preserves_existing_expiry_contract() {
         let cache_service = Arc::new(CacheService::new(
-            None,
-            "parser-cache".to_string(),
-            Some(Duration::from_secs(600)),
-            None,
+            CacheServiceConfig::local("parser-cache")
+                .with_default_ttl(Some(Duration::from_secs(600))),
         ));
         let profile_store = Arc::new(ProfileControlPlaneStore::open_temp("origin-app").unwrap());
         let mut response = sample_response();
@@ -1233,7 +1227,7 @@ mod tests {
 
     #[tokio::test]
     async fn parser_side_cache_refresh_records_local_owner_endpoint_from_heartbeat() {
-        let cache_service = Arc::new(CacheService::new(None, "parser-cache".to_string(), None, None));
+        let cache_service = Arc::new(CacheService::new(CacheServiceConfig::local("parser-cache")));
         let profile_store = Arc::new(ProfileControlPlaneStore::open_temp("origin-app").unwrap());
         profile_store
             .heartbeat_node(NodeInfo {

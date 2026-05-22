@@ -1,7 +1,4 @@
-use crate::common::model::{
-    Request, Response,
-    message::TaskEvent,
-};
+use crate::common::model::{Request, Response, message::TaskEvent};
 use crate::errors::Result;
 use crate::utils::logger::LogModel;
 use async_trait::async_trait;
@@ -88,7 +85,11 @@ impl QueueNativeCompensator {
     /// Returns all pending records and drains them from the in-memory store.
     /// Used for crash recovery: replay these records through the normal processing pipeline.
     pub fn drain_pending(&self) -> Vec<CompensationRecord> {
-        let records: Vec<CompensationRecord> = self.pending.iter().map(|entry| entry.value().clone()).collect();
+        let records: Vec<CompensationRecord> = self
+            .pending
+            .iter()
+            .map(|entry| entry.value().clone())
+            .collect();
         self.pending.clear();
         records
     }
@@ -211,7 +212,10 @@ mod tests {
             .expect("remove should succeed");
         assert_eq!(compensator.pending_count(), 0);
 
-        let incomplete = compensator.scan_incomplete().await.expect("scan should succeed");
+        let incomplete = compensator
+            .scan_incomplete()
+            .await
+            .expect("scan should succeed");
         assert!(incomplete.is_empty());
 
         // Re-adding the same task is safe (idempotent begin)
@@ -241,7 +245,10 @@ mod tests {
             .expect("duplicate add should succeed");
         assert_eq!(compensator.pending_count(), 1);
 
-        let incomplete = compensator.scan_incomplete().await.expect("scan should succeed");
+        let incomplete = compensator
+            .scan_incomplete()
+            .await
+            .expect("scan should succeed");
         assert_eq!(incomplete.len(), 1);
     }
 

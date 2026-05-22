@@ -16,21 +16,23 @@ use crate::common::model::chain_key;
 use crate::common::model::login_info::LoginInfo;
 use crate::common::model::message::TaskEvent;
 use crate::common::model::{
-    insert_runtime_node_hint, ExecutionMark, ModuleConfig, NodeDispatch, NodeParseOutput,
-    PayloadCodec, Request, ResolvedCommonConfig, Response, RuntimeNodeRoutingHint,
-    TypedEnvelope,
+    ExecutionMark, ModuleConfig, NodeDispatch, NodeParseOutput, PayloadCodec, Request,
+    ResolvedCommonConfig, Response, RuntimeNodeRoutingHint, TypedEnvelope,
+    insert_runtime_node_hint,
 };
 use crate::engine::task::module_dag_compiler::{
     ModuleDagCompiler, ModuleDagDefinition, ModuleDagNodeDef,
 };
 use crate::engine::task::node_context_adapter::{
-    build_module_config_generate_context, build_module_config_parse_context,
+    ModuleConfigGenerateContextInput, build_module_config_generate_context,
+    build_module_config_parse_context,
 };
 use crate::engine::task::parser_error_adapter::{
     ErrorEnvelopeSeed, ParserDispatchSeed, TypedParserOutput,
 };
 use crate::errors::Result;
 use crate::errors::{ModuleError, RequestError};
+use crate::schedule::dag::NodePlacement;
 use futures::StreamExt;
 use indexmap::IndexMap;
 use log::{debug, info, warn};
@@ -42,7 +44,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock;
 use uuid::Uuid;
-use crate::schedule::dag::NodePlacement;
 
 // ── Distributed gate types ──────────────────────────────────────────────────
 
@@ -97,7 +98,10 @@ where
                     run_id: response.run_id,
                 },
                 timestamp,
-                metadata: decode_payload_to_metadata(&dispatch.input.payload, metadata_fallback.clone()),
+                metadata: decode_payload_to_metadata(
+                    &dispatch.input.payload,
+                    metadata_fallback.clone(),
+                ),
                 context: context_for_target(&target_node),
                 run_id: response.run_id,
                 prefix_request: response.prefix_request,
@@ -114,7 +118,10 @@ where
     }
 }
 
-fn placeholder_dispatch(target_node: impl Into<String>, metadata: &Map<String, Value>) -> NodeDispatch {
+fn placeholder_dispatch(
+    target_node: impl Into<String>,
+    metadata: &Map<String, Value>,
+) -> NodeDispatch {
     let target_node = target_node.into();
     let payload = TypedEnvelope::new(
         "mocra.node_input.v1",
@@ -217,7 +224,10 @@ impl ModuleDagProcessor {
     fn execution_binding_metadata(&self) -> HashMap<String, String> {
         let mut metadata = HashMap::new();
         if self.profile_version != 0 {
-            metadata.insert("profile_version".to_string(), self.profile_version.to_string());
+            metadata.insert(
+                "profile_version".to_string(),
+                self.profile_version.to_string(),
+            );
         }
         if !self.dag_version.is_empty() {
             metadata.insert("dag_version".to_string(), self.dag_version.clone());
@@ -293,7 +303,10 @@ impl ModuleDagProcessor {
         if actual_dag_version != self.dag_version {
             return Err(self.execution_binding_error(
                 stage,
-                format!("dag_version expected={} actual={actual_dag_version}", self.dag_version),
+                format!(
+                    "dag_version expected={} actual={actual_dag_version}",
+                    self.dag_version
+                ),
             ));
         }
 
@@ -316,13 +329,12 @@ impl ModuleDagProcessor {
         // Register nodes in definition order.
         for node_def in &definition.nodes {
             nodes.insert(node_def.node_id.clone(), node_def.node.clone());
-            let mut hint = RuntimeNodeRoutingHint::new(node_def.node_id.clone())
-                .with_placement(
-                    node_def
-                        .placement_override
-                        .clone()
-                        .unwrap_or_else(NodePlacement::local),
-                );
+            let mut hint = RuntimeNodeRoutingHint::new(node_def.node_id.clone()).with_placement(
+                node_def
+                    .placement_override
+                    .clone()
+                    .unwrap_or_else(NodePlacement::local),
+            );
             if let Some(policy) = node_def
                 .policy_override
                 .clone()
@@ -383,10 +395,10 @@ impl ModuleDagProcessor {
     /// 3. First entry node (initial call with no context)
     async fn resolve_node_id(&self, ctx: &Option<ExecutionMark>) -> Option<String> {
         if let Some(mark) = ctx {
-            if let Some(ref nid) = mark.node_id {
-                if !nid.is_empty() {
-                    return Some(nid.clone());
-                }
+            if let Some(ref nid) = mark.node_id
+                && !nid.is_empty()
+            {
+                return Some(nid.clone());
             }
             // step_idx → positional lookup.
             if let Some(idx) = mark.step_idx {
@@ -430,7 +442,14 @@ impl ModuleDagProcessor {
     pub async fn compile_generate_node_dag(
         &self,
         ctx: &Option<ExecutionMark>,
-    ) -> std::result::Result<Option<(crate::schedule::dag::Dag, String, Option<RuntimeNodeRoutingHint>)>, crate::schedule::dag::DagError> {
+    ) -> std::result::Result<
+        Option<(
+            crate::schedule::dag::Dag,
+            String,
+            Option<RuntimeNodeRoutingHint>,
+        )>,
+        crate::schedule::dag::DagError,
+    > {
         let Some(node_id) = self.resolve_node_id(ctx).await else {
             return Ok(None);
         };
@@ -508,7 +527,14 @@ impl ModuleDagProcessor {
     pub async fn compile_parse_node_dag(
         &self,
         response: &Response,
-    ) -> std::result::Result<Option<(crate::schedule::dag::Dag, String, Option<RuntimeNodeRoutingHint>)>, crate::schedule::dag::DagError> {
+    ) -> std::result::Result<
+        Option<(
+            crate::schedule::dag::Dag,
+            String,
+            Option<RuntimeNodeRoutingHint>,
+        )>,
+        crate::schedule::dag::DagError,
+    > {
         let Some(node_id) = self.resolve_parse_node_id_for_compile(response).await else {
             return Ok(None);
         };
@@ -548,7 +574,8 @@ impl ModuleDagProcessor {
 
         if !data.next_dispatches.is_empty() {
             // ── Route explicit parser dispatches ─────────────────────────
-            let mut routed: Vec<ParserDispatchSeed> = Vec::with_capacity(data.next_dispatches.len());
+            let mut routed: Vec<ParserDispatchSeed> =
+                Vec::with_capacity(data.next_dispatches.len());
 
             for mut dispatch in data.next_dispatches.drain(..) {
                 dispatch.prefix_request = response.prefix_request;
@@ -600,7 +627,8 @@ impl ModuleDagProcessor {
                                 let mut next_dispatch = dispatch.clone();
                                 next_dispatch.context = next_ctx.clone();
                                 retarget_dispatch(&mut next_dispatch, succ);
-                                self.apply_runtime_node_hint(&mut next_dispatch.metadata, succ).await;
+                                self.apply_runtime_node_hint(&mut next_dispatch.metadata, succ)
+                                    .await;
                                 routed.push(next_dispatch);
                             }
                         }
@@ -653,7 +681,8 @@ impl ModuleDagProcessor {
                         prefix_request: response.prefix_request,
                         dispatch: Some(placeholder_dispatch(succ.clone(), &task_metadata)),
                     };
-                    self.apply_runtime_node_hint(&mut next_dispatch.metadata, succ).await;
+                    self.apply_runtime_node_hint(&mut next_dispatch.metadata, succ)
+                        .await;
                     data = data.with_next_dispatch(next_dispatch);
                     debug!(
                         "[dag] module={} run={} execute_parse: advance gate won for '{}' -> synthesized dispatch to '{}'",
@@ -730,7 +759,8 @@ impl ModuleDagProcessor {
 
         let step_idx = {
             let nodes = self.nodes.read().await;
-            nodes.get_index_of(node_id)
+            nodes
+                .get_index_of(node_id)
                 .unwrap_or_else(|| Self::resolve_parse_fallback_index(&response))
         };
 
@@ -866,10 +896,10 @@ impl ModuleDagProcessor {
 
     /// Returns true when a downstream parser dispatch targets this processor's module.
     fn is_task_for_current_module(&self, ctx: &ExecutionMark, task_modules: &[String]) -> bool {
-        if let Some(ref mid) = ctx.module_id {
-            if !mid.is_empty() {
-                return mid == &self.module_id;
-            }
+        if let Some(ref mid) = ctx.module_id
+            && !mid.is_empty()
+        {
+            return mid == &self.module_id;
         }
         if task_modules.is_empty() {
             return true;
@@ -917,21 +947,20 @@ impl ModuleDagProcessor {
             return Ok(Box::pin(futures::stream::empty()));
         };
 
-        if let Some(hint) = self.runtime_node_hint(&node_id).await {
-            if let Some(NodePlacement::Remote { worker_group }) = hint.placement {
-                let message = format!(
-                    "local fast path cannot execute remote-placed node '{}' for module '{}' (worker_group='{}')",
-                    node_id, self.module_id, worker_group
-                );
-                warn!(
-                    "[dag] module={} run={} execute_generate: {}",
-                    self.module_id, self.run_id, message
-                );
-                return Err(RequestError::InvalidMetaForRemote(
-                    std::io::Error::new(std::io::ErrorKind::Other, message).into(),
-                )
-                .into());
-            }
+        if let Some(hint) = self.runtime_node_hint(&node_id).await
+            && let Some(NodePlacement::Remote { worker_group }) = hint.placement
+        {
+            let message = format!(
+                "local fast path cannot execute remote-placed node '{}' for module '{}' (worker_group='{}')",
+                node_id, self.module_id, worker_group
+            );
+            warn!(
+                "[dag] module={} run={} execute_generate: {}",
+                self.module_id, self.run_id, message
+            );
+            return Err(
+                RequestError::InvalidMetaForRemote(std::io::Error::other(message).into()).into(),
+            );
         }
 
         debug!(
@@ -956,16 +985,16 @@ impl ModuleDagProcessor {
             mark
         };
         let default_common = self.default_common_config.read().await.clone();
-        let node_ctx = build_module_config_generate_context(
-            &self.module_id,
-            self.run_id,
-            &node_id,
-            default_common,
-            config.as_ref(),
-            meta,
+        let node_ctx = build_module_config_generate_context(ModuleConfigGenerateContextInput {
+            module_id: &self.module_id,
+            run_id: self.run_id,
+            node_key: &node_id,
+            base_common: default_common,
+            config: config.as_ref(),
+            params: meta,
             login_info,
-            (!prefix.is_nil()).then_some(prefix),
-        );
+            parent_request_id: (!prefix.is_nil()).then_some(prefix),
+        });
 
         match node.generate(node_ctx.borrowed()).await {
             Ok(stream) => {
@@ -1036,21 +1065,20 @@ impl ModuleDagProcessor {
             return Ok(TypedParserOutput::default());
         }
 
-        if let Some(hint) = self.runtime_node_hint(&node_id).await {
-            if let Some(NodePlacement::Remote { worker_group }) = hint.placement {
-                let message = format!(
-                    "local fast path cannot execute remote-placed node '{}' for module '{}' (worker_group='{}')",
-                    node_id, self.module_id, worker_group
-                );
-                warn!(
-                    "[dag] module={} run={} execute_parse: {}",
-                    self.module_id, self.run_id, message
-                );
-                return Err(RequestError::InvalidMetaForRemote(
-                    std::io::Error::new(std::io::ErrorKind::Other, message).into(),
-                )
-                .into());
-            }
+        if let Some(hint) = self.runtime_node_hint(&node_id).await
+            && let Some(NodePlacement::Remote { worker_group }) = hint.placement
+        {
+            let message = format!(
+                "local fast path cannot execute remote-placed node '{}' for module '{}' (worker_group='{}')",
+                node_id, self.module_id, worker_group
+            );
+            warn!(
+                "[dag] module={} run={} execute_parse: {}",
+                self.module_id, self.run_id, message
+            );
+            return Err(
+                RequestError::InvalidMetaForRemote(std::io::Error::other(message).into()).into(),
+            );
         }
 
         let Some(node) = self.get_node(&node_id).await else {
@@ -1095,12 +1123,13 @@ impl ModuleDagProcessor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cacheable::CacheServiceConfig;
     use crate::common::interface::{
         NodeGenerateContext, NodeParseContext, SyncBoxStream, ToSyncBoxStream,
     };
     use crate::common::model::{
-        extract_runtime_node_hint, ModuleConfig, NodeDispatch, NodeInput, NodeParseOutput,
-        PayloadCodec, Request, Response, TypedEnvelope,
+        ModuleConfig, NodeDispatch, NodeInput, NodeParseOutput, PayloadCodec, Request, Response,
+        TypedEnvelope, extract_runtime_node_hint,
     };
     use crate::engine::task::module_dag_compiler::{
         ModuleDagDefinition, ModuleDagEdgeDef, ModuleDagNodeDef,
@@ -1180,7 +1209,7 @@ mod tests {
         let entry_nodes = node_ids
             .iter()
             .filter(|id| !targets.contains(id.as_str()))
-            .map(|id| id.clone())
+            .cloned()
             .collect();
 
         ModuleDagDefinition {
@@ -1193,7 +1222,7 @@ mod tests {
     }
 
     fn make_cache() -> Arc<CacheService> {
-        Arc::new(CacheService::new(None, "test".to_string(), None, None))
+        Arc::new(CacheService::new(CacheServiceConfig::local("test")))
     }
 
     #[tokio::test]
@@ -1332,7 +1361,11 @@ mod tests {
         }
     }
 
-    fn make_binding_meta(run_id: Uuid, profile_version: u64, dag_version: &str) -> Map<String, serde_json::Value> {
+    fn make_binding_meta(
+        run_id: Uuid,
+        profile_version: u64,
+        dag_version: &str,
+    ) -> Map<String, serde_json::Value> {
         let mut metadata = Map::new();
         metadata.insert(
             "run_id".to_string(),
@@ -1678,7 +1711,10 @@ mod tests {
             .err()
             .expect("remote placement should not run on the local fast path");
 
-        assert!(err.to_string().contains("local fast path cannot execute remote-placed node"));
+        assert!(
+            err.to_string()
+                .contains("local fast path cannot execute remote-placed node")
+        );
     }
 
     #[tokio::test]
@@ -1730,7 +1766,10 @@ mod tests {
             .await
             .expect_err("remote placement should not run on the local fast path");
 
-        assert!(err.to_string().contains("local fast path cannot execute remote-placed node"));
+        assert!(
+            err.to_string()
+                .contains("local fast path cannot execute remote-placed node")
+        );
     }
 
     #[tokio::test]
@@ -1742,10 +1781,8 @@ mod tests {
         proc.init_from_definition(&def).await;
 
         let mismatched_run_id = Uuid::now_v7();
-        let mut response = make_response(
-            "node_a",
-            make_binding_meta(mismatched_run_id, 7, "dag-v1"),
-        );
+        let mut response =
+            make_response("node_a", make_binding_meta(mismatched_run_id, 7, "dag-v1"));
         response.run_id = mismatched_run_id;
 
         let err = proc
@@ -1925,7 +1962,12 @@ mod tests {
                 run_id: response.run_id,
             },
             timestamp: chrono::Utc::now().timestamp() as u64,
-            metadata: response.metadata.task.as_object().cloned().unwrap_or_default(),
+            metadata: response
+                .metadata
+                .task
+                .as_object()
+                .cloned()
+                .unwrap_or_default(),
             context: response.context.clone(),
             run_id: response.run_id,
             prefix_request: response.prefix_request,
@@ -1961,7 +2003,12 @@ mod tests {
                 run_id: response.run_id,
             },
             timestamp: chrono::Utc::now().timestamp() as u64,
-            metadata: response.metadata.task.as_object().cloned().unwrap_or_default(),
+            metadata: response
+                .metadata
+                .task
+                .as_object()
+                .cloned()
+                .unwrap_or_default(),
             context: response.context.clone(),
             run_id: response.run_id,
             prefix_request: response.prefix_request,
@@ -1988,7 +2035,12 @@ mod tests {
                 run_id: response.run_id,
             },
             timestamp: chrono::Utc::now().timestamp() as u64,
-            metadata: response.metadata.task.as_object().cloned().unwrap_or_default(),
+            metadata: response
+                .metadata
+                .task
+                .as_object()
+                .cloned()
+                .unwrap_or_default(),
             context: response.context.clone(),
             run_id: response.run_id,
             prefix_request: response.prefix_request,

@@ -1,5 +1,5 @@
-use crate::common::model::{ExecutionMark, Priority, Request, Response};
 use crate::common::model::config::KafkaConfig;
+use crate::common::model::{ExecutionMark, Priority, Request, Response};
 use crate::common::policy::{PolicyConfig, PolicyOverride};
 use crate::engine::task::request_response_adapter::{
     build_request_dispatch, build_response_dispatch, decode_request_dispatch,
@@ -7,11 +7,11 @@ use crate::engine::task::request_response_adapter::{
 };
 use crate::errors::ErrorKind;
 use crate::errors::Result;
-use crate::queue::kafka::KafkaQueue;
 use crate::queue::compensation::Identifiable;
+use crate::queue::kafka::{KafkaQueue, KafkaQueueConfig};
 use crate::queue::{
-    AckAction, DlqRecord, HEADER_ATTEMPT, HEADER_NACK_REASON, Message, MqBackend,
-    NackDisposition, NackPolicy, QueueManager, QueuedItem, decide_nack,
+    AckAction, DlqRecord, HEADER_ATTEMPT, HEADER_NACK_REASON, Message, MqBackend, NackDisposition,
+    NackPolicy, QueueManager, QueuedItem, decide_nack,
 };
 use async_trait::async_trait;
 use rmp_serde as rmps;
@@ -99,11 +99,7 @@ impl MqBackend for MockBackend {
         Ok(())
     }
 
-    async fn read_dlq(
-        &self,
-        _topic: &str,
-        _count: usize,
-    ) -> Result<Vec<DlqRecord>> {
+    async fn read_dlq(&self, _topic: &str, _count: usize) -> Result<Vec<DlqRecord>> {
         Ok(Vec::new())
     }
 }
@@ -178,35 +174,16 @@ impl MqBackend for DlqOpsMockBackend {
         Ok(())
     }
 
-    async fn read_dlq(
-        &self,
-        _topic: &str,
-        _count: usize,
-    ) -> Result<Vec<DlqRecord>> {
-        Ok(self
-            .dlq_records
-            .lock()
-            .unwrap()
-            .values()
-            .cloned()
-            .collect())
+    async fn read_dlq(&self, _topic: &str, _count: usize) -> Result<Vec<DlqRecord>> {
+        Ok(self.dlq_records.lock().unwrap().values().cloned().collect())
     }
 
-    async fn read_dlq_record(
-        &self,
-        _topic: &str,
-        record_id: &str,
-    ) -> Result<Option<DlqRecord>> {
+    async fn read_dlq_record(&self, _topic: &str, record_id: &str) -> Result<Option<DlqRecord>> {
         Ok(self.dlq_records.lock().unwrap().get(record_id).cloned())
     }
 
     async fn delete_dlq(&self, _topic: &str, record_id: &str) -> Result<bool> {
-        Ok(self
-            .dlq_records
-            .lock()
-            .unwrap()
-            .remove(record_id)
-            .is_some())
+        Ok(self.dlq_records.lock().unwrap().remove(record_id).is_some())
     }
 }
 
@@ -285,8 +262,8 @@ async fn test_dlq_record_id_requeue_and_delete() {
     let backend = Arc::new(DlqOpsMockBackend::new());
     let manager = QueueManager::new(Some(backend.clone()), 16);
     let request = Request::new("http://example.com", "GET");
-    let dispatch = build_request_dispatch(&request, "origin")
-        .expect("request dispatch should build");
+    let dispatch =
+        build_request_dispatch(&request, "origin").expect("request dispatch should build");
 
     manager
         .send_to_dlq("request-normal", &dispatch, "poison")
@@ -319,7 +296,10 @@ async fn test_dlq_record_id_requeue_and_delete() {
     assert_eq!(published.len(), 1);
     assert_eq!(published[0].0, "request-normal");
     assert_eq!(
-        published[0].2.get(HEADER_ATTEMPT).map(|value| value.as_str()),
+        published[0]
+            .2
+            .get(HEADER_ATTEMPT)
+            .map(|value| value.as_str()),
         Some("0")
     );
 
@@ -369,7 +349,10 @@ async fn test_response_dispatch_dlq_record_id_requeue_and_delete() {
     assert_eq!(published.len(), 1);
     assert_eq!(published[0].0, "origin::response-normal");
     assert_eq!(
-        published[0].2.get(HEADER_ATTEMPT).map(|value| value.as_str()),
+        published[0]
+            .2
+            .get(HEADER_ATTEMPT)
+            .map(|value| value.as_str()),
         Some("0")
     );
 
@@ -433,7 +416,10 @@ async fn cross_namespace_response_uses_explicit_namespace_topic() {
     let response_msg = messages
         .iter()
         .find(|(topic, _, _)| topic == "origin::response-normal");
-    assert!(response_msg.is_some(), "should publish to explicit origin topic");
+    assert!(
+        response_msg.is_some(),
+        "should publish to explicit origin topic"
+    );
 }
 
 #[test]
@@ -446,8 +432,9 @@ fn response_fast_path_stays_local_only_for_local_namespace() {
         .expect("local dispatch should build");
     assert!(manager.should_use_local_response_fast_path(&local_dispatch));
 
-    let mut remote_dispatch = build_response_dispatch(&sample_response(), manager.namespace.clone())
-        .expect("remote dispatch should build");
+    let mut remote_dispatch =
+        build_response_dispatch(&sample_response(), manager.namespace.clone())
+            .expect("remote dispatch should build");
     remote_dispatch.routing.namespace = "origin".to_string();
     assert!(!manager.should_use_local_response_fast_path(&remote_dispatch));
 }
@@ -483,7 +470,11 @@ async fn federated_download_pool_subscribes_remote_request_topics() {
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     let subscribed_topics = backend.subscribed_topics.lock().unwrap();
-    assert!(subscribed_topics.iter().any(|topic| topic == "request-normal"));
+    assert!(
+        subscribed_topics
+            .iter()
+            .any(|topic| topic == "request-normal")
+    );
     assert!(
         subscribed_topics
             .iter()
@@ -719,7 +710,12 @@ async fn test_kafka_retry_then_ack() {
         max_retries: 1,
         backoff_ms: 0,
     };
-    let queue = match KafkaQueue::new(&kafka_config, 0, &namespace, nack_policy) {
+    let queue = match KafkaQueue::new(KafkaQueueConfig {
+        kafka_config: &kafka_config,
+        minid_time: 0,
+        namespace: &namespace,
+        nack_policy,
+    }) {
         Ok(q) => q,
         Err(e) => {
             eprintln!(
@@ -792,7 +788,12 @@ async fn test_kafka_out_of_order_ack() {
         max_retries: 0,
         backoff_ms: 0,
     };
-    let queue = match KafkaQueue::new(&kafka_config, 0, &namespace, nack_policy) {
+    let queue = match KafkaQueue::new(KafkaQueueConfig {
+        kafka_config: &kafka_config,
+        minid_time: 0,
+        namespace: &namespace,
+        nack_policy,
+    }) {
         Ok(q) => q,
         Err(e) => {
             eprintln!(
@@ -843,4 +844,3 @@ async fn test_kafka_out_of_order_ack() {
     msg2.ack().await.expect("ack2");
     msg1.ack().await.expect("ack1");
 }
-

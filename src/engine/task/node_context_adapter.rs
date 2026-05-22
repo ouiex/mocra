@@ -6,8 +6,8 @@ use uuid::Uuid;
 use crate::common::interface::module::{NodeGenerateContext, NodeParseContext};
 use crate::common::model::login_info::LoginInfo;
 use crate::common::model::{
-    ExecutionMeta, ModuleConfig, NodeInput, PayloadCodec, Priority,
-    ResolvedCommonConfig, ResolvedNodeConfig, Response, RoutingMeta, TypedEnvelope,
+    ExecutionMeta, ModuleConfig, NodeInput, PayloadCodec, Priority, ResolvedCommonConfig,
+    ResolvedNodeConfig, Response, RoutingMeta, TypedEnvelope,
 };
 
 pub(crate) struct OwnedNodeGenerateContext {
@@ -48,17 +48,21 @@ impl OwnedNodeParseContext {
     }
 }
 
+pub(crate) struct ModuleConfigGenerateContextInput<'a> {
+    pub(crate) module_id: &'a str,
+    pub(crate) run_id: Uuid,
+    pub(crate) node_key: &'a str,
+    pub(crate) base_common: ResolvedCommonConfig,
+    pub(crate) config: &'a ModuleConfig,
+    pub(crate) params: Map<String, Value>,
+    pub(crate) login_info: Option<LoginInfo>,
+    pub(crate) parent_request_id: Option<Uuid>,
+}
+
 pub(crate) fn build_module_config_generate_context(
-    module_id: &str,
-    run_id: Uuid,
-    node_key: &str,
-    base_common: ResolvedCommonConfig,
-    config: &ModuleConfig,
-    params: Map<String, Value>,
-    login_info: Option<LoginInfo>,
-    parent_request_id: Option<Uuid>,
+    input: ModuleConfigGenerateContextInput<'_>,
 ) -> OwnedNodeGenerateContext {
-    let (account, platform, module) = split_module_id(module_id);
+    let (account, platform, module) = split_module_id(input.module_id);
     let now_ms = now_ms();
 
     OwnedNodeGenerateContext {
@@ -67,10 +71,10 @@ pub(crate) fn build_module_config_generate_context(
             account,
             platform,
             module,
-            node_key: node_key.to_string(),
-            run_id,
+            node_key: input.node_key.to_string(),
+            run_id: input.run_id,
             request_id: Uuid::now_v7(),
-            parent_request_id: parent_request_id.filter(|id| !id.is_nil()),
+            parent_request_id: input.parent_request_id.filter(|id| !id.is_nil()),
             priority: Priority::default(),
         },
         exec: ExecutionMeta {
@@ -78,9 +82,14 @@ pub(crate) fn build_module_config_generate_context(
             updated_at_ms: now_ms,
             ..ExecutionMeta::default()
         },
-        config: build_module_config_node_config(module_id, node_key, base_common, Some(config)),
-        input: build_module_config_input(node_key, params),
-        login_info,
+        config: build_module_config_node_config(
+            input.module_id,
+            input.node_key,
+            input.base_common,
+            Some(input.config),
+        ),
+        input: build_module_config_input(input.node_key, input.params),
+        login_info: input.login_info,
     }
 }
 
@@ -221,8 +230,8 @@ fn now_ms() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::model::Priority;
     use crate::common::interface::ModuleTrait;
+    use crate::common::model::Priority;
     use std::sync::Arc;
 
     struct CommonDefaultsTestModule;
@@ -276,7 +285,8 @@ mod tests {
     #[test]
     fn apply_module_config_common_overrides_preserves_inherited_option_defaults() {
         let default_common = CommonDefaultsTestModule.default_common_config();
-        let resolved = apply_module_config_common_overrides(default_common, Some(&ModuleConfig::default()));
+        let resolved =
+            apply_module_config_common_overrides(default_common, Some(&ModuleConfig::default()));
 
         assert_eq!(resolved.rate_limit, Some(2.5));
         assert_eq!(resolved.proxy_pool.as_deref(), Some("pool-a"));

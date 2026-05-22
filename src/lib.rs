@@ -1,6 +1,13 @@
 //! mocra: single-package entry point.
 //! All former workspace crates are embedded as local modules under `src/`.
 
+#![allow(
+    clippy::large_enum_variant,
+    clippy::module_inception,
+    clippy::result_large_err,
+    clippy::type_complexity
+)]
+
 pub mod prelude;
 
 #[path = "cacheable/lib.rs"]

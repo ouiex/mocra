@@ -186,7 +186,11 @@ impl DistributedSlidingWindowRateLimiter {
     }
 
     pub async fn set_key_config(&self, key: &str, config: RateLimitConfig) -> Result<()> {
-        if self.local_configs.get(key).is_some_and(|existing| *existing == config) {
+        if self
+            .local_configs
+            .get(key)
+            .is_some_and(|existing| *existing == config)
+        {
             return Ok(());
         }
         self.local_configs.insert(key.to_string(), config);
@@ -412,8 +416,7 @@ impl DistributedSlidingWindowRateLimiter {
         let base = config
             .base_max_requests_per_second
             .unwrap_or(config.max_requests_per_second);
-        config.max_requests_per_second =
-            (config.max_requests_per_second * step_factor).min(base);
+        config.max_requests_per_second = (config.max_requests_per_second * step_factor).min(base);
         let new_limit = config.max_requests_per_second;
         self.set_key_config(identifier, config).await?;
         Ok(new_limit)
@@ -501,8 +504,7 @@ pub trait RateLimitBackend: Send + Sync + std::fmt::Debug {
 
     async fn current_time_ms(&self) -> std::result::Result<u64, String>;
 
-    async fn cleanup(&self, prefix: &str, older_than_ms: u64)
-        -> std::result::Result<u64, String>;
+    async fn cleanup(&self, prefix: &str, older_than_ms: u64) -> std::result::Result<u64, String>;
 
     async fn record(
         &self,
@@ -531,6 +533,12 @@ pub struct LocalRateLimitBackend {
     suspended: Arc<DashMap<String, u64>>,
 }
 
+impl Default for LocalRateLimitBackend {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl LocalRateLimitBackend {
     pub fn new() -> Self {
         Self {
@@ -552,7 +560,7 @@ impl RateLimitBackend for LocalRateLimitBackend {
         if ttl_ms == 0 {
             if let Some(last_time) = self.last_request.get(key) {
                 let elapsed = current_time_ms.saturating_sub(*last_time);
-                return Ok((elapsed < min_interval_ms).then_some(min_interval_ms - elapsed).unwrap_or(0));
+                return Ok(min_interval_ms.saturating_sub(elapsed));
             }
             return Ok(0);
         }
@@ -602,11 +610,7 @@ impl RateLimitBackend for LocalRateLimitBackend {
             .as_millis() as u64)
     }
 
-    async fn cleanup(
-        &self,
-        prefix: &str,
-        older_than_ms: u64,
-    ) -> std::result::Result<u64, String> {
+    async fn cleanup(&self, prefix: &str, older_than_ms: u64) -> std::result::Result<u64, String> {
         let cutoff = self.current_time_ms().await?.saturating_sub(older_than_ms);
         let mut removed = 0;
         self.last_request.retain(|key, last| {
@@ -636,8 +640,7 @@ impl RateLimitBackend for LocalRateLimitBackend {
         suspend_until_ms: u64,
         _ttl_ms: u64,
     ) -> std::result::Result<(), String> {
-        self.suspended
-            .insert(key.to_string(), suspend_until_ms);
+        self.suspended.insert(key.to_string(), suspend_until_ms);
         Ok(())
     }
 
@@ -888,7 +891,9 @@ impl RateLimitBackend for RaftRateLimitBackend {
         key: &str,
         current_time_ms: u64,
     ) -> std::result::Result<Option<u64>, String> {
-        if let Some(value) = self.store.read_cache_value(&self.namespace, &self.suspend_key(key))
+        if let Some(value) = self
+            .store
+            .read_cache_value(&self.namespace, &self.suspend_key(key))
             && let Ok(value_str) = String::from_utf8(value)
             && let Ok(suspend_until) = value_str.parse::<u64>()
             && suspend_until > current_time_ms
@@ -930,7 +935,14 @@ mod tests {
 
         limiter.record("user_cleanup").await.unwrap();
         assert!(limiter.get_identifier_count().await.unwrap() > 0);
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        let expired_at = limiter
+            .get_current_timestamp()
+            .await
+            .unwrap()
+            .saturating_sub(limiter.default_config.window_size_millis * 3);
+        limiter
+            .local_last_request
+            .insert("user_cleanup".to_string(), expired_at);
         assert!(limiter.cleanup().await.unwrap() > 0);
         assert_eq!(limiter.get_identifier_count().await.unwrap(), 0);
     }

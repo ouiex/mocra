@@ -7,8 +7,8 @@ use std::time::Instant;
 
 use crate::common::model::control_plane_profile::DefaultConfigScope;
 use crate::common::model::{
-    DefaultConfigUpsert, MiddlewareType, MiddlewareUpsert,
-    TaskProfileIdentity, TaskProfileSnapshot, TaskProfileUpsert,
+    DefaultConfigUpsert, MiddlewareType, MiddlewareUpsert, TaskProfileIdentity,
+    TaskProfileSnapshot, TaskProfileUpsert,
 };
 use crate::engine::api::profile_store::{
     ControlPlaneStoreError, DefaultConfigPatch, MiddlewarePatch, TaskProfilePatch,
@@ -85,10 +85,12 @@ pub struct MiddlewareQuery {
 pub struct TaskProfilePatchPayload {
     pub enabled: Option<bool>,
     pub common: Option<crate::common::model::ResolvedCommonConfig>,
-    pub node_configs: Option<std::collections::BTreeMap<String, crate::common::model::TypedEnvelope>>,
+    pub node_configs:
+        Option<std::collections::BTreeMap<String, crate::common::model::TypedEnvelope>>,
     pub download_middleware: Option<Vec<crate::common::model::MiddlewareBinding>>,
     pub data_middleware: Option<Vec<crate::common::model::MiddlewareBinding>>,
-    pub middleware_configs: Option<std::collections::BTreeMap<String, crate::common::model::TypedEnvelope>>,
+    pub middleware_configs:
+        Option<std::collections::BTreeMap<String, crate::common::model::TypedEnvelope>>,
     pub debug_layers_json: Option<serde_json::Value>,
     pub updated_by: Option<String>,
 }
@@ -120,7 +122,14 @@ pub async fn get_profile(
         .get_profile(&namespace, &account, &platform, &module)
         .map(Json)
         .ok_or(StatusCode::NOT_FOUND);
-    record_status_metrics("get_profile", result.as_ref().map(|_| StatusCode::OK).unwrap_or(StatusCode::NOT_FOUND), started);
+    record_status_metrics(
+        "get_profile",
+        result
+            .as_ref()
+            .map(|_| StatusCode::OK)
+            .unwrap_or(StatusCode::NOT_FOUND),
+        started,
+    );
     result
 }
 
@@ -144,7 +153,10 @@ pub async fn create_profile(
         .map_err(map_profile_store_error);
     record_status_metrics(
         "create_profile",
-        result.as_ref().map(|_| StatusCode::CREATED).unwrap_or(StatusCode::BAD_REQUEST),
+        result
+            .as_ref()
+            .map(|_| StatusCode::CREATED)
+            .unwrap_or(StatusCode::BAD_REQUEST),
         started,
     );
     result
@@ -184,7 +196,10 @@ pub async fn patch_profile(
         .ok_or(StatusCode::NOT_FOUND);
     record_status_metrics(
         "patch_profile",
-        result.as_ref().map(|_| StatusCode::OK).unwrap_or(StatusCode::NOT_FOUND),
+        result
+            .as_ref()
+            .map(|_| StatusCode::OK)
+            .unwrap_or(StatusCode::NOT_FOUND),
         started,
     );
     result
@@ -229,10 +244,7 @@ pub async fn patch_account(
     patch_default(state, DefaultConfigScope::Account, name, payload).await
 }
 
-pub async fn delete_account(
-    State(state): State<ApiState>,
-    Path(name): Path<String>,
-) -> StatusCode {
+pub async fn delete_account(State(state): State<ApiState>, Path(name): Path<String>) -> StatusCode {
     delete_default(state, DefaultConfigScope::Account, name).await
 }
 
@@ -295,10 +307,7 @@ pub async fn patch_module(
     patch_default(state, DefaultConfigScope::Module, name, payload).await
 }
 
-pub async fn delete_module(
-    State(state): State<ApiState>,
-    Path(name): Path<String>,
-) -> StatusCode {
+pub async fn delete_module(State(state): State<ApiState>, Path(name): Path<String>) -> StatusCode {
     delete_default(state, DefaultConfigScope::Module, name).await
 }
 
@@ -308,12 +317,14 @@ pub async fn list_middlewares(
 ) -> Json<Vec<MiddlewareResponse>> {
     let started = Instant::now();
     let namespace = state.state.config.read().await.name.clone();
-    let response = Json(state
-        .profile_store
-        .list_middlewares(&namespace, query.middleware_type)
-        .into_iter()
-        .map(middleware_response)
-        .collect());
+    let response = Json(
+        state
+            .profile_store
+            .list_middlewares(&namespace, query.middleware_type)
+            .into_iter()
+            .map(middleware_response)
+            .collect(),
+    );
     record_api_metrics("list_middlewares", "success", started);
     response
 }
@@ -337,7 +348,10 @@ pub async fn get_middleware(
         .ok_or(StatusCode::NOT_FOUND);
     record_status_metrics(
         "get_middleware",
-        result.as_ref().map(|_| StatusCode::OK).unwrap_or(StatusCode::NOT_FOUND),
+        result
+            .as_ref()
+            .map(|_| StatusCode::OK)
+            .unwrap_or(StatusCode::NOT_FOUND),
         started,
     );
     result
@@ -373,7 +387,10 @@ pub async fn create_middleware(
         .map_err(map_profile_store_error);
     record_status_metrics(
         "create_middleware",
-        result.as_ref().map(|_| StatusCode::CREATED).unwrap_or(StatusCode::BAD_REQUEST),
+        result
+            .as_ref()
+            .map(|_| StatusCode::CREATED)
+            .unwrap_or(StatusCode::BAD_REQUEST),
         started,
     );
     result
@@ -413,7 +430,10 @@ pub async fn patch_middleware(
         .ok_or(StatusCode::NOT_FOUND);
     record_status_metrics(
         "patch_middleware",
-        result.as_ref().map(|_| StatusCode::OK).unwrap_or(StatusCode::NOT_FOUND),
+        result
+            .as_ref()
+            .map(|_| StatusCode::OK)
+            .unwrap_or(StatusCode::NOT_FOUND),
         started,
     );
     result
@@ -452,12 +472,14 @@ async fn list_defaults(
 ) -> Json<Vec<DefaultConfigResponse>> {
     let started = Instant::now();
     let namespace = state.state.config.read().await.name.clone();
-    let response = Json(state
-        .profile_store
-        .list_defaults(scope, &namespace)
-        .into_iter()
-        .map(default_config_response)
-        .collect());
+    let response = Json(
+        state
+            .profile_store
+            .list_defaults(scope, &namespace)
+            .into_iter()
+            .map(default_config_response)
+            .collect(),
+    );
     record_api_metrics(list_action(scope), "success", started);
     response
 }
@@ -475,7 +497,14 @@ async fn get_default(
         .map(default_config_response)
         .map(Json)
         .ok_or(StatusCode::NOT_FOUND);
-    record_status_metrics(get_action(scope), result.as_ref().map(|_| StatusCode::OK).unwrap_or(StatusCode::NOT_FOUND), started);
+    record_status_metrics(
+        get_action(scope),
+        result
+            .as_ref()
+            .map(|_| StatusCode::OK)
+            .unwrap_or(StatusCode::NOT_FOUND),
+        started,
+    );
     result
 }
 
@@ -510,7 +539,10 @@ async fn create_default(
 
     record_status_metrics(
         create_action(scope),
-        result.as_ref().map(|_| StatusCode::CREATED).unwrap_or(StatusCode::BAD_REQUEST),
+        result
+            .as_ref()
+            .map(|_| StatusCode::CREATED)
+            .unwrap_or(StatusCode::BAD_REQUEST),
         started,
     );
     result
@@ -538,14 +570,17 @@ async fn patch_default(
                     .map(|value| json_envelope("control.default", value)),
             },
         )
-                .await
+        .await
         .map_err(map_profile_store_error)?
         .map(default_config_response)
         .map(Json)
         .ok_or(StatusCode::NOT_FOUND);
     record_status_metrics(
         patch_action(scope),
-        result.as_ref().map(|_| StatusCode::OK).unwrap_or(StatusCode::NOT_FOUND),
+        result
+            .as_ref()
+            .map(|_| StatusCode::OK)
+            .unwrap_or(StatusCode::NOT_FOUND),
         started,
     );
     result
@@ -554,7 +589,12 @@ async fn patch_default(
 async fn delete_default(state: ApiState, scope: DefaultConfigScope, name: String) -> StatusCode {
     let started = Instant::now();
     let namespace = state.state.config.read().await.name.clone();
-    let status = match state.state.profile_store.disable_default(scope, &namespace, &name).await {
+    let status = match state
+        .state
+        .profile_store
+        .disable_default(scope, &namespace, &name)
+        .await
+    {
         Ok(true) => StatusCode::NO_CONTENT,
         Ok(false) => StatusCode::NOT_FOUND,
         Err(e) => {
@@ -629,13 +669,7 @@ fn record_status_metrics(action: &str, status: StatusCode, started: Instant) {
     };
     record_api_metrics(action, result, started);
     if result == "error" {
-        crate::common::metrics::inc_error(
-            "control_plane",
-            "config",
-            "http",
-            status.as_str(),
-            1,
-        );
+        crate::common::metrics::inc_error("control_plane", "config", "http", status.as_str(), 1);
     }
 }
 

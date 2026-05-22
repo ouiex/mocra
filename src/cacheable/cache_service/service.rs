@@ -14,75 +14,108 @@ pub struct CacheService {
     pub(crate) serialize_blocking_threshold: usize,
 }
 
-impl CacheService {
-    pub fn new(
-        pool: Option<()>,
-        namespace: String,
-        default_ttl: Option<Duration>,
-        compression_threshold: Option<usize>,
-    ) -> Self {
-        Self::new_with_l1_config(
-            pool,
-            namespace,
-            default_ttl,
-            compression_threshold,
-            false,
-            30,
-            10000,
-        )
-    }
+#[derive(Clone)]
+pub struct CacheServiceConfig {
+    pub pool: Option<()>,
+    pub namespace: String,
+    pub default_ttl: Option<Duration>,
+    pub compression_threshold: Option<usize>,
+    pub enable_l1: bool,
+    pub l1_ttl_secs: u64,
+    pub l1_max_entries: usize,
+    pub backend_kind: Option<CacheBackendKind>,
+    pub profile_store: Option<Arc<ProfileControlPlaneStore>>,
+}
 
-    pub fn new_with_l1_config(
-        pool: Option<()>,
-        namespace: String,
-        default_ttl: Option<Duration>,
-        compression_threshold: Option<usize>,
-        enable_l1: bool,
-        l1_ttl_secs: u64,
-        l1_max_entries: usize,
-    ) -> Self {
-        let threshold = compression_threshold.unwrap_or(1024);
-
-        let _ = (pool, threshold, enable_l1, l1_ttl_secs, l1_max_entries);
-        let backend: Arc<dyn CacheBackend> = Arc::new(LocalBackend::new());
-
-        CacheService {
-            backend,
-            namespace,
-            default_ttl,
-            serialize_blocking_threshold: 64 * 1024,
+impl CacheServiceConfig {
+    pub fn local(namespace: impl Into<String>) -> Self {
+        Self {
+            pool: None,
+            namespace: namespace.into(),
+            default_ttl: None,
+            compression_threshold: None,
+            enable_l1: false,
+            l1_ttl_secs: 30,
+            l1_max_entries: 10000,
+            backend_kind: Some(CacheBackendKind::Local),
+            profile_store: None,
         }
     }
 
-    /// Construct a `CacheService` with explicit backend kind selection.
-    pub fn new_with_backend_kind(
-        pool: Option<()>,
-        namespace: String,
-        default_ttl: Option<Duration>,
-        compression_threshold: Option<usize>,
-        enable_l1: bool,
-        l1_ttl_secs: u64,
-        l1_max_entries: usize,
+    pub fn raft_rocksdb(
+        namespace: impl Into<String>,
+        profile_store: Arc<ProfileControlPlaneStore>,
+    ) -> Self {
+        Self {
+            backend_kind: Some(CacheBackendKind::RaftRocksdb),
+            profile_store: Some(profile_store),
+            ..Self::local(namespace)
+        }
+    }
+
+    pub fn with_pool(mut self, pool: Option<()>) -> Self {
+        self.pool = pool;
+        self
+    }
+
+    pub fn with_default_ttl(mut self, default_ttl: Option<Duration>) -> Self {
+        self.default_ttl = default_ttl;
+        self
+    }
+
+    pub fn with_compression_threshold(mut self, compression_threshold: Option<usize>) -> Self {
+        self.compression_threshold = compression_threshold;
+        self
+    }
+
+    pub fn with_l1(mut self, enable_l1: bool, l1_ttl_secs: u64, l1_max_entries: usize) -> Self {
+        self.enable_l1 = enable_l1;
+        self.l1_ttl_secs = l1_ttl_secs;
+        self.l1_max_entries = l1_max_entries;
+        self
+    }
+
+    pub fn with_backend(
+        mut self,
         backend_kind: Option<CacheBackendKind>,
         profile_store: Option<Arc<ProfileControlPlaneStore>>,
     ) -> Self {
-        let threshold = compression_threshold.unwrap_or(1024);
+        self.backend_kind = backend_kind;
+        self.profile_store = profile_store;
+        self
+    }
+}
 
-        let backend: Arc<dyn CacheBackend> = match backend_kind {
+impl CacheService {
+    pub fn new(config: CacheServiceConfig) -> Self {
+        let threshold = config.compression_threshold.unwrap_or(1024);
+
+        let backend: Arc<dyn CacheBackend> = match config.backend_kind {
             Some(CacheBackendKind::Local) => Arc::new(LocalBackend::new()),
             Some(CacheBackendKind::RaftRocksdb) => {
-                let store = profile_store
+                let store = config
+                    .profile_store
                     .expect("ProfileControlPlaneStore required for raft_rocksdb backend");
-                Arc::new(RaftRocksDbCacheBackend::new(store, namespace.clone(), default_ttl))
+                Arc::new(RaftRocksDbCacheBackend::new(
+                    store,
+                    config.namespace.clone(),
+                    config.default_ttl,
+                ))
             }
             None => Arc::new(LocalBackend::new()),
         };
-        let _ = (pool, threshold, enable_l1, l1_ttl_secs, l1_max_entries);
+        let _ = (
+            config.pool,
+            threshold,
+            config.enable_l1,
+            config.l1_ttl_secs,
+            config.l1_max_entries,
+        );
 
         CacheService {
             backend,
-            namespace,
-            default_ttl,
+            namespace: config.namespace,
+            default_ttl: config.default_ttl,
             serialize_blocking_threshold: 64 * 1024,
         }
     }

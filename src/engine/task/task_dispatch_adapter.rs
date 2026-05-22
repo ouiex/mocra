@@ -27,7 +27,10 @@ fn transport_error(error: impl std::error::Error + Send + Sync + 'static) -> Err
     Error::new(ErrorKind::Queue, Some(error))
 }
 
-pub fn build_task_dispatch(task: &TaskEvent, namespace: impl Into<String>) -> Result<TaskDispatchEnvelope> {
+pub fn build_task_dispatch(
+    task: &TaskEvent,
+    namespace: impl Into<String>,
+) -> Result<TaskDispatchEnvelope> {
     let payload = TypedEnvelope::new(
         TASK_EVENT_SCHEMA_ID,
         1,
@@ -79,7 +82,10 @@ pub fn processor_context_from_dispatch(dispatch: &TaskDispatchEnvelope) -> Proce
         context.created_at = (dispatch.exec.created_at_ms / 1000) as u64;
     }
 
-    let retry_count = dispatch.exec.task_retry_count.max(dispatch.exec.retry_count);
+    let retry_count = dispatch
+        .exec
+        .task_retry_count
+        .max(dispatch.exec.retry_count);
     if retry_count > 0 {
         context = context.with_retry_policy(RetryPolicy {
             current_retry: retry_count,

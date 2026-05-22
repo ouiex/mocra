@@ -29,10 +29,10 @@ impl<P> EventAwareProcessor<P> {
 
     /// Publishes an event envelope when both event and bus are available.
     async fn publish_event(&self, event: Option<EventEnvelope>) {
-        if let (Some(event), Some(event_bus)) = (event, &self.event_bus) {
-            if let Err(_e) = event_bus.publish(event).await {
-                // log::error!("Failed to publish event: {_e}");
-            }
+        if let (Some(event), Some(event_bus)) = (event, &self.event_bus)
+            && let Err(_e) = event_bus.publish(event).await
+        {
+            // log::error!("Failed to publish event: {_e}");
         }
     }
 

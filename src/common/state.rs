@@ -7,12 +7,12 @@ use crate::common::model::config::{CacheBackendKind, Config};
 use crate::engine::api::profile_store::ProfileControlPlaneStore;
 use crate::sync::{RaftRuntime, RaftRuntimeConfig};
 
-use crate::cacheable::CacheService;
+use crate::cacheable::{CacheService, CacheServiceConfig};
 use crate::common::status_tracker::{ErrorTrackerConfig, StatusTracker};
+use crate::utils::distributed_lock::{DistributedLockManager, RaftLockBackend};
 use crate::utils::distributed_rate_limit::{
     DistributedSlidingWindowRateLimiter, RaftRateLimitBackend, RateLimitConfig,
 };
-use crate::utils::distributed_lock::{DistributedLockManager, RaftLockBackend};
 use log::{error, info};
 use std::sync::Arc;
 use std::time;
@@ -119,16 +119,13 @@ impl CacheRuntimeSettings {
         backend_kind: Option<CacheBackendKind>,
         profile_store: Option<Arc<ProfileControlPlaneStore>>,
     ) -> Arc<CacheService> {
-        Arc::new(CacheService::new_with_backend_kind(
-            pool,
-            namespace,
-            Some(self.cache_ttl),
-            self.compression_threshold,
-            self.enable_l1,
-            self.l1_ttl_secs,
-            self.l1_max_entries,
-            backend_kind,
-            profile_store,
+        Arc::new(CacheService::new(
+            CacheServiceConfig::local(namespace)
+                .with_pool(pool)
+                .with_default_ttl(Some(self.cache_ttl))
+                .with_compression_threshold(self.compression_threshold)
+                .with_l1(self.enable_l1, self.l1_ttl_secs, self.l1_max_entries)
+                .with_backend(backend_kind, profile_store),
         ))
     }
 }
@@ -193,34 +190,32 @@ impl CoordinationServices {
         };
 
         let api_limiter = config.api.as_ref().and_then(|api| {
-            api.rate_limit.map(|limit| {
-                match backend_kind {
-                    Some(CacheBackendKind::RaftRocksdb) => {
-                        let raft_rate_limit = Arc::new(RaftRateLimitBackend::new(
-                            profile_store.clone(),
-                            config.name.as_str(),
-                        ));
-                        Arc::new(DistributedSlidingWindowRateLimiter::with_backend(
-                            raft_rate_limit,
-                            &format!("{}:api", config.name),
-                            RateLimitConfig {
-                                max_requests_per_second: limit as f32,
-                                window_size_millis: 1000,
-                                base_max_requests_per_second: Some(limit as f32),
-                            },
-                        ))
-                    }
-                    _ => Arc::new(DistributedSlidingWindowRateLimiter::new(
-                        None,
-                        locker.clone(),
+            api.rate_limit.map(|limit| match backend_kind {
+                Some(CacheBackendKind::RaftRocksdb) => {
+                    let raft_rate_limit = Arc::new(RaftRateLimitBackend::new(
+                        profile_store.clone(),
+                        config.name.as_str(),
+                    ));
+                    Arc::new(DistributedSlidingWindowRateLimiter::with_backend(
+                        raft_rate_limit,
                         &format!("{}:api", config.name),
                         RateLimitConfig {
                             max_requests_per_second: limit as f32,
                             window_size_millis: 1000,
                             base_max_requests_per_second: Some(limit as f32),
                         },
-                    )),
+                    ))
                 }
+                _ => Arc::new(DistributedSlidingWindowRateLimiter::new(
+                    None,
+                    locker.clone(),
+                    &format!("{}:api", config.name),
+                    RateLimitConfig {
+                        max_requests_per_second: limit as f32,
+                        window_size_millis: 1000,
+                        base_max_requests_per_second: Some(limit as f32),
+                    },
+                )),
             })
         });
 
@@ -348,7 +343,7 @@ impl State {
         let backend_kind = config.cache.backend;
         let coordination = CoordinationServices::build(
             &config,
-            cache_pool.clone(),
+            cache_pool,
             cookie_pool,
             profile_store.clone(),
             backend_kind,
@@ -425,8 +420,8 @@ impl State {
 mod tests {
     use super::{BootstrapCapabilities, CoordinationServices};
     use crate::common::model::config::{
-        Api, BlobStorageConfig, CacheConfig, ChannelConfig, Config, CrawlerConfig,
-        DatabaseConfig, DownloadConfig, RaftConfig,
+        Api, BlobStorageConfig, CacheConfig, ChannelConfig, Config, CrawlerConfig, DatabaseConfig,
+        DownloadConfig, RaftConfig,
     };
     use crate::engine::api::profile_store::ProfileControlPlaneStore;
     use std::sync::Arc;
@@ -716,7 +711,10 @@ mod tests {
             .await
             .expect("check_and_update 2");
         // With rate_limit=2.0 and window=1000ms, interval is 500ms
-        assert!(wait2 > 0, "expected wait time on second request, got {wait2}");
+        assert!(
+            wait2 > 0,
+            "expected wait time on second request, got {wait2}"
+        );
     }
 
     // ── Full-stack RaftRocksDB integration tests ──

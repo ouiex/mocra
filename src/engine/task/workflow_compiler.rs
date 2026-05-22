@@ -158,7 +158,6 @@ impl WorkflowCompiler {
             )]),
         }
     }
-
 }
 
 #[cfg(test)]
@@ -358,7 +357,10 @@ mod tests {
     async fn compile_hybrid_module_prefers_custom_definition() {
         let compiler = WorkflowCompiler;
         let workflow = compiler
-            .compile(&profile("hybrid_module", &["root", "detail"]), Arc::new(HybridModule))
+            .compile(
+                &profile("hybrid_module", &["root", "detail"]),
+                Arc::new(HybridModule),
+            )
             .await
             .expect("workflow should compile");
 
@@ -371,7 +373,10 @@ mod tests {
     async fn compile_definition_preserves_node_policy_and_schema_metadata() {
         let compiler = WorkflowCompiler;
         let workflow = compiler
-            .compile(&profile("hybrid_module", &["root", "detail"]), Arc::new(HybridModule))
+            .compile(
+                &profile("hybrid_module", &["root", "detail"]),
+                Arc::new(HybridModule),
+            )
             .await
             .expect("workflow should compile");
         let root = workflow.node("root").expect("root node should exist");

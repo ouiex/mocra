@@ -12,6 +12,20 @@ use std::sync::Arc;
 /// Builds module configuration objects from database entities and relations.
 pub struct ConfigAssembler;
 
+/// Inputs required to assemble the effective module config.
+pub struct ModuleConfigAssemblyInput<'a> {
+    pub account: &'a AccountModel,
+    pub platform: &'a PlatformModel,
+    pub module: &'a ModuleModel,
+    pub rel_account_platform: &'a RelAccountPlatformModel,
+    pub rel_module_platform: &'a RelModulePlatformModel,
+    pub rel_module_account: &'a RelModuleAccountModel,
+    pub data_middleware: &'a [DataMiddlewareModel],
+    pub download_middleware: &'a [DownloadMiddlewareModel],
+    pub rel_module_data_middleware: &'a [RelModuleDataMiddlewareModel],
+    pub rel_module_download_middleware: &'a [RelModuleDownloadMiddlewareModel],
+}
+
 impl ConfigAssembler {
     /// Builds a relation config map for middleware-like entities.
     pub fn build_relation_config<T, F, G>(
@@ -85,39 +99,28 @@ impl ConfigAssembler {
     }
 
     /// Assembles the complete `ModuleConfig` from account/platform/module entities.
-    #[allow(clippy::too_many_arguments)]
-    pub fn assemble_module_config(
-        account: &AccountModel,
-        platform: &PlatformModel,
-        module: &ModuleModel,
-        rel_account_platform: &RelAccountPlatformModel,
-        rel_module_platform: &RelModulePlatformModel,
-        rel_module_account: &RelModuleAccountModel,
-        data_middleware: &[DataMiddlewareModel],
-        download_middleware: &[DownloadMiddlewareModel],
-        rel_module_data_middleware: &[RelModuleDataMiddlewareModel],
-        rel_module_download_middleware: &[RelModuleDownloadMiddlewareModel],
-    ) -> ModuleConfig {
-        let data_middleware_config = Self::build_middleware_base_config(data_middleware);
-        let download_middleware_config = Self::build_middleware_base_config(download_middleware);
+    pub fn assemble_module_config(input: ModuleConfigAssemblyInput<'_>) -> ModuleConfig {
+        let data_middleware_config = Self::build_middleware_base_config(input.data_middleware);
+        let download_middleware_config =
+            Self::build_middleware_base_config(input.download_middleware);
         let rel_module_data_middleware_config = Self::build_data_middleware_relation_config(
-            rel_module_data_middleware,
-            data_middleware,
+            input.rel_module_data_middleware,
+            input.data_middleware,
         );
         let rel_module_download_middleware_config = Self::build_download_middleware_relation_config(
-            rel_module_download_middleware,
-            download_middleware,
+            input.rel_module_download_middleware,
+            input.download_middleware,
         );
 
         ModuleConfig {
-            account_config: account.config.clone(),
-            platform_config: platform.config.clone(),
-            module_config: module.config.clone(),
+            account_config: input.account.config.clone(),
+            platform_config: input.platform.config.clone(),
+            module_config: input.module.config.clone(),
             data_middleware_config,
             download_middleware_config,
-            rel_account_platform_config: rel_account_platform.config.clone(),
-            rel_module_account_config: rel_module_account.config.clone(),
-            rel_module_platform_config: rel_module_platform.config.clone(),
+            rel_account_platform_config: input.rel_account_platform.config.clone(),
+            rel_module_account_config: input.rel_module_account.config.clone(),
+            rel_module_platform_config: input.rel_module_platform.config.clone(),
             rel_module_data_middleware_config,
             rel_module_download_middleware_config,
         }

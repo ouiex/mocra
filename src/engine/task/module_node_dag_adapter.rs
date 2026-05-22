@@ -52,10 +52,15 @@ impl ModuleNodeDagAdapter {
 #[async_trait]
 impl DagNodeTrait for ModuleNodeDagAdapter {
     async fn start(&self, context: NodeExecutionContext) -> Result<TaskPayload, DagError> {
-        let runtime_input = context.runtime_input.as_ref().ok_or_else(|| DagError::NodeExecutionFailed {
-            node_id: context.node_id.clone(),
-            reason: "ModuleNodeDagAdapter requires runtime_input to execute node logic".to_string(),
-        })?;
+        let runtime_input =
+            context
+                .runtime_input
+                .as_ref()
+                .ok_or_else(|| DagError::NodeExecutionFailed {
+                    node_id: context.node_id.clone(),
+                    reason: "ModuleNodeDagAdapter requires runtime_input to execute node logic"
+                        .to_string(),
+                })?;
 
         if is_generate_runtime_input(runtime_input) {
             let generate_input = decode_generate_runtime_input(runtime_input).map_err(|e| {
@@ -92,9 +97,11 @@ impl DagNodeTrait for ModuleNodeDagAdapter {
                 .map(|request| apply_request_response_cache_policy(request, &response_cache_common))
                 .collect::<Vec<_>>();
 
-            return encode_request_batch_payload(&requests).map_err(|e| DagError::NodeExecutionFailed {
-                node_id: context.node_id,
-                reason: format!("encode request batch failed: {e}"),
+            return encode_request_batch_payload(&requests).map_err(|e| {
+                DagError::NodeExecutionFailed {
+                    node_id: context.node_id,
+                    reason: format!("encode request batch failed: {e}"),
+                }
             });
         }
 
@@ -126,9 +133,11 @@ impl DagNodeTrait for ModuleNodeDagAdapter {
                     reason: format!("{SCHEDULER_PARSER_NODE_ERROR_PREFIX}{e}"),
                 })?;
 
-            return encode_parser_output_payload(output).map_err(|e| DagError::NodeExecutionFailed {
-                node_id: context.node_id,
-                reason: format!("encode parser output failed: {e}"),
+            return encode_parser_output_payload(output).map_err(|e| {
+                DagError::NodeExecutionFailed {
+                    node_id: context.node_id,
+                    reason: format!("encode parser output failed: {e}"),
+                }
             });
         }
 
@@ -150,7 +159,9 @@ mod tests {
     use async_trait::async_trait;
 
     use super::ModuleNodeDagAdapter;
-    use crate::common::interface::{ModuleNodeTrait, NodeGenerateContext, NodeParseContext, SyncBoxStream, ToSyncBoxStream};
+    use crate::common::interface::{
+        ModuleNodeTrait, NodeGenerateContext, NodeParseContext, SyncBoxStream, ToSyncBoxStream,
+    };
     use crate::common::model::login_info::LoginInfo;
     use crate::common::model::{
         ExecutionMark, ExecutionMeta, NodeDispatch, NodeInput, NodeParseOutput, PayloadCodec,
@@ -163,15 +174,18 @@ mod tests {
         decode_parser_output_payload, decode_request_batch_payload, encode_generate_runtime_input,
         encode_parser_runtime_input,
     };
-    use crate::schedule::dag::{DagNodeTrait, NodeExecutionContext};
     use crate::errors::Result as CResult;
+    use crate::schedule::dag::{DagNodeTrait, NodeExecutionContext};
     use uuid::Uuid;
 
     struct CapturingGenerateNode;
 
     #[async_trait]
     impl ModuleNodeTrait for CapturingGenerateNode {
-        async fn generate(&self, ctx: NodeGenerateContext<'_>) -> CResult<SyncBoxStream<'static, Request>> {
+        async fn generate(
+            &self,
+            ctx: NodeGenerateContext<'_>,
+        ) -> CResult<SyncBoxStream<'static, Request>> {
             let mut request = Request::new("https://example.com/generated", "GET");
             request.account = ctx.routing.account.clone();
             request.platform = ctx.routing.platform.clone();

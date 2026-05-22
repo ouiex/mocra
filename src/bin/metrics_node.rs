@@ -4,7 +4,10 @@ use std::path::Path;
 use std::sync::Arc;
 use tokio::signal;
 
-use mocra::common::interface::{ModuleNodeTrait, ModuleTrait, NodeGenerateContext, NodeParseContext, SyncBoxStream, ToSyncBoxStream};
+use mocra::common::interface::{
+    ModuleNodeTrait, ModuleTrait, NodeGenerateContext, NodeParseContext, SyncBoxStream,
+    ToSyncBoxStream,
+};
 use mocra::common::model::request::RequestMethod;
 use mocra::common::model::{CronConfig, NodeParseOutput, Request, Response};
 use mocra::common::state::State;
@@ -48,7 +51,7 @@ struct LocalProbeModule {
 }
 
 impl LocalProbeModule {
-    fn new(health_url: String) -> Self {
+    const fn new(health_url: String) -> Self {
         Self { health_url }
     }
 }
@@ -101,7 +104,7 @@ async fn ensure_local_sqlite_task_catalog(state: &State) -> std::result::Result<
         .replace('\\', "/")
         .replace('\'', "''");
 
-    let attach_sql = format!("ATTACH DATABASE '{}' AS base", base_path_sql);
+    let attach_sql = format!("ATTACH DATABASE '{base_path_sql}' AS base");
     if let Err(err) = state
         .db
         .execute(Statement::from_string(DbBackend::Sqlite, attach_sql))
@@ -146,7 +149,10 @@ async fn ensure_local_sqlite_task_catalog(state: &State) -> std::result::Result<
 #[tokio::main]
 async fn main() {
     let config_path = Path::new("monitoring").join("local_engine.toml");
-    eprintln!("metrics_node: initializing state from {}", config_path.display());
+    eprintln!(
+        "metrics_node: initializing state from {}",
+        config_path.display()
+    );
     let state = match State::try_new(config_path.to_str().expect("config path")).await {
         Ok(state) => Arc::new(state),
         Err(e) => {

@@ -4,8 +4,8 @@ use crate::common::model::entity::{
 };
 use crate::common::model::message::TaskEvent;
 use crate::common::state::State;
-use crate::engine::task::task_dispatch_adapter::build_task_dispatch;
 use crate::engine::task::TaskManager;
+use crate::engine::task::task_dispatch_adapter::build_task_dispatch;
 use crate::queue::{QueueManager, QueuedItem};
 use chrono::{DateTime, TimeZone, Utc};
 use cron::Schedule;
@@ -67,28 +67,30 @@ pub struct CronScheduler {
     leadership_gate: Arc<dyn LeadershipGate>,
 }
 
+pub struct CronSchedulerConfig {
+    pub task_manager: Arc<TaskManager>,
+    pub state: Arc<State>,
+    pub queue_manager: Arc<QueueManager>,
+    pub shutdown_rx: broadcast::Receiver<()>,
+    pub leadership_gate: Arc<dyn LeadershipGate>,
+}
+
 impl CronScheduler {
     /// Creates a new scheduler with empty in-memory caches.
-    pub async fn new(
-        task_manager: Arc<TaskManager>,
-        state: Arc<State>,
-        queue_manager: Arc<QueueManager>,
-        shutdown_rx: broadcast::Receiver<()>,
-        leadership_gate: Arc<dyn LeadershipGate>,
-    ) -> Self {
+    pub async fn new(config: CronSchedulerConfig) -> Self {
         Self {
-            task_manager,
-            state,
-            queue_manager,
+            task_manager: config.task_manager,
+            state: config.state,
+            queue_manager: config.queue_manager,
             schedule_cache: DashMap::new(),
             cron_config_cache: DashMap::new(),
             right_now_context_hash: DashMap::new(),
-            shutdown_rx,
+            shutdown_rx: config.shutdown_rx,
             last_version: AtomicU64::new(0),
             last_module_hash: AtomicU64::new(0),
             last_refresh_at_ms: AtomicU64::new(0),
             active_context_jobs: AtomicU64::new(0),
-            leadership_gate,
+            leadership_gate: config.leadership_gate,
         }
     }
 
@@ -500,7 +502,7 @@ impl CronScheduler {
         let batch_size = 500;
 
         futures::stream::iter(contexts.chunks(batch_size))
-            .for_each_concurrent(Some((concurrency + batch_size - 1) / batch_size), |batch| {
+            .for_each_concurrent(Some(concurrency.div_ceil(batch_size)), |batch| {
                 let namespace_prefix = Arc::clone(&namespace_prefix);
                 async move {
                     let mut keys = Vec::with_capacity(batch.len());

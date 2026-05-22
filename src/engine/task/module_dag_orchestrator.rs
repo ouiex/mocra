@@ -3,16 +3,14 @@ use std::sync::Arc;
 
 use crate::common::interface::ModuleTrait;
 use crate::common::model::RuntimeNodeRoutingHint;
-use crate::engine::task::module_dag_compiler::{
-    ModuleDagCompiler, ModuleDagDefinition,
-};
+use crate::engine::task::module_dag_compiler::{ModuleDagCompiler, ModuleDagDefinition};
 use crate::engine::task::module_node_runtime_bridge::{
     SchedulerNodeGenerateRuntimeInput, SchedulerNodeParserRuntimeInput,
     encode_generate_runtime_input, encode_parser_runtime_input,
 };
 use crate::schedule::dag::{
-    Dag, DagError, DagExecutionReport, DagNodeDispatcher, DagNodeRuntimeOverride,
-    DagScheduler, DagSchedulerOptions,
+    Dag, DagError, DagExecutionReport, DagNodeDispatcher, DagNodeRuntimeOverride, DagScheduler,
+    DagSchedulerOptions,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -20,16 +18,9 @@ pub struct ModuleDagOrchestratorOptions {
     pub scheduler_options: DagSchedulerOptions,
 }
 
+#[derive(Default)]
 pub struct ModuleDagOrchestrator {
     options: ModuleDagOrchestratorOptions,
-}
-
-impl Default for ModuleDagOrchestrator {
-    fn default() -> Self {
-        Self {
-            options: ModuleDagOrchestratorOptions::default(),
-        }
-    }
 }
 
 impl ModuleDagOrchestrator {
@@ -205,7 +196,8 @@ impl ModuleDagOrchestrator {
 
     /// Executes a precompiled DAG with DagScheduler defaults from orchestrator options.
     pub async fn execute_dag(&self, dag: Dag) -> Result<DagExecutionReport, DagError> {
-        self.execute_dag_with_runtime_overrides(dag, Vec::new()).await
+        self.execute_dag_with_runtime_overrides(dag, Vec::new())
+            .await
     }
 
     pub async fn execute_dag_with_runtime_overrides(
@@ -240,8 +232,11 @@ impl ModuleDagOrchestrator {
         dag: Dag,
         hints: impl IntoIterator<Item = RuntimeNodeRoutingHint>,
     ) -> Result<DagExecutionReport, DagError> {
-        self.execute_dag_with_runtime_overrides(dag, Self::routing_hints_to_runtime_overrides(hints))
-            .await
+        self.execute_dag_with_runtime_overrides(
+            dag,
+            Self::routing_hints_to_runtime_overrides(hints),
+        )
+        .await
     }
 
     pub async fn execute_dag_with_generate_runtime_input(
@@ -353,9 +348,9 @@ mod tests {
         ModuleDagDefinition, ModuleDagEdgeDef, ModuleDagNodeDef,
     };
     use crate::engine::task::module_node_runtime_bridge::{
-        build_module_config_generate_runtime_input,
-        build_module_config_parse_runtime_input,
-        decode_parser_output_payload, decode_request_batch_payload,
+        ModuleConfigGenerateRuntimeInput, build_module_config_generate_runtime_input,
+        build_module_config_parse_runtime_input, decode_parser_output_payload,
+        decode_request_batch_payload,
     };
     use crate::errors::Result;
     use crate::schedule::dag::{DagNodeExecutionPolicy, NodePlacement};
@@ -573,16 +568,17 @@ mod tests {
             .expect("compiled dag should have one node")
             .id
             .clone();
-        let runtime_input = build_module_config_generate_runtime_input(
-            "account-a-platform-x-dummy_module_for_orchestrator",
-            Uuid::now_v7(),
-            &node_id,
-            crate::common::model::ResolvedCommonConfig::default(),
-            &ModuleConfig::default(),
-            serde_json::Map::new(),
-            None,
-            None,
-        );
+        let runtime_input =
+            build_module_config_generate_runtime_input(ModuleConfigGenerateRuntimeInput {
+                module_id: "account-a-platform-x-dummy_module_for_orchestrator",
+                run_id: Uuid::now_v7(),
+                node_key: &node_id,
+                base_common: crate::common::model::ResolvedCommonConfig::default(),
+                config: &ModuleConfig::default(),
+                params: serde_json::Map::new(),
+                login_info: None,
+                parent_request_id: None,
+            });
 
         let report = orchestrator
             .execute_dag_with_generate_runtime_input(dag, &node_id, &runtime_input, Vec::new())
@@ -739,8 +735,7 @@ mod tests {
         };
 
         let overrides = ModuleDagOrchestrator::routing_hints_to_runtime_overrides(vec![
-            RuntimeNodeRoutingHint::new("detail")
-                .with_placement(NodePlacement::remote("wg-a")),
+            RuntimeNodeRoutingHint::new("detail").with_placement(NodePlacement::remote("wg-a")),
             RuntimeNodeRoutingHint::new("detail").with_policy(policy.clone()),
             RuntimeNodeRoutingHint::new("list"),
         ]);

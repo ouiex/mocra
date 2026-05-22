@@ -27,6 +27,39 @@ pub struct LoadedProfile {
     pub workflow: WorkflowDefinition,
 }
 
+pub struct ProfileLoadRequest<'a> {
+    pub namespace: &'a str,
+    pub account: &'a str,
+    pub platform: &'a str,
+    pub module_name: &'a str,
+    pub updated_by: &'a str,
+    pub module_impl: Arc<dyn ModuleTrait>,
+    pub module_config: &'a ModuleConfig,
+}
+
+struct ProfileSnapshotBuildRequest<'a> {
+    namespace: &'a str,
+    account: &'a str,
+    platform: &'a str,
+    module_name: &'a str,
+    updated_by: &'a str,
+    default_common: ResolvedCommonConfig,
+    module_config: &'a ModuleConfig,
+    definition: &'a ModuleDagDefinition,
+}
+
+struct ProfileVersionInput<'a> {
+    namespace: &'a str,
+    account: &'a str,
+    platform: &'a str,
+    module_name: &'a str,
+    common: &'a ResolvedCommonConfig,
+    node_configs: &'a BTreeMap<String, TypedEnvelope>,
+    download_middleware: &'a [MiddlewareBinding],
+    data_middleware: &'a [MiddlewareBinding],
+    middleware_configs: &'a BTreeMap<String, TypedEnvelope>,
+}
+
 #[derive(Debug, Default, Clone, Copy)]
 pub struct NodeConfigResolver;
 
@@ -51,29 +84,23 @@ pub struct ProfileLoader {
 impl ProfileLoader {
     pub async fn load(
         &self,
-        namespace: &str,
-        account: &str,
-        platform: &str,
-        module_name: &str,
-        updated_by: &str,
-        module_impl: Arc<dyn ModuleTrait>,
-        module_config: &ModuleConfig,
+        request: ProfileLoadRequest<'_>,
     ) -> Result<LoadedProfile, ProfileLoadError> {
-        let default_common = module_impl.default_common_config();
+        let default_common = request.module_impl.default_common_config();
         let definition = self
             .workflow_compiler
-            .build_module_definition(module_impl)
+            .build_module_definition(request.module_impl)
             .await;
-        let snapshot = self.build_snapshot(
-            namespace,
-            account,
-            platform,
-            module_name,
-            updated_by,
+        let snapshot = self.build_snapshot(ProfileSnapshotBuildRequest {
+            namespace: request.namespace,
+            account: request.account,
+            platform: request.platform,
+            module_name: request.module_name,
+            updated_by: request.updated_by,
             default_common,
-            module_config,
-            &definition,
-        );
+            module_config: request.module_config,
+            definition: &definition,
+        });
         let workflow = self
             .workflow_compiler
             .compile_definition(&snapshot, definition)?;
@@ -85,22 +112,16 @@ impl ProfileLoader {
         Ok(LoadedProfile { snapshot, workflow })
     }
 
-    fn build_snapshot(
-        &self,
-        namespace: &str,
-        account: &str,
-        platform: &str,
-        module_name: &str,
-        updated_by: &str,
-        default_common: ResolvedCommonConfig,
-        module_config: &ModuleConfig,
-        definition: &ModuleDagDefinition,
-    ) -> TaskProfileSnapshot {
-        let merged_config = module_config.get_merged_config();
+    fn build_snapshot(&self, request: ProfileSnapshotBuildRequest<'_>) -> TaskProfileSnapshot {
+        let merged_config = request.module_config.get_merged_config();
         let merged_bytes = serde_json::to_vec(&merged_config).unwrap_or_default();
-        let common = apply_module_config_common_overrides(default_common, Some(module_config));
+        let common = apply_module_config_common_overrides(
+            request.default_common,
+            Some(request.module_config),
+        );
 
-        let node_configs = definition
+        let node_configs = request
+            .definition
             .nodes
             .iter()
             .map(|node| {
@@ -116,19 +137,22 @@ impl ProfileLoader {
             })
             .collect();
 
-        let download_middleware: Vec<MiddlewareBinding> = module_config
+        let download_middleware: Vec<MiddlewareBinding> = request
+            .module_config
             .download_middleware_config
             .keys()
             .map(|name| MiddlewareBinding {
                 name: name.clone(),
                 middleware_type: MiddlewareType::Download,
-                weight: module_config
+                weight: request
+                    .module_config
                     .get_middleware_weight(name)
                     .map(|weight| weight as i32)
                     .unwrap_or_default(),
             })
             .collect();
-        let data_middleware: Vec<MiddlewareBinding> = module_config
+        let data_middleware: Vec<MiddlewareBinding> = request
+            .module_config
             .data_middleware_config
             .keys()
             .map(|name| MiddlewareBinding {
@@ -137,24 +161,24 @@ impl ProfileLoader {
                 weight: 0,
             })
             .collect();
-        let middleware_configs = collect_middleware_configs(module_config);
-        let version = stable_profile_version(
-            namespace,
-            account,
-            platform,
-            module_name,
-            &common,
-            &node_configs,
-            &download_middleware,
-            &data_middleware,
-            &middleware_configs,
-        );
+        let middleware_configs = collect_middleware_configs(request.module_config);
+        let version = stable_profile_version(ProfileVersionInput {
+            namespace: request.namespace,
+            account: request.account,
+            platform: request.platform,
+            module_name: request.module_name,
+            common: &common,
+            node_configs: &node_configs,
+            download_middleware: &download_middleware,
+            data_middleware: &data_middleware,
+            middleware_configs: &middleware_configs,
+        });
 
         TaskProfileSnapshot {
-            namespace: namespace.to_string(),
-            account: account.to_string(),
-            platform: platform.to_string(),
-            module: module_name.to_string(),
+            namespace: request.namespace.to_string(),
+            account: request.account.to_string(),
+            platform: request.platform.to_string(),
+            module: request.module_name.to_string(),
             version,
             enabled: true,
             common,
@@ -164,22 +188,12 @@ impl ProfileLoader {
             middleware_configs,
             debug_layers_json: None,
             updated_at: now_ms(),
-            updated_by: updated_by.to_string(),
+            updated_by: request.updated_by.to_string(),
         }
     }
 }
 
-fn stable_profile_version(
-    namespace: &str,
-    account: &str,
-    platform: &str,
-    module_name: &str,
-    common: &ResolvedCommonConfig,
-    node_configs: &BTreeMap<String, TypedEnvelope>,
-    download_middleware: &[MiddlewareBinding],
-    data_middleware: &[MiddlewareBinding],
-    middleware_configs: &BTreeMap<String, TypedEnvelope>,
-) -> u64 {
+fn stable_profile_version(input: ProfileVersionInput<'_>) -> u64 {
     #[derive(serde::Serialize)]
     struct ProfileFingerprint<'a> {
         namespace: &'a str,
@@ -194,15 +208,15 @@ fn stable_profile_version(
     }
 
     let fingerprint = ProfileFingerprint {
-        namespace,
-        account,
-        platform,
-        module_name,
-        common,
-        node_configs,
-        download_middleware,
-        data_middleware,
-        middleware_configs,
+        namespace: input.namespace,
+        account: input.account,
+        platform: input.platform,
+        module_name: input.module_name,
+        common: input.common,
+        node_configs: input.node_configs,
+        download_middleware: input.download_middleware,
+        data_middleware: input.data_middleware,
+        middleware_configs: input.middleware_configs,
     };
     let digest = md5::compute(serde_json::to_vec(&fingerprint).unwrap_or_default());
     u64::from_be_bytes(digest.0[..8].try_into().unwrap_or([0; 8]))
@@ -282,11 +296,18 @@ mod tests {
 
     #[async_trait]
     impl ModuleNodeTrait for DummyNode {
-        async fn generate(&self, _ctx: NodeGenerateContext<'_>) -> crate::errors::Result<SyncBoxStream<'static, Request>> {
+        async fn generate(
+            &self,
+            _ctx: NodeGenerateContext<'_>,
+        ) -> crate::errors::Result<SyncBoxStream<'static, Request>> {
             Ok(Vec::<Request>::new().to_stream())
         }
 
-        async fn parser(&self, _response: Response, _ctx: NodeParseContext<'_>) -> crate::errors::Result<NodeParseOutput> {
+        async fn parser(
+            &self,
+            _response: Response,
+            _ctx: NodeParseContext<'_>,
+        ) -> crate::errors::Result<NodeParseOutput> {
             Ok(NodeParseOutput::default())
         }
 
@@ -351,16 +372,17 @@ mod tests {
     #[tokio::test]
     async fn profile_loader_builds_snapshot_and_workflow() {
         let loader = ProfileLoader::default();
+        let config = module_config();
         let loaded = loader
-            .load(
-                "demo",
-                "account-a",
-                "platform-x",
-                "dummy_module",
-                "task_factory",
-                Arc::new(DummyModule),
-                &module_config(),
-            )
+            .load(ProfileLoadRequest {
+                namespace: "demo",
+                account: "account-a",
+                platform: "platform-x",
+                module_name: "dummy_module",
+                updated_by: "task_factory",
+                module_impl: Arc::new(DummyModule),
+                module_config: &config,
+            })
             .await
             .expect("profile should load");
 
@@ -379,16 +401,17 @@ mod tests {
     #[tokio::test]
     async fn node_config_resolver_returns_per_node_config() {
         let loader = ProfileLoader::default();
+        let config = module_config();
         let loaded = loader
-            .load(
-                "demo",
-                "account-a",
-                "platform-x",
-                "dummy_module",
-                "task_factory",
-                Arc::new(DummyModule),
-                &module_config(),
-            )
+            .load(ProfileLoadRequest {
+                namespace: "demo",
+                account: "account-a",
+                platform: "platform-x",
+                module_name: "dummy_module",
+                updated_by: "task_factory",
+                module_impl: Arc::new(DummyModule),
+                module_config: &config,
+            })
             .await
             .expect("profile should load");
 
@@ -406,28 +429,29 @@ mod tests {
     #[tokio::test]
     async fn profile_loader_assigns_stable_non_zero_profile_version() {
         let loader = ProfileLoader::default();
+        let config = module_config();
         let first = loader
-            .load(
-                "demo",
-                "account-a",
-                "platform-x",
-                "dummy_module",
-                "task_factory",
-                Arc::new(DummyModule),
-                &module_config(),
-            )
+            .load(ProfileLoadRequest {
+                namespace: "demo",
+                account: "account-a",
+                platform: "platform-x",
+                module_name: "dummy_module",
+                updated_by: "task_factory",
+                module_impl: Arc::new(DummyModule),
+                module_config: &config,
+            })
             .await
             .expect("profile should load");
         let second = loader
-            .load(
-                "demo",
-                "account-a",
-                "platform-x",
-                "dummy_module",
-                "task_factory",
-                Arc::new(DummyModule),
-                &module_config(),
-            )
+            .load(ProfileLoadRequest {
+                namespace: "demo",
+                account: "account-a",
+                platform: "platform-x",
+                module_name: "dummy_module",
+                updated_by: "task_factory",
+                module_impl: Arc::new(DummyModule),
+                module_config: &config,
+            })
             .await
             .expect("profile should load");
 

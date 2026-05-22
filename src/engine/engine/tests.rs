@@ -1,7 +1,12 @@
 use super::*;
-use crate::common::model::{DeadLetterEnvelope, Request, RequestDispatchEnvelope, Response, ResponseDispatchEnvelope};
+use crate::common::model::{
+    DeadLetterEnvelope, Request, RequestDispatchEnvelope, Response, ResponseDispatchEnvelope,
+};
 use crate::common::policy::{PolicyConfig, PolicyOverride};
-use crate::engine::task::request_response_adapter::{build_request_dispatch, build_response_dispatch, decode_request_dispatch, decode_response_dispatch};
+use crate::engine::task::request_response_adapter::{
+    build_request_dispatch, build_response_dispatch, decode_request_dispatch,
+    decode_response_dispatch,
+};
 use crate::errors::ErrorKind;
 use crate::queue::codec::queue_codec;
 use crate::queue::{DlqRecord, Message, MqBackend};
@@ -9,8 +14,8 @@ use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use tokio::sync::watch;
 use tokio::sync::mpsc;
+use tokio::sync::watch;
 use uuid::Uuid;
 
 #[derive(Clone, Default)]
@@ -66,18 +71,15 @@ impl MqBackend for TestBackend {
         payload: &[u8],
         reason: &str,
     ) -> crate::errors::Result<()> {
-        self.dlq_entries
-            .lock()
-            .unwrap()
-            .push((topic.to_string(), payload.to_vec(), reason.to_string()));
+        self.dlq_entries.lock().unwrap().push((
+            topic.to_string(),
+            payload.to_vec(),
+            reason.to_string(),
+        ));
         Ok(())
     }
 
-    async fn read_dlq(
-        &self,
-        _topic: &str,
-        _count: usize,
-    ) -> crate::errors::Result<Vec<DlqRecord>> {
+    async fn read_dlq(&self, _topic: &str, _count: usize) -> crate::errors::Result<Vec<DlqRecord>> {
         Ok(Vec::new())
     }
 }
@@ -128,16 +130,16 @@ async fn retryable_failure_policy_can_route_to_dlq() {
 
     let retry_policy = RetryPolicy::default().with_reason("unit test".to_string());
 
-    Engine::handle_policy_retry(
-        &policy_resolver,
-        &queue_manager,
-        "request",
-        "download",
-        &request,
-        &retry_policy,
-        &mut ack_fn,
-        &mut nack_fn,
-    )
+    Engine::handle_policy_retry(PolicyRetryRequest {
+        policy_resolver: &policy_resolver,
+        queue_manager: &queue_manager,
+        topic: "request",
+        event_type: "download",
+        item: &request,
+        retry_policy: &retry_policy,
+        ack_fn: &mut ack_fn,
+        nack_fn: &mut nack_fn,
+    })
     .await;
 
     assert!(acked.load(Ordering::SeqCst));
@@ -170,19 +172,22 @@ async fn retryable_failure_policy_preserves_request_dispatch_payload_in_dlq() {
 
     let policy_resolver = PolicyResolver::new(Some(&policy_cfg));
     let request = Request::new("http://example.com", "GET");
-    let dispatch = build_request_dispatch(&request, "origin").expect("request dispatch should build");
+    let dispatch =
+        build_request_dispatch(&request, "origin").expect("request dispatch should build");
     let retry_policy = RetryPolicy::default().with_reason("unit test".to_string());
 
-    Engine::handle_policy_retry(
-        &policy_resolver,
-        &queue_manager,
-        "request",
-        "download",
-        &dispatch,
-        &retry_policy,
-        &mut None,
-        &mut None,
-    )
+    let mut ack_fn = None;
+    let mut nack_fn = None;
+    Engine::handle_policy_retry(PolicyRetryRequest {
+        policy_resolver: &policy_resolver,
+        queue_manager: &queue_manager,
+        topic: "request",
+        event_type: "download",
+        item: &dispatch,
+        retry_policy: &retry_policy,
+        ack_fn: &mut ack_fn,
+        nack_fn: &mut nack_fn,
+    })
     .await;
 
     let dlq_entries = backend.dlq_entries.lock().unwrap();
@@ -245,16 +250,18 @@ async fn retryable_failure_policy_preserves_response_dispatch_payload_in_dlq() {
         .expect("response dispatch should build");
     let retry_policy = RetryPolicy::default().with_reason("unit test".to_string());
 
-    Engine::handle_policy_retry(
-        &policy_resolver,
-        &queue_manager,
-        "response",
-        "parser",
-        &dispatch,
-        &retry_policy,
-        &mut None,
-        &mut None,
-    )
+    let mut ack_fn = None;
+    let mut nack_fn = None;
+    Engine::handle_policy_retry(PolicyRetryRequest {
+        policy_resolver: &policy_resolver,
+        queue_manager: &queue_manager,
+        topic: "response",
+        event_type: "parser",
+        item: &dispatch,
+        retry_policy: &retry_policy,
+        ack_fn: &mut ack_fn,
+        nack_fn: &mut nack_fn,
+    })
     .await;
 
     let dlq_entries = backend.dlq_entries.lock().unwrap();

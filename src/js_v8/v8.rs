@@ -146,13 +146,11 @@ fn ensure_host_dispatch_fn(
         }
     }
     let tmpl = v8::FunctionTemplate::new(cs, host_fn_dispatch);
-    let f = tmpl.get_function(cs).ok_or_else(|| {
-        std::io::Error::new(std::io::ErrorKind::Other, "create __rust_host_call failed")
-    })?;
+    let f = tmpl
+        .get_function(cs)
+        .ok_or_else(|| std::io::Error::other("create __rust_host_call failed"))?;
     if global.set(cs, key.into(), f.into()).is_none() {
-        return Err(
-            std::io::Error::new(std::io::ErrorKind::Other, "set __rust_host_call failed").into(),
-        );
+        return Err(std::io::Error::other("set __rust_host_call failed").into());
     }
     Ok(())
 }
@@ -243,19 +241,15 @@ impl V8Engine {
         let mut cs = v8::ContextScope::new(hs, local_ctx);
         v8::tc_scope!(let tc, &mut cs);
 
-        let code = v8::String::new(tc, source).ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "failed to create v8 string from source",
-            )
-        })?;
+        let code = v8::String::new(tc, source)
+            .ok_or_else(|| std::io::Error::other("failed to create v8 string from source"))?;
 
         let script = v8::Script::compile(tc, code, None)
-            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "compile failed"))?;
+            .ok_or_else(|| std::io::Error::other("compile failed"))?;
 
         script
             .run(tc)
-            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "run failed").into())
+            .ok_or_else(|| std::io::Error::other("run failed").into())
             .map(|_| ())
     }
 
@@ -263,10 +257,7 @@ impl V8Engine {
     pub fn exec_file(&mut self, path: impl AsRef<Path>) -> Result<(), Box<dyn std::error::Error>> {
         let path = path.as_ref();
         let src = fs::read_to_string(path).map_err(|e| {
-            std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("read js file failed: {}: {}", path.display(), e),
-            )
+            std::io::Error::other(format!("read js file failed: {}: {}", path.display(), e))
         })?;
         self.exec_script(&src, path.file_name().and_then(|s| s.to_str()))
     }
@@ -303,14 +294,13 @@ impl V8Engine {
             "(function() {{\n  const m = {};\n  const n = {};\n  const k = {};\n  const root = (globalThis.__host_imports = globalThis.__host_imports || {{}});\n  const mod = (root[m] = root[m] || {{}});\n  mod[n] = function(...a) {{ return globalThis.__rust_host_call(k, ...a); }};\n}})();",
             module_lit, name_lit, key_lit
         );
-        let code = v8::String::new(&mut cs, &js)
-            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "alloc js str failed"))?;
-        let script = v8::Script::compile(&mut cs, code, None).ok_or_else(|| {
-            std::io::Error::new(std::io::ErrorKind::Other, "compile wrapper failed")
-        })?;
+        let code = v8::String::new(&cs, &js)
+            .ok_or_else(|| std::io::Error::other("alloc js str failed"))?;
+        let script = v8::Script::compile(&cs, code, None)
+            .ok_or_else(|| std::io::Error::other("compile wrapper failed"))?;
         script
-            .run(&mut cs)
-            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "run wrapper failed"))?;
+            .run(&cs)
+            .ok_or_else(|| std::io::Error::other("run wrapper failed"))?;
         Ok(())
     }
 
@@ -335,10 +325,7 @@ impl V8Engine {
         {
             let bs = ab.get_backing_store();
             let dst = bs.data().ok_or_else(|| {
-                std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    "arraybuffer backing store has no data ptr",
-                )
+                std::io::Error::other("arraybuffer backing store has no data ptr")
             })?;
             unsafe {
                 std::ptr::copy_nonoverlapping(
@@ -351,13 +338,11 @@ impl V8Engine {
 
         let global = tc.get_current_context().global(tc);
         let tmp_key = v8::String::new(tc, "__wasm_bytes_tmp")
-            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "alloc tmp key"))?;
+            .ok_or_else(|| std::io::Error::other("alloc tmp key"))?;
         if global.set(tc, tmp_key.into(), ab.into()).is_none() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "failed to set temporary wasm bytes on global",
-            )
-            .into());
+            return Err(
+                std::io::Error::other("failed to set temporary wasm bytes on global").into(),
+            );
         }
 
         // 2) Build and run a JS snippet to instantiate and store instance+exports to globals
@@ -368,17 +353,13 @@ impl V8Engine {
         );
 
         let code = v8::String::new(tc, &js).ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "failed to create v8 string for wasm bootstrap",
-            )
+            std::io::Error::other("failed to create v8 string for wasm bootstrap")
         })?;
-        let script = v8::Script::compile(tc, code, None).ok_or_else(|| {
-            std::io::Error::new(std::io::ErrorKind::Other, "compile wasm bootstrap failed")
-        })?;
-        script.run(tc).ok_or_else(|| {
-            std::io::Error::new(std::io::ErrorKind::Other, "run wasm bootstrap failed")
-        })?;
+        let script = v8::Script::compile(tc, code, None)
+            .ok_or_else(|| std::io::Error::other("compile wasm bootstrap failed"))?;
+        script
+            .run(tc)
+            .ok_or_else(|| std::io::Error::other("run wasm bootstrap failed"))?;
         Ok(())
     }
 
@@ -398,57 +379,47 @@ impl V8Engine {
 
         // instance object
         let inst_key = v8::String::new(tc, instance_global_name)
-            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "alloc instance name"))?;
+            .ok_or_else(|| std::io::Error::other("alloc instance name"))?;
         let inst_val = global.get(tc, inst_key.into()).ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!(
-                    "global has no wasm instance '{}': not found",
-                    instance_global_name
-                ),
-            )
+            std::io::Error::other(format!(
+                "global has no wasm instance '{}': not found",
+                instance_global_name
+            ))
         })?;
         let inst_obj = v8::Local::<v8::Object>::try_from(inst_val).map_err(|_| {
-            std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("wasm instance '{}' is not an object", instance_global_name),
-            )
+            std::io::Error::other(format!(
+                "wasm instance '{}' is not an object",
+                instance_global_name
+            ))
         })?;
 
         // exports object
         let exports_key = v8::String::new(tc, "exports")
-            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "alloc 'exports'"))?;
-        let exports_val = inst_obj.get(tc, exports_key.into()).ok_or_else(|| {
-            std::io::Error::new(std::io::ErrorKind::Other, "instance.exports missing")
-        })?;
-        let exports_obj = v8::Local::<v8::Object>::try_from(exports_val).map_err(|_| {
-            std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "instance.exports is not an object",
-            )
-        })?;
+            .ok_or_else(|| std::io::Error::other("alloc 'exports'"))?;
+        let exports_val = inst_obj
+            .get(tc, exports_key.into())
+            .ok_or_else(|| std::io::Error::other("instance.exports missing"))?;
+        let exports_obj = v8::Local::<v8::Object>::try_from(exports_val)
+            .map_err(|_| std::io::Error::other("instance.exports is not an object"))?;
 
         // exported function
         let fn_key = v8::String::new(tc, export_name)
-            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "alloc export name"))?;
-        let fn_val = exports_obj.get(tc, fn_key.into()).ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("export '{}' not found", export_name),
-            )
-        })?;
+            .ok_or_else(|| std::io::Error::other("alloc export name"))?;
+        let fn_val = exports_obj
+            .get(tc, fn_key.into())
+            .ok_or_else(|| std::io::Error::other(format!("export '{}' not found", export_name)))?;
         if !fn_val.is_function() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("export '{}' is not a function", export_name),
-            )
+            return Err(std::io::Error::other(format!(
+                "export '{}' is not a function",
+                export_name
+            ))
             .into());
         }
         let func = v8::Local::<v8::Function>::try_from(fn_val).map_err(|_| {
-            std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("failed to cast export '{}' to Function", export_name),
-            )
+            std::io::Error::other(format!(
+                "failed to cast export '{}' to Function",
+                export_name
+            ))
         })?;
 
         // argv
@@ -456,9 +427,8 @@ impl V8Engine {
         for a in args.iter().cloned() {
             match a.into() {
                 JsValue::Str(s) => {
-                    let v = v8::String::new(tc, &s).ok_or_else(|| {
-                        std::io::Error::new(std::io::ErrorKind::Other, "arg to v8 string failed")
-                    })?;
+                    let v = v8::String::new(tc, &s)
+                        .ok_or_else(|| std::io::Error::other("arg to v8 string failed"))?;
                     argv.push(v.into());
                 }
                 JsValue::Number(n) => argv.push(v8::Number::new(tc, n).into()),
@@ -467,46 +437,44 @@ impl V8Engine {
         }
 
         let recv = v8::undefined(tc).into();
-        let result = func.call(tc, recv, &argv).ok_or_else(|| {
-            std::io::Error::new(std::io::ErrorKind::Other, "wasm export call failed")
-        })?;
+        let result = func
+            .call(tc, recv, &argv)
+            .ok_or_else(|| std::io::Error::other("wasm export call failed"))?;
 
         if result.is_boolean() {
             return Ok(JsReturn::Bool(result.boolean_value(tc)));
         }
         if result.is_number() {
-            let n = result.number_value(tc).ok_or_else(|| {
-                std::io::Error::new(std::io::ErrorKind::Other, "number_value failed")
-            })?;
+            let n = result
+                .number_value(tc)
+                .ok_or_else(|| std::io::Error::other("number_value failed"))?;
             return Ok(JsReturn::Number(n));
         }
         if result.is_uint8_array() {
-            let arr = v8::Local::<v8::Uint8Array>::try_from(result).map_err(|_| {
-                std::io::Error::new(std::io::ErrorKind::Other, "failed to cast to Uint8Array")
-            })?;
+            let arr = v8::Local::<v8::Uint8Array>::try_from(result)
+                .map_err(|_| std::io::Error::other("failed to cast to Uint8Array"))?;
             let offset = arr.byte_offset();
             let len = arr.byte_length();
-            let buf = arr.buffer(tc).ok_or_else(|| {
-                std::io::Error::new(std::io::ErrorKind::Other, "Uint8Array.buffer() failed")
-            })?;
+            let buf = arr
+                .buffer(tc)
+                .ok_or_else(|| std::io::Error::other("Uint8Array.buffer() failed"))?;
             let bs = buf.get_backing_store();
-            let base = bs.data().ok_or_else(|| {
-                std::io::Error::new(std::io::ErrorKind::Other, "backing store no data")
-            })?;
+            let base = bs
+                .data()
+                .ok_or_else(|| std::io::Error::other("backing store no data"))?;
             unsafe {
                 let src = std::slice::from_raw_parts(base.as_ptr().add(offset) as *const u8, len);
                 return Ok(JsReturn::Bytes(src.to_vec()));
             }
         }
         if result.is_array_buffer() {
-            let ab = v8::Local::<v8::ArrayBuffer>::try_from(result).map_err(|_| {
-                std::io::Error::new(std::io::ErrorKind::Other, "failed to cast to ArrayBuffer")
-            })?;
+            let ab = v8::Local::<v8::ArrayBuffer>::try_from(result)
+                .map_err(|_| std::io::Error::other("failed to cast to ArrayBuffer"))?;
             let len = ab.byte_length();
             let bs = ab.get_backing_store();
-            let ptr = bs.data().ok_or_else(|| {
-                std::io::Error::new(std::io::ErrorKind::Other, "backing store no data")
-            })?;
+            let ptr = bs
+                .data()
+                .ok_or_else(|| std::io::Error::other("backing store no data"))?;
             unsafe {
                 let src = std::slice::from_raw_parts(ptr.as_ptr() as *const u8, len);
                 return Ok(JsReturn::Bytes(src.to_vec()));
@@ -522,9 +490,9 @@ impl V8Engine {
                 };
             }
         }
-        let s = result.to_string(tc).ok_or_else(|| {
-            std::io::Error::new(std::io::ErrorKind::Other, "export result.toString failed")
-        })?;
+        let s = result
+            .to_string(tc)
+            .ok_or_else(|| std::io::Error::other("export result.toString failed"))?;
         Ok(JsReturn::Text(s.to_rust_string_lossy(tc)))
     }
     /// Call a global function with basic arguments.
@@ -539,40 +507,28 @@ impl V8Engine {
         v8::tc_scope!(let tc, &mut cs);
 
         let global = tc.get_current_context().global(tc);
-        let fname = v8::String::new(tc, name).ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "failed to create v8 string for function name",
-            )
-        })?;
+        let fname = v8::String::new(tc, name)
+            .ok_or_else(|| std::io::Error::other("failed to create v8 string for function name"))?;
 
         let func_val = global.get(tc, fname.into()).ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("global has no property '{}': not defined", name),
-            )
+            std::io::Error::other(format!("global has no property '{}': not defined", name))
         })?;
         if !func_val.is_function() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("'{}' is not a function", name),
-            )
-            .into());
+            return Err(std::io::Error::other(format!("'{}' is not a function", name)).into());
         }
         let func = v8::Local::<v8::Function>::try_from(func_val).map_err(|_| {
-            std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("failed to cast global property '{}' to Function", name),
-            )
+            std::io::Error::other(format!(
+                "failed to cast global property '{}' to Function",
+                name
+            ))
         })?;
 
         let mut argv: Vec<v8::Local<v8::Value>> = Vec::with_capacity(args.len());
         for a in args.iter().cloned() {
             match a.into() {
                 JsValue::Str(s) => {
-                    let v = v8::String::new(tc, &s).ok_or_else(|| {
-                        std::io::Error::new(std::io::ErrorKind::Other, "arg to v8 string failed")
-                    })?;
+                    let v = v8::String::new(tc, &s)
+                        .ok_or_else(|| std::io::Error::other("arg to v8 string failed"))?;
                     argv.push(v.into());
                 }
                 JsValue::Number(n) => {
@@ -585,47 +541,45 @@ impl V8Engine {
         }
 
         let recv = global.into();
-        let result = func.call(tc, recv, &argv).ok_or_else(|| {
-            std::io::Error::new(std::io::ErrorKind::Other, "function call failed")
-        })?;
+        let result = func
+            .call(tc, recv, &argv)
+            .ok_or_else(|| std::io::Error::other("function call failed"))?;
 
         // Map V8 value to JsReturn
         if result.is_boolean() {
             return Ok(JsReturn::Bool(result.boolean_value(tc)));
         }
         if result.is_number() {
-            let n = result.number_value(tc).ok_or_else(|| {
-                std::io::Error::new(std::io::ErrorKind::Other, "number_value failed")
-            })?;
+            let n = result
+                .number_value(tc)
+                .ok_or_else(|| std::io::Error::other("number_value failed"))?;
             return Ok(JsReturn::Number(n));
         }
         if result.is_uint8_array() {
-            let arr = v8::Local::<v8::Uint8Array>::try_from(result).map_err(|_| {
-                std::io::Error::new(std::io::ErrorKind::Other, "failed to cast to Uint8Array")
-            })?;
+            let arr = v8::Local::<v8::Uint8Array>::try_from(result)
+                .map_err(|_| std::io::Error::other("failed to cast to Uint8Array"))?;
             let offset = arr.byte_offset();
             let len = arr.byte_length();
-            let buf = arr.buffer(tc).ok_or_else(|| {
-                std::io::Error::new(std::io::ErrorKind::Other, "Uint8Array.buffer() failed")
-            })?;
+            let buf = arr
+                .buffer(tc)
+                .ok_or_else(|| std::io::Error::other("Uint8Array.buffer() failed"))?;
             let bs = buf.get_backing_store();
-            let base = bs.data().ok_or_else(|| {
-                std::io::Error::new(std::io::ErrorKind::Other, "backing store no data")
-            })?;
+            let base = bs
+                .data()
+                .ok_or_else(|| std::io::Error::other("backing store no data"))?;
             unsafe {
                 let src = std::slice::from_raw_parts(base.as_ptr().add(offset) as *const u8, len);
                 return Ok(JsReturn::Bytes(src.to_vec()));
             }
         }
         if result.is_array_buffer() {
-            let ab = v8::Local::<v8::ArrayBuffer>::try_from(result).map_err(|_| {
-                std::io::Error::new(std::io::ErrorKind::Other, "failed to cast to ArrayBuffer")
-            })?;
+            let ab = v8::Local::<v8::ArrayBuffer>::try_from(result)
+                .map_err(|_| std::io::Error::other("failed to cast to ArrayBuffer"))?;
             let len = ab.byte_length();
             let bs = ab.get_backing_store();
-            let ptr = bs.data().ok_or_else(|| {
-                std::io::Error::new(std::io::ErrorKind::Other, "backing store no data")
-            })?;
+            let ptr = bs
+                .data()
+                .ok_or_else(|| std::io::Error::other("backing store no data"))?;
             unsafe {
                 let src = std::slice::from_raw_parts(ptr.as_ptr() as *const u8, len);
                 return Ok(JsReturn::Bytes(src.to_vec()));
@@ -641,9 +595,9 @@ impl V8Engine {
                 };
             }
         }
-        let s = result.to_string(tc).ok_or_else(|| {
-            std::io::Error::new(std::io::ErrorKind::Other, "result.toString failed")
-        })?;
+        let s = result
+            .to_string(tc)
+            .ok_or_else(|| std::io::Error::other("result.toString failed"))?;
         Ok(JsReturn::Text(s.to_rust_string_lossy(tc)))
     }
 }

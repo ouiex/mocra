@@ -42,10 +42,10 @@ impl CoordinationBackend for MockBackend {
             .unwrap()
             .as_millis() as u64;
 
-        if let Some((_, exp)) = locks.get(key) {
-            if now < *exp {
-                return Ok(false);
-            }
+        if let Some((_, exp)) = locks.get(key)
+            && now < *exp
+        {
+            return Ok(false);
         }
         locks.insert(key.to_string(), (value.to_vec(), now + ttl_ms));
         Ok(true)
@@ -58,14 +58,14 @@ impl CoordinationBackend for MockBackend {
             .unwrap()
             .as_millis() as u64;
 
-        if let Some((owner, exp)) = locks.get_mut(key) {
-            if owner == value {
-                // Only renew if not already expired? Or revive?
-                // But strict distributed lock usually requires checking if we still hold it.
-                // Here we simplify: if key exists and owner matches, extend.
-                *exp = now + ttl_ms;
-                return Ok(true);
-            }
+        if let Some((owner, exp)) = locks.get_mut(key)
+            && owner == value
+        {
+            // Only renew if not already expired? Or revive?
+            // But strict distributed lock usually requires checking if we still hold it.
+            // Here we simplify: if key exists and owner matches, extend.
+            *exp = now + ttl_ms;
+            return Ok(true);
         }
         Ok(false)
     }

@@ -77,5 +77,4 @@ mod tests {
 
         assert_eq!(decoded, mark);
     }
-
 }

@@ -1,6 +1,9 @@
 use crate::engine::api::state::ApiState;
 use axum::http::StatusCode;
-use axum::{Json, extract::{Path, State}};
+use axum::{
+    Json,
+    extract::{Path, State},
+};
 use serde::Serialize;
 use std::time::Duration;
 use std::time::Instant;
@@ -64,13 +67,7 @@ pub async fn get_nodes(State(state): State<ApiState>) -> Json<Vec<NodeInfo>> {
         .state
         .profile_store
         .list_active_nodes(Duration::from_secs(30));
-    crate::common::metrics::inc_throughput(
-        "control_plane",
-        "cluster",
-        "get_nodes",
-        "success",
-        1,
-    );
+    crate::common::metrics::inc_throughput("control_plane", "cluster", "get_nodes", "success", 1);
     crate::common::metrics::observe_latency(
         "control_plane",
         "cluster",
@@ -158,7 +155,11 @@ pub async fn get_module_fallback_gate(
 }
 
 fn record_control_status(action: &str, status: StatusCode, started: Instant) {
-    let result = if status == StatusCode::OK { "success" } else { "error" };
+    let result = if status == StatusCode::OK {
+        "success"
+    } else {
+        "error"
+    };
     crate::common::metrics::inc_throughput("control_plane", "cluster", action, result, 1);
     crate::common::metrics::observe_latency(
         "control_plane",
@@ -168,13 +169,7 @@ fn record_control_status(action: &str, status: StatusCode, started: Instant) {
         started.elapsed().as_secs_f64(),
     );
     if result == "error" {
-        crate::common::metrics::inc_error(
-            "control_plane",
-            "cluster",
-            "http",
-            status.as_str(),
-            1,
-        );
+        crate::common::metrics::inc_error("control_plane", "cluster", "http", status.as_str(), 1);
     }
 }
 

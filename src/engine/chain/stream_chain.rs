@@ -1,7 +1,7 @@
 use crate::cacheable::{CacheAble, CacheService};
 use crate::common::interface::MiddlewareManager;
-use crate::common::model::workflow_profile::TaskProfileSnapshot;
 use crate::common::model::Request;
+use crate::common::model::workflow_profile::TaskProfileSnapshot;
 use crate::common::processors::processor::{
     ProcessorContext, ProcessorResult, ProcessorTrait, RetryPolicy,
 };
@@ -32,7 +32,9 @@ struct WebSocketDownloadProcessor {
 }
 
 #[async_trait]
-impl ProcessorTrait<(Option<Request>, Arc<TaskProfileSnapshot>), ()> for WebSocketDownloadProcessor {
+impl ProcessorTrait<(Option<Request>, Arc<TaskProfileSnapshot>), ()>
+    for WebSocketDownloadProcessor
+{
     fn name(&self) -> &'static str {
         "WebSocketDownloadProcessor"
     }
@@ -180,7 +182,10 @@ impl ProcessorTrait<(Option<Request>, Arc<TaskProfileSnapshot>), ()> for WebSock
 impl EventProcessorTrait<(Option<Request>, Arc<TaskProfileSnapshot>), ()>
     for WebSocketDownloadProcessor
 {
-    fn pre_status(&self, input: &(Option<Request>, Arc<TaskProfileSnapshot>)) -> Option<EventEnvelope> {
+    fn pre_status(
+        &self,
+        input: &(Option<Request>, Arc<TaskProfileSnapshot>),
+    ) -> Option<EventEnvelope> {
         match &input.0 {
             Some(request) => {
                 let ev: DownloadEvent = request.into();

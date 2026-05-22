@@ -5,7 +5,7 @@ pub mod raft_backend;
 mod service;
 
 pub use cache_able::CacheAble;
-pub use service::CacheService;
+pub use service::{CacheService, CacheServiceConfig};
 
 #[cfg(test)]
 mod tests;

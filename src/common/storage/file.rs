@@ -18,14 +18,14 @@ impl FileBlobStorage {
     }
 
     async fn ensure_dir(&self, path: &std::path::Path) -> Result<()> {
-        if let Some(parent) = path.parent() {
-            if !parent.exists() {
-                fs::create_dir_all(parent).await.map_err(|e| {
-                    crate::errors::Error::from(crate::errors::error::DataStoreError::SaveFailed(
-                        Box::new(e),
-                    ))
-                })?;
-            }
+        if let Some(parent) = path.parent()
+            && !parent.exists()
+        {
+            fs::create_dir_all(parent).await.map_err(|e| {
+                crate::errors::Error::from(crate::errors::error::DataStoreError::SaveFailed(
+                    Box::new(e),
+                ))
+            })?;
         }
         Ok(())
     }

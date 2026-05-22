@@ -3,11 +3,11 @@ use std::collections::BTreeSet;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::common::registry::NodeInfo;
 use crate::common::model::{
     MiddlewareBinding, MiddlewareType, PipelineStage, ResolvedCommonConfig, StatusEntry,
     TaskProfileSnapshot, TypedEnvelope,
 };
+use crate::common::registry::NodeInfo;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TaskProfileIdentity {
@@ -184,15 +184,35 @@ impl MiddlewareType {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum ControlPlaneRaftCommand {
-    UpsertTaskProfile { snapshot: TaskProfileSnapshot },
-    DisableTaskProfile { identity: TaskProfileIdentity },
-    BatchUpsertTaskProfiles { snapshots: Vec<TaskProfileSnapshot> },
-    UpsertAccountDefault { default: DefaultConfigUpsert },
-    UpsertPlatformDefault { default: DefaultConfigUpsert },
-    UpsertModuleDefault { default: DefaultConfigUpsert },
-    UpsertMiddleware { middleware: MiddlewareUpsert },
-    UpsertNodeHeartbeat { namespace: String, node: NodeInfo },
-    RemoveNode { namespace: String, node_id: String },
+    UpsertTaskProfile {
+        snapshot: TaskProfileSnapshot,
+    },
+    DisableTaskProfile {
+        identity: TaskProfileIdentity,
+    },
+    BatchUpsertTaskProfiles {
+        snapshots: Vec<TaskProfileSnapshot>,
+    },
+    UpsertAccountDefault {
+        default: DefaultConfigUpsert,
+    },
+    UpsertPlatformDefault {
+        default: DefaultConfigUpsert,
+    },
+    UpsertModuleDefault {
+        default: DefaultConfigUpsert,
+    },
+    UpsertMiddleware {
+        middleware: MiddlewareUpsert,
+    },
+    UpsertNodeHeartbeat {
+        namespace: String,
+        node: NodeInfo,
+    },
+    RemoveNode {
+        namespace: String,
+        node_id: String,
+    },
     UpsertResponseCacheOwner {
         namespace: String,
         cache_key: String,
@@ -207,13 +227,19 @@ pub enum ControlPlaneRaftCommand {
         owner_namespace: String,
         owner_node_id: Option<String>,
     },
-    RemoveResponseCacheOwner { namespace: String, cache_key: String },
+    RemoveResponseCacheOwner {
+        namespace: String,
+        cache_key: String,
+    },
     SetModuleLock {
         namespace: String,
         module_id: String,
         locked_at: u64,
     },
-    RemoveModuleLock { namespace: String, module_id: String },
+    RemoveModuleLock {
+        namespace: String,
+        module_id: String,
+    },
     MarkTaskTerminated {
         namespace: String,
         task_id: String,
@@ -234,20 +260,78 @@ pub enum ControlPlaneRaftCommand {
         entry: StatusEntry,
         previous_stage: Option<PipelineStage>,
     },
-    SetPauseState { namespace: String, paused: bool },
+    SetPauseState {
+        namespace: String,
+        paused: bool,
+    },
     // ── Cache backend commands ──
-    CacheSet { namespace: String, key: String, value: Vec<u8>, expires_at_ms: Option<i64> },
-    CacheSetNx { namespace: String, key: String, value: Vec<u8>, expires_at_ms: Option<i64>, request_id: String },
-    CacheDelete { namespace: String, key: String },
-    CacheDeleteBatch { namespace: String, keys: Vec<String> },
-    CacheIncrBy { namespace: String, key: String, delta: i64, expires_at_ms: Option<i64>, request_id: String },
-    CacheZAdd { namespace: String, zset_key: String, score: f64, member: Vec<u8> },
-    CacheZRem { namespace: String, zset_key: String, member: Vec<u8> },
-    CacheZRemRangeByScore { namespace: String, zset_key: String, min: f64, max: f64, request_id: String },
+    CacheSet {
+        namespace: String,
+        key: String,
+        value: Vec<u8>,
+        expires_at_ms: Option<i64>,
+    },
+    CacheSetNx {
+        namespace: String,
+        key: String,
+        value: Vec<u8>,
+        expires_at_ms: Option<i64>,
+        request_id: String,
+    },
+    CacheDelete {
+        namespace: String,
+        key: String,
+    },
+    CacheDeleteBatch {
+        namespace: String,
+        keys: Vec<String>,
+    },
+    CacheIncrBy {
+        namespace: String,
+        key: String,
+        delta: i64,
+        expires_at_ms: Option<i64>,
+        request_id: String,
+    },
+    CacheZAdd {
+        namespace: String,
+        zset_key: String,
+        score: f64,
+        member: Vec<u8>,
+    },
+    CacheZRem {
+        namespace: String,
+        zset_key: String,
+        member: Vec<u8>,
+    },
+    CacheZRemRangeByScore {
+        namespace: String,
+        zset_key: String,
+        min: f64,
+        max: f64,
+        request_id: String,
+    },
     // ── Lock backend commands ──
-    LockAcquire { namespace: String, key: String, owner_token: String, ttl_ms: u64, request_id: String },
-    LockRenew { namespace: String, key: String, owner_token: String, ttl_ms: u64, request_id: String },
-    LockRelease { namespace: String, key: String, owner_token: String, request_id: String },
+    LockAcquire {
+        namespace: String,
+        key: String,
+        owner_token: String,
+        ttl_ms: u64,
+        request_id: String,
+    },
+    LockRenew {
+        namespace: String,
+        key: String,
+        owner_token: String,
+        ttl_ms: u64,
+        request_id: String,
+    },
+    LockRelease {
+        namespace: String,
+        key: String,
+        owner_token: String,
+        request_id: String,
+    },
 }
 
 impl ControlPlaneRaftCommand {
@@ -452,7 +536,12 @@ impl ControlPlaneRaftCommand {
                 }])
             }
             // ── Cache backend apply models ──
-            ControlPlaneRaftCommand::CacheSet { namespace, key, value, expires_at_ms } => {
+            ControlPlaneRaftCommand::CacheSet {
+                namespace,
+                key,
+                value,
+                expires_at_ms,
+            } => {
                 validate_non_empty("namespace", namespace)?;
                 validate_non_empty("key", key)?;
                 Ok(vec![ControlPlaneApply::CacheKvUpsert {
@@ -465,7 +554,13 @@ impl ControlPlaneRaftCommand {
                     },
                 }])
             }
-            ControlPlaneRaftCommand::CacheSetNx { namespace, key, value, expires_at_ms, request_id } => {
+            ControlPlaneRaftCommand::CacheSetNx {
+                namespace,
+                key,
+                value,
+                expires_at_ms,
+                request_id,
+            } => {
                 validate_non_empty("namespace", namespace)?;
                 validate_non_empty("key", key)?;
                 Ok(vec![ControlPlaneApply::CacheKvUpsertNx {
@@ -488,10 +583,19 @@ impl ControlPlaneRaftCommand {
             }
             ControlPlaneRaftCommand::CacheDeleteBatch { namespace, keys } => {
                 validate_non_empty("namespace", namespace)?;
-                let state_keys: Vec<String> = keys.iter().map(|k| format!("{}:cache:kv:{}", namespace, k)).collect();
+                let state_keys: Vec<String> = keys
+                    .iter()
+                    .map(|k| format!("{}:cache:kv:{}", namespace, k))
+                    .collect();
                 Ok(vec![ControlPlaneApply::CacheKvDeleteMany { state_keys }])
             }
-            ControlPlaneRaftCommand::CacheIncrBy { namespace, key, delta, expires_at_ms, request_id } => {
+            ControlPlaneRaftCommand::CacheIncrBy {
+                namespace,
+                key,
+                delta,
+                expires_at_ms,
+                request_id,
+            } => {
                 validate_non_empty("namespace", namespace)?;
                 validate_non_empty("key", key)?;
                 Ok(vec![ControlPlaneApply::CacheCounterIncr {
@@ -501,7 +605,12 @@ impl ControlPlaneRaftCommand {
                     request_id: request_id.clone(),
                 }])
             }
-            ControlPlaneRaftCommand::CacheZAdd { namespace, zset_key, score, member } => {
+            ControlPlaneRaftCommand::CacheZAdd {
+                namespace,
+                zset_key,
+                score,
+                member,
+            } => {
                 validate_non_empty("namespace", namespace)?;
                 validate_non_empty("zset_key", zset_key)?;
                 let score_key = f64_to_be_bytes(*score);
@@ -510,7 +619,8 @@ impl ControlPlaneRaftCommand {
                     ControlPlaneApply::CacheZSetEntryUpsert {
                         state_key: format!(
                             "{}:cache:zset:{}:{}:{}",
-                            namespace, zset_key,
+                            namespace,
+                            zset_key,
                             hex::encode(score_key),
                             member_hex
                         ),
@@ -535,7 +645,11 @@ impl ControlPlaneRaftCommand {
                     },
                 ])
             }
-            ControlPlaneRaftCommand::CacheZRem { namespace, zset_key, member } => {
+            ControlPlaneRaftCommand::CacheZRem {
+                namespace,
+                zset_key,
+                member,
+            } => {
                 validate_non_empty("namespace", namespace)?;
                 validate_non_empty("zset_key", zset_key)?;
                 let member_hex = hex::encode(member);
@@ -546,11 +660,20 @@ impl ControlPlaneRaftCommand {
                         member_hex: member_hex.clone(),
                     },
                     ControlPlaneApply::CacheKvDelete {
-                        state_key: format!("{}:cache:zset_idx:{}:{}", namespace, zset_key, member_hex),
+                        state_key: format!(
+                            "{}:cache:zset_idx:{}:{}",
+                            namespace, zset_key, member_hex
+                        ),
                     },
                 ])
             }
-            ControlPlaneRaftCommand::CacheZRemRangeByScore { namespace, zset_key, min, max, request_id } => {
+            ControlPlaneRaftCommand::CacheZRemRangeByScore {
+                namespace,
+                zset_key,
+                min,
+                max,
+                request_id,
+            } => {
                 validate_non_empty("namespace", namespace)?;
                 validate_non_empty("zset_key", zset_key)?;
                 Ok(vec![ControlPlaneApply::CacheZSetRangeDelete {
@@ -562,7 +685,13 @@ impl ControlPlaneRaftCommand {
                 }])
             }
             // ── Lock backend apply models ──
-            ControlPlaneRaftCommand::LockAcquire { namespace, key, owner_token, ttl_ms, request_id } => {
+            ControlPlaneRaftCommand::LockAcquire {
+                namespace,
+                key,
+                owner_token,
+                ttl_ms,
+                request_id,
+            } => {
                 validate_non_empty("namespace", namespace)?;
                 validate_non_empty("key", key)?;
                 validate_non_empty("owner_token", owner_token)?;
@@ -578,7 +707,13 @@ impl ControlPlaneRaftCommand {
                     request_id: request_id.clone(),
                 }])
             }
-            ControlPlaneRaftCommand::LockRenew { namespace, key, owner_token, ttl_ms, request_id } => {
+            ControlPlaneRaftCommand::LockRenew {
+                namespace,
+                key,
+                owner_token,
+                ttl_ms,
+                request_id,
+            } => {
                 validate_non_empty("namespace", namespace)?;
                 validate_non_empty("key", key)?;
                 validate_non_empty("owner_token", owner_token)?;
@@ -589,7 +724,12 @@ impl ControlPlaneRaftCommand {
                     request_id: request_id.clone(),
                 }])
             }
-            ControlPlaneRaftCommand::LockRelease { namespace, key, owner_token, request_id } => {
+            ControlPlaneRaftCommand::LockRelease {
+                namespace,
+                key,
+                owner_token,
+                request_id,
+            } => {
                 validate_non_empty("namespace", namespace)?;
                 validate_non_empty("key", key)?;
                 validate_non_empty("owner_token", owner_token)?;

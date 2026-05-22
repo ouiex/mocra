@@ -8,11 +8,10 @@ use crate::sync::SyncService;
 
 use super::graph::Dag;
 use super::types::{
-    DagAdvanceGate, DagError, DagErrorClass, DagErrorCode, DagFencingStore,
-    DagNodeDispatcher, DagNodeExecutionPolicy, DagNodeRetryMode, DagNodeRunState,
-    DagNodeRuntimeOverride, DagNodeStatus, DagNodeSyncState, DagRunGuard, DagRunState,
-    DagRunStateStore, DagRunStatus, DagStopSignal, LocalNodeDispatcher, NodeExecutionContext,
-    NodePlacement, TaskPayload,
+    DagAdvanceGate, DagError, DagErrorClass, DagErrorCode, DagFencingStore, DagNodeDispatcher,
+    DagNodeExecutionPolicy, DagNodeRetryMode, DagNodeRunState, DagNodeRuntimeOverride,
+    DagNodeStatus, DagNodeSyncState, DagRunGuard, DagRunState, DagRunStateStore, DagRunStatus,
+    DagStopSignal, LocalNodeDispatcher, NodeExecutionContext, NodePlacement, TaskPayload,
 };
 
 type JoinOutput = (String, usize, usize, Result<TaskPayload, DagError>);
@@ -80,7 +79,11 @@ fn collect_entry_nodes(runtime: &Dag) -> Vec<String> {
 fn runtime_identity(runtime: &Dag) -> HashMap<String, String> {
     ["profile_version", "dag_version"]
         .into_iter()
-        .filter_map(|key| runtime.metadata(key).map(|value| (key.to_string(), value.to_string())))
+        .filter_map(|key| {
+            runtime
+                .metadata(key)
+                .map(|value| (key.to_string(), value.to_string()))
+        })
         .collect()
 }
 
@@ -285,16 +288,15 @@ impl RuntimeState {
             run_state.last_error = node.error.clone();
             node_states.insert(id.clone(), run_state);
 
-            if node.status == DagNodeStatus::Succeeded {
-                if let Some(payload) = self
+            if node.status == DagNodeStatus::Succeeded
+                && let Some(payload) = self
                     .outputs
                     .get(id)
                     .cloned()
                     .or_else(|| node.result.clone())
-                {
-                    succeeded_outputs.insert(id.clone(), payload);
-                    completed_nodes.push(id.clone());
-                }
+            {
+                succeeded_outputs.insert(id.clone(), payload);
+                completed_nodes.push(id.clone());
             }
         }
 
@@ -436,6 +438,84 @@ struct FencingStoreConfig {
 struct RunStateStoreConfig {
     store: Arc<dyn DagRunStateStore>,
     run_key: String,
+}
+
+struct DagSyncStateEmit<'a> {
+    run_id: &'a str,
+    run_fencing_token: Option<u64>,
+    node_id: &'a str,
+    stage: DagSyncStage,
+    attempt: usize,
+    layer_index: usize,
+    placement: &'a NodePlacement,
+    idempotency_key: Option<String>,
+    worker_id: Option<String>,
+    deadline_ms: Option<u64>,
+    dispatch_latency_ms: Option<u64>,
+    error_code: Option<DagErrorCode>,
+    error_class: Option<DagErrorClass>,
+    error: Option<String>,
+}
+
+impl<'a> DagSyncStateEmit<'a> {
+    fn new(
+        run_id: &'a str,
+        run_fencing_token: Option<u64>,
+        node_id: &'a str,
+        stage: DagSyncStage,
+        attempt: usize,
+        layer_index: usize,
+        placement: &'a NodePlacement,
+    ) -> Self {
+        Self {
+            run_id,
+            run_fencing_token,
+            node_id,
+            stage,
+            attempt,
+            layer_index,
+            placement,
+            idempotency_key: None,
+            worker_id: None,
+            deadline_ms: None,
+            dispatch_latency_ms: None,
+            error_code: None,
+            error_class: None,
+            error: None,
+        }
+    }
+
+    fn with_idempotency_key(mut self, idempotency_key: Option<String>) -> Self {
+        self.idempotency_key = idempotency_key;
+        self
+    }
+
+    fn with_worker_id(mut self, worker_id: Option<String>) -> Self {
+        self.worker_id = worker_id;
+        self
+    }
+
+    fn with_deadline_ms(mut self, deadline_ms: Option<u64>) -> Self {
+        self.deadline_ms = deadline_ms;
+        self
+    }
+
+    fn with_dispatch_latency_ms(mut self, dispatch_latency_ms: Option<u64>) -> Self {
+        self.dispatch_latency_ms = dispatch_latency_ms;
+        self
+    }
+
+    fn with_error(
+        mut self,
+        error_code: Option<DagErrorCode>,
+        error_class: Option<DagErrorClass>,
+        error: Option<String>,
+    ) -> Self {
+        self.error_code = error_code;
+        self.error_class = error_class;
+        self.error = error;
+        self
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -784,28 +864,12 @@ impl DagScheduler {
         payload
     }
 
-    async fn emit_sync_state(
-        &self,
-        run_id: &str,
-        run_fencing_token: Option<u64>,
-        node_id: &str,
-        stage: DagSyncStage,
-        attempt: usize,
-        layer_index: usize,
-        placement: &NodePlacement,
-        idempotency_key: Option<String>,
-        worker_id: Option<String>,
-        deadline_ms: Option<u64>,
-        dispatch_latency_ms: Option<u64>,
-        error_code: Option<DagErrorCode>,
-        error_class: Option<DagErrorClass>,
-        error: Option<String>,
-    ) {
+    async fn emit_sync_state(&self, emit: DagSyncStateEmit<'_>) {
         let Some(sync_service) = &self.sync_service else {
             return;
         };
 
-        let (placement_name, worker_group) = match placement {
+        let (placement_name, worker_group) = match emit.placement {
             NodePlacement::Local => ("local".to_string(), None),
             NodePlacement::Remote { worker_group } => {
                 ("remote".to_string(), Some(worker_group.clone()))
@@ -813,30 +877,30 @@ impl DagScheduler {
         };
 
         let state = DagNodeSyncState {
-            run_id: run_id.to_string(),
-            run_fencing_token,
-            node_id: node_id.to_string(),
-            stage: stage.as_str().to_string(),
+            run_id: emit.run_id.to_string(),
+            run_fencing_token: emit.run_fencing_token,
+            node_id: emit.node_id.to_string(),
+            stage: emit.stage.as_str().to_string(),
             placement: placement_name,
             worker_group,
-            worker_id,
-            attempt,
-            layer_index,
-            idempotency_key,
-            deadline_ms,
-            dispatch_latency_ms,
-            error_code,
-            error_class,
-            error,
+            worker_id: emit.worker_id,
+            attempt: emit.attempt,
+            layer_index: emit.layer_index,
+            idempotency_key: emit.idempotency_key,
+            deadline_ms: emit.deadline_ms,
+            dispatch_latency_ms: emit.dispatch_latency_ms,
+            error_code: emit.error_code,
+            error_class: emit.error_class,
+            error: emit.error,
             timestamp_ms: Self::now_ms(),
         };
 
         if let Err(sync_err) = sync_service.send(&state).await {
             eprintln!(
                 "DAG sync emit failed: run_id={} node_id={} stage={} error={}",
-                run_id,
-                node_id,
-                stage.as_str(),
+                emit.run_id,
+                emit.node_id,
+                emit.stage.as_str(),
                 sync_err
             );
         }
@@ -956,20 +1020,16 @@ impl DagScheduler {
                         layer_index: waiter_layer_index,
                     });
                     self.emit_sync_state(
-                        &state.run_id,
-                        state.run_fencing_token,
-                        &waiter_node_id,
-                        DagSyncStage::SingleflightFulfilled,
-                        state.attempts.get(&waiter_node_id).copied().unwrap_or(0),
-                        waiter_layer_index,
-                        &placement,
-                        Some(key.clone()),
-                        None,
-                        None,
-                        None,
-                        None,
-                        None,
-                        None,
+                        DagSyncStateEmit::new(
+                            &state.run_id,
+                            state.run_fencing_token,
+                            &waiter_node_id,
+                            DagSyncStage::SingleflightFulfilled,
+                            state.attempts.get(&waiter_node_id).copied().unwrap_or(0),
+                            waiter_layer_index,
+                            &placement,
+                        )
+                        .with_idempotency_key(Some(key.clone())),
                     )
                     .await;
                     Self::unlock_successors(
@@ -993,20 +1053,17 @@ impl DagScheduler {
             layer_index,
         });
         self.emit_sync_state(
-            &state.run_id,
-            state.run_fencing_token,
-            node_id,
-            DagSyncStage::Succeeded,
-            attempt,
-            layer_index,
-            &placement,
-            policy.idempotency_key.clone(),
-            None,
-            None,
-            dispatch_latency_ms,
-            None,
-            None,
-            None,
+            DagSyncStateEmit::new(
+                &state.run_id,
+                state.run_fencing_token,
+                node_id,
+                DagSyncStage::Succeeded,
+                attempt,
+                layer_index,
+                &placement,
+            )
+            .with_idempotency_key(policy.idempotency_key.clone())
+            .with_dispatch_latency_ms(dispatch_latency_ms),
         )
         .await;
         if state.stop_signal.is_some() {
@@ -1107,10 +1164,11 @@ impl DagScheduler {
             .or_insert(1);
 
         let mut retry_delay_ms = policy.retry_backoff_ms;
-        if let Some(threshold) = policy.circuit_breaker_failure_threshold {
-            if *failure_streak >= threshold && policy.circuit_breaker_open_ms > retry_delay_ms {
-                retry_delay_ms = policy.circuit_breaker_open_ms;
-            }
+        if let Some(threshold) = policy.circuit_breaker_failure_threshold
+            && *failure_streak >= threshold
+            && policy.circuit_breaker_open_ms > retry_delay_ms
+        {
+            retry_delay_ms = policy.circuit_breaker_open_ms;
         }
 
         if state.stop_signal.is_none() && attempt <= policy.max_retries && allow_retry {
@@ -1126,24 +1184,28 @@ impl DagScheduler {
             }
             state.runtime.set_status(&node_id, DagNodeStatus::Pending)?;
             self.emit_sync_state(
-                &state.run_id,
-                state.run_fencing_token,
-                &node_id,
-                DagSyncStage::RetryScheduled,
-                attempt,
-                layer_index,
-                &placement,
-                policy.idempotency_key.clone(),
-                None,
-                None,
-                state
-                    .dispatch_started_ms
-                    .get(&node_id)
-                    .copied()
-                    .map(|started| Self::now_ms().saturating_sub(started)),
-                Some(failure_code.clone()),
-                Some(failure_class_tag.clone()),
-                Some(error.to_string()),
+                DagSyncStateEmit::new(
+                    &state.run_id,
+                    state.run_fencing_token,
+                    &node_id,
+                    DagSyncStage::RetryScheduled,
+                    attempt,
+                    layer_index,
+                    &placement,
+                )
+                .with_idempotency_key(policy.idempotency_key.clone())
+                .with_dispatch_latency_ms(
+                    state
+                        .dispatch_started_ms
+                        .get(&node_id)
+                        .copied()
+                        .map(|started| Self::now_ms().saturating_sub(started)),
+                )
+                .with_error(
+                    Some(failure_code.clone()),
+                    Some(failure_class_tag.clone()),
+                    Some(error.to_string()),
+                ),
             )
             .await;
             if retry_delay_ms > 0 {
@@ -1191,20 +1253,22 @@ impl DagScheduler {
             }
         }
         self.emit_sync_state(
-            &state.run_id,
-            state.run_fencing_token,
-            &node_id,
-            DagSyncStage::Failed,
-            attempt,
-            layer_index,
-            &placement,
-            policy.idempotency_key.clone(),
-            None,
-            None,
-            dispatch_latency_ms,
-            Some(failure_code),
-            Some(failure_class_tag),
-            Some(error.to_string()),
+            DagSyncStateEmit::new(
+                &state.run_id,
+                state.run_fencing_token,
+                &node_id,
+                DagSyncStage::Failed,
+                attempt,
+                layer_index,
+                &placement,
+            )
+            .with_idempotency_key(policy.idempotency_key.clone())
+            .with_dispatch_latency_ms(dispatch_latency_ms)
+            .with_error(
+                Some(failure_code),
+                Some(failure_class_tag),
+                Some(error.to_string()),
+            ),
         )
         .await;
         Ok(Some(DagError::RetryExhausted {
@@ -1320,25 +1384,25 @@ impl DagScheduler {
         }
 
         self.emit_sync_state(
-            &state.run_id,
-            state.run_fencing_token,
-            &node_id,
-            DagSyncStage::Running,
-            attempt,
-            layer_index,
-            &placement,
-            policy.idempotency_key.clone(),
-            Some(match &placement {
+            DagSyncStateEmit::new(
+                &state.run_id,
+                state.run_fencing_token,
+                &node_id,
+                DagSyncStage::Running,
+                attempt,
+                layer_index,
+                &placement,
+            )
+            .with_idempotency_key(policy.idempotency_key.clone())
+            .with_worker_id(Some(match &placement {
                 NodePlacement::Local => format!("local-{}", std::process::id()),
                 NodePlacement::Remote { worker_group } => worker_group.clone(),
-            }),
-            policy
-                .timeout_ms
-                .map(|timeout_ms| Self::now_ms() + timeout_ms),
-            None,
-            None,
-            None,
-            None,
+            }))
+            .with_deadline_ms(
+                policy
+                    .timeout_ms
+                    .map(|timeout_ms| Self::now_ms() + timeout_ms),
+            ),
         )
         .await;
         state
@@ -1414,20 +1478,16 @@ impl DagScheduler {
                 layer_index,
             });
             self.emit_sync_state(
-                &state.run_id,
-                state.run_fencing_token,
-                node_id,
-                DagSyncStage::CacheHit,
-                state.attempts.get(node_id).copied().unwrap_or(0),
-                layer_index,
-                placement,
-                policy.idempotency_key.clone(),
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
+                DagSyncStateEmit::new(
+                    &state.run_id,
+                    state.run_fencing_token,
+                    node_id,
+                    DagSyncStage::CacheHit,
+                    state.attempts.get(node_id).copied().unwrap_or(0),
+                    layer_index,
+                    placement,
+                )
+                .with_idempotency_key(policy.idempotency_key.clone()),
             )
             .await;
             Self::unlock_successors(
@@ -1450,20 +1510,16 @@ impl DagScheduler {
                 .or_default()
                 .push((node_id.to_string(), layer_index));
             self.emit_sync_state(
-                &state.run_id,
-                state.run_fencing_token,
-                node_id,
-                DagSyncStage::SingleflightWait,
-                state.attempts.get(node_id).copied().unwrap_or(0),
-                layer_index,
-                placement,
-                policy.idempotency_key.clone(),
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
+                DagSyncStateEmit::new(
+                    &state.run_id,
+                    state.run_fencing_token,
+                    node_id,
+                    DagSyncStage::SingleflightWait,
+                    state.attempts.get(node_id).copied().unwrap_or(0),
+                    layer_index,
+                    placement,
+                )
+                .with_idempotency_key(policy.idempotency_key.clone()),
             )
             .await;
             return Ok(true);
@@ -1580,50 +1636,50 @@ impl DagScheduler {
         let mut renew_stop_tx = None;
         let mut renew_task = None;
 
-        if let Some((cfg, owner, _token)) = &run_guard_ctx {
-            if let Some(interval_ms) = cfg.renew_interval_ms {
-                let (tx, mut rx) = tokio::sync::watch::channel(false);
-                let guard = cfg.guard.clone();
-                let lock_key = cfg.lock_key.clone();
-                let owner = owner.clone();
-                let ttl_ms = cfg.ttl_ms;
-                let renew_jitter_pct = cfg.renew_jitter_pct;
-                let failed = renew_failed_reason.clone();
-                renew_stop_tx = Some(tx);
-                renew_task = Some(tokio::spawn(async move {
-                    loop {
-                        tokio::select! {
-                            _ = rx.changed() => {
-                                break;
-                            }
-                            _ = tokio::time::sleep(Duration::from_millis(Self::run_guard_jittered_interval_ms(interval_ms, renew_jitter_pct))) => {
-                                let renew_started = Instant::now();
-                                match guard.renew(&lock_key, &owner, ttl_ms).await {
-                                    Ok(true) => {}
-                                    Ok(false) => {
-                                        Self::record_run_guard_latency("renew", false, renew_started.elapsed());
-                                        Self::record_run_guard_counter("mocra_dag_run_guard_renew_total", "lost");
-                                        if let Ok(mut slot) = failed.lock() {
-                                            *slot = Some("run guard lock ownership lost during renew".to_string());
-                                        }
-                                        break;
+        if let Some((cfg, owner, _token)) = &run_guard_ctx
+            && let Some(interval_ms) = cfg.renew_interval_ms
+        {
+            let (tx, mut rx) = tokio::sync::watch::channel(false);
+            let guard = cfg.guard.clone();
+            let lock_key = cfg.lock_key.clone();
+            let owner = owner.clone();
+            let ttl_ms = cfg.ttl_ms;
+            let renew_jitter_pct = cfg.renew_jitter_pct;
+            let failed = renew_failed_reason.clone();
+            renew_stop_tx = Some(tx);
+            renew_task = Some(tokio::spawn(async move {
+                loop {
+                    tokio::select! {
+                        _ = rx.changed() => {
+                            break;
+                        }
+                        _ = tokio::time::sleep(Duration::from_millis(Self::run_guard_jittered_interval_ms(interval_ms, renew_jitter_pct))) => {
+                            let renew_started = Instant::now();
+                            match guard.renew(&lock_key, &owner, ttl_ms).await {
+                                Ok(true) => {}
+                                Ok(false) => {
+                                    Self::record_run_guard_latency("renew", false, renew_started.elapsed());
+                                    Self::record_run_guard_counter("mocra_dag_run_guard_renew_total", "lost");
+                                    if let Ok(mut slot) = failed.lock() {
+                                        *slot = Some("run guard lock ownership lost during renew".to_string());
                                     }
-                                    Err(e) => {
-                                        Self::record_run_guard_latency("renew", false, renew_started.elapsed());
-                                        Self::record_run_guard_counter("mocra_dag_run_guard_renew_total", "error");
-                                        if let Ok(mut slot) = failed.lock() {
-                                            *slot = Some(e.to_string());
-                                        }
-                                        break;
-                                    }
+                                    break;
                                 }
-                                Self::record_run_guard_latency("renew", true, renew_started.elapsed());
-                                Self::record_run_guard_counter("mocra_dag_run_guard_renew_total", "success");
+                                Err(e) => {
+                                    Self::record_run_guard_latency("renew", false, renew_started.elapsed());
+                                    Self::record_run_guard_counter("mocra_dag_run_guard_renew_total", "error");
+                                    if let Ok(mut slot) = failed.lock() {
+                                        *slot = Some(e.to_string());
+                                    }
+                                    break;
+                                }
                             }
+                            Self::record_run_guard_latency("renew", true, renew_started.elapsed());
+                            Self::record_run_guard_counter("mocra_dag_run_guard_renew_total", "success");
                         }
                     }
-                }));
-            }
+                }
+            }));
         }
 
         let execute_result = async {
@@ -1657,28 +1713,28 @@ impl DagScheduler {
             let mut join_set: tokio::task::JoinSet<JoinOutput> = tokio::task::JoinSet::new();
 
             while !state.ready_queue.is_empty() || !join_set.is_empty() {
-                if let Some(lock_key) = run_guard_lock_key.as_ref() {
-                    if let Some(reason) = renew_failed_reason.lock().ok().and_then(|g| g.clone()) {
-                        join_set.abort_all();
-                        self.persist_failure_snapshot_if_enabled(&mut state, "renew_lost")
-                            .await;
-                        return Err(DagError::RunGuardRenewFailed {
-                            lock_key: lock_key.clone(),
-                            reason,
-                        });
-                    }
+                if let Some(lock_key) = run_guard_lock_key.as_ref()
+                    && let Some(reason) = renew_failed_reason.lock().ok().and_then(|g| g.clone())
+                {
+                    join_set.abort_all();
+                    self.persist_failure_snapshot_if_enabled(&mut state, "renew_lost")
+                        .await;
+                    return Err(DagError::RunGuardRenewFailed {
+                        lock_key: lock_key.clone(),
+                        reason,
+                    });
                 }
 
-                if let Some(timeout) = run_timeout {
-                    if started_at.elapsed() > timeout {
-                        join_set.abort_all();
-                        self.persist_failure_snapshot_if_enabled(&mut state, "run_timeout")
-                            .await;
-                        return Err(DagError::ExecutionTimeout {
-                            run_id: state.run_id.clone(),
-                            timeout_ms: timeout.as_millis() as u64,
-                        });
-                    }
+                if let Some(timeout) = run_timeout
+                    && started_at.elapsed() > timeout
+                {
+                    join_set.abort_all();
+                    self.persist_failure_snapshot_if_enabled(&mut state, "run_timeout")
+                        .await;
+                    return Err(DagError::ExecutionTimeout {
+                        run_id: state.run_id.clone(),
+                        timeout_ms: timeout.as_millis() as u64,
+                    });
                 }
 
                 self.refresh_stop_signal(&mut state).await?;
@@ -1747,10 +1803,10 @@ impl DagScheduler {
             }
 
             let report = state.into_report();
-            if report.is_ok() {
-                if let Some(cfg) = &self.run_state_store {
-                    cfg.store.clear(&cfg.run_key).await?;
-                }
+            if report.is_ok()
+                && let Some(cfg) = &self.run_state_store
+            {
+                cfg.store.clear(&cfg.run_key).await?;
             }
             report
         }
@@ -1789,23 +1845,20 @@ impl DagScheduler {
                     Self::record_run_guard_counter("mocra_dag_run_guard_release_total", "success");
                 }
             }
-            if execute_result.is_ok() {
-                if let Some(reason) = renew_failed {
-                    Self::record_run_guard_counter(
-                        "mocra_dag_run_guard_renew_total",
-                        "failed_final",
-                    );
-                    let result = Err(DagError::RunGuardRenewFailed {
-                        lock_key: cfg.lock_key,
-                        reason,
-                    });
-                    Self::record_execute_metrics(
-                        &result,
-                        run_started.elapsed(),
-                        self.run_guard.is_some(),
-                    );
-                    return result;
-                }
+            if execute_result.is_ok()
+                && let Some(reason) = renew_failed
+            {
+                Self::record_run_guard_counter("mocra_dag_run_guard_renew_total", "failed_final");
+                let result = Err(DagError::RunGuardRenewFailed {
+                    lock_key: cfg.lock_key,
+                    reason,
+                });
+                Self::record_execute_metrics(
+                    &result,
+                    run_started.elapsed(),
+                    self.run_guard.is_some(),
+                );
+                return result;
             }
         }
         Self::record_execute_metrics(

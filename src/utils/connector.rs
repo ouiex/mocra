@@ -2,7 +2,7 @@ use dashmap::DashMap;
 use once_cell::sync::Lazy;
 use sea_orm::{Database, DatabaseConnection};
 
-static CONNECTION_POOLS: Lazy<DashMap<String, DatabaseConnection>> = Lazy::new(|| DashMap::new());
+static CONNECTION_POOLS: Lazy<DashMap<String, DatabaseConnection>> = Lazy::new(DashMap::new);
 
 pub async fn db_connection(
     url: Option<String>,

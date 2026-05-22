@@ -76,7 +76,7 @@ pub mod errors {
 }
 pub mod cacheable {
     pub use crate::cacheable::CacheAble;
-    pub use crate::cacheable::CacheService;
+    pub use crate::cacheable::{CacheService, CacheServiceConfig};
 }
 
 #[cfg(feature = "polars")]

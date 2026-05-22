@@ -1,6 +1,6 @@
 use super::{
-    assembler::{ConfigAssembler, ModuleAssembler},
-    profile_loader::{LoadedProfile, ProfileLoader},
+    assembler::{ConfigAssembler, ModuleAssembler, ModuleConfigAssemblyInput},
+    profile_loader::{LoadedProfile, ProfileLoadRequest, ProfileLoader},
     repository::TaskRepository,
     task::Task,
 };
@@ -14,8 +14,8 @@ use crate::common::state::State;
 use crate::engine::task::module::Module;
 use crate::engine::task::module_dag_processor::ModuleDagProcessor;
 use crate::engine::task::parser_error_adapter::{
-    extract_error_envelope_seed, extract_parser_dispatch_seed, ErrorEnvelopeSeed,
-    ParserDispatchSeed,
+    ErrorEnvelopeSeed, ParserDispatchSeed, extract_error_envelope_seed,
+    extract_parser_dispatch_seed,
 };
 use dashmap::DashMap;
 use std::sync::Arc;
@@ -34,6 +34,14 @@ pub struct TaskFactory {
     state: Arc<State>,
 }
 
+pub struct TaskFactoryConfig {
+    pub repository: TaskRepository,
+    pub cache_service: Arc<CacheService>,
+    pub cookie_service: Option<Arc<CacheService>>,
+    pub module_assembler: Arc<tokio::sync::RwLock<ModuleAssembler>>,
+    pub state: Arc<State>,
+}
+
 const CACHE_TTL: Duration = Duration::from_secs(30);
 
 struct CacheEntry {
@@ -43,21 +51,15 @@ struct CacheEntry {
 
 impl TaskFactory {
     /// Creates a task factory with repository/cache/assembler dependencies.
-    pub fn new(
-        repository: TaskRepository,
-        sync_service: Arc<CacheService>,
-        cookie_sync_service: Option<Arc<CacheService>>,
-        module_assembler: Arc<tokio::sync::RwLock<ModuleAssembler>>,
-        state: Arc<State>,
-    ) -> Self {
+    pub fn new(config: TaskFactoryConfig) -> Self {
         Self {
-            repository,
-            cache_service: sync_service,
-            cookie_service: cookie_sync_service,
-            module_assembler,
+            repository: config.repository,
+            cache_service: config.cache_service,
+            cookie_service: config.cookie_service,
+            module_assembler: config.module_assembler,
             profile_loader: ProfileLoader::default(),
             cache: Arc::new(DashMap::new()),
-            state,
+            state: config.state,
         }
     }
 
@@ -113,15 +115,15 @@ impl TaskFactory {
     ) -> Result<LoadedProfile> {
         let namespace = self.state.config.read().await.name.clone();
         self.profile_loader
-            .load(
-                &namespace,
-                account_name,
-                platform_name,
+            .load(ProfileLoadRequest {
+                namespace: &namespace,
+                account: account_name,
+                platform: platform_name,
                 module_name,
-                "task_factory",
+                updated_by: "task_factory",
                 module_impl,
                 module_config,
-            )
+            })
             .await
             .map_err(|err| {
                 ModuleError::Model(
@@ -343,18 +345,19 @@ impl TaskFactory {
                 .collect();
 
             // Assemble effective module config.
-            let module_config = ConfigAssembler::assemble_module_config(
-                &account,
-                &platform,
-                &module,
-                &rel_account_platform,
-                &rel_module_platform,
-                &rel_module_account,
-                &data_middleware,
-                &download_middleware,
-                &rel_module_data_middleware,
-                &rel_module_download_middleware,
-            );
+            let module_config =
+                ConfigAssembler::assemble_module_config(ModuleConfigAssemblyInput {
+                    account: &account,
+                    platform: &platform,
+                    module: &module,
+                    rel_account_platform: &rel_account_platform,
+                    rel_module_platform: &rel_module_platform,
+                    rel_module_account: &rel_module_account,
+                    data_middleware: &data_middleware,
+                    download_middleware: &download_middleware,
+                    rel_module_data_middleware: &rel_module_data_middleware,
+                    rel_module_download_middleware: &rel_module_download_middleware,
+                });
 
             // Build runtime module instance.
             let assembler = self.module_assembler.read().await;
@@ -484,9 +487,7 @@ impl TaskFactory {
     }
 
     async fn load_parser_seed(&self, seed: &ParserDispatchSeed) -> Result<Task> {
-        let mut task = self
-            .create_task_from_model(&seed.task_model)
-            .await?;
+        let mut task = self.create_task_from_model(&seed.task_model).await?;
         task.prefix_request = seed.prefix_request;
         task.run_id = seed.run_id;
         task.modules
@@ -501,7 +502,8 @@ impl TaskFactory {
             // module.error_times = error_times;
             module.prefix_request = seed.prefix_request;
             module.pending_ctx = Some(seed.context.clone());
-            self.refresh_module_runtime_from_cache(module, seed.run_id).await?;
+            self.refresh_module_runtime_from_cache(module, seed.run_id)
+                .await?;
         }
         Ok(task)
     }
@@ -522,7 +524,8 @@ impl TaskFactory {
             m.pending_ctx = Some(seed.context.clone());
         });
         for module in task.modules.iter_mut() {
-            self.refresh_module_runtime_from_cache(module, seed.run_id).await?;
+            self.refresh_module_runtime_from_cache(module, seed.run_id)
+                .await?;
         }
 
         // Task error accounting placeholder.

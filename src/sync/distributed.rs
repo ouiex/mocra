@@ -145,10 +145,10 @@ impl SyncService {
     pub fn from_config(
         backend: Option<Arc<dyn CoordinationBackend>>,
         namespace: String,
-        config: &SyncConfig,
+        _config: &SyncConfig,
     ) -> Self {
         let options = SyncOptions {
-            envelope_enabled: config.envelope_enabled || true,
+            envelope_enabled: true,
         };
 
         Self::new_with_options(backend, namespace, options)
@@ -201,10 +201,10 @@ impl SyncService {
     where
         T: SyncAble,
     {
-        if options.envelope_enabled {
-            if let Ok(envelope) = msgpack_decode::<SyncEnvelope<T>>(bytes) {
-                return Ok((envelope.value, envelope.version));
-            }
+        if options.envelope_enabled
+            && let Ok(envelope) = msgpack_decode::<SyncEnvelope<T>>(bytes)
+        {
+            return Ok((envelope.value, envelope.version));
         }
 
         let value = msgpack_decode::<T>(bytes).map_err(|e| {

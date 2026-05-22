@@ -1,11 +1,12 @@
 use crate::cacheable::{CacheAble, CacheService};
-use crate::common::model::{Request, Response};
 use crate::common::model::download_config::DownloadConfig;
+use crate::common::model::{Request, Response};
 use crate::common::response_cache::{
-    current_owner_api_base_url, persist_response_cache_entry, RESPONSE_CACHE_EXPIRES_AT_KEY,
+    RESPONSE_CACHE_EXPIRES_AT_KEY, ResponseCachePersistRequest, current_owner_api_base_url,
+    persist_response_cache_entry,
 };
 use crate::common::state::State;
-use crate::downloader::request_downloader::RequestDownloader;
+use crate::downloader::request_downloader::{RequestDownloader, RequestDownloaderConfig};
 use crate::downloader::{Downloader, WebSocketDownloader};
 use crate::engine::api::profile_store::ProfileControlPlaneStore;
 use crate::errors::CacheError;
@@ -69,14 +70,11 @@ async fn cleanup_local_response_cache_owner_records(
                     .unwrap_or_default()
                     .as_millis() as i64
         });
-        if expired {
-            if let Err(err) = Response::delete(&record.cache_key, cache_service).await {
-                warn!(
-                    "Failed to delete expired local cached response during owner cleanup: cache_key={} error={:?}",
-                    record.cache_key,
-                    err
-                );
-            }
+        if expired && let Err(err) = Response::delete(&record.cache_key, cache_service).await {
+            warn!(
+                "Failed to delete expired local cached response during owner cleanup: cache_key={} error={:?}",
+                record.cache_key, err
+            );
         }
 
         let should_clear_owner = match Response::sync(&record.cache_key, cache_service).await {
@@ -84,10 +82,11 @@ async fn cleanup_local_response_cache_owner_records(
                 if expired {
                     true
                 } else if cached_response_matches_owner_record(&record.cache_key, &response) {
-                    let expected_owner_api_base_url = current_node_response_cache_owner_api_base_url(
-                        profile_store,
-                        owner_node_id,
-                    );
+                    let expected_owner_api_base_url =
+                        current_node_response_cache_owner_api_base_url(
+                            profile_store,
+                            owner_node_id,
+                        );
                     if record.owner_api_base_url != expected_owner_api_base_url {
                         let mut refreshed_response = response.clone();
                         if refreshed_response
@@ -101,16 +100,16 @@ async fn cleanup_local_response_cache_owner_records(
                                 .add_trait_config(RESPONSE_CACHE_EXPIRES_AT_KEY, expires_at);
                         }
 
-                        if persist_response_cache_entry(
-                            &refreshed_response,
+                        if persist_response_cache_entry(ResponseCachePersistRequest {
+                            response: &refreshed_response,
                             owner_namespace,
                             owner_node_id,
-                            expected_owner_api_base_url.as_deref(),
-                            None,
+                            owner_api_base_url: expected_owner_api_base_url.as_deref(),
+                            fallback_ttl: None,
                             cache_service,
                             profile_store,
-                            "background_owner_endpoint_refresh",
-                        )
+                            context: "background_owner_endpoint_refresh",
+                        })
                         .await
                         .is_none()
                         {
@@ -127,15 +126,12 @@ async fn cleanup_local_response_cache_owner_records(
                 } else {
                     warn!(
                         "Removing stale response cache owner after local cache key mismatch: cache_key={} owner_namespace={} owner_node_id={:?}",
-                        record.cache_key,
-                        record.owner_namespace,
-                        record.owner_node_id
+                        record.cache_key, record.owner_namespace, record.owner_node_id
                     );
                     if let Err(err) = Response::delete(&record.cache_key, cache_service).await {
                         warn!(
                             "Failed to delete mismatched local cached response during owner cleanup: cache_key={} error={:?}",
-                            record.cache_key,
-                            err
+                            record.cache_key, err
                         );
                     }
                     true
@@ -145,16 +141,12 @@ async fn cleanup_local_response_cache_owner_records(
             Err(CacheError::Serde(err)) => {
                 warn!(
                     "Removing stale response cache owner after local cache decode failure: cache_key={} owner_namespace={} owner_node_id={:?} error={:?}",
-                    record.cache_key,
-                    record.owner_namespace,
-                    record.owner_node_id,
-                    err
+                    record.cache_key, record.owner_namespace, record.owner_node_id, err
                 );
                 if let Err(delete_err) = Response::delete(&record.cache_key, cache_service).await {
                     warn!(
                         "Failed to delete corrupt local cached response during owner cleanup: cache_key={} error={:?}",
-                        record.cache_key,
-                        delete_err
+                        record.cache_key, delete_err
                     );
                 }
                 true
@@ -162,10 +154,7 @@ async fn cleanup_local_response_cache_owner_records(
             Err(err) => {
                 warn!(
                     "Skipping local response cache owner cleanup after cache read failure: cache_key={} owner_namespace={} owner_node_id={:?} error={:?}",
-                    record.cache_key,
-                    record.owner_namespace,
-                    record.owner_node_id,
-                    err
+                    record.cache_key, record.owner_namespace, record.owner_node_id, err
                 );
                 false
             }
@@ -185,10 +174,7 @@ async fn cleanup_local_response_cache_owner_records(
         {
             warn!(
                 "Failed to clear stale response cache owner during background cleanup: cache_key={} owner_namespace={} owner_node_id={:?} error={:?}",
-                record.cache_key,
-                record.owner_namespace,
-                record.owner_node_id,
-                err
+                record.cache_key, record.owner_namespace, record.owner_node_id, err
             );
         }
     }
@@ -243,17 +229,17 @@ impl DownloaderManager {
         DownloaderManager {
             state: state.clone(),
             default_downloader: Box::new(
-                RequestDownloader::new(
-                    Arc::clone(&state.limiter),
-                    Arc::clone(&state.locker),
-                    Arc::clone(&state.cache_service),
-                    namespace,
-                    node_id,
-                    Arc::clone(&state.profile_store),
+                RequestDownloader::new(RequestDownloaderConfig {
+                    limiter: Arc::clone(&state.limiter),
+                    locker: Arc::clone(&state.locker),
+                    cache_service: Arc::clone(&state.cache_service),
+                    owner_namespace: namespace,
+                    owner_node_id: node_id,
+                    profile_store: Arc::clone(&state.profile_store),
                     api_key,
                     pool_size,
                     max_response_size,
-                )
+                })
                 .with_federation_response_cache_api_endpoints(
                     federation_response_cache_api_endpoints,
                 ),
@@ -400,7 +386,6 @@ impl DownloaderManager {
             // Optimistically update cache to prevent spamming the spawn
             self.expire_update_cache
                 .insert(module_id.clone(), current_time);
-
         }
 
         // Get or insert configuration.
@@ -473,7 +458,7 @@ impl DownloaderManager {
 #[cfg(test)]
 mod tests {
     use super::cleanup_local_response_cache_owner_records;
-    use crate::cacheable::{CacheAble, CacheService};
+    use crate::cacheable::{CacheAble, CacheService, CacheServiceConfig};
     use crate::common::model::meta::MetaData;
     use crate::common::model::{Cookies, ExecutionMark, Response};
     use crate::common::registry::NodeInfo;
@@ -511,7 +496,7 @@ mod tests {
 
     #[tokio::test]
     async fn cleanup_local_response_cache_owner_records_removes_missing_entries() {
-        let cache_service = Arc::new(CacheService::new(None, "test:cache".to_string(), None, None));
+        let cache_service = Arc::new(CacheService::new(CacheServiceConfig::local("test:cache")));
         let profile_store = Arc::new(ProfileControlPlaneStore::open_temp("origin-app").unwrap());
 
         profile_store
@@ -527,12 +512,16 @@ mod tests {
         )
         .await;
 
-        assert!(profile_store.get_response_cache_owner("cache-key-1").is_none());
+        assert!(
+            profile_store
+                .get_response_cache_owner("cache-key-1")
+                .is_none()
+        );
     }
 
     #[tokio::test]
     async fn cleanup_local_response_cache_owner_records_removes_corrupt_entries() {
-        let cache_service = Arc::new(CacheService::new(None, "test:cache".to_string(), None, None));
+        let cache_service = Arc::new(CacheService::new(CacheServiceConfig::local("test:cache")));
         let profile_store = Arc::new(ProfileControlPlaneStore::open_temp("origin-app").unwrap());
 
         profile_store
@@ -540,7 +529,11 @@ mod tests {
             .await
             .expect("cache owner should be recorded");
         cache_service
-            .set(&Response::cache_id("cache-key-1", &cache_service), b"not-json", None)
+            .set(
+                &Response::cache_id("cache-key-1", &cache_service),
+                b"not-json",
+                None,
+            )
             .await
             .expect("corrupt cache entry should be stored");
 
@@ -552,7 +545,11 @@ mod tests {
         )
         .await;
 
-        assert!(profile_store.get_response_cache_owner("cache-key-1").is_none());
+        assert!(
+            profile_store
+                .get_response_cache_owner("cache-key-1")
+                .is_none()
+        );
         assert!(
             Response::sync("cache-key-1", &cache_service)
                 .await
@@ -563,7 +560,7 @@ mod tests {
 
     #[tokio::test]
     async fn cleanup_local_response_cache_owner_records_removes_mismatched_entries() {
-        let cache_service = Arc::new(CacheService::new(None, "test:cache".to_string(), None, None));
+        let cache_service = Arc::new(CacheService::new(CacheServiceConfig::local("test:cache")));
         let profile_store = Arc::new(ProfileControlPlaneStore::open_temp("origin-app").unwrap());
 
         profile_store
@@ -588,7 +585,11 @@ mod tests {
         )
         .await;
 
-        assert!(profile_store.get_response_cache_owner("cache-key-1").is_none());
+        assert!(
+            profile_store
+                .get_response_cache_owner("cache-key-1")
+                .is_none()
+        );
         assert!(
             Response::sync("cache-key-1", &cache_service)
                 .await
@@ -599,7 +600,7 @@ mod tests {
 
     #[tokio::test]
     async fn cleanup_local_response_cache_owner_records_preserves_valid_entries() {
-        let cache_service = Arc::new(CacheService::new(None, "test:cache".to_string(), None, None));
+        let cache_service = Arc::new(CacheService::new(CacheServiceConfig::local("test:cache")));
         let profile_store = Arc::new(ProfileControlPlaneStore::open_temp("origin-app").unwrap());
 
         profile_store
@@ -639,7 +640,7 @@ mod tests {
 
     #[tokio::test]
     async fn cleanup_local_response_cache_owner_records_removes_expired_entries() {
-        let cache_service = Arc::new(CacheService::new(None, "test:cache".to_string(), None, None));
+        let cache_service = Arc::new(CacheService::new(CacheServiceConfig::local("test:cache")));
         let profile_store = Arc::new(ProfileControlPlaneStore::open_temp("origin-app").unwrap());
 
         profile_store
@@ -669,7 +670,11 @@ mod tests {
         )
         .await;
 
-        assert!(profile_store.get_response_cache_owner("cache-key-1").is_none());
+        assert!(
+            profile_store
+                .get_response_cache_owner("cache-key-1")
+                .is_none()
+        );
         assert!(
             Response::sync("cache-key-1", &cache_service)
                 .await
@@ -680,7 +685,7 @@ mod tests {
 
     #[tokio::test]
     async fn cleanup_local_response_cache_owner_records_refreshes_owner_endpoint_from_heartbeat() {
-        let cache_service = Arc::new(CacheService::new(None, "test:cache".to_string(), None, None));
+        let cache_service = Arc::new(CacheService::new(CacheServiceConfig::local("test:cache")));
         let profile_store = Arc::new(ProfileControlPlaneStore::open_temp("origin-app").unwrap());
         profile_store
             .heartbeat_node(NodeInfo {
@@ -747,8 +752,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cleanup_local_response_cache_owner_records_clears_stale_owner_endpoint_when_api_port_missing() {
-        let cache_service = Arc::new(CacheService::new(None, "test:cache".to_string(), None, None));
+    async fn cleanup_local_response_cache_owner_records_clears_stale_owner_endpoint_when_api_port_missing()
+     {
+        let cache_service = Arc::new(CacheService::new(CacheServiceConfig::local("test:cache")));
         let profile_store = Arc::new(ProfileControlPlaneStore::open_temp("origin-app").unwrap());
         profile_store
             .heartbeat_node(NodeInfo {
@@ -780,7 +786,10 @@ mod tests {
         response.metadata = response
             .metadata
             .add_trait_config(RESPONSE_CACHE_LOOKUP_KEY, "cache-key-1")
-            .add_trait_config(RESPONSE_CACHE_OWNER_API_BASE_URL_KEY, "http://127.0.0.1:18080");
+            .add_trait_config(
+                RESPONSE_CACHE_OWNER_API_BASE_URL_KEY,
+                "http://127.0.0.1:18080",
+            );
         response
             .send_persistent("cache-key-1", &cache_service)
             .await

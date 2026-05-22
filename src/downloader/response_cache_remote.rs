@@ -36,22 +36,25 @@ pub struct HttpResponseCacheRemoteClient {
     http_client: Client,
 }
 
+#[derive(Clone)]
+pub struct HttpResponseCacheRemoteClientConfig {
+    pub owner_namespace: String,
+    pub owner_node_id: Option<String>,
+    pub profile_store: Arc<ProfileControlPlaneStore>,
+    pub api_key: Option<String>,
+    pub federation_endpoints: HashMap<String, String>,
+    pub http_client: Client,
+}
+
 impl HttpResponseCacheRemoteClient {
-    pub fn new(
-        owner_namespace: String,
-        owner_node_id: Option<String>,
-        profile_store: Arc<ProfileControlPlaneStore>,
-        api_key: Option<String>,
-        federation_endpoints: HashMap<String, String>,
-        http_client: Client,
-    ) -> Self {
+    pub fn new(config: HttpResponseCacheRemoteClientConfig) -> Self {
         Self {
-            owner_namespace,
-            owner_node_id,
-            profile_store,
-            api_key,
-            federation_endpoints,
-            http_client,
+            owner_namespace: config.owner_namespace,
+            owner_node_id: config.owner_node_id,
+            profile_store: config.profile_store,
+            api_key: config.api_key,
+            federation_endpoints: config.federation_endpoints,
+            http_client: config.http_client,
         }
     }
 }
@@ -168,7 +171,10 @@ impl ResponseCacheRemoteClient for HttpResponseCacheRemoteClient {
             if !response.status().is_success() {
                 warn!(
                     "Remote cached response lookup returned non-success: cache_key={} owner_namespace={} endpoint={} reason=http_status status={}",
-                    cache_key, owner.owner_namespace, endpoint, response.status()
+                    cache_key,
+                    owner.owner_namespace,
+                    endpoint,
+                    response.status()
                 );
                 continue;
             }
@@ -200,10 +206,7 @@ impl HttpResponseCacheRemoteClient {
     ) -> Vec<(String, bool)> {
         let mut endpoints: Vec<(String, bool)> = Vec::new();
         let mut push = |endpoint: String, authoritative_not_found: bool| {
-            if let Some((_, existing)) = endpoints
-                .iter_mut()
-                .find(|(e, _)| *e == endpoint)
-            {
+            if let Some((_, existing)) = endpoints.iter_mut().find(|(e, _)| *e == endpoint) {
                 *existing |= authoritative_not_found;
             } else {
                 endpoints.push((endpoint, authoritative_not_found));

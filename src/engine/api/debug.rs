@@ -9,7 +9,9 @@ use serde_json::{Map, Value, json};
 
 use crate::cacheable::CacheAble;
 use crate::common::model::control_plane_profile::DefaultConfigScope;
-use crate::common::model::{MiddlewareType, PipelineStage, Response, TaskProfileSnapshot, TaskStatus, TypedEnvelope};
+use crate::common::model::{
+    MiddlewareType, PipelineStage, Response, TaskProfileSnapshot, TaskStatus, TypedEnvelope,
+};
 use crate::engine::api::profile_store::{ProfileControlPlaneStore, StoredStatusEntryRecord};
 use crate::engine::api::state::ApiState;
 
@@ -149,7 +151,11 @@ pub async fn list_debug_status_by_stage(
 ) -> Result<Json<Vec<DebugStatusResponse>>, StatusCode> {
     let started = Instant::now();
     let Some(stage) = parse_pipeline_stage(&stage) else {
-        record_debug_status_metrics("list_debug_status_by_stage", StatusCode::BAD_REQUEST, started);
+        record_debug_status_metrics(
+            "list_debug_status_by_stage",
+            StatusCode::BAD_REQUEST,
+            started,
+        );
         return Err(StatusCode::BAD_REQUEST);
     };
 
@@ -186,7 +192,11 @@ pub async fn get_debug_cached_response(
     let cached = match load_cached_response(&cache_key, &state.state.cache_service).await {
         Ok(Some(response)) => response,
         Ok(None) => {
-            record_debug_status_metrics("get_debug_cached_response", StatusCode::NOT_FOUND, started);
+            record_debug_status_metrics(
+                "get_debug_cached_response",
+                StatusCode::NOT_FOUND,
+                started,
+            );
             return Err(StatusCode::NOT_FOUND);
         }
         Err(err) => {
@@ -420,10 +430,10 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::{
-        build_debug_layers, load_cached_response, merge_object_layer, parse_pipeline_stage,
-        status_counts_response, status_record_response, DebugStatusResponse,
+        DebugStatusResponse, build_debug_layers, load_cached_response, merge_object_layer,
+        parse_pipeline_stage, status_counts_response, status_record_response,
     };
-    use crate::cacheable::{CacheAble, CacheService};
+    use crate::cacheable::{CacheAble, CacheService, CacheServiceConfig};
     use crate::common::model::{
         ExecutionMark, MiddlewareBinding, MiddlewareType, PayloadCodec, PipelineStage, Priority,
         ResolvedCommonConfig, Response, StatusEntry, TaskProfileSnapshot, TaskStatus,
@@ -479,9 +489,18 @@ mod tests {
     #[test]
     fn parse_pipeline_stage_accepts_runtime_aliases() {
         assert_eq!(parse_pipeline_stage("task"), Some(PipelineStage::Task));
-        assert_eq!(parse_pipeline_stage("parser_task"), Some(PipelineStage::ParserTask));
-        assert_eq!(parse_pipeline_stage("parser-task"), Some(PipelineStage::ParserTask));
-        assert_eq!(parse_pipeline_stage("error_task"), Some(PipelineStage::Error));
+        assert_eq!(
+            parse_pipeline_stage("parser_task"),
+            Some(PipelineStage::ParserTask)
+        );
+        assert_eq!(
+            parse_pipeline_stage("parser-task"),
+            Some(PipelineStage::ParserTask)
+        );
+        assert_eq!(
+            parse_pipeline_stage("error_task"),
+            Some(PipelineStage::Error)
+        );
         assert_eq!(parse_pipeline_stage("unknown"), None);
     }
 
@@ -517,7 +536,7 @@ mod tests {
 
     #[tokio::test]
     async fn load_cached_response_returns_cached_payload() {
-        let cache_service = CacheService::new(None, "demo:cache".to_string(), None, None);
+        let cache_service = CacheService::new(CacheServiceConfig::local("demo:cache"));
         let cache_key = "response-cache-key".to_string();
         let response = Response {
             id: Uuid::now_v7(),

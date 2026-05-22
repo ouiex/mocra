@@ -30,8 +30,7 @@ impl RaftRocksDbCacheBackend {
     }
 
     fn resolve_ttl(&self, ttl: Option<Duration>) -> Option<u64> {
-        ttl.or(self.default_ttl)
-            .map(|d| d.as_millis() as u64)
+        ttl.or(self.default_ttl).map(|d| d.as_millis() as u64)
     }
 }
 
@@ -41,12 +40,7 @@ impl CacheBackend for RaftRocksDbCacheBackend {
         Ok(self.store.read_cache_value(&self.namespace, key))
     }
 
-    async fn set(
-        &self,
-        key: &str,
-        value: &[u8],
-        ttl: Option<Duration>,
-    ) -> Result<(), CacheError> {
+    async fn set(&self, key: &str, value: &[u8], ttl: Option<Duration>) -> Result<(), CacheError> {
         self.store
             .submit_cache_set(&self.namespace, key, value.to_vec(), self.resolve_ttl(ttl))
             .await
@@ -76,9 +70,7 @@ impl CacheBackend for RaftRocksDbCacheBackend {
         pattern: &str,
         limit: usize,
     ) -> Result<Vec<String>, CacheError> {
-        Ok(self
-            .store
-            .list_cache_keys(&self.namespace, pattern, limit))
+        Ok(self.store.list_cache_keys(&self.namespace, pattern, limit))
     }
 
     async fn set_nx(
@@ -125,12 +117,7 @@ impl CacheBackend for RaftRocksDbCacheBackend {
         Ok(())
     }
 
-    async fn zadd(
-        &self,
-        key: &str,
-        score: f64,
-        member: &[u8],
-    ) -> Result<i64, CacheError> {
+    async fn zadd(&self, key: &str, score: f64, member: &[u8]) -> Result<i64, CacheError> {
         self.store
             .submit_cache_zadd(&self.namespace, key, score, member.to_vec())
             .await
@@ -144,15 +131,12 @@ impl CacheBackend for RaftRocksDbCacheBackend {
         min: f64,
         max: f64,
     ) -> Result<Vec<Vec<u8>>, CacheError> {
-        Ok(self.store.read_cache_zrange_by_score(&self.namespace, key, min, max, None))
+        Ok(self
+            .store
+            .read_cache_zrange_by_score(&self.namespace, key, min, max, None))
     }
 
-    async fn zremrangebyscore(
-        &self,
-        key: &str,
-        min: f64,
-        max: f64,
-    ) -> Result<i64, CacheError> {
+    async fn zremrangebyscore(&self, key: &str, min: f64, max: f64) -> Result<i64, CacheError> {
         let request_id = uuid::Uuid::new_v4().to_string();
         let outcome_ns = self.namespace.clone();
         self.store
@@ -175,7 +159,6 @@ impl CacheBackend for RaftRocksDbCacheBackend {
             .unwrap_or(0);
         Ok(count)
     }
-
 }
 
 #[cfg(test)]
