@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  check:
+    name: build · test · clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      # rdkafka (queue-kafka feature) needs cmake; harmless when the feature is off.
+      - name: Install system deps
+        run: sudo apt-get update && sudo apt-get install -y cmake
+
+      - name: Build (default features)
+        run: cargo build --lib
+
+      - name: Test
+        run: cargo test --lib
+
+      # Warnings are not yet denied — tighten to `-D warnings` after the Phase 0/1 cleanup.
+      - name: Clippy
+        run: cargo clippy --lib

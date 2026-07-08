@@ -10,6 +10,7 @@ use crate::common::model::config::{RedisConfig, KafkaConfig};
 use uuid::Uuid;
 use tokio::time::{timeout, Duration};
 use deadpool_redis::redis;
+#[cfg(feature = "queue-kafka")]
 use crate::queue::kafka::KafkaQueue;
 use crate::common::policy::{PolicyConfig, PolicyOverride};
 use crate::errors::ErrorKind;
@@ -305,6 +306,7 @@ fn build_redis_config() -> RedisConfig {
     }
 }
 
+#[cfg(feature = "queue-kafka")]
 fn build_kafka_config() -> Option<KafkaConfig> {
     let brokers = std::env::var("KAFKA_BROKERS").ok()?;
     if brokers.trim().is_empty() {
@@ -451,6 +453,7 @@ async fn test_redis_retry_then_dlq_path() {
     assert_eq!(reason, "second_fail");
 }
 
+#[cfg(feature = "queue-kafka")]
 #[tokio::test]
 async fn test_kafka_retry_then_ack() {
     let Some(kafka_config) = build_kafka_config() else {
@@ -509,6 +512,7 @@ async fn test_kafka_retry_then_ack() {
     msg2.ack().await.expect("ack2");
 }
 
+#[cfg(feature = "queue-kafka")]
 #[tokio::test]
 async fn test_kafka_out_of_order_ack() {
     let Some(kafka_config) = build_kafka_config() else {

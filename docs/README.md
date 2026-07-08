@@ -17,6 +17,12 @@ Welcome to the mocra documentation. This directory contains the full technical d
 | [API Reference](api-reference.md) | Built-in HTTP control plane and metrics |
 | [Deployment](deployment.md) | Single-node vs distributed mode, monitoring, and operations |
 
+## Design & Refactoring (设计与重构)
+
+| Document | Description |
+|---|---|
+| [Refactoring Plan (中文)](refactor/README.md) | 从企业级采集平台重构为可嵌入的分布式爬虫库:现状评估、目标 API、集群架构(redb+Raft 控制面 / 可插拔 MQ 数据面)、实施路线 |
+
 ## Quick Links
 
 - **Repository:** <https://github.com/ouiex/mocra>

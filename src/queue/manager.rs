@@ -6,6 +6,7 @@ use crate::queue::channel::Channel;
 use crate::queue::compression::{compress_payload_owned, decompress_payload};
 use crate::queue::compensation::{Compensator, Identifiable, RedisCompensator};
 use crate::queue::redis::RedisQueue;
+#[cfg(feature = "queue-kafka")]
 use crate::queue::kafka::KafkaQueue;
 use crate::common::policy::PolicyResolver;
 use crate::common::model::message::{TaskErrorEvent, TaskParserEvent, TaskEvent};
@@ -160,20 +161,32 @@ impl QueueManager {
                 }
             }
         } else if let Some(kafka_config) = &channel_config.kafka {
-            match KafkaQueue::new(kafka_config, channel_config.minid_time, namespace, nack_policy)
-            {
+            #[cfg(feature = "queue-kafka")]
+            let qm = match KafkaQueue::new(
+                kafka_config,
+                channel_config.minid_time,
+                namespace,
+                nack_policy,
+            ) {
                 Ok(kafka_queue) => {
                     info!("KafkaQueue initialized successfully");
                     QueueManager::new(Some(Arc::new(kafka_queue)), channel_config.capacity)
                 }
                 Err(e) => {
-                    error!(
-                        "KafkaQueue init failed, fallback to in-memory queue: {}",
-                        e
-                    );
+                    error!("KafkaQueue init failed, fallback to in-memory queue: {}", e);
                     QueueManager::new(None, channel_config.capacity)
                 }
-            }
+            };
+            #[cfg(not(feature = "queue-kafka"))]
+            let qm = {
+                let _ = kafka_config;
+                error!(
+                    "channel_config.kafka is set but the `queue-kafka` feature is disabled; \
+                     falling back to in-memory queue"
+                );
+                QueueManager::new(None, channel_config.capacity)
+            };
+            qm
         } else {
             info!("In-Memory Queue initialized (Single Node Mode)");
             QueueManager::new(None, 10000)

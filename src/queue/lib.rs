@@ -1,5 +1,6 @@
 pub mod channel;
 pub mod compensation;
+#[cfg(feature = "queue-kafka")]
 pub mod kafka;
 pub mod manager;
 pub mod redis;
