@@ -13,6 +13,7 @@
 
 pub mod cmd;
 pub mod control;
+pub mod raft;
 pub mod state_machine;
 
 pub use cmd::{Cmd, CmdResult, Lock};
