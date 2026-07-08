@@ -3,6 +3,9 @@
 
 pub mod prelude;
 
+/// 高层 `Spider` 门面(重构 Phase 1)—— 面向 80% 场景的简单入口。
+pub mod facade;
+
 #[path = "cacheable/lib.rs"]
 pub mod cacheable;
 #[path = "common/lib.rs"]

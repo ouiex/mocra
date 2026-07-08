@@ -31,6 +31,31 @@ pub struct Response {
     pub priority: crate::common::model::Priority,
 }
 impl Response {
+    /// 响应体按 UTF-8 解码为字符串(严格;无效字节返回错误)。
+    pub fn text(&self) -> crate::errors::Result<&str> {
+        std::str::from_utf8(&self.content).map_err(|e| {
+            crate::errors::Error::new(
+                crate::errors::ErrorKind::Response,
+                Some(format!("response body is not valid UTF-8: {e}")),
+            )
+        })
+    }
+
+    /// 响应体按 UTF-8 解码(无效字节以 U+FFFD 替换)。
+    pub fn text_lossy(&self) -> std::borrow::Cow<'_, str> {
+        String::from_utf8_lossy(&self.content)
+    }
+
+    /// 响应体反序列化为 JSON。
+    pub fn json<T: serde::de::DeserializeOwned>(&self) -> crate::errors::Result<T> {
+        serde_json::from_slice(&self.content).map_err(|e| {
+            crate::errors::Error::new(
+                crate::errors::ErrorKind::Response,
+                Some(format!("response body is not valid JSON: {e}")),
+            )
+        })
+    }
+
     pub fn task_id(&self) -> String {
         format!("{}-{}", self.account, self.platform)
     }

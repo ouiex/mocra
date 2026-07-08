@@ -1,3 +1,8 @@
+// High-level Spider facade (重构 Phase 1)
+pub use crate::facade::{
+    on_item, ChannelSink, Ctx, DataSink, Mocra, MocraBuilder, Seeds, Spider,
+};
+
 // Common Traits and Structs
 pub use crate::common::interface::{
     DataMiddleware, DataStoreMiddleware, DownloadMiddleware, MiddlewareManager, ModuleNodeTrait,
@@ -63,6 +68,7 @@ pub mod schedule {
 }
 pub mod sync {
     pub use crate::sync::DistributedSync;
+    #[cfg(feature = "queue-kafka")]
     pub use crate::sync::KafkaBackend;
     pub use crate::sync::CoordinationBackend;
     pub use crate::sync::RedisBackend;
