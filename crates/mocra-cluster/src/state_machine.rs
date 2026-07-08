@@ -161,6 +161,58 @@ impl StateMachine {
         let t = r.open_table(KV).map_err(redb_err)?;
         Ok(t.get(key).map_err(redb_err)?.map(|g| g.value().to_vec()))
     }
+
+    /// 快照用:把整个业务状态(kv + locks)序列化为字节。
+    pub fn dump(&self) -> Result<Vec<u8>, StateMachineError> {
+        let r = self.db.begin_read().map_err(redb_err)?;
+        let mut kv = Vec::new();
+        {
+            let t = r.open_table(KV).map_err(redb_err)?;
+            for item in t.iter().map_err(redb_err)? {
+                let (k, v) = item.map_err(redb_err)?;
+                kv.push((k.value().to_vec(), v.value().to_vec()));
+            }
+        }
+        let mut locks = Vec::new();
+        {
+            let t = r.open_table(LOCKS).map_err(redb_err)?;
+            for item in t.iter().map_err(redb_err)? {
+                let (k, v) = item.map_err(redb_err)?;
+                locks.push((k.value().to_string(), v.value().to_vec()));
+            }
+        }
+        rmp_serde::to_vec(&SmDump { kv, locks }).map_err(|e| StateMachineError::Codec(e.to_string()))
+    }
+
+    /// 从快照恢复:清空 kv / locks 并载入。
+    pub fn restore(&self, bytes: &[u8]) -> Result<(), StateMachineError> {
+        let dump: SmDump =
+            rmp_serde::from_slice(bytes).map_err(|e| StateMachineError::Codec(e.to_string()))?;
+        let w = self.db.begin_write().map_err(redb_err)?;
+        {
+            let mut t = w.open_table(KV).map_err(redb_err)?;
+            t.retain(|_, _| false).map_err(redb_err)?;
+            for (k, v) in &dump.kv {
+                t.insert(k.as_slice(), v.as_slice()).map_err(redb_err)?;
+            }
+        }
+        {
+            let mut t = w.open_table(LOCKS).map_err(redb_err)?;
+            t.retain(|_, _| false).map_err(redb_err)?;
+            for (k, v) in &dump.locks {
+                t.insert(k.as_str(), v.as_slice()).map_err(redb_err)?;
+            }
+        }
+        w.commit().map_err(redb_err)?;
+        Ok(())
+    }
+}
+
+/// 状态机快照的可序列化表示(kv + locks 全量)。
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SmDump {
+    kv: Vec<(Vec<u8>, Vec<u8>)>,
+    locks: Vec<(String, Vec<u8>)>,
 }
 
 #[cfg(test)]

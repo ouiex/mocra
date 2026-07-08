@@ -15,33 +15,44 @@ use async_trait::async_trait;
 use crate::cmd::{Cmd, CmdResult};
 use crate::state_machine::{StateMachine, StateMachineError};
 
+/// 控制面错误:状态机错误 + 共识 / 配置错误。
+#[derive(Debug, thiserror::Error)]
+pub enum ControlError {
+    #[error(transparent)]
+    StateMachine(#[from] StateMachineError),
+    #[error("raft: {0}")]
+    Raft(String),
+    #[error("config: {0}")]
+    Config(String),
+}
+
 /// 控制面:强一致的 KV + 分布式锁(+ 将来的成员/归属)。
 #[async_trait]
 pub trait ControlPlane: Send + Sync {
-    async fn set(&self, key: &[u8], value: &[u8]) -> Result<(), StateMachineError>;
-    async fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, StateMachineError>;
-    async fn delete(&self, key: &[u8]) -> Result<(), StateMachineError>;
+    async fn set(&self, key: &[u8], value: &[u8]) -> Result<(), ControlError>;
+    async fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, ControlError>;
+    async fn delete(&self, key: &[u8]) -> Result<(), ControlError>;
     /// 比较并交换,返回是否成功。
     async fn cas(
         &self,
         key: &[u8],
         expect: Option<&[u8]>,
         value: &[u8],
-    ) -> Result<bool, StateMachineError>;
+    ) -> Result<bool, ControlError>;
     /// 获取锁,成功返回 fencing token。
     async fn acquire_lock(
         &self,
         key: &str,
         holder: &str,
         ttl_ms: u64,
-    ) -> Result<Option<u64>, StateMachineError>;
+    ) -> Result<Option<u64>, ControlError>;
     async fn renew_lock(
         &self,
         key: &str,
         holder: &str,
         ttl_ms: u64,
-    ) -> Result<bool, StateMachineError>;
-    async fn release_lock(&self, key: &str, holder: &str) -> Result<(), StateMachineError>;
+    ) -> Result<bool, ControlError>;
+    async fn release_lock(&self, key: &str, holder: &str) -> Result<(), ControlError>;
 }
 
 fn now_ms() -> u64 {
@@ -63,7 +74,7 @@ impl LocalControlPlane {
     }
 
     /// 打开一个 redb 支撑的单节点控制面。
-    pub fn open(path: impl AsRef<Path>) -> Result<Self, StateMachineError> {
+    pub fn open(path: impl AsRef<Path>) -> Result<Self, ControlError> {
         Ok(Self {
             sm: Arc::new(StateMachine::open(path)?),
         })
@@ -72,7 +83,7 @@ impl LocalControlPlane {
 
 #[async_trait]
 impl ControlPlane for LocalControlPlane {
-    async fn set(&self, key: &[u8], value: &[u8]) -> Result<(), StateMachineError> {
+    async fn set(&self, key: &[u8], value: &[u8]) -> Result<(), ControlError> {
         self.sm.apply(&Cmd::Set {
             key: key.to_vec(),
             value: value.to_vec(),
@@ -80,11 +91,11 @@ impl ControlPlane for LocalControlPlane {
         Ok(())
     }
 
-    async fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, StateMachineError> {
-        self.sm.get(key)
+    async fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, ControlError> {
+        Ok(self.sm.get(key)?)
     }
 
-    async fn delete(&self, key: &[u8]) -> Result<(), StateMachineError> {
+    async fn delete(&self, key: &[u8]) -> Result<(), ControlError> {
         self.sm.apply(&Cmd::Delete { key: key.to_vec() })?;
         Ok(())
     }
@@ -94,7 +105,7 @@ impl ControlPlane for LocalControlPlane {
         key: &[u8],
         expect: Option<&[u8]>,
         value: &[u8],
-    ) -> Result<bool, StateMachineError> {
+    ) -> Result<bool, ControlError> {
         match self.sm.apply(&Cmd::Cas {
             key: key.to_vec(),
             expect: expect.map(|e| e.to_vec()),
@@ -110,7 +121,7 @@ impl ControlPlane for LocalControlPlane {
         key: &str,
         holder: &str,
         ttl_ms: u64,
-    ) -> Result<Option<u64>, StateMachineError> {
+    ) -> Result<Option<u64>, ControlError> {
         match self.sm.apply(&Cmd::AcquireLock {
             key: key.to_string(),
             holder: holder.to_string(),
@@ -127,7 +138,7 @@ impl ControlPlane for LocalControlPlane {
         key: &str,
         holder: &str,
         ttl_ms: u64,
-    ) -> Result<bool, StateMachineError> {
+    ) -> Result<bool, ControlError> {
         match self.sm.apply(&Cmd::RenewLock {
             key: key.to_string(),
             holder: holder.to_string(),
@@ -139,7 +150,7 @@ impl ControlPlane for LocalControlPlane {
         }
     }
 
-    async fn release_lock(&self, key: &str, holder: &str) -> Result<(), StateMachineError> {
+    async fn release_lock(&self, key: &str, holder: &str) -> Result<(), ControlError> {
         self.sm.apply(&Cmd::ReleaseLock {
             key: key.to_string(),
             holder: holder.to_string(),

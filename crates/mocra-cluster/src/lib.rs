@@ -14,8 +14,13 @@
 pub mod cmd;
 pub mod control;
 pub mod raft;
+pub mod raft_network;
+pub mod raft_node;
+pub mod raft_store;
 pub mod state_machine;
 
 pub use cmd::{Cmd, CmdResult, Lock};
-pub use control::{ControlPlane, LocalControlPlane};
+pub use control::{ControlError, ControlPlane, LocalControlPlane};
+pub use raft::{MocraRaft, NodeId, TypeConfig};
+pub use raft_node::RaftControlPlane;
 pub use state_machine::{StateMachine, StateMachineError};
