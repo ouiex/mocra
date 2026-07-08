@@ -9,7 +9,7 @@ use futures::StreamExt;
 use crate::common::interface::{
     DataMiddlewareHandle, DataStoreMiddlewareHandle, ModuleTrait, SyncBoxStream,
 };
-use crate::common::model::entity::{AccountModel, PlatformModel};
+use crate::common::model::scope::{AccountInfo, PlatformInfo};
 use crate::common::model::login_info::LoginInfo;
 use crate::common::model::{Cookies, Headers, ModuleConfig, Response,Request};
 use crate::common::model::message::TaskOutputEvent;
@@ -24,10 +24,10 @@ use crate::engine::task::module_dag_processor::ModuleDagProcessor;
 pub struct Module {
     /// Resolved module configuration.
     pub config: Arc<ModuleConfig>,
-    /// Bound account model.
-    pub account: AccountModel,
-    /// Bound platform model.
-    pub platform: PlatformModel,
+    /// Bound account info(轻量,不依赖 sea-orm)。
+    pub account: AccountInfo,
+    /// Bound platform info(轻量,不依赖 sea-orm)。
+    pub platform: PlatformInfo,
     /// In-memory error counter snapshot.
     pub error_times: u32,
     /// Completion flag at module level.
@@ -291,7 +291,6 @@ mod tests {
     use async_trait::async_trait;
     use crate::cacheable::CacheService;
     use crate::common::interface::{ModuleTrait, SyncBoxStream, ToSyncBoxStream};
-    use crate::common::model::entity::{AccountModel, PlatformModel};
     use crate::common::model::message::TaskOutputEvent;
     use crate::common::model::{Request, Response};
     use crate::engine::task::module_dag_processor::ModuleDagProcessor;
@@ -321,28 +320,17 @@ mod tests {
     }
 
     fn build_test_module(module_impl: Arc<dyn ModuleTrait>) -> Module {
-        let now = chrono::Utc::now().naive_utc();
         Module {
             config: Arc::new(ModuleConfig::default()),
-            account: AccountModel {
+            account: AccountInfo {
                 id: 1,
                 name: "acc".to_string(),
-                modules: vec![],
-                enabled: true,
                 config: serde_json::json!({}),
-                priority: 1,
-                created_at: now,
-                updated_at: now,
             },
-            platform: PlatformModel {
+            platform: PlatformInfo {
                 id: 1,
                 name: "pf".to_string(),
-                description: None,
-                base_url: None,
-                enabled: true,
                 config: serde_json::json!({}),
-                created_at: now,
-                updated_at: now,
             },
             error_times: 0,
             finished: false,

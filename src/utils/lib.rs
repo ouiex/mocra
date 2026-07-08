@@ -12,6 +12,7 @@ pub mod rate_limit;
 pub mod redis_lock;
 pub mod string_case;
 pub mod to_numeric;
+#[cfg(feature = "store")]
 pub mod txn;
 pub mod type_convert;
 pub mod priority;

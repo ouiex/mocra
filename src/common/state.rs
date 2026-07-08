@@ -1,5 +1,7 @@
 // no direct filesystem path usage here
-use crate::utils::connector::{create_redis_pool, db_connection};
+use crate::utils::connector::create_redis_pool;
+#[cfg(feature = "store")]
+use crate::utils::connector::db_connection;
 
 use crate::common::model::config::Config;
 use crate::common::config::ConfigProvider;
@@ -45,10 +47,16 @@ pub enum StateInitError {
 /// Global application state shared across the system.
 ///
 /// Contains connections to database, Redis, configuration, and shared services.
+/// DB 句柄:开启 `store` 特性时为真实连接,否则为占位类型(始终 `None`)。
+#[cfg(feature = "store")]
+pub type DbHandle = Option<Arc<sea_orm::DatabaseConnection>>;
+#[cfg(not(feature = "store"))]
+pub type DbHandle = Option<()>;
+
 #[derive(Clone)]
 pub struct State {
-    /// Database connection pool
-    pub db: Arc<sea_orm::DatabaseConnection>,
+    /// Database connection pool(`None` = 无 DB / standalone 模式;无 `store` 特性时恒为占位 `None`)。
+    pub db: DbHandle,
     /// Thread-safe dynamic configuration
     pub config: Arc<RwLock<Config>>,
     /// General purpose cache service
@@ -67,38 +75,20 @@ pub struct State {
     pub redis: Option<Pool>,
 }
 impl State {
-    /// Creates a new State instance using a file-based configuration.
-    pub async fn new(path: &str) -> Self {
-        match Self::try_new(path).await {
-            Ok(state) => state,
-            Err(e) => {
-                error!("State initialization failed: {}", e);
-                std::process::exit(1);
-            }
-        }
-    }
-
-    /// Creates a new State instance with detailed error propagation.
+    /// Creates a new State instance from a file-based configuration.
+    ///
+    /// Returns a `Result`; library code never calls `process::exit` — callers
+    /// decide how to handle initialization failures.
     pub async fn try_new(path: &str) -> Result<Self, StateInitError> {
         let provider = FileConfigProvider::new(path);
         Self::try_new_with_provider(Box::new(provider)).await
     }
 
-    /// Creates a new State instance with a custom configuration provider.
+    /// Creates a new State instance from a custom configuration provider,
+    /// returning explicit initialization failures.
     ///
     /// Initializes all connections (DB, Redis) and services (Lock, Limit, Tracker).
     /// Starts a background task to watch for configuration changes.
-    pub async fn new_with_provider(provider: Box<dyn ConfigProvider>) -> Self {
-        match Self::try_new_with_provider(provider).await {
-            Ok(state) => state,
-            Err(e) => {
-                error!("State initialization failed: {}", e);
-                std::process::exit(1);
-            }
-        }
-    }
-
-    /// Creates a new State instance and returns explicit initialization failures.
     pub async fn try_new_with_provider(
         provider: Box<dyn ConfigProvider>,
     ) -> Result<Self, StateInitError> {
@@ -114,8 +104,9 @@ impl State {
         
         let watcher_res = provider.watch().await;
 
-        let db = Arc::new(
-            db_connection(
+        #[cfg(feature = "store")]
+        let db: DbHandle = if config.db.url.is_some() {
+            let conn = db_connection(
                 config.db.url.clone(),
                 config.db.database_schema.clone(),
                 config.db.pool_size,
@@ -127,9 +118,20 @@ impl State {
                 schema: config.db.database_schema.clone(),
                 pool_size: config.db.pool_size,
                 tls: config.db.tls,
-            })?,
-        );
-        info!("Database connected successfully");
+            })?;
+            info!("Database connected successfully");
+            Some(Arc::new(conn))
+        } else {
+            info!("No database configured; running in standalone (in-memory metadata) mode");
+            None
+        };
+        #[cfg(not(feature = "store"))]
+        let db: DbHandle = {
+            if config.db.url.is_some() {
+                info!("db.url is set but the `store` feature is disabled; ignoring (standalone mode)");
+            }
+            None
+        };
         let cache_pool = if single_node_mode {
             None
         } else {

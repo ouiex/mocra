@@ -1,5 +1,5 @@
 #![allow(unused)]
-use crate::common::model::entity::{AccountModel, PlatformModel};
+use crate::common::model::scope::{AccountInfo, PlatformInfo};
 use crate::common::model::{Request, login_info::LoginInfo};
 use crate::engine::task::module::Module;
 use crate::errors::Result;
@@ -9,8 +9,8 @@ use futures::StreamExt;
 /// Runtime task aggregate for one account-platform execution scope.
 #[derive(Clone)]
 pub struct Task {
-    pub account: AccountModel,
-    pub platform: PlatformModel,
+    pub account: AccountInfo,
+    pub platform: PlatformInfo,
     pub login_info: Option<LoginInfo>,
     pub modules: Vec<Module>,
     pub metadata: serde_json::Map<String, serde_json::Value>,

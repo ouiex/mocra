@@ -1,13 +1,17 @@
 use super::{
-    assembler::{ConfigAssembler, ModuleAssembler},
-    repository::TaskRepository,
+    assembler::ModuleAssembler,
     task::Task,
 };
+#[cfg(feature = "store")]
+use super::assembler::ConfigAssembler;
+#[cfg(feature = "store")]
+use super::repository::TaskRepository;
 use crate::errors::{ModuleError::ModuleNotFound, Result};
 
 use crate::common::model::login_info::LoginInfo;
 use crate::common::model::message::{TaskErrorEvent, TaskParserEvent, TaskEvent};
 use crate::common::model::{ModuleConfig, Response};
+use crate::common::model::scope::{AccountInfo, PlatformInfo};
 use crate::common::state::State;
 use crate::cacheable::{CacheAble, CacheService};
 use crate::engine::task::module::Module;
@@ -17,9 +21,16 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
+/// 有 `store` 特性时为 `Option<TaskRepository>`,否则为占位 `()`(始终无 DB / synthetic)。
+#[cfg(feature = "store")]
+type MaybeRepository = Option<TaskRepository>;
+#[cfg(not(feature = "store"))]
+type MaybeRepository = ();
+
 /// Task factory that materializes Task instances from runtime inputs.
 pub struct TaskFactory {
-    repository: TaskRepository,
+    /// `None`/占位 = 无 DB(standalone)模式,任务从内存模块注册表合成。
+    repository: MaybeRepository,
     cache_service: Arc<CacheService>,
     cookie_service: Option<Arc<CacheService>>,
     module_assembler: Arc<tokio::sync::RwLock<ModuleAssembler>>,
@@ -37,8 +48,10 @@ struct CacheEntry {
 
 impl TaskFactory {
     /// Creates a task factory with repository/cache/assembler dependencies.
+    ///
+    /// `repository = None` 时进入无 DB 模式(从模块注册表合成任务)。
     pub fn new(
-        repository: TaskRepository,
+        repository: MaybeRepository,
         sync_service: Arc<CacheService>,
         cookie_sync_service: Option<Arc<CacheService>>,
         module_assembler: Arc<tokio::sync::RwLock<ModuleAssembler>>,
@@ -52,6 +65,76 @@ impl TaskFactory {
             cache: Arc::new(DashMap::new()),
             state,
         }
+    }
+
+    /// Synthesizes a task from the in-memory module registry when no database
+    /// is configured(无 DB 模式:合成默认 account/platform + 注册模块)。
+    async fn create_synthetic_task(
+        &self,
+        platform_name: &str,
+        account_name: &str,
+        run_id: Uuid,
+    ) -> Result<Arc<Task>> {
+        let account = AccountInfo {
+            id: 0,
+            name: account_name.to_string(),
+            config: serde_json::json!({}),
+        };
+        let platform = PlatformInfo {
+            id: 0,
+            name: platform_name.to_string(),
+            config: serde_json::json!({}),
+        };
+
+        let cache_ttl = self.state.config.read().await.cache.ttl;
+        let registered = {
+            let assembler = self.module_assembler.read().await;
+            assembler.get_all_modules()
+        };
+
+        let mut module_instances = Vec::with_capacity(registered.len());
+        for module in registered {
+            let name = module.name();
+            let module_instance = Module {
+                config: Arc::new(ModuleConfig::default()),
+                account: account.clone(),
+                platform: platform.clone(),
+                error_times: 0,
+                finished: false,
+                data_middleware: vec![],
+                download_middleware: vec![],
+                module,
+                locker: false,
+                locker_ttl: 0,
+                processor: ModuleDagProcessor::new(
+                    format!("{}-{}-{}", account.name, platform.name, name),
+                    self.state.cache_service.clone(),
+                    run_id,
+                    cache_ttl,
+                ),
+                run_id,
+                prefix_request: Default::default(),
+                pending_ctx: None,
+                bound_task_meta: None,
+                bound_login_info: None,
+            };
+            module_instance.add_step().await;
+            module_instances.push(module_instance);
+        }
+
+        let mut task = Task {
+            account,
+            platform,
+            login_info: None,
+            modules: module_instances,
+            metadata: Default::default(),
+            run_id,
+            prefix_request: Default::default(),
+        };
+        task.login_info = self.login_info(&task.id()).await;
+        let task = Arc::new(task);
+        self.put_task_aliases(task.clone()).await;
+        Ok(task)
     }
 
     /// Loads login info from cookie cache service if configured.
@@ -96,41 +179,80 @@ impl TaskFactory {
 
     // Cache key uses Task::id() => account-platform; value stores full task module set.
 
-    /// Builds full task with all enabled modules for one account-platform pair.
+    /// Dispatches task construction: DB-backed when a repository is present,
+    /// otherwise synthesizes a task from the in-memory module registry(无 DB 模式)。
     async fn create_task_with_modules(
         &self,
         platform_name: &str,
         account_name: &str,
         run_id: Uuid,
     ) -> Result<Arc<Task>> {
-        let start = Instant::now();
         // Fast path: in-memory cache lookup.
         let cache_key = format!("{account_name}-{platform_name}");
         if let Some(cached) = self.get_from_cache(&cache_key).await {
             return Ok(cached);
         }
-        log::debug!("create_task_with_modules: cache miss for {}, loading from DB", cache_key);
+        #[cfg(feature = "store")]
+        let result = match self.repository.as_ref() {
+            Some(repository) => {
+                self.create_task_from_db(repository, platform_name, account_name, run_id)
+                    .await
+            }
+            None => {
+                self.create_synthetic_task(platform_name, account_name, run_id)
+                    .await
+            }
+        };
+        #[cfg(not(feature = "store"))]
+        let result = self
+            .create_synthetic_task(platform_name, account_name, run_id)
+            .await;
+        result
+    }
+
+    /// Builds full task with all enabled modules for one account-platform pair (DB-backed).
+    #[cfg(feature = "store")]
+    async fn create_task_from_db(
+        &self,
+        repository: &TaskRepository,
+        platform_name: &str,
+        account_name: &str,
+        run_id: Uuid,
+    ) -> Result<Arc<Task>> {
+        let start = Instant::now();
+        let cache_key = format!("{account_name}-{platform_name}");
+        log::debug!("create_task_from_db: loading from DB for {}", cache_key);
 
         // Load all modules available under account-platform relation.
-        let modules = self
-            .repository
+        let modules = repository
             .load_modules_by_account_platform(platform_name, account_name)
             .await?;
 
         // Load base account/platform entities.
-        let account = self.repository.load_account(account_name).await?;
-        let platform = self.repository.load_platform(platform_name).await?;
+        let account = repository.load_account(account_name).await?;
+        let platform = repository.load_platform(platform_name).await?;
 
         // Validate account-platform relation.
-        let rel_account_platform = self
-            .repository
+        let rel_account_platform = repository
             .load_account_platform_relation(account.id, platform.id)
             .await?;
 
+        // 转成不依赖 sea-orm 的轻量信息;原实体 account/platform 仍供 ConfigAssembler 使用。
+        let account_info = AccountInfo {
+            id: account.id,
+            name: account.name.clone(),
+            config: account.config.clone(),
+        };
+        let platform_info = PlatformInfo {
+            id: platform.id,
+            name: platform.name.clone(),
+            config: platform.config.clone(),
+        };
+
         if modules.is_empty() {
             let mut task = Task {
-                account,
-                platform,
+                account: account_info.clone(),
+                platform: platform_info.clone(),
                 // error_times: 0,
                 login_info: None,
                 modules: vec![],
@@ -147,12 +269,10 @@ impl TaskFactory {
 
         // Batch-load middleware relations.
         let module_ids: Vec<i32> = modules.iter().map(|m| m.id).collect();
-        let module_data_middleware_map = self
-            .repository
+        let module_data_middleware_map = repository
             .load_module_data_middleware_relations(&module_ids)
             .await?;
-        let module_download_middleware_map = self
-            .repository
+        let module_download_middleware_map = repository
             .load_module_download_middleware_relations(&module_ids)
             .await?;
 
@@ -174,7 +294,7 @@ impl TaskFactory {
 
         // Bulk-load middleware entities.
         let all_data_middleware = if !all_data_middleware_ids.is_empty() {
-            self.repository
+            repository
                 .load_data_middlewares(&all_data_middleware_ids.into_iter().collect::<Vec<_>>())
                 .await?
         } else {
@@ -182,7 +302,7 @@ impl TaskFactory {
         };
 
         let all_download_middleware = if !all_download_middleware_ids.is_empty() {
-            self.repository
+            repository
                 .load_download_middlewares(
                     &all_download_middleware_ids.into_iter().collect::<Vec<_>>(),
                 )
@@ -193,12 +313,10 @@ impl TaskFactory {
 
         // Batch-load module relation maps.
         let module_ids_list: Vec<i32> = modules.iter().map(|m| m.id).collect();
-        let rel_module_platform_map = self
-            .repository
+        let rel_module_platform_map = repository
             .load_module_platform_relations(&module_ids_list, platform.id)
             .await?;
-        let rel_module_account_map = self
-            .repository
+        let rel_module_account_map = repository
             .load_module_account_relations(&module_ids_list, account.id)
             .await?;
 
@@ -283,8 +401,8 @@ impl TaskFactory {
             let cache_ttl = app_config.cache.ttl;
             let module_instance = Module {
                 config: Arc::new(module_config),
-                account: account.clone(),
-                platform: platform.clone(),
+                account: account_info.clone(),
+                platform: platform_info.clone(),
                 error_times: 0,
                 finished: false,
                 data_middleware: data_middleware.iter().map(|x| x.name.clone()).collect(),
@@ -311,8 +429,8 @@ impl TaskFactory {
             module_instances.push(module_instance);
         }
         let mut task = Task {
-            account,
-            platform,
+            account: account_info,
+            platform: platform_info,
             // error_times: 0,
             login_info: None,
             modules: module_instances,

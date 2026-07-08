@@ -1,15 +1,19 @@
 #![allow(unused)]
 use crate::common::interface::ModuleTrait;
 use crate::common::model::ModuleConfig;
+#[cfg(feature = "store")]
 use crate::common::model::entity::*;
+#[cfg(feature = "store")]
 use crate::common::model::entity::{RelModuleDataMiddlewareModel, RelModuleDownloadMiddlewareModel};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 /// Builds module configuration objects from database entities and relations.
+#[cfg(feature = "store")]
 pub struct ConfigAssembler;
 
+#[cfg(feature = "store")]
 impl ConfigAssembler {
     /// Builds a relation config map for middleware-like entities.
     pub fn build_relation_config<T, F, G>(
@@ -123,11 +127,13 @@ impl ConfigAssembler {
 }
 
 /// Shared abstraction for entities exposing a name and config payload.
+#[cfg(feature = "store")]
 pub trait HasNameAndConfig {
     fn name(&self) -> &String;
     fn config(&self) -> &serde_json::Value;
 }
 
+#[cfg(feature = "store")]
 impl HasNameAndConfig for DataMiddlewareModel {
     fn name(&self) -> &String {
         &self.name
@@ -138,6 +144,7 @@ impl HasNameAndConfig for DataMiddlewareModel {
     }
 }
 
+#[cfg(feature = "store")]
 impl HasNameAndConfig for DownloadMiddlewareModel {
     fn name(&self) -> &String {
         &self.name

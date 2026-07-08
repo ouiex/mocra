@@ -1,8 +1,10 @@
+#[cfg(feature = "store")]
 use sea_orm::{Database, DatabaseConnection};
 use once_cell::sync::Lazy;
 use dashmap::DashMap;
 
 // Global cache for connection pools
+#[cfg(feature = "store")]
 static CONNECTION_POOLS: Lazy<DashMap<String, DatabaseConnection>> = Lazy::new(|| DashMap::new());
 
 pub fn create_redis_pool(
@@ -43,6 +45,7 @@ pub fn create_redis_pool(
     cfg.create_pool(Some(deadpool_redis::Runtime::Tokio1)).ok()
 }
 
+#[cfg(feature = "store")]
 pub async fn db_connection(
     url: Option<String>,
     schema: Option<String>,

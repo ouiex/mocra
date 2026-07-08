@@ -1,5 +1,6 @@
 use crate::engine::task::TaskManager;
 use chrono::{DateTime, TimeZone, Utc};
+#[cfg(feature = "store")]
 use crate::common::model::entity::{
     account, module, platform, rel_account_platform, rel_module_account, rel_module_platform,
 };
@@ -9,7 +10,9 @@ use crate::common::state::State;
 use cron::Schedule;
 use log::{error, info, warn};
 use crate::queue::{QueuedItem, QueueManager};
+#[cfg(feature = "store")]
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect, JoinType, RelationTrait};
+#[cfg(feature = "store")]
 use sea_orm::prelude::Expr;
 use dashmap::DashMap;
 use std::collections::{HashSet, hash_map::DefaultHasher};
@@ -552,9 +555,17 @@ impl CronScheduler {
 
     async fn fetch_all_enabled_contexts(
         &self,
-    ) -> Result<Vec<(String, String, String)>, sea_orm::DbErr> {
+    ) -> Result<Vec<(String, String, String)>, String> {
+        #[cfg(not(feature = "store"))]
+        let results: Vec<(String, String, String)> = Vec::new();
+        #[cfg(feature = "store")]
+        let results: Vec<(String, String, String)> = {
+        // 无 DB(standalone)模式:没有可调度的 DB 上下文。
+        let Some(db) = self.state.db.as_ref() else {
+            return Ok(Vec::new());
+        };
         // Single query for all enabled scheduling contexts.
-        let results: Vec<(String, String, String)> = module::Entity::find()
+        module::Entity::find()
             .join(JoinType::InnerJoin, module::Relation::RelModuleAccount.def())
             .join(JoinType::InnerJoin, rel_module_account::Relation::Account.def())
             .join(JoinType::InnerJoin, account::Relation::RelAccountPlatform.def())
@@ -573,8 +584,10 @@ impl CronScheduler {
             .column(account::Column::Name)
             .column(platform::Column::Name)
             .into_tuple()
-            .all(&*self.state.db)
-            .await?;
+            .all(&**db)
+            .await
+            .map_err(|e| e.to_string())?
+        };
 
         Ok(results)
     }

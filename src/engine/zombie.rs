@@ -3,7 +3,9 @@ use tokio::time::{Duration, sleep};
 use log::{info, warn, error};
 use crate::common::state::State;
 use crate::queue::compensation::Compensator;
+#[cfg(feature = "store")]
 use sea_orm::{ConnectionTrait, Statement, TransactionTrait};
+#[cfg(feature = "store")]
 use chrono::{Utc, DateTime};
 
 /// Starts a periodic cleaner for stale `Running` tasks.
@@ -15,35 +17,48 @@ pub async fn start_zombie_cleaner(
     zombie_threshold_secs: i64,
     compensator: Option<Arc<dyn Compensator>>,
 ) {
-    info!("ZombieTaskCleaner started with threshold {}s", zombie_threshold_secs);
-    
-    loop {
-        sleep(Duration::from_secs(60)).await;
-        
-        let threshold_time = Utc::now() - chrono::Duration::seconds(zombie_threshold_secs);
-        
-        match clean_zombies(&state, threshold_time, &compensator).await {
-            Ok(count) => {
-                if count > 0 {
-                    warn!("Cleaned up {} zombie tasks", count);
+    #[cfg(not(feature = "store"))]
+    {
+        let _ = (&state, zombie_threshold_secs, &compensator);
+        info!("ZombieTaskCleaner disabled (no `store` feature); nothing to clean");
+    }
+    #[cfg(feature = "store")]
+    {
+        info!("ZombieTaskCleaner started with threshold {}s", zombie_threshold_secs);
+
+        loop {
+            sleep(Duration::from_secs(60)).await;
+
+            let threshold_time = Utc::now() - chrono::Duration::seconds(zombie_threshold_secs);
+
+            match clean_zombies(&state, threshold_time, &compensator).await {
+                Ok(count) => {
+                    if count > 0 {
+                        warn!("Cleaned up {} zombie tasks", count);
+                    }
                 }
-            }
-            Err(e) => {
-                error!("Failed to clean zombie tasks: {}", e);
+                Err(e) => {
+                    error!("Failed to clean zombie tasks: {}", e);
+                }
             }
         }
     }
 }
 
+#[cfg(feature = "store")]
 async fn clean_zombies(
     state: &State,
     threshold_time: DateTime<Utc>,
     compensator: &Option<Arc<dyn Compensator>>,
 ) -> Result<u64, sea_orm::DbErr> {
     let formatted_time = threshold_time.format("%Y-%m-%d %H:%M:%S").to_string();
-    let backend = state.db.get_database_backend();
+    // 无 DB(standalone)模式:无僵尸任务表可清理。
+    let Some(db) = state.db.as_ref() else {
+        return Ok(0);
+    };
+    let backend = db.get_database_backend();
 
-    let txn = state.db.begin().await?;
+    let txn = db.begin().await?;
 
     // Mark zombie tasks as Failed inside the transaction.
     let update_sql = format!(

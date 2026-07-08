@@ -5,6 +5,7 @@ pub mod cookies;
 pub mod cron_config;
 pub mod data;
 pub mod download_config;
+#[cfg(feature = "store")]
 pub mod entity;
 pub mod headers;
 pub mod login_info;
@@ -15,6 +16,7 @@ pub mod model_config;
 pub mod priority;
 pub mod request;
 pub mod response;
+pub mod scope;
 pub mod serde_value;
 
 pub use context::ExecutionMark;
@@ -25,3 +27,4 @@ pub use model_config::ModuleConfig;
 pub use priority::{Priority, Prioritizable};
 pub use request::Request;
 pub use response::Response;
+pub use scope::{AccountInfo, PlatformInfo};

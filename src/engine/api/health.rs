@@ -40,11 +40,17 @@ pub async fn health_check(
         Err(e) => ComponentStatus::down(e),
     };
 
-    // Check DB
-    let db_status = match state.state.db.ping().await {
-        Ok(_) => ComponentStatus::up(),
-        Err(e) => ComponentStatus::down(e),
+    // Check DB(无 `store` 特性 / 无 DB 模式视为 up)。
+    #[cfg(feature = "store")]
+    let db_status = match state.state.db.as_ref() {
+        Some(db) => match db.ping().await {
+            Ok(_) => ComponentStatus::up(),
+            Err(e) => ComponentStatus::down(e),
+        },
+        None => ComponentStatus::up(),
     };
+    #[cfg(not(feature = "store"))]
+    let db_status = ComponentStatus::up();
 
     let global_status = if redis_status.status == "up" && db_status.status == "up" {
         "up"

@@ -2,14 +2,21 @@ use crate::downloader::request_downloader::RequestDownloader;
 use crate::downloader::{Downloader, WebSocketDownloader};
 use crate::common::model::Request;
 use crate::common::model::download_config::DownloadConfig;
-use crate::common::state::State;
+use crate::common::model::config::Config;
+use crate::cacheable::CacheService;
+use crate::utils::redis_lock::DistributedLockManager;
+use crate::utils::distributed_rate_limit::DistributedSlidingWindowRateLimiter;
+use tokio::sync::RwLock;
 use dashmap::DashMap;
 use deadpool_redis::redis::Script;
 use std::sync::Arc;
 use std::time::SystemTime;
 
 pub struct DownloaderManager {
-    pub state: Arc<State>,
+    /// 应用配置(命名空间名等);此前吃整个 `Arc<State>`,现窄化为具体依赖(重构 Phase 2)。
+    pub app_config: Arc<RwLock<Config>>,
+    /// 分布式锁管理器(用于取 Redis 连接池)。
+    pub locker: Arc<DistributedLockManager>,
     pub default_downloader: Box<dyn Downloader>,
     // Registered downloader factories.
     pub downloader: Arc<DashMap<String, Box<dyn Downloader>>>,
@@ -27,9 +34,14 @@ impl DownloaderManager {
     ///
     /// # Arguments
     /// * `state` - Shared application state containing configuration, rate limiter, etc.
-    pub async fn new(state: Arc<State>) -> Self {
+    pub async fn new(
+        app_config: Arc<RwLock<Config>>,
+        limiter: Arc<DistributedSlidingWindowRateLimiter>,
+        locker: Arc<DistributedLockManager>,
+        cache_service: Arc<CacheService>,
+    ) -> Self {
         let (pool_size, max_response_size) = {
-            let cfg = state.config.read().await;
+            let cfg = app_config.read().await;
             (
                 cfg.download_config.pool_size.unwrap_or(200),
                 cfg.download_config.max_response_size.unwrap_or(10 * 1024 * 1024),
@@ -37,11 +49,12 @@ impl DownloaderManager {
         };
 
         DownloaderManager {
-            state: state.clone(),
+            app_config,
+            locker: locker.clone(),
             default_downloader: Box::new(RequestDownloader::new(
-                Arc::clone(&state.limiter),
-                Arc::clone(&state.locker),
-                Arc::clone(&state.cache_service),
+                Arc::clone(&limiter),
+                Arc::clone(&locker),
+                Arc::clone(&cache_service),
                 pool_size,
                 max_response_size,
             )),
@@ -86,8 +99,7 @@ impl DownloaderManager {
     // Cleans up expired downloaders.
     async fn cleanup_expired_downloader(&self) {
         let downloader_expire_time = self
-            .state
-            .config
+            .app_config
             .read()
             .await
             .download_config
@@ -96,7 +108,7 @@ impl DownloaderManager {
         let current_time = Self::current_timestamp();
         let max_score = current_time.saturating_sub(downloader_expire_time);
 
-        let config_name = self.state.config.read().await.name.clone();
+        let config_name = self.app_config.read().await.name.clone();
         let key = format!("{}:downloader_expire", config_name);
 
         // Lua script to get and remove expired keys
@@ -115,7 +127,7 @@ impl DownloaderManager {
         let mut expired_keys: Vec<String> = Vec::new();
 
         // Execute Lua script
-        let pool = self.state.locker.get_pool();
+        let pool = self.locker.get_pool();
         if let Some(pool) = pool
             && let Ok(mut conn) = pool.get().await {
                 let result: Result<Vec<String>, _> = script
@@ -198,9 +210,9 @@ impl DownloaderManager {
                 .insert(module_id.clone(), current_time);
 
             // Update expiration time (Redis ZSET).
-            let config_name = self.state.config.read().await.name.clone();
+            let config_name = self.app_config.read().await.name.clone();
             let key = format!("{}:downloader_expire", config_name);
-            let pool = self.state.locker.get_pool().map(|p| p.clone());
+            let pool = self.locker.get_pool().map(|p| p.clone());
             let module_id_clone = module_id.clone();
             let current_time_clone = current_time;
 

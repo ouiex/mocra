@@ -537,7 +537,13 @@ impl Engine {
         // Initialize DownloaderManager
 
         // Initialize DownloaderManager
-        let downloader_manager = DownloaderManager::new(Arc::clone(&state)).await;
+        let downloader_manager = DownloaderManager::new(
+            state.config.clone(),
+            state.limiter.clone(),
+            state.locker.clone(),
+            state.cache_service.clone(),
+        )
+        .await;
         let proxy_manager = if let Some(proxy_config) = state.config.read().await.proxy.clone() {
             Some(Arc::new(
                 ProxyManager::from_proxy_config(&proxy_config)
@@ -551,7 +557,7 @@ impl Engine {
             None
         };
 
-        let middleware_manager = MiddlewareManager::new(state.clone());
+        let middleware_manager = MiddlewareManager::new();
         let node_id = state
             .config
             .read()

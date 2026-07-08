@@ -1,8 +1,10 @@
 #![allow(unused)]
 use super::{
-    assembler::ModuleAssembler, factory::TaskFactory, repository::TaskRepository, task::Task,
+    assembler::ModuleAssembler, factory::TaskFactory, task::Task,
     module::Module,
 };
+#[cfg(feature = "store")]
+use super::repository::TaskRepository;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use dashmap::DashMap;
@@ -180,7 +182,13 @@ impl Default for DagCutoverStateTracker {
 impl TaskManager {
     /// Creates a task manager with repository, factory, and module assembler wiring.
     pub fn new(state: Arc<State>) -> Self {
-        let repository = TaskRepository::new((*state.db).clone());
+        #[cfg(feature = "store")]
+        let repository = state
+            .db
+            .as_ref()
+            .map(|db| TaskRepository::new((**db).clone()));
+        #[cfg(not(feature = "store"))]
+        let repository = ();
 
         let module_assembler = Arc::new(RwLock::new(ModuleAssembler::new()));
         let factory = TaskFactory::new(

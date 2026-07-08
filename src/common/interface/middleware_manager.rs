@@ -4,7 +4,6 @@ use crate::common::interface::middleware::{
     DataMiddlewareHandle, DataStoreMiddlewareHandle, DownloadMiddlewareHandle,
 };
 use crate::common::model::data::DataEvent;
-use crate::common::state::State;
 use crate::common::model::ModuleConfig;
 use crate::common::model::{Request, Response};
 use futures::future::join_all;
@@ -35,10 +34,15 @@ pub struct MiddlewareManager {
     data_index: Arc<RwLock<HashMap<String, usize>>>,
     pub store_middleware: Arc<RwLock<Vec<DataStoreMiddlewareHandle>>>,
     store_index: Arc<RwLock<HashMap<String, usize>>>,
-    pub state: Arc<State>,
+}
+impl Default for MiddlewareManager {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 impl MiddlewareManager {
-    pub fn new(state: Arc<State>) -> Self {
+    /// 不再持有 `Arc<State>`(此前存了却从未使用 —— 重构 Phase 2 去除该死耦合)。
+    pub fn new() -> Self {
         MiddlewareManager {
             download_middleware: Default::default(),
             download_index: Default::default(),
@@ -46,7 +50,6 @@ impl MiddlewareManager {
             data_index: Default::default(),
             store_middleware: Default::default(),
             store_index: Default::default(),
-            state,
         }
     }
     pub async fn register_download_middleware(&self, middleware: DownloadMiddlewareHandle) {
