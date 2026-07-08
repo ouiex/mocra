@@ -1,8 +1,8 @@
-# 单包 workspace(重构 Phase 0)。root 包为唯一成员;
-# 后续 Phase 2/3 在此加入 crates/mocra-cluster、crates/mocra-queue 等成员。
+# workspace:root 包(mocra)+ crates/ 下的成员。
 # 详见 docs/refactor/04-roadmap.md。
 [workspace]
 resolver = "2"
+members = ["crates/mocra-cluster"]
 
 [package]
 name = "mocra"

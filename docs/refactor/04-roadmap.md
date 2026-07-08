@@ -104,7 +104,12 @@ js-v8    = ["dep:v8"]
 
 还清最大技术债 + 落地新控制面。详见 [03 · 集群架构](03-cluster-architecture.md)。
 
-- [ ] **新增 `mocra-cluster`**:`openraft` + `redb` 状态机、`RaftBackend: CoordinationBackend`、join API、成员/心跳。
+- [~] **新增 `mocra-cluster` crate**(workspace 成员):
+  - [x] redb 复制状态机(`kv` / `locks` + 单调 fencing token,确定性 `apply(Cmd)`)+ 单元测试(cas、锁 fencing/过期/续租/释放全绿)。
+  - [x] `ControlPlane` trait + `LocalControlPlane`(单节点:set/get/cas/acquire_lock/renew_lock/release_lock)。
+  - [ ] openraft 共识分层于状态机之上(`RaftControlPlane`:命令先复制到多数派再 apply)。
+  - [ ] 成员 / 心跳 / join API(方案 A:小投票核心 3~5 + 多 worker)。
+  - [ ] 主 crate 侧 `impl CoordinationBackend for RaftControlPlane`,替换 Redis 协调。
 - [ ] `DistributedLockManager` 改走 `CoordinationBackend`(→ Raft);限流改本地按成员数分摊。
 - [ ] 分区归属:优先复用 MQ 消费组分配 + `hash(account)` 亲和;为无消费组后端做 Raft 归属表 + 再平衡 + fencing。
 - [ ] **保留 `MqBackend` 多实现**,新增 `mocra-queue` 的 NATS 后端;in-memory 作单机默认。

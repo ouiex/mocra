@@ -1,0 +1,19 @@
+[package]
+name = "mocra-cluster"
+version = "0.1.0"
+edition = "2024"
+description = "mocra 内嵌控制面:redb 状态机 + Raft 共识(重构 Phase 3)"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+# 状态机存储:纯 Rust、ACID、无 C++ 工具链(对标 RocksDB 的轻量替代)。
+redb = "2"
+serde = { version = "1", features = ["derive"] }
+rmp-serde = "1"
+thiserror = "2"
+async-trait = "0.1"
+tokio = { version = "1", features = ["sync", "rt", "macros", "time"] }
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["full"] }
