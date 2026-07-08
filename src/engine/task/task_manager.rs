@@ -196,7 +196,7 @@ impl TaskManager {
             Arc::clone(&state.cache_service),
             state.cookie_service.clone(),
             Arc::clone(&module_assembler),
-            Arc::clone(&state),
+            Arc::clone(&state.config),
         );
 
         Self {

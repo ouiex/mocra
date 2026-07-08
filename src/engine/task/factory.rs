@@ -12,7 +12,7 @@ use crate::common::model::login_info::LoginInfo;
 use crate::common::model::message::{TaskErrorEvent, TaskParserEvent, TaskEvent};
 use crate::common::model::{ModuleConfig, Response};
 use crate::common::model::scope::{AccountInfo, PlatformInfo};
-use crate::common::state::State;
+use crate::common::model::config::Config;
 use crate::cacheable::{CacheAble, CacheService};
 use crate::engine::task::module::Module;
 use crate::engine::task::module_dag_processor::ModuleDagProcessor;
@@ -36,7 +36,8 @@ pub struct TaskFactory {
     module_assembler: Arc<tokio::sync::RwLock<ModuleAssembler>>,
     // In-memory cache keyed by task id (account-platform).
     cache: Arc<DashMap<String, CacheEntry>>,
-    state: Arc<State>,
+    /// 窄依赖:仅需应用配置(此前吃整个 `Arc<State>` —— 重构 Phase 2)。
+    app_config: Arc<tokio::sync::RwLock<Config>>,
 }
 
 const CACHE_TTL: Duration = Duration::from_secs(30);
@@ -55,7 +56,7 @@ impl TaskFactory {
         sync_service: Arc<CacheService>,
         cookie_sync_service: Option<Arc<CacheService>>,
         module_assembler: Arc<tokio::sync::RwLock<ModuleAssembler>>,
-        state: Arc<State>,
+        app_config: Arc<tokio::sync::RwLock<Config>>,
     ) -> Self {
         Self {
             repository,
@@ -63,7 +64,7 @@ impl TaskFactory {
             cookie_service: cookie_sync_service,
             module_assembler,
             cache: Arc::new(DashMap::new()),
-            state,
+            app_config,
         }
     }
 
@@ -86,7 +87,7 @@ impl TaskFactory {
             config: serde_json::json!({}),
         };
 
-        let cache_ttl = self.state.config.read().await.cache.ttl;
+        let cache_ttl = self.app_config.read().await.cache.ttl;
         let registered = {
             let assembler = self.module_assembler.read().await;
             assembler.get_all_modules()
@@ -108,7 +109,7 @@ impl TaskFactory {
                 locker_ttl: 0,
                 processor: ModuleDagProcessor::new(
                     format!("{}-{}-{}", account.name, platform.name, name),
-                    self.state.cache_service.clone(),
+                    self.cache_service.clone(),
                     run_id,
                     cache_ttl,
                 ),
@@ -393,7 +394,7 @@ impl TaskFactory {
                 continue;
             }
 
-            let app_config = self.state.config.read().await;
+            let app_config = self.app_config.read().await;
             let locker = module_config
                 .get_config_value("module_locker")
                 .and_then(|v| v.as_bool())
@@ -412,7 +413,7 @@ impl TaskFactory {
                 locker_ttl: 0,
                 processor: ModuleDagProcessor::new(
                     format!("{}-{}-{}", account.name, platform.name, module.name),
-                    self.state.cache_service.clone(),
+                    self.cache_service.clone(),
                     run_id,
                     cache_ttl
                 ),
@@ -545,7 +546,7 @@ impl TaskFactory {
         //     .await?;
 
         // Task threshold check placeholder.
-        // if task.error_times > self.state.config.read().await.crawler.task_max_errors {
+        // if task.error_times > self.app_config.read().await.crawler.task_max_errors {
         //     return Err(ModuleError::TaskMaxError(
         //         format!(
         //             "Task {}-{} error times exceed limit",
@@ -568,7 +569,7 @@ impl TaskFactory {
         // }
 
         // Module filtering by error threshold placeholder.
-        // let max_errors = self.state.config.read().await.crawler.task_max_errors;
+        // let max_errors = self.app_config.read().await.crawler.task_max_errors;
         // task.crawler.retain(|m| m.error_times < max_errors);
         task.metadata = error_model.metadata.clone();
         Ok(task)

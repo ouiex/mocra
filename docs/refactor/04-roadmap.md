@@ -89,7 +89,7 @@ js-v8    = ["dep:v8"]
 
 把门面的「薄封装」变成真正的薄。
 
-- [ ] 拆 `State` 上帝对象为聚焦上下文(Cache / Lock / Queue / Limit …)或精简 `Runtime`。已从两个 manager 卸下 `Arc<State>`(见下),其余持有点待续。
+- [~] 拆 `State` 上帝对象为聚焦上下文。已从 **3 个组件**卸下 `Arc<State>`:`MiddlewareManager`(删死耦合)、`DownloaderManager`(窄化为 4 依赖)、`TaskFactory`(窄化为 `app_config` + 复用 `cache_service`)。**剩余持有者主要是 chains**,它们 `state.clone()` 把整个 `State` 往下游传 —— 干净窄化已到极限,进一步需要引入统一的"运行时上下文"并贯穿所有 chain(较大重构,非有界项)。
 - [x] **DB 变可选**:`State.db` 改 `Option<Arc<DatabaseConnection>>`;`db.url` 缺省即 standalone;无 DB 时 `TaskFactory::create_synthetic_task` 从内存模块注册表合成任务;zombie / scheduler / health 均加无 DB 守卫;`Mocra` 程序化默认配置 + 自动种子任务注入。已验证热路径无 DB 写入。
 - [x] **`Task`/`Module` 从 sea-orm 实体解耦**(sea-orm gating 的关键前置):新增轻量 `AccountInfo`/`PlatformInfo`(`common/model/scope.rs`)取代内嵌的 `AccountModel`/`PlatformModel`;DB 路径转换填充,synthetic 路径直接构造;`factory` 不再直接依赖实体类型。
 - [x] **把 sea-orm gate 出默认构建**:新增 `store` 特性(默认关闭);`entity` / `repository` / `txn` / `ConfigAssembler` / `connector` 的 db 部分全部门控;`State.db` 用 `DbHandle` 类型别名(无 `store` 时为占位 `()`,恒 `None`);`factory` / `task_manager` / `scheduler` / `zombie` / `health` 的 DB 路径按特性分支(`MaybeRepository` 别名统一 `TaskFactory::new` 签名)。**默认构建不再编译 sea-orm**;`--features store` 恢复完整 DB / 多租户能力。
