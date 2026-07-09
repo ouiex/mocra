@@ -63,7 +63,7 @@ js-v8    = ["dep:v8"]
 为后续一切改动立安全网。
 
 - [x] 建 `[workspace]`(root 单包成员,`resolver = "2"`);`tests/` 暂缓纳入 —— 其引用已删类型,待 Phase 1 示例改写时一并修。
-- [x] 加 **CI**(`.github/workflows/ci.yml`):`build` / `test` / `clippy`。**主 crate 默认 clippy 已清零(41 → 0),CI 收紧 `-D warnings`**;4 个子 crate `-D warnings` + `cargo doc -D warnings`;`store` / `cluster-embedded` / `queue-nats`(真实 NATS 集成)/ `polars,excel` / examples 全覆盖。`fmt` 待收紧。
+- [x] 加 **CI**(`.github/workflows/ci.yml`):`build` / `test` / `clippy`。**主 crate 全特性 clippy 已清零并 CI 收紧 `-D warnings`** —— 默认(41 → 0)+ **特性矩阵**(`store` / `dashboard` / `cluster-embedded` / `queue-nats` / `queue-kafka` / `polars,excel`,修掉 store 的 5 处无效 SQL 转义空操作 + polars 的 2 处冗余 `as` + 1 处冗余闭包);4 个子 crate `-D warnings` + `cargo doc -D warnings`;`store` / `cluster-embedded` / `queue-nats`(真实 NATS 集成)/ `polars,excel` / examples(含 dashboard)全覆盖。`fmt` 待收紧。
 - [x] 移除库代码里的 `process::exit`(`common/state.rs`:删除 `new` / `new_with_provider` 退出包装,仅保留 `try_new*`)。v8 worker 内一处仍在 `js-v8` 特性内,后续处理。
 - [x] **特性门控 rdkafka** → `queue-kafka`(默认关闭,移除 cmake/C++ 构建负担;`queue`/`sync` 的 kafka 后端与相关测试随之门控)。已验证默认 `cargo check --lib --tests` 不再编译 rdkafka。
 - [x] **特性门控 polars / calamine** —— 三个 polars crate + calamine 改 `optional`;`polars = ["dep:polars", ...]`(修掉空壳)/ `excel = ["dep:calamine", "polars"]`,默认**全关**。`DataType` 新增始终存在的 `Empty` 默认变体,`DataFrame` 变体 + `DataFrameStore` + `polars_utils` / `excel_dataframe` / `type_convert`(零外部引用的死代码)全部门控。补 `serde/rc`(原先靠 polars 隐式带入 `Arc: Serialize`)。**默认依赖树不再含 polars**;`--features polars` / `excel` 恢复能力,测试全绿。(postgres 随 `store` 特性,已在 Phase 2 门控。)
@@ -89,7 +89,11 @@ js-v8    = ["dep:v8"]
 
 把门面的「薄封装」变成真正的薄。
 
-- [~] 拆 `State` 上帝对象为聚焦上下文。已从 **3 个组件**卸下 `Arc<State>`:`MiddlewareManager`(删死耦合)、`DownloaderManager`(窄化为 4 依赖)、`TaskFactory`(窄化为 `app_config` + 复用 `cache_service`)。**剩余持有者主要是 chains**,它们 `state.clone()` 把整个 `State` 往下游传 —— 干净窄化已到极限,进一步需要引入统一的"运行时上下文"并贯穿所有 chain(较大重构,非有界项)。
+- [x] 拆 `State` 上帝对象为聚焦上下文。**核心采集管线已全部脱离 `State` 结构体**:
+  - 新增 [`PipelineContext`](../../src/common/context.rs)(`config` / `cache_service` / `status_tracker` / `locker` 四字段)+ `State::pipeline_ctx()`;**四个 chain(download / parser / task-model / stream)由 `Arc<State>` 窄化为 `Arc<PipelineContext>`** —— 管线不再触达 `db` / `cookie_service` / `limiter` / `api_limiter` / `redis` / `coordination` 等可选或集群子系统(10 字段 → 4)。
+  - `SystemMonitor::run` 去掉从不使用的 `Arc<State>` 参数(彻底脱钩);`TaskManager::new` 由 `Arc<State>` 窄化为 `&DbHandle` + `cache_service` / `cookie_service` / `config` 显式依赖。
+  - 早前已卸下:`MiddlewareManager`(删死耦合)、`DownloaderManager`(窄化为 4 依赖)、`TaskFactory`(窄化为 `app_config` + 复用 `cache_service`)。
+  - 剩余 `Arc<State>` 持有者为**组合根 `Engine`** 与**天然耦合协调 / DB 的后台任务**(`CronScheduler` 需 `coordination`+`db`、`zombie` 需 `db`)—— 属正当依赖,是未来抽 `mocra-core` 时的宿主侧装配点。默认 / `store` / `dashboard` / `cluster-embedded` 全绿。
 - [x] **DB 变可选**:`State.db` 改 `Option<Arc<DatabaseConnection>>`;`db.url` 缺省即 standalone;无 DB 时 `TaskFactory::create_synthetic_task` 从内存模块注册表合成任务;zombie / scheduler / health 均加无 DB 守卫;`Mocra` 程序化默认配置 + 自动种子任务注入。已验证热路径无 DB 写入。
 - [x] **`Task`/`Module` 从 sea-orm 实体解耦**(sea-orm gating 的关键前置):新增轻量 `AccountInfo`/`PlatformInfo`(`common/model/scope.rs`)取代内嵌的 `AccountModel`/`PlatformModel`;DB 路径转换填充,synthetic 路径直接构造;`factory` 不再直接依赖实体类型。
 - [x] **把 sea-orm gate 出默认构建**:新增 `store` 特性(默认关闭);`entity` / `repository` / `txn` / `ConfigAssembler` / `connector` 的 db 部分全部门控;`State.db` 用 `DbHandle` 类型别名(无 `store` 时为占位 `()`,恒 `None`);`factory` / `task_manager` / `scheduler` / `zombie` / `health` 的 DB 路径按特性分支(`MaybeRepository` 别名统一 `TaskFactory::new` 签名)。**默认构建不再编译 sea-orm**;`--features store` 恢复完整 DB / 多租户能力。
@@ -119,7 +123,7 @@ js-v8    = ["dep:v8"]
 - [x] **接入任务分发(控制面)**:`CronScheduler` 在多节点 Raft 集群下**各节点只调度归属自己的分区**(账号 rendezvous 互斥,无 leader 瓶颈,cron 负载水平扩展);单机 / Redis 协调回退到既有 leader 模式。内存队列下**触发与处理同在归属节点**,端到端闭环;决策逻辑单测。种子注入亦按 leader 去重(避免 N× 重复抓取)。
 - [x] **接入任务分发(数据面)**:`Identifiable::partition_key`(`TaskEvent` 覆写为账号)让任务消息按 `hash(account)` 落同一 Kafka 分区 / Redis 流分片,复用 MQ 消费组分配实现**跨节点消费亲和**;与去重 / 补偿用的 `get_id`(run_id)相互独立。单测 + 端到端(mock 后端捕获分区键 = 账号)绿。
 - [x] **保留 `MqBackend` 多实现**,新增 **NATS(JetStream)后端**(`queue-nats` 特性,[`src/queue/nats.rs`](../../src/queue/nats.rs)):持久化 stream + durable pull consumer + explicit ack + nack 按 `NackPolicy` 重投原 subject / 投 DLQ,语义对齐 Kafka;in-memory(`backend=None`)作单机默认。**对真实 NATS 集成测试测通**(publish→subscribe→ack 往返;nack attempt 0→1 重投→超限投 DLQ),CI 用 Docker 起 JetStream 容器跑 `--ignored` 集成测试。账号亲和在 NATS 下暂为竞争消费(负载均衡),粘账号后续用分区 subject 实现。
-- [~] 合并 DAG 执行:`ModuleProcessorWithChain` 已被 `ModuleDagProcessor` 取代(前者仅其自身测试引用、7 个公共类型零外部使用),**删除该死执行器(1104 行)** —— 单一执行器即 `ModuleDagProcessor`。`ModuleNodeDagAdapter` 仍需保留(把模块节点包装成 `DagNodeTrait` 供 `DagScheduler`);进一步剥掉占位 adapter、统一 DAG 编译与执行是更深的重构(留待影子对比切换)。
+- [x] 合并 DAG 执行:**统一为单一路径**。先前已删死执行器 `ModuleProcessorWithChain`(1104 行);本轮再剥掉**从未真正执行、仅在注册时预编译入缓存的「影子」DAG 系统** —— 占位 `ModuleNodeDagAdapter`(其 `DagNodeTrait::start` 是 no-op)、`ModuleDagCompiler`(编译成 `mocra-dag` 的 `Dag`)、orchestrator 的 `compile_*` / `execute_dag`、`TaskManager` 的 per-module `compiled_dags` 缓存 + `DagCutoverStateTracker` + 全部 cutover/compare 包装、以及公开 API `Engine::get_module_dag`(破坏性)。模块 DAG 现只有一条路:`ModuleDagOrchestrator::build_definition` → 队列驱动的 `ModuleDagProcessor`;顺带去掉每次模块注册时的无用预编译。删净后核心引擎不再残留并行 DAG 表示,`task_manager.rs` 由 514 → ~140 行。默认 / `store` / `dashboard` / `cluster-embedded` / `queue-*` / `polars,excel` 全绿。
 
 **产出**:「不装 Redis 也能起一个自组网的分布式采集集群。」—— 控制面(选举 / 锁 / KV / 成员 / 分区归属)已全部 Raft 化并测试;数据面 MQ 可插拔待补 NATS。
 

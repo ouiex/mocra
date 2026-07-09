@@ -36,7 +36,6 @@ use crate::common::interface::{
 use crate::common::registry::NodeRegistry;
 use crate::utils::connector::create_redis_pool;
 use crate::engine::task::TaskManager;
-use crate::schedule::dag::Dag;
 use crate::engine::runner::ProcessorRunner;
 use crate::engine::lua::LuaScriptRegistry;
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
@@ -469,7 +468,12 @@ impl Engine {
             }
         });
 
-        let task_manager = Arc::new(TaskManager::new(Arc::clone(&state)));
+        let task_manager = Arc::new(TaskManager::new(
+            &state.db,
+            Arc::clone(&state.cache_service),
+            state.cookie_service.clone(),
+            Arc::clone(&state.config),
+        ));
         let cfg = state.config.read().await.clone();
         let _channel_config = cfg.channel_config.clone();
         let namespace = cfg.name.clone();
@@ -646,13 +650,7 @@ impl Engine {
     /// Register a functional module.
     ///
     /// Modules define the crawling logic, including task generation and response parsing.
-    /// The module's DAG is automatically compiled and cached upon registration.
     pub async fn register_module(&self, module: Arc<dyn ModuleTrait>) {
         self.task_manager.add_module(module).await;
-    }
-
-    /// Returns the pre-compiled DAG for a registered module, if available.
-    pub fn get_module_dag(&self, module_name: &str) -> Option<Dag> {
-        self.task_manager.get_module_dag(module_name)
     }
 }

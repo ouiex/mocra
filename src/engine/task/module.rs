@@ -177,8 +177,9 @@ impl Module {
         }
 
         use crate::engine::task::module_dag_orchestrator::ModuleDagOrchestrator;
-        let orchestrator = ModuleDagOrchestrator::default();
-        let definition = orchestrator.build_definition(self.module.clone()).await;
+        let definition = ModuleDagOrchestrator
+            .build_definition(self.module.clone())
+            .await;
         self.processor.init_from_definition(&definition).await;
     }
 

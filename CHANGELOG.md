@@ -43,6 +43,13 @@ Cargo workspace. No backward compatibility with `0.2.x` internals.
 ### Removed
 
 - Dead `ModuleProcessorWithChain` executor (superseded by the queue-driven DAG processor).
+- **Vestigial "shadow" DAG execution path** — the parallel `mocra-dag`-`Dag`-compilation machinery
+  that was precompiled/cached at module registration but never actually executed at runtime:
+  the placeholder `ModuleNodeDagAdapter`, `ModuleDagCompiler`, the orchestrator's `compile_*`/
+  `execute_dag` methods, `TaskManager`'s per-module compiled-DAG cache + `DagCutoverStateTracker`,
+  and the public **`Engine::get_module_dag`** (BREAKING). Module DAGs now have a single path:
+  `ModuleDagOrchestrator::build_definition` → the queue-backed `ModuleDagProcessor`. This also
+  removes wasted DAG precompilation on every module registration.
 
 ### Fixed
 
