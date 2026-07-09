@@ -1,0 +1,27 @@
+[package]
+name = "mocra-proxy"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Configuration-driven proxy pool / manager for the mocra crawler framework (zero-State, standalone)."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/ouiex/mocra"
+homepage = "https://github.com/ouiex/mocra"
+documentation = "https://docs.rs/mocra-proxy"
+readme = "README.md"
+keywords = ["proxy", "crawler", "scraping", "http"]
+categories = ["network-programming", "web-programming"]
+
+[dependencies]
+thiserror = "2"
+async-trait = "0.1"
+serde = { version = "1", features = ["derive"] }
+tokio = { version = "1", features = ["sync", "rt", "macros", "time"] }
+url = "2"
+log = "0.4"
+time = { version = "0.3", features = ["formatting", "parsing"] }
+reqwest = { version = "0.13", default-features = false, features = ["native-tls"] }
+toml = "0.9"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }

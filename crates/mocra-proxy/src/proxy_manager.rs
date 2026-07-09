@@ -1,5 +1,5 @@
-use crate::proxy::proxy_pool::*;
-use crate::errors::{Error, Result};
+use crate::proxy_pool::*;
+use crate::error::{ProxyError, Result};
 use std::time::Duration;
 
 pub struct ProxyManager {
@@ -35,7 +35,7 @@ impl ProxyManager {
         self.pool
             .get_best_tunnel()
             .await
-            .ok_or_else(Error::proxy_not_found)
+            .ok_or_else(|| ProxyError::ProxyNotFound)
     }
 
     pub async fn report_proxy_result(
@@ -92,7 +92,7 @@ impl Default for ProxyManager {
 #[cfg(test)]
 mod tests {
 
-    use crate::proxy::{ProxyConfig, ProxyManager};
+    use crate::{ProxyConfig, ProxyManager};
     use tokio::fs;
 
     #[tokio::test]

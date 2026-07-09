@@ -1,6 +1,6 @@
 use async_trait::async_trait;
-use crate::errors::ProxyError;
-use crate::errors::Result;
+use crate::error::ProxyError;
+use crate::error::Result;
 use serde::{Deserialize, Serialize};
 use std::cmp::{Ordering, PartialEq};
 use std::collections::HashMap;
@@ -266,8 +266,7 @@ impl DirectProxy {
                         scheme
                     )
                     .into(),
-                )
-                .into())
+                ))
             }
         }
         .to_string();
@@ -318,7 +317,7 @@ impl StaticIpProxyEntry {
 
 impl ProxyConfig {
     pub fn load_from_toml(toml_str: &str) -> Result<Self> {
-        toml::from_str(toml_str).map_err(|e| ProxyError::InvalidConfig(e.to_string().into()).into())
+        toml::from_str(toml_str).map_err(|e| ProxyError::InvalidConfig(e.to_string().into()))
     }
 
     pub async fn build_proxy_pool(&self) -> ProxyPool {
@@ -426,7 +425,7 @@ impl ProxyPoolBuilder {
             }
         }
         for provider in &self.ip_providers {
-            let loader = crate::proxy::proxy_impl::build_ip_proxy_loader(provider.clone());
+            let loader = crate::proxy_impl::build_ip_proxy_loader(provider.clone());
             pool.add_ip_provider(loader).await;
         }
         pool
@@ -835,7 +834,7 @@ impl ProxyPool {
             }
         }
 
-        Err(ProxyError::InvalidConfig("No valid proxy available".into()).into())
+        Err(ProxyError::InvalidConfig("No valid proxy available".into()))
     }
 
     /// 获取最佳代理（跨所有提供商）
@@ -886,10 +885,10 @@ impl ProxyPool {
                 proxy_items[mut_idx].rate_limit_tracker.record_request();
                 Ok(proxy_items[mut_idx].proxy.clone())
             } else {
-                Err(ProxyError::InvalidConfig("No valid proxy available".into()).into())
+                Err(ProxyError::InvalidConfig("No valid proxy available".into()))
             }
         } else {
-            Err(ProxyError::InvalidConfig("No valid proxy available".into()).into())
+            Err(ProxyError::InvalidConfig("No valid proxy available".into()))
         }
     }
 
@@ -941,8 +940,7 @@ impl ProxyPool {
         if !found {
             return Err(ProxyError::InvalidConfig(
                 format!("Tunnel {} not found", tunnel.endpoint).into(),
-            )
-            .into());
+            ));
         }
         // 更新统计信息
         self.update_stats().await;
@@ -992,8 +990,7 @@ impl ProxyPool {
                     proxy.ip, proxy.port
                 )
                 .into(),
-            )
-            .into());
+            ));
         }
         // 更新统计信息
         self.update_stats().await;
@@ -1044,7 +1041,7 @@ impl ProxyPool {
             let now = OffsetDateTime::now_utc().unix_timestamp();
             if let Ok(expire_timestamp) = OffsetDateTime::parse(expire_time, &Rfc3339) {
                 if now >= expire_timestamp.unix_timestamp() {
-                    return Err(ProxyError::ProxyProviderExpired.into());
+                    return Err(ProxyError::ProxyProviderExpired);
                 }
             } else {
                 return Err(ProxyError::InvalidConfig(
@@ -1053,8 +1050,7 @@ impl ProxyPool {
                         provider.get_config().name
                     )
                     .into(),
-                )
-                .into());
+                ));
             };
         }
         let new_proxies = provider.get_ip_proxies().await?;

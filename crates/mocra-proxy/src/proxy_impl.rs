@@ -1,23 +1,23 @@
-use crate::proxy::{IpProvider, IpProxy, IpProxyLoader};
+use crate::{IpProvider, IpProxy, IpProxyLoader};
 use async_trait::async_trait;
 use log::info;
 use std::time::Duration;
 
-async fn fetch_text_proxies(config: &IpProvider) -> crate::errors::Result<Vec<IpProxy>> {
+async fn fetch_text_proxies(config: &IpProvider) -> crate::error::Result<Vec<IpProxy>> {
     info!("Fetching proxies from {}: {}", config.name, config.url);
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(config.timeout))
         .build()
-        .map_err(|e| crate::errors::Error::from(crate::errors::ProxyError::GetProxy(Box::new(e))))?;
+        .map_err(|e| crate::error::ProxyError::GetProxy(Box::new(e)))?;
 
     let resp = client
         .get(&config.url)
         .send()
         .await
-        .map_err(|e| crate::errors::Error::from(crate::errors::ProxyError::GetProxy(Box::new(e))))?
+        .map_err(|e| crate::error::ProxyError::GetProxy(Box::new(e)))?
         .text()
         .await
-        .map_err(|e| crate::errors::Error::from(crate::errors::ProxyError::GetProxy(Box::new(e))))?;
+        .map_err(|e| crate::error::ProxyError::GetProxy(Box::new(e)))?;
 
     let mut proxies = Vec::new();
     for line in resp.lines() {
@@ -59,7 +59,7 @@ pub(crate) struct KuaiDaiLiLoader {
 
 #[async_trait]
 impl IpProxyLoader for KuaiDaiLiLoader {
-    async fn get_ip_proxies(&self) -> crate::errors::Result<Vec<IpProxy>> {
+    async fn get_ip_proxies(&self) -> crate::error::Result<Vec<IpProxy>> {
         fetch_text_proxies(&self.config).await
     }
     fn is_retry_code(&self, code: &u16) -> bool {
@@ -90,7 +90,7 @@ pub(crate) struct ZmLoader {
 
 #[async_trait]
 impl IpProxyLoader for ZmLoader {
-    async fn get_ip_proxies(&self) -> crate::errors::Result<Vec<IpProxy>> {
+    async fn get_ip_proxies(&self) -> crate::error::Result<Vec<IpProxy>> {
         fetch_text_proxies(&self.config).await
     }
 
@@ -122,7 +122,7 @@ pub(crate) struct TextListLoader {
 
 #[async_trait]
 impl IpProxyLoader for TextListLoader {
-    async fn get_ip_proxies(&self) -> crate::errors::Result<Vec<IpProxy>> {
+    async fn get_ip_proxies(&self) -> crate::error::Result<Vec<IpProxy>> {
         fetch_text_proxies(&self.config).await
     }
 
@@ -173,7 +173,7 @@ async fn check_proxy_health(proxy: &IpProxy) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::proxy::IpProvider;
+    use crate::IpProvider;
 
     #[test]
     fn test_kuaidaili_config() {

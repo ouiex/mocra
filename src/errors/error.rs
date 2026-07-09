@@ -5,6 +5,8 @@ use std::num::ParseIntError;
 use std::str::ParseBoolError;
 use thiserror::Error;
 use serde::{Deserialize, Serialize};
+// ProxyError 已抽到独立 crate mocra-proxy;主 crate 经下方 `From` 在边界纳入自身 Error。
+use mocra_proxy::ProxyError;
 /// 通用错误详情类型
 pub type BoxError = Box<dyn StdError + Send + Sync + 'static>;
 
@@ -381,29 +383,6 @@ pub enum ServiceError {
     AuthenticationFailed,
 }
 
-#[derive(Debug, Error)]
-pub enum ProxyError {
-    #[error("invalid config: {0}")]
-    InvalidConfig(#[source] BoxError),
-    #[error("missing field: {0}")]
-    MissingField(#[source] BoxError),
-    #[error("parse error: {0}")]
-    ParseError(#[source] BoxError),
-    #[error("get proxy error: {0}")]
-    GetProxy(#[source] BoxError),
-    #[error("proxy not found")]
-    ProxyNotFound,
-    #[error("proxy not available: {0}")]
-    ProxyNotAvailable(#[source] BoxError),
-    #[error("proxy already expired")]
-    ProxyExpired,
-    #[error("proxy provider already expired")]
-    ProxyProviderExpired,
-    #[error("proxy connection failed")]
-    ProxyConnectionFailed,
-    #[error("proxy authentication failed")]
-    ProxyAuthenticationFailed,
-}
 
 #[derive(Debug, Error)]
 pub enum CookieError {
@@ -733,6 +712,7 @@ impl From<serde_json::Error> for Error {
     }
 }
 
+#[cfg(feature = "polars")]
 impl From<polars::prelude::PolarsError> for Error {
     fn from(err: polars::prelude::PolarsError) -> Self {
         Error::from(ParserError::PolarsError(err.to_string().into()))
