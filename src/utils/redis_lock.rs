@@ -328,7 +328,7 @@ impl Drop for AdvancedDistributedLock {
         }
     }
 }
-/// 由 [`CoordinationBackend`](crate::sync::CoordinationBackend) 支撑的分布式锁句柄。
+/// 由 [`CoordinationBackend`] 支撑的分布式锁句柄。
 ///
 /// 集群(如内嵌 redb+Raft)模式下,锁经共识落库,跨节点强一致 —— 取代无 Redis
 /// 时退化的**进程内**本地锁。自带续租任务;`release` 走 CAS-del(仅持有者可删)。

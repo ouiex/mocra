@@ -13,7 +13,9 @@
 
 pub mod prelude;
 
-/// 高层 `Spider` 门面(重构 Phase 1)—— 面向 80% 场景的简单入口。
+// 高层 `Spider` 门面(重构 Phase 1)—— 面向 80% 场景的简单入口。
+// 模块级文档见 `facade.rs` 顶部的 `//!`(此处用普通注释,避免与其内部
+// `//!` 合并后在 crate 根作用域解析、导致 intra-doc 链接失效)。
 pub mod facade;
 
 #[path = "cacheable/lib.rs"]

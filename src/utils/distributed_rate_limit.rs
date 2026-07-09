@@ -702,7 +702,7 @@ impl DistributedSlidingWindowRateLimiter {
     /// Atomically checks and updates rate-limit state (competitive model).
     ///
     /// Only ONE caller wins the permit per interval; others receive a wait
-    /// duration and must retry.  Prefer [`wait_for_permit`] for download
+    /// duration and must retry.  Prefer [`wait_for_permit`](Self::wait_for_permit) for download
     /// tasks — it uses a reservation model that eliminates retry loops.
     ///
     /// # Returns
