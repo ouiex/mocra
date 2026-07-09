@@ -1,6 +1,9 @@
 use std::sync::Arc;
+#[cfg(feature = "store")]
 use tokio::time::{Duration, sleep};
-use log::{info, warn, error};
+use log::info;
+#[cfg(feature = "store")]
+use log::{error, warn};
 use crate::common::state::State;
 use crate::queue::compensation::Compensator;
 #[cfg(feature = "store")]

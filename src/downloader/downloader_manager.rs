@@ -212,7 +212,7 @@ impl DownloaderManager {
             // Update expiration time (Redis ZSET).
             let config_name = self.app_config.read().await.name.clone();
             let key = format!("{}:downloader_expire", config_name);
-            let pool = self.locker.get_pool().map(|p| p.clone());
+            let pool = self.locker.get_pool().cloned();
             let module_id_clone = module_id.clone();
             let current_time_clone = current_time;
 

@@ -32,6 +32,7 @@ use crate::engine::chain::backpressure::{BackpressureSendState, send_with_backpr
 
 /// Resolves response to module/config/login context before parsing.
 pub struct ResponseModuleProcessor {
+    #[allow(dead_code)]
     task_manager: Arc<TaskManager>,
     cache_service: Arc<CacheService>,
     state: Arc<State>,
@@ -243,6 +244,7 @@ impl EventProcessorTrait<Response, (Response, Arc<Module>, Arc<ModuleConfig>, Op
 }
 
 pub struct ResponseParserProcessor {
+    #[allow(dead_code)]
     task_manager: Arc<TaskManager>,
     queue_manager: Arc<QueueManager>,
     state: Arc<State>,
@@ -434,7 +436,7 @@ impl ProcessorTrait<(Response, Arc<Module>, Arc<ModuleConfig>, Option<LoginInfo>
                let task_prefix_request = task.prefix_request;
              // OPTIMIZATION: Check if we can bypass the queue and generate requests locally
              let target_module_name = task.account_task.module.as_ref().and_then(|v| v.first());
-             let is_same_module = target_module_name.map_or(true, |name| name == module.module.name().as_str());
+             let is_same_module = target_module_name.is_none_or(|name| name == module.module.name().as_str());
              
              // Check if account/platform match (usually yes for parser tasks)
              let is_same_context = task.account_task.account == module.account.name && task.account_task.platform == module.platform.name;
@@ -1019,6 +1021,7 @@ impl EventProcessorTrait<DataEvent, ()> for DataStoreProcessor {
 /// - Data middleware and store stages run in parallel map form with skip-on-error strategy.
 pub async fn create_parser_chain(
     state: Arc<State>,
+    #[allow(dead_code)]
     task_manager: Arc<TaskManager>,
     middleware_manager: Arc<MiddlewareManager>,
     queue_manager: Arc<QueueManager>,

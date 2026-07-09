@@ -11,17 +11,11 @@ pub struct ModuleDagOrchestratorOptions {
     pub scheduler_options: DagSchedulerOptions,
 }
 
+#[derive(Default)]
 pub struct ModuleDagOrchestrator {
     options: ModuleDagOrchestratorOptions,
 }
 
-impl Default for ModuleDagOrchestrator {
-    fn default() -> Self {
-        Self {
-            options: ModuleDagOrchestratorOptions::default(),
-        }
-    }
-}
 
 impl ModuleDagOrchestrator {
     pub fn new(options: ModuleDagOrchestratorOptions) -> Self {

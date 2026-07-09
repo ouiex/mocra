@@ -1,15 +1,15 @@
-/// Queue-backed DAG processor.
-///
-/// Design principles:
-/// - Node routing uses `ExecutionMark.node_id` carried by Request/Response.
-/// - Topology (successors map) is built from `ModuleDagDefinition` at init time.
-/// - Fallback traces prior request via `prefix_request`; requests are persisted by `request.id`.
-/// - Generate failure allows at most one fallback per `(node_id, prefix_uuid)` gate.
-/// - Parser failure emits `TaskErrorEvent` tagged with same-node retry context.
-/// - If parser succeeds but yields no `TaskParserEvent` while successors exist,
-///   a per-successor one-shot advance gate synthesizes a placeholder task.
-/// - Multi-branch support: when a node has N successors and parser returns one unrouted task,
-///   it is fanned out to all N successors automatically.
+//! Queue-backed DAG processor.
+//!
+//! Design principles:
+//! - Node routing uses `ExecutionMark.node_id` carried by Request/Response.
+//! - Topology (successors map) is built from `ModuleDagDefinition` at init time.
+//! - Fallback traces prior request via `prefix_request`; requests are persisted by `request.id`.
+//! - Generate failure allows at most one fallback per `(node_id, prefix_uuid)` gate.
+//! - Parser failure emits `TaskErrorEvent` tagged with same-node retry context.
+//! - If parser succeeds but yields no `TaskParserEvent` while successors exist,
+//!   a per-successor one-shot advance gate synthesizes a placeholder task.
+//! - Multi-branch support: when a node has N successors and parser returns one unrouted task,
+//!   it is fanned out to all N successors automatically.
 
 use crate::common::interface::module::{ModuleNodeTrait, SyncBoxStream};
 use crate::common::model::chain_key;
@@ -62,6 +62,7 @@ pub struct ModuleDagProcessor {
     module_id: String,
     run_id: Uuid,
     cache: Arc<CacheService>,
+    #[allow(dead_code)]
     ttl: u64,
     /// Node registry: preserves definition order so index-based backward-compat lookup works.
     nodes: Arc<RwLock<IndexMap<String, Arc<dyn ModuleNodeTrait>>>>,

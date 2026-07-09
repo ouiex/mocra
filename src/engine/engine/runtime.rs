@@ -338,7 +338,6 @@ impl Engine {
                 }
                 Err(e) => {
                     error!("API server error: {:?}", e);
-                    return;
                 }
             }
         });

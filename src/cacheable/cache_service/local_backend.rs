@@ -152,7 +152,7 @@ impl CacheBackend for LocalBackend {
     }
 
     async fn zadd(&self, key: &str, score: f64, member: &[u8]) -> Result<i64, CacheError> {
-        let mut entry = self.zstore.entry(key.to_string()).or_insert(Vec::new());
+        let mut entry = self.zstore.entry(key.to_string()).or_default();
         let vec = entry.value_mut();
 
         let mut removed = false;

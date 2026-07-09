@@ -6,7 +6,6 @@ pub mod module_dag_compiler;
 pub mod module_dag_orchestrator;
 pub mod module_dag_processor;
 pub mod module_node_dag_adapter;
-pub mod module_processor_with_chain;
 #[cfg(feature = "store")]
 pub mod repository;
 #[allow(clippy::module_inception)]

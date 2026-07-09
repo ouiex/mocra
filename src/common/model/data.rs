@@ -1,8 +1,11 @@
 use crate::common::interface::StoreTrait;
 use crate::common::model::Response;
 use crate::common::model::meta::MetaData;
+#[cfg(feature = "polars")]
 use polars::io::SerWriter;
+#[cfg(feature = "polars")]
 use polars::io::ipc::IpcWriter;
+#[cfg(feature = "polars")]
 use polars::prelude::*;
 use std::fmt::Debug;
 use uuid::Uuid;
@@ -60,7 +63,6 @@ impl StoreTrait for FileStore {
         }
     }
 }
-
 
 impl From<FileStore> for DataEvent {
     fn from(value: FileStore) -> Self {
@@ -122,6 +124,7 @@ impl FileStore {
     }
 }
 
+#[cfg(feature = "polars")]
 #[derive(Clone, Debug)]
 pub enum DataframeStoreData {
     Bytes(Vec<u8>),
@@ -129,6 +132,7 @@ pub enum DataframeStoreData {
 }
 
 /// DataFrame storage structure for tabular data.
+#[cfg(feature = "polars")]
 #[derive(Clone, Debug)]
 pub struct DataFrameStore {
     /// Context information.
@@ -140,6 +144,7 @@ pub struct DataFrameStore {
     /// Database table name.
     pub table: String,
 }
+#[cfg(feature = "polars")]
 impl Default for DataFrameStore {
     fn default() -> Self {
         Self {
@@ -151,6 +156,7 @@ impl Default for DataFrameStore {
     }
 }
 
+#[cfg(feature = "polars")]
 impl StoreTrait for DataFrameStore {
     fn build(&self) -> DataEvent {
         // Clone to preserve full metadata.
@@ -165,6 +171,7 @@ impl StoreTrait for DataFrameStore {
         }
     }
 }
+#[cfg(feature = "polars")]
 impl From<DataFrameStore> for DataEvent {
     fn from(value: DataFrameStore) -> Self {
         DataEvent {
@@ -179,7 +186,7 @@ impl From<DataFrameStore> for DataEvent {
     }
 }
 
-
+#[cfg(feature = "polars")]
 impl DataFrameStore {
     /// Sets DataFrame data and serializes to IPC format.
     pub fn with_data(mut self, data: DataFrame) -> Self {
@@ -213,9 +220,16 @@ impl DataFrameStore {
 }
 
 /// Data type enum.
-#[derive(Debug, Clone)]
+// 变体刻意不装箱(`File`/`DataFrame` 直接内联),以便下游用 `DataType::File(f)` 直接
+// 解构;`Empty` 为轻量默认。装箱会改动公共 API,故此处豁免大小差异 lint。
+#[allow(clippy::large_enum_variant)]
+#[derive(Debug, Clone, Default)]
 pub enum DataType {
-    /// Structured tabular data.
+    /// 空载荷:默认变体(尚未填充具体数据),无需任何可选依赖。
+    #[default]
+    Empty,
+    /// Structured tabular data(需 `polars` 特性)。
+    #[cfg(feature = "polars")]
     DataFrame(DataFrameStore),
     /// File data.
     File(FileStore),
@@ -248,7 +262,7 @@ impl Default for DataEvent {
             account: "".to_string(),
             module: "".to_string(),
             meta: Default::default(),
-            data: DataType::DataFrame(DataFrameStore::default()),
+            data: DataType::Empty,
             data_middleware: vec![],
         }
     }
@@ -262,7 +276,7 @@ impl DataEvent {
             account: response.account.clone(),
             module: response.module.clone(),
             meta: response.metadata.clone(),
-            data: DataType::DataFrame(DataFrameStore::default()),
+            data: DataType::Empty,
             data_middleware: response.data_middleware.clone(),
         }
     }
@@ -284,7 +298,8 @@ impl DataEvent {
     pub fn module_id(&self) -> String {
         format!("{}-{}-{}", self.account, self.platform, self.module)
     }
-    /// Converts into `DataFrameStore`.
+    /// Converts into `DataFrameStore`(需 `polars` 特性)。
+    #[cfg(feature = "polars")]
     pub fn with_df(self, data: DataFrame) -> DataFrameStore {
         DataFrameStore::default().with_data(data)
     }
@@ -308,6 +323,8 @@ impl DataEvent {
     /// Returns payload size (bytes or rows).
     pub fn size(&self) -> usize {
         match &self.data {
+            DataType::Empty => 0,
+            #[cfg(feature = "polars")]
             DataType::DataFrame(df_store) => match &df_store.data {
                 DataframeStoreData::Bytes(bytes) => bytes.len(),
                 DataframeStoreData::DataFrame(df) => df.height() as usize * df.width() as usize, // rough estimate: rows * columns
@@ -316,6 +333,7 @@ impl DataEvent {
         }
     }
 }
+#[cfg(feature = "polars")]
 impl From<(DataFrame, &Response)> for DataEvent {
     fn from(value: (DataFrame, &Response)) -> Self {
         let (data, response) = value;
@@ -338,7 +356,6 @@ impl StoreTrait for DataEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::NaiveDate;
     use serde::{Deserialize, Serialize};
 
     #[test]
@@ -421,11 +438,15 @@ mod tests {
             .get("version")
             .and_then(|v| v.as_str())
             .unwrap_or("unknown");
-        
+
         assert!(is_success);
         assert_eq!(version, "1.0.0");
+    }
 
-        // Polars DataFrame test
+    #[cfg(feature = "polars")]
+    #[test]
+    fn test_polars_dataframe() {
+        use chrono::NaiveDate;
         let df: DataFrame = df!(
             "name" => ["Alice Archer", "Ben Brown", "Chloe Cooper", "Daniel Donovan"],
             "birthdate" => [
@@ -438,7 +459,7 @@ mod tests {
             "height" => [1.56, 1.77, 1.65, 1.75],  // (m)
         )
         .unwrap();
-        
+
         assert_eq!(df.height(), 4);
         assert_eq!(df.width(), 4);
     }

@@ -98,11 +98,9 @@ impl NodeRegistry {
         let results = self.cache.mget(&key_refs).await.map_err(crate::errors::Error::from)?;
 
         let mut nodes = Vec::with_capacity(results.len());
-        for val in results {
-            if let Some(bytes) = val {
-                if let Ok(node) = serde_json::from_slice::<NodeInfo>(&bytes) {
-                    nodes.push(node);
-                }
+        for bytes in results.into_iter().flatten() {
+            if let Ok(node) = serde_json::from_slice::<NodeInfo>(&bytes) {
+                nodes.push(node);
             }
         }
         Ok(nodes)

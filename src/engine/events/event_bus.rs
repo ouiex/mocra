@@ -32,7 +32,7 @@ impl EventBus {
         let (tx, rx) = mpsc::channel(1000);
         self.subscribers
             .entry(event_type)
-            .or_insert_with(Vec::new)
+            .or_default()
             .push(tx);
         rx
     }
@@ -84,7 +84,7 @@ impl EventBus {
                                 for tx in senders {
                                     let event_clone = event.clone();
                                     tokio::spawn(async move {
-                                        if let Err(_) = tx.send(event_clone).await {
+                                        if tx.send(event_clone).await.is_err() {
                                             // Receiver dropped, ignore
                                         }
                                     });

@@ -167,20 +167,28 @@ async fn main() -> Result<()> {
 }
 ```
 
-## L1 · 分布式 —— 加两行,同一二进制起集群
+## L1 · 分布式 —— 加一行,同一二进制起集群
+
+**已实现**(`cluster-embedded` 特性):
 
 ```rust
+// 首个核心节点:自举新集群
 Mocra::builder()
-    .spider(HackerNews)
-    .cluster(Cluster::embedded()                     // ← 控制面:redb+raft 自组网(详见 03)
-        .seeds(["10.0.0.1:7000"])
-        .data_dir("/var/lib/mocra"))
-    .queue(Kafka::brokers("broker:9092"))            // ← 数据面传输:自选 MQ
-    .sink(Kafka::topic("crawled-items"))             // ← 数据出口:你的 MQ 来消费
-    .api(8080)                                        // ← 控制面 HTTP:暂停/恢复/指标/注入
-    .run().await
-// 同一二进制部署到 N 台机器 = N 个 worker 共享队列,代码零改动。
+    .spider(HackerNews, on_item(|s: Story| async move { /* ... */ }))
+    .cluster(ClusterConfig::bootstrap(1, "10.0.0.1:7001", "/var/lib/mocra/n1"))
+    .run().await?;
+
+// 其余节点:注册到任意已知节点即入网(作 learner)
+Mocra::builder()
+    .spider(HackerNews, on_item(|s: Story| async move { /* ... */ }))
+    .cluster(ClusterConfig::join(2, "10.0.0.2:7001", "/var/lib/mocra/n2", "10.0.0.1:7001"))
+    .run().await?;
 ```
+
+- 控制面(选举 / 锁 / 成员 / 分区归属)跑在内嵌 **redb + Raft**,自组网,**无需 Redis**。
+- 容器化:`ClusterConfig::from_env()`(读 `MOCRA_*`);广域网:`.with_raft_tuning(RaftTuning { .. })`。
+- 数据面 MQ 经现有 config 的 `channel_config`(Kafka / Redis / 内存)配置;任务按 `hash(account)` 路由实现跨节点消费亲和。
+- **待糖化**:`.queue(..)` / `.sink(..)` / `.api(port)` 链式配置(数据面 / 出口 / 控制 HTTP)是后续项;当前经 config 或 `DataSink` 提供。
 
 ## DataSink —— 数据出口的可插拔缝
 

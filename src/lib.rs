@@ -1,6 +1,16 @@
 //! mocra: single-package entry point.
 //! All former workspace crates are embedded as local modules under `src/`.
 
+// 结构性 clippy lint —— 现有设计取舍(参数数、类型复杂度、模块同名、error/枚举变体尺寸),
+// 非 bug;统一豁免,便于逐步对主 crate 收紧 `-D warnings`。
+#![allow(
+    clippy::too_many_arguments,
+    clippy::type_complexity,
+    clippy::module_inception,
+    clippy::result_large_err,
+    clippy::large_enum_variant
+)]
+
 pub mod prelude;
 
 /// 高层 `Spider` 门面(重构 Phase 1)—— 面向 80% 场景的简单入口。

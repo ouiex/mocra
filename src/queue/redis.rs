@@ -319,18 +319,16 @@ impl RedisQueue {
                             }
                         }
 
-                        if pending_count >= 50 {
-                             if Self::flush_acks(&pool, &group_id, &mut batches).await {
+                        if pending_count >= 50
+                             && Self::flush_acks(&pool, &group_id, &mut batches).await {
                                  pending_count = 0;
                              }
-                        }
                     }
                     _ = interval.tick() => {
-                        if !batches.is_empty() {
-                             if Self::flush_acks(&pool, &group_id, &mut batches).await {
+                        if !batches.is_empty()
+                             && Self::flush_acks(&pool, &group_id, &mut batches).await {
                                  pending_count = 0;
                              }
-                        }
                     }
                     else => break,
                 }
@@ -571,16 +569,12 @@ impl RedisQueue {
             }
         }
         
-        if let Some(payload) = found_payload {
-            Some(Message {
+        found_payload.map(|payload| Message {
                 payload: std::sync::Arc::new(payload),
                 id: format!("{}@{}", topic_claim, id),
                 headers: std::sync::Arc::new(headers),
                 ack_tx,
             })
-        } else {
-            None
-        }
     }
 }
 

@@ -27,9 +27,9 @@ impl ModuleNodeDagAdapter {
 #[async_trait]
 impl DagNodeTrait for ModuleNodeDagAdapter {
     async fn start(&self, context: NodeExecutionContext) -> Result<TaskPayload, DagError> {
-        // Placeholder behavior for phase-A compatibility.
-        // It keeps DAG scheduling path compilable while business execution
-        // still goes through ModuleProcessorWithChain.
+        // Placeholder behavior: this adapter only wraps a module node as a
+        // `DagNodeTrait` to keep the DAG scheduling path compilable; the actual
+        // business execution runs through `ModuleDagProcessor`.
         let mut payload = TaskPayload::from_bytes(Vec::new())
             .with_content_type("application/x-mocra-module-node-placeholder")
             .with_meta("module_node_id", &context.node_id)

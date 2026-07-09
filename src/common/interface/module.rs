@@ -44,7 +44,7 @@ pub trait ModuleTrait: Send + Sync {
     async fn pre_process(&self, _config: Option<Arc<ModuleConfig>>,) -> Result<()> {
         Ok(())
     }
-    // Called after `ModuleProcessorWithChain` finishes all nodes, for finalization logic.
+    // Called after `ModuleDagProcessor` finishes all nodes, for finalization logic.
     // Responses may not yet pass through `DataMiddleware`, so do not depend on final processed output.
     async fn post_process(&self, _config: Option<Arc<ModuleConfig>>,) -> Result<()> {
         Ok(())
@@ -58,7 +58,7 @@ pub trait ModuleTrait: Send + Sync {
 
 /// `ModuleNodeTrait` defines per-node request generation and response parsing.
 /// Data across nodes is currently propagated via metadata:
-/// `Request -> Response -> ParserData -> Request`.
+/// `Request -> Response -> TaskParserEvent -> Request`.
 /// Ideally node structs are immutable during execution; when mutable progression state
 /// (e.g. pagination) is needed, it should be carried in metadata.
 #[async_trait]

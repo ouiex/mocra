@@ -18,12 +18,15 @@ use crate::errors::ErrorKind;
 #[derive(Clone)]
 struct MockBackend {
     pub messages: Arc<Mutex<Vec<(String, Vec<u8>, std::collections::HashMap<String, String>)>>>,
+    /// 捕获每条消息的分区键(验证账号亲和路由)。
+    pub keys: Arc<Mutex<Vec<Option<String>>>>,
 }
 
 impl MockBackend {
     fn new() -> Self {
         Self {
             messages: Arc::new(Mutex::new(Vec::new())),
+            keys: Arc::new(Mutex::new(Vec::new())),
         }
     }
 }
@@ -35,7 +38,8 @@ impl MqBackend for MockBackend {
         Ok(())
     }
     
-    async fn publish_with_headers(&self, topic: &str, _key: Option<&str>, payload: &[u8], headers: &std::collections::HashMap<String, String>) -> Result<()> {
+    async fn publish_with_headers(&self, topic: &str, key: Option<&str>, payload: &[u8], headers: &std::collections::HashMap<String, String>) -> Result<()> {
+        self.keys.lock().unwrap().push(key.map(|k| k.to_string()));
         self.messages
             .lock()
             .unwrap()
@@ -115,6 +119,57 @@ async fn test_queue_manager_integration() {
     assert!(high_msg.is_some(), "Should find message with topic 'request-high'");
 }
 
+#[test]
+fn task_event_partition_key_is_account_not_run_id() {
+    use crate::common::model::message::TaskEvent;
+    use crate::queue::compensation::Identifiable;
+
+    let ev = TaskEvent {
+        account: "acct-7".to_string(),
+        platform: "p".to_string(),
+        module: Some(vec!["m".to_string()]),
+        run_id: Uuid::now_v7(),
+        priority: Default::default(),
+    };
+    // 分区键 = 账号(用于亲和路由);id = run_id(用于去重 / 补偿);二者独立。
+    assert_eq!(ev.partition_key(), "acct-7");
+    assert_eq!(ev.get_id(), ev.run_id.to_string());
+    assert_ne!(ev.partition_key(), ev.get_id());
+    // QueuedItem 必须把 partition_key 透传到 inner(而非退化回 get_id)。
+    let qi = QueuedItem::new(ev.clone());
+    assert_eq!(qi.partition_key(), "acct-7");
+    assert_eq!(qi.get_id(), ev.run_id.to_string());
+}
+
+#[tokio::test]
+async fn task_published_with_account_partition_key_end_to_end() {
+    use crate::common::model::message::TaskEvent;
+
+    let backend = Arc::new(MockBackend::new());
+    let manager = QueueManager::new(Some(backend.clone()), 100);
+    manager.subscribe();
+
+    let ev = TaskEvent {
+        account: "acct-9".to_string(),
+        platform: "p".to_string(),
+        module: Some(vec!["m".to_string()]),
+        run_id: Uuid::now_v7(),
+        priority: Default::default(),
+    };
+    manager
+        .get_task_push_channel()
+        .send(QueuedItem::new(ev))
+        .await
+        .expect("send task");
+
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let keys = backend.keys.lock().unwrap();
+    assert!(!keys.is_empty(), "task should have been published to backend");
+    // 经完整 forwarder → encode_items 路径,MQ 分区键应是账号(而非随机 run_id)。
+    assert_eq!(keys[0].as_deref(), Some("acct-9"));
+}
+
 fn minimal_config(policy: Option<PolicyConfig>) -> crate::common::model::config::Config {
     use crate::common::model::config::{
         CacheConfig, ChannelConfig, CrawlerConfig, DatabaseConfig, DownloadConfig,
@@ -169,6 +224,7 @@ fn minimal_config(policy: Option<PolicyConfig>) -> crate::common::model::config:
             blob_storage: None,
             redis: None,
             kafka: None,
+            nats: None,
             compensator: None,
             minid_time: 0,
             capacity: 10,

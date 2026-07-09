@@ -91,7 +91,7 @@ async fn main() -> Result<()> {
 cargo run
 ```
 
-> **扩展到分布式集群**：准备一个含 `[cache.redis]` 的 `config.toml`，用 `Mocra::builder().from_toml("config.toml")` 加载；同一份代码零改动横向扩展到多节点。进阶的多阶段扇出 DAG 与多租户模型见[文档](docs/zh/README.md)。
+> **扩展到分布式集群（无需 Redis）**：开启 `cluster-embedded` 特性，用 `.cluster(ClusterConfig::bootstrap(1, "127.0.0.1:7001", "./data/n1"))` 自举首个核心节点，其余节点用 `ClusterConfig::join(id, addr, dir, seed)` 注册到任意已知节点即入网。控制面（选举 / 锁 / 成员 / 分区归属）跑在内嵌 **redb + Raft** 上，数据面保留可插拔消息队列（Kafka / Redis / 内存），任务按 `hash(account)` 路由实现消费亲和。进阶的多阶段扇出 DAG 与多租户模型见[文档](docs/zh/README.md)。
 
 ## 架构
 
@@ -110,7 +110,19 @@ cargo run
 └─────────────────────────────────────────────────────────┘
 ```
 
-每个阶段通过消息队列解耦。单节点模式使用本地 Tokio 通道，分布式模式使用 Redis Streams 或 Kafka — **同一代码，零改动**。
+每个阶段通过消息队列解耦。单节点模式使用本地 Tokio 通道，分布式模式使用 Redis Streams / Kafka / NATS(JetStream)— **同一代码，零改动**。
+
+### Workspace crate
+
+mocra 是一个 Cargo workspace;可复用的子系统以独立 crate 发布,依赖单向无环(`mocra → {mocra-cluster, mocra-dag, mocra-proxy, mocra-store}`,子 crate 不反依赖 `mocra`):
+
+| Crate | 说明 |
+|---|---|
+| [`mocra`](.) | 门面:`Spider` trait、`Mocra` 构建器、prelude、引擎 —— 多数用户唯一需要 import 的 crate。 |
+| [`mocra-cluster`](crates/mocra-cluster) | 内嵌控制面:Raft + redb(选举、带 fencing 的分布式锁、成员、分区归属)—— 无需外部协调器。 |
+| [`mocra-dag`](crates/mocra-dag) | 通用分布式 DAG 执行引擎(零爬虫耦合)。 |
+| [`mocra-proxy`](crates/mocra-proxy) | 配置驱动的代理池 / 管理器(独立可用)。 |
+| [`mocra-store`](crates/mocra-store) | 多租户 sea-orm 实体模型(`store` 特性)。 |
 
 ## DAG 执行
 

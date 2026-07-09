@@ -1,7 +1,7 @@
 use crate::downloader::Downloader;
 use crate::errors::{DownloadError, RequestError, Result};
 use futures::StreamExt;
-use log::{debug, info, warn};
+use log::{info, warn};
 use reqwest::Client;
 use reqwest::Method;
 use reqwest::Proxy;

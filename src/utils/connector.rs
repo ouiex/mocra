@@ -1,6 +1,8 @@
 #[cfg(feature = "store")]
 use sea_orm::{Database, DatabaseConnection};
+#[cfg(feature = "store")]
 use once_cell::sync::Lazy;
+#[cfg(feature = "store")]
 use dashmap::DashMap;
 
 // Global cache for connection pools

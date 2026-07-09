@@ -49,7 +49,10 @@ impl Drop for ActiveCronJobGuard<'_> {
 /// Responsibilities:
 /// - Periodically refresh enabled `(module, account, platform)` contexts.
 /// - Cache parsed schedules for low-latency tick matching.
-/// - Trigger queue tasks only on the elected leader node.
+/// - Trigger queue tasks distributed across the cluster:
+///   - **多节点 Raft 集群**:每个节点只调度**归属自己的分区**(账号 rendezvous 分配,
+///     跨节点互斥),无 leader 瓶颈 —— cron 负载随节点数水平扩展。
+///   - **单机 / Redis 协调**:仅 leader 节点调度全部 context(维持既有语义)。
 /// - Recover short scheduler pauses with configurable misfire catch-up.
 pub struct CronScheduler {
     task_manager: Arc<TaskManager>,
@@ -341,6 +344,34 @@ impl CronScheduler {
         }
     }
 
+    /// 纯决策(便于单测):给定协调后端的成员数与本地 leader 状态,返回
+    /// `(是否分区集群, 本 tick 是否应调度)`。
+    ///
+    /// - 成员数 > 1 → 分区集群:所有节点都调度(各管自己的分区),与 leader 无关。
+    /// - 否则(单机 / 单节点 / Redis 协调不感知成员)→ 仅 leader 调度全部 context。
+    fn scheduling_decision(cluster_size: Option<usize>, is_leader: bool) -> (bool, bool) {
+        let partitioned = cluster_size.map(|n| n > 1).unwrap_or(false);
+        (partitioned, partitioned || is_leader)
+    }
+
+    /// 是否为「按分区分摊」的多节点集群(内嵌 Raft 且成员数 > 1)。
+    fn is_partitioned_cluster(&self) -> bool {
+        Self::scheduling_decision(
+            self.state.coordination.as_ref().map(|c| c.cluster_size()),
+            false,
+        )
+        .0
+    }
+
+    /// 本节点这一 tick 是否应执行调度。
+    fn scheduling_active(&self) -> bool {
+        Self::scheduling_decision(
+            self.state.coordination.as_ref().map(|c| c.cluster_size()),
+            self.leader_elector.is_leader(),
+        )
+        .1
+    }
+
     /// Main loop that evaluates one scheduler tick per second.
     async fn run(self: Arc<Self>) {
         // Start leader election loop.
@@ -359,8 +390,8 @@ impl CronScheduler {
             let current_second_ts = now.timestamp();
 
             if let Some(current_second) = Utc.timestamp_opt(current_second_ts, 0).single() {
-                // Only leader nodes execute scheduling decisions.
-                if self.leader_elector.is_leader() {
+                // 分区集群:所有节点都调度(各管自己的分区);单机/Redis:仅 leader。
+                if self.scheduling_active() {
                     // Handle temporary pauses by optionally replaying missed ticks.
                     if let Some(last_run) = last_tick {
                         let diff = current_second.signed_duration_since(last_run).num_seconds();
@@ -462,15 +493,28 @@ impl CronScheduler {
         let namespace_prefix = Arc::new(namespace_prefix);
         let batch_size = 500;
 
+        // 分区集群:仅处理归属本节点的账号(rendezvous 分配跨节点互斥);
+        // 单机 / Redis:`partitioned = false`,不过滤(维持既有全量语义)。
+        let partitioned = self.is_partitioned_cluster();
+        let coordination = self.state.coordination.clone();
+
         futures::stream::iter(contexts.chunks(batch_size))
-            .for_each_concurrent(Some((concurrency + batch_size - 1) / batch_size), |batch| {
+            .for_each_concurrent(Some(concurrency.div_ceil(batch_size)), |batch| {
                 let namespace_prefix = Arc::clone(&namespace_prefix);
+                let coordination = coordination.clone();
                 async move {
                 let mut keys = Vec::with_capacity(batch.len());
                 // Keep references to map lock results to original contexts.
                 let mut batch_items = Vec::with_capacity(batch.len());
 
                 for (account, platform) in batch {
+                    // 归属过滤:非本节点分区的账号交给其归属节点处理。
+                    if partitioned
+                        && let Some(c) = coordination.as_ref()
+                        && !c.owns_partition_key(account)
+                    {
+                        continue;
+                    }
                     let key = if let Some(prefix) = namespace_prefix.as_ref() {
                         format!("{prefix}:cron:{}:{}:{}:{}", module_name, account, platform, timestamp)
                     } else {
@@ -618,6 +662,19 @@ mod tests {
     use super::*;
     use std::str::FromStr;
     use chrono::TimeZone;
+
+    #[test]
+    fn scheduling_decision_partitions_multi_node_else_leader_gated() {
+        // 无协调后端(单机):仅 leader 调度。
+        assert_eq!(CronScheduler::scheduling_decision(None, true), (false, true));
+        assert_eq!(CronScheduler::scheduling_decision(None, false), (false, false));
+        // 单节点集群(size=1):仍走 leader 门(自己就是 leader)。
+        assert_eq!(CronScheduler::scheduling_decision(Some(1), true), (false, true));
+        assert_eq!(CronScheduler::scheduling_decision(Some(1), false), (false, false));
+        // 多节点集群:所有节点都调度(各管自己的分区),与 leader 状态无关。
+        assert_eq!(CronScheduler::scheduling_decision(Some(3), false), (true, true));
+        assert_eq!(CronScheduler::scheduling_decision(Some(3), true), (true, true));
+    }
 
     #[test]
     fn test_is_schedule_match() {

@@ -16,6 +16,17 @@ use deadpool_redis::redis;
 /// Trait for objects that can be uniquely identified for compensation purposes.
 pub trait Identifiable {
     fn get_id(&self) -> String;
+
+    /// MQ 分区键:决定消息路由到哪个分区 / 流分片 / 消费者,用于**账号亲和**
+    /// (会话粘性 + 集群里同账号任务落同一节点)。
+    ///
+    /// 默认与 [`get_id`](Self::get_id) 相同(无亲和,随机分布);`TaskEvent` 覆写为
+    /// **账号**,使同一账号的任务经 `hash(account)` 稳定落到同一分区,从而复用
+    /// Kafka/NATS 消费组分配 / Redis 流分片实现跨节点消费亲和。与去重 / 补偿用的
+    /// `get_id` 相互独立。
+    fn partition_key(&self) -> String {
+        self.get_id()
+    }
 }
 
 impl Identifiable for LogModel {
@@ -53,6 +64,11 @@ impl Identifiable for TaskErrorEvent {
 impl Identifiable for TaskEvent {
     fn get_id(&self) -> String {
         self.run_id.to_string()
+    }
+
+    /// 账号亲和:同账号任务落同一分区(会话粘性 + 集群同账号同节点)。
+    fn partition_key(&self) -> String {
+        self.account.clone()
     }
 }
 
