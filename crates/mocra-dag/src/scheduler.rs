@@ -4,10 +4,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use futures::FutureExt;
 use uuid::Uuid;
 
-use crate::sync::SyncService;
 
-use super::graph::Dag;
-use super::types::{
+use crate::graph::Dag;
+use crate::types::{
     DagError, DagErrorClass, DagErrorCode, DagFencingStore, DagNodeDispatcher,
     DagNodeExecutionPolicy, DagNodeRetryMode, DagNodeStatus, DagNodeSyncState, DagRunGuard,
     DagRunResumeState, DagRunStateStore, LocalNodeDispatcher, NodeExecutionContext,
@@ -71,7 +70,7 @@ struct PreparedDispatch {
     layer_index: usize,
     attempt: usize,
     placement: NodePlacement,
-    policy: super::types::DagNodeExecutionPolicy,
+    policy: crate::types::DagNodeExecutionPolicy,
     context: NodeExecutionContext,
 }
 
@@ -161,11 +160,10 @@ impl RuntimeState {
     fn snapshot(&self) -> DagRunResumeState {
         let mut succeeded_outputs = HashMap::new();
         for (id, node) in &self.runtime.nodes {
-            if node.status == DagNodeStatus::Succeeded {
-                if let Some(payload) = self.outputs.get(id).cloned().or_else(|| node.result.clone()) {
+            if node.status == DagNodeStatus::Succeeded
+                && let Some(payload) = self.outputs.get(id).cloned().or_else(|| node.result.clone()) {
                     succeeded_outputs.insert(id.clone(), payload);
                 }
-            }
         }
 
         DagRunResumeState {
@@ -232,7 +230,7 @@ pub struct DagScheduler {
     dag: Dag,
     dispatcher: Arc<dyn DagNodeDispatcher>,
     options: DagSchedulerOptions,
-    sync_service: Option<SyncService>,
+    event_sink: Option<Arc<dyn crate::store::DagEventSink>>,
     run_guard: Option<RunGuardConfig>,
     fencing_store: Option<FencingStoreConfig>,
     run_state_store: Option<RunStateStoreConfig>,
@@ -282,7 +280,7 @@ impl DagScheduler {
             dag,
             dispatcher: Arc::new(LocalNodeDispatcher),
             options: DagSchedulerOptions::default(),
-            sync_service: None,
+            event_sink: None,
             run_guard: None,
             fencing_store: None,
             run_state_store: None,
@@ -299,8 +297,8 @@ impl DagScheduler {
         self
     }
 
-    pub fn with_sync_service(mut self, sync_service: SyncService) -> Self {
-        self.sync_service = Some(sync_service);
+    pub fn with_event_sink(mut self, sink: Arc<dyn crate::store::DagEventSink>) -> Self {
+        self.event_sink = Some(sink);
         self
     }
 
@@ -379,7 +377,7 @@ impl DagScheduler {
 
     fn record_run_guard_latency(stage: &str, ok: bool, elapsed: Duration) {
         let result = if ok { "ok" } else { "err" };
-        crate::common::metrics::observe_latency("dag", "run_guard", stage, result, elapsed.as_secs_f64());
+        crate::metrics::observe_latency("dag", "run_guard", stage, result, elapsed.as_secs_f64());
     }
 
     fn record_run_guard_counter(metric: &'static str, result: &str) {
@@ -390,11 +388,11 @@ impl DagScheduler {
         } else {
             "renew"
         };
-        crate::common::metrics::inc_throughput("dag", "run_guard", operation, result, 1);
+        crate::metrics::inc_throughput("dag", "run_guard", operation, result, 1);
         if metric == "mocra_dag_run_guard_renew_total"
             && (result == "lost" || result == "error" || result == "failed_final")
         {
-            crate::common::metrics::inc_error("dag", "run_guard", "critical", result, 1);
+            crate::metrics::inc_error("dag", "run_guard", "critical", result, 1);
         }
     }
 
@@ -441,8 +439,8 @@ impl DagScheduler {
         let _run_guard = if run_guard_enabled { "on" } else { "off" };
         match result {
             Ok(_) => {
-                crate::common::metrics::inc_throughput("dag", "scheduler", "execute", "success", 1);
-                crate::common::metrics::observe_latency(
+                crate::metrics::inc_throughput("dag", "scheduler", "execute", "success", 1);
+                crate::metrics::observe_latency(
                     "dag",
                     "scheduler",
                     "execute",
@@ -453,15 +451,15 @@ impl DagScheduler {
             Err(err) => {
                 let code = format!("{:?}", Self::error_code(err));
                 let class = format!("{:?}", Self::top_level_error_class(err));
-                crate::common::metrics::inc_throughput("dag", "scheduler", "execute", "error", 1);
-                crate::common::metrics::observe_latency(
+                crate::metrics::inc_throughput("dag", "scheduler", "execute", "error", 1);
+                crate::metrics::observe_latency(
                     "dag",
                     "scheduler",
                     "execute",
                     "error",
                     elapsed.as_secs_f64(),
                 );
-                crate::common::metrics::inc_error("dag", "scheduler", &class, &code, 1);
+                crate::metrics::inc_error("dag", "scheduler", &class, &code, 1);
             }
         }
     }
@@ -595,7 +593,7 @@ impl DagScheduler {
         error_class: Option<DagErrorClass>,
         error: Option<String>,
     ) {
-        let Some(sync_service) = &self.sync_service else {
+        let Some(event_sink) = &self.event_sink else {
             return;
         };
 
@@ -625,7 +623,7 @@ impl DagScheduler {
             timestamp_ms: Self::now_ms(),
         };
 
-        if let Err(sync_err) = sync_service.send(&state).await {
+        if let Err(sync_err) = event_sink.emit(&state).await {
             eprintln!(
                 "DAG sync emit failed: run_id={} node_id={} stage={} error={}",
                 run_id,
@@ -890,14 +888,13 @@ impl DagScheduler {
             .or_insert(1);
 
         let mut retry_delay_ms = policy.retry_backoff_ms;
-        if let Some(threshold) = policy.circuit_breaker_failure_threshold {
-            if *failure_streak >= threshold && policy.circuit_breaker_open_ms > retry_delay_ms {
+        if let Some(threshold) = policy.circuit_breaker_failure_threshold
+            && *failure_streak >= threshold && policy.circuit_breaker_open_ms > retry_delay_ms {
                 retry_delay_ms = policy.circuit_breaker_open_ms;
             }
-        }
 
         if attempt <= policy.max_retries && allow_retry {
-            crate::common::metrics::inc_error("dag", "node", &failure_class_tag_str, &failure_code_tag, 1);
+            crate::metrics::inc_error("dag", "node", &failure_class_tag_str, &failure_code_tag, 1);
             if let Some(node) = state.runtime.nodes.get_mut(&node_id) {
                 node.error = Some(error.to_string());
             }
@@ -934,7 +931,7 @@ impl DagScheduler {
         if let Some(node) = state.runtime.nodes.get_mut(&node_id) {
             node.error = Some(error.to_string());
         }
-        crate::common::metrics::inc_error("dag", "node", &failure_class_tag_str, &failure_code_tag, 1);
+        crate::metrics::inc_error("dag", "node", &failure_class_tag_str, &failure_code_tag, 1);
         let _ = failure_code_tag;
         let _ = failure_class_tag_str;
         let _ = placement_tag;
@@ -1241,10 +1238,10 @@ impl DagScheduler {
         let snapshot = state.snapshot();
         match cfg.store.save(&cfg.run_key, &snapshot).await {
             Ok(()) => {
-                crate::common::metrics::inc_throughput("dag", "run_state", stage, "saved", 1);
+                crate::metrics::inc_throughput("dag", "run_state", stage, "saved", 1);
             }
             Err(e) => {
-                crate::common::metrics::inc_error("dag", "run_state", "store", "save_error", 1);
+                crate::metrics::inc_error("dag", "run_state", "store", "save_error", 1);
                 eprintln!(
                     "DAG run state snapshot save failed before error return: stage={} run_key={} error={}",
                     stage,
@@ -1257,7 +1254,7 @@ impl DagScheduler {
 
     pub async fn execute_parallel(&self) -> Result<DagExecutionReport, DagError> {
         let run_started = Instant::now();
-        crate::common::metrics::inc_throughput("dag", "scheduler", "execute", "started", 1);
+        crate::metrics::inc_throughput("dag", "scheduler", "execute", "started", 1);
 
         if let Err(e) = self.validate() {
             let result = Err(e);
@@ -1322,8 +1319,8 @@ impl DagScheduler {
         let mut renew_stop_tx = None;
         let mut renew_task = None;
 
-        if let Some((cfg, owner, _token)) = &run_guard_ctx {
-            if let Some(interval_ms) = cfg.renew_interval_ms {
+        if let Some((cfg, owner, _token)) = &run_guard_ctx
+            && let Some(interval_ms) = cfg.renew_interval_ms {
                 let (tx, mut rx) = tokio::sync::watch::channel(false);
                 let guard = cfg.guard.clone();
                 let lock_key = cfg.lock_key.clone();
@@ -1366,7 +1363,6 @@ impl DagScheduler {
                     }
                 }));
             }
-        }
 
         let execute_result = async {
             let resume_state = if let Some(cfg) = &self.run_state_store {
@@ -1391,8 +1387,8 @@ impl DagScheduler {
             let mut join_set: tokio::task::JoinSet<JoinOutput> = tokio::task::JoinSet::new();
 
             while !state.ready_queue.is_empty() || !join_set.is_empty() {
-                if let Some(lock_key) = run_guard_lock_key.as_ref() {
-                    if let Some(reason) = renew_failed_reason.lock().ok().and_then(|g| g.clone()) {
+                if let Some(lock_key) = run_guard_lock_key.as_ref()
+                    && let Some(reason) = renew_failed_reason.lock().ok().and_then(|g| g.clone()) {
                         join_set.abort_all();
                         self
                             .persist_failure_snapshot_if_enabled(&state, "renew_lost")
@@ -1402,10 +1398,9 @@ impl DagScheduler {
                             reason,
                         });
                     }
-                }
 
-                if let Some(timeout) = run_timeout {
-                    if started_at.elapsed() > timeout {
+                if let Some(timeout) = run_timeout
+                    && started_at.elapsed() > timeout {
                         join_set.abort_all();
                         self
                             .persist_failure_snapshot_if_enabled(&state, "run_timeout")
@@ -1415,7 +1410,6 @@ impl DagScheduler {
                             timeout_ms: timeout.as_millis() as u64,
                         });
                     }
-                }
 
                 while join_set.len() < max_in_flight {
                     let Some(node_id) = state.pop_ready() else {
@@ -1478,11 +1472,10 @@ impl DagScheduler {
             }
 
             let report = state.into_report();
-            if report.is_ok() {
-                if let Some(cfg) = &self.run_state_store {
+            if report.is_ok()
+                && let Some(cfg) = &self.run_state_store {
                     cfg.store.clear(&cfg.run_key).await?;
                 }
-            }
             report
         }
         .await;
@@ -1523,8 +1516,8 @@ impl DagScheduler {
                     Self::record_run_guard_counter("mocra_dag_run_guard_release_total", "success");
                 }
             }
-            if execute_result.is_ok() {
-                if let Some(reason) = renew_failed {
+            if execute_result.is_ok()
+                && let Some(reason) = renew_failed {
                     Self::record_run_guard_counter("mocra_dag_run_guard_renew_total", "failed_final");
                     let result = Err(DagError::RunGuardRenewFailed {
                         lock_key: cfg.lock_key,
@@ -1537,7 +1530,6 @@ impl DagScheduler {
                     );
                     return result;
                 }
-            }
         }
         Self::record_execute_metrics(
             &execute_result,

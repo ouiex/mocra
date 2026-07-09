@@ -1379,7 +1379,7 @@ async fn execute_parallel_emits_syncable_state() {
         .unwrap();
 
     let sync_service = SyncService::new(None, "dag_schedule_test".to_string());
-    let scheduler = DagScheduler::new(dag).with_sync_service(sync_service.clone());
+    let scheduler = DagScheduler::new(dag).with_event_sink(Arc::new(DagSyncSink(sync_service.clone())));
 
     let _ = scheduler.execute_parallel().await.unwrap();
     let latest = sync_service

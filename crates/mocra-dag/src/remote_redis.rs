@@ -11,9 +11,9 @@ use serde::{Deserialize, Serialize};
 use tokio::time::{Duration, Instant};
 use uuid::Uuid;
 
-use crate::cacheable::CacheService;
+use crate::store::DagStore;
 
-use super::types::{
+use crate::types::{
     DagError, DagNodeDispatcher, DagNodeTrait, NodeExecutionContext, NodePlacement, TaskPayload,
 };
 
@@ -36,14 +36,14 @@ impl Default for RedisRemoteDispatcherOptions {
 
 #[derive(Clone)]
 pub struct RedisRemoteDispatcher {
-    cache: Arc<CacheService>,
+    cache: Arc<dyn DagStore>,
     key_prefix: String,
     options: RedisRemoteDispatcherOptions,
 }
 
 impl RedisRemoteDispatcher {
     pub fn new(
-        cache: Arc<CacheService>,
+        cache: Arc<dyn DagStore>,
         key_prefix: impl AsRef<str>,
         options: RedisRemoteDispatcherOptions,
     ) -> Self {
@@ -321,7 +321,7 @@ impl DagNodeDispatcher for RedisRemoteDispatcher {
 
 #[cfg(test)]
 mod tests {
-    use super::RedisRemoteDispatcher;
+    use crate::RedisRemoteDispatcher;
 
     #[test]
     fn next_poll_delay_ms_grows_and_caps() {
@@ -344,7 +344,7 @@ mod tests {
 
 #[derive(Clone)]
 pub struct RedisDagWorker {
-    cache: Arc<CacheService>,
+    cache: Arc<dyn DagStore>,
     key_prefix: String,
     worker_group: String,
     worker_id: String,
@@ -362,7 +362,7 @@ pub struct RedisDagWorker {
 
 impl RedisDagWorker {
     pub fn new(
-        cache: Arc<CacheService>,
+        cache: Arc<dyn DagStore>,
         key_prefix: impl AsRef<str>,
         worker_group: impl AsRef<str>,
     ) -> Self {

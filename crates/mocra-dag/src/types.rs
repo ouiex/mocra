@@ -5,7 +5,6 @@ use std::error::Error;
 use std::fmt::{Display, Formatter};
 use std::sync::Arc;
 
-use crate::sync::SyncAble;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DagError {
@@ -406,12 +405,6 @@ pub struct DagRunResumeState {
     pub run_id: String,
     pub run_fencing_token: Option<u64>,
     pub succeeded_outputs: HashMap<String, TaskPayload>,
-}
-
-impl SyncAble for DagNodeSyncState {
-    fn topic() -> String {
-        "dag_node_sync_state".to_string()
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

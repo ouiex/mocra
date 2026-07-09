@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use metrics::counter;
 use redis::Script;
 
-use super::types::{DagError, DagFencingStore, TaskPayload};
+use crate::types::{DagError, DagFencingStore, TaskPayload};
 
 #[derive(Clone)]
 pub struct RedisDagFencingStore {

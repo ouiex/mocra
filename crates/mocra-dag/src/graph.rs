@@ -3,7 +3,7 @@ use std::collections::{BinaryHeap, HashMap};
 use std::sync::Arc;
 use uuid::Uuid;
 
-use super::types::{
+use crate::types::{
     DagError, DagNodeExecutionPolicy, DagNodeRecord, DagNodeStatus, DagNodeTrait, NodePlacement,
 };
 
@@ -51,6 +51,12 @@ impl<'a> DagChainBuilder<'a> {
 pub struct Dag {
     pub(crate) nodes: HashMap<String, DagNodeRecord>,
     pub(crate) edges: HashMap<String, Vec<String>>,
+}
+
+impl Default for Dag {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Dag {
@@ -229,7 +235,7 @@ impl Dag {
             .get(&node_id)
             .cloned()
             .map(Arc::new)
-            .ok_or_else(|| DagError::NodeNotFound(node_id))
+            .ok_or(DagError::NodeNotFound(node_id))
     }
 
     fn connect(&mut self, from: impl AsRef<str>, to: impl AsRef<str>) -> Result<(), DagError> {
@@ -248,11 +254,10 @@ impl Dag {
             tos.push(to.clone());
         }
 
-        if let Some(node) = self.nodes.get_mut(&to) {
-            if !node.predecessors.iter().any(|p| p == &from) {
+        if let Some(node) = self.nodes.get_mut(&to)
+            && !node.predecessors.iter().any(|p| p == &from) {
                 node.predecessors.push(from);
             }
-        }
 
         Ok(())
     }
