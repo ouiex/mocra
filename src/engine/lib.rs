@@ -1,4 +1,5 @@
 pub mod engine;
+#[cfg(feature = "dashboard")]
 pub mod api;
 pub mod chain;
 pub mod events;

@@ -1,3 +1,17 @@
+//! mocra 的公开 API 契约 —— `use mocra::prelude::*` 一站式引入。
+//!
+//! 分层:
+//! - **核心门面**:`Spider` / `Mocra` / `DataSink` / `on_item` / `Ctx` / `Seeds`
+//!   + `Request` / `Response` / `Result` —— 80% 场景只需这些。
+//! - **集群**(`cluster-embedded`):`ClusterConfig` / `RaftTuning`。
+//! - **后台管理 / 监控**(`dashboard`):`prelude::dashboard`(`EngineStats` / `ClusterStatusView`),
+//!   配合门面 `Mocra::builder().dashboard(port)` 暴露 admin + 可观测 HTTP API。
+//! - **扩展点**:自定义后端时实现 `queue::MqBackend` / `sync::CoordinationBackend` /
+//!   `common::ModuleTrait` / `common::DataMiddleware` 等。
+//!
+//! 进阶 / 扩展类型在子模块 `prelude::{engine, queue, sync, schedule, common, utils, proxy,
+//! cacheable, errors}`;内部实现细节已收敛为 `pub(crate)`,不进公开 API。
+
 // High-level Spider facade (重构 Phase 1)
 pub use crate::facade::{
     on_item, ChannelSink, Ctx, DataSink, Mocra, MocraBuilder, Seeds, Spider,
@@ -54,6 +68,14 @@ pub mod downloader {
 pub mod engine {
     pub use crate::engine::engine::Engine;
 }
+/// 后台管理 / 监控可观测数据类型(需 `dashboard` 特性)。供后台管理页面 / 客户端消费。
+#[cfg(feature = "dashboard")]
+pub mod dashboard {
+    pub use crate::engine::api::observability::{EngineStats, PendingBreakdown};
+    pub use crate::engine::monitor::SystemSnapshot;
+    pub use crate::sync::ClusterStatusView;
+    pub use crate::utils::logger::LogRecord;
+}
 pub mod queue {
     pub use crate::queue::Channel;
     pub use crate::queue::Compensator;
@@ -74,13 +96,18 @@ pub mod sync {
     pub use crate::sync::DistributedSync;
     #[cfg(feature = "queue-kafka")]
     pub use crate::sync::KafkaBackend;
+    pub use crate::sync::ClusterStatusView;
     pub use crate::sync::CoordinationBackend;
     pub use crate::sync::RedisBackend;
     pub use crate::sync::SyncAble;
     pub use crate::sync::SyncService;
 }
 pub mod utils {
-    pub use crate::utils::*;
+    pub use crate::utils::date_utils::DateUtils;
+    pub use crate::utils::distributed_rate_limit::{
+        DistributedSlidingWindowRateLimiter, RateLimitConfig,
+    };
+    pub use crate::utils::redis_lock::DistributedLockManager;
 }
 pub mod proxy {
     pub use crate::proxy::*;

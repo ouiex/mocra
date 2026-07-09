@@ -1,0 +1,339 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>mocra dashboard</title>
+<style>
+  :root {
+    --bg: #0d1117; --panel: #161b22; --panel2: #1c2230; --border: #30363d;
+    --text: #e6edf3; --muted: #8b949e; --accent: #58a6ff;
+    --good: #3fb950; --warn: #d29922; --bad: #f85149; --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+  a { color: var(--accent); }
+  header {
+    position: sticky; top: 0; z-index: 10; background: rgba(13,17,23,.92); backdrop-filter: blur(6px);
+    border-bottom: 1px solid var(--border); padding: 10px 16px; display: flex; gap: 12px; align-items: center; flex-wrap: wrap;
+  }
+  header .brand { font-weight: 700; letter-spacing: .3px; display: flex; align-items: center; gap: 8px; }
+  header .brand .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); box-shadow: 0 0 0 3px rgba(139,148,158,.15); }
+  header .brand .dot.on { background: var(--good); box-shadow: 0 0 0 3px rgba(63,185,80,.18); }
+  header .brand .dot.err { background: var(--bad); box-shadow: 0 0 0 3px rgba(248,81,73,.18); }
+  header input, header select, header button {
+    background: var(--panel); color: var(--text); border: 1px solid var(--border);
+    border-radius: 6px; padding: 6px 10px; font-size: 13px; outline: none;
+  }
+  header input:focus { border-color: var(--accent); }
+  header input.endpoint { min-width: 240px; font-family: var(--mono); }
+  header input.apikey { min-width: 150px; font-family: var(--mono); }
+  header button { cursor: pointer; }
+  header button.primary { background: var(--accent); border-color: var(--accent); color: #06101f; font-weight: 600; }
+  header .spacer { flex: 1; }
+  header .meta { color: var(--muted); font-size: 12px; font-family: var(--mono); }
+  main { padding: 16px; max-width: 1280px; margin: 0 auto; }
+  .grid { display: grid; grid-template-columns: repeat(12, 1fr); gap: 14px; }
+  .card { grid-column: span 12; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; }
+  @media (min-width: 720px) { .card.half { grid-column: span 6; } .card.third { grid-column: span 4; } }
+  .card h2 { margin: 0 0 12px; font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); font-weight: 600; }
+  .row { display: flex; gap: 10px; flex-wrap: wrap; }
+  .badge { display: inline-flex; align-items: center; gap: 6px; background: var(--panel2); border: 1px solid var(--border); border-radius: 999px; padding: 3px 10px; font-size: 12px; }
+  .badge.good { color: var(--good); border-color: rgba(63,185,80,.4); }
+  .badge.warn { color: var(--warn); border-color: rgba(210,153,34,.4); }
+  .badge.accent { color: var(--accent); border-color: rgba(88,166,255,.4); }
+  .meter { margin: 10px 0; }
+  .meter .lbl { display: flex; justify-content: space-between; font-size: 12px; color: var(--muted); margin-bottom: 5px; }
+  .meter .lbl b { color: var(--text); font-family: var(--mono); font-weight: 600; }
+  .meter .track { height: 8px; background: var(--panel2); border-radius: 999px; overflow: hidden; }
+  .meter .fill { height: 100%; width: 0; border-radius: 999px; background: var(--good); transition: width .4s ease, background .4s ease; }
+  .stats { display: grid; grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); gap: 10px; }
+  .stat { background: var(--panel2); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; }
+  .stat .n { font-size: 22px; font-weight: 700; font-family: var(--mono); }
+  .stat .k { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; margin-top: 2px; }
+  .stat.total { border-color: rgba(88,166,255,.4); }
+  .stat.total .n { color: var(--accent); }
+  .stat.err .n { color: var(--bad); }
+  .kv { display: grid; grid-template-columns: auto 1fr; gap: 6px 14px; font-size: 13px; }
+  .kv .k { color: var(--muted); }
+  .kv .v { font-family: var(--mono); text-align: right; }
+  .logs-ctl { display: flex; gap: 8px; align-items: center; margin-bottom: 10px; flex-wrap: wrap; }
+  .logs-ctl select, .logs-ctl button { background: var(--panel2); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 4px 8px; font-size: 12px; }
+  .logwrap { overflow: auto; max-height: 420px; border: 1px solid var(--border); border-radius: 8px; }
+  table.logs { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 12px; }
+  table.logs th { position: sticky; top: 0; background: var(--panel2); text-align: left; padding: 7px 10px; color: var(--muted); font-weight: 600; border-bottom: 1px solid var(--border); }
+  table.logs td { padding: 6px 10px; border-bottom: 1px solid rgba(48,54,61,.5); vertical-align: top; white-space: nowrap; }
+  table.logs td.msg { white-space: normal; word-break: break-word; font-family: -apple-system, sans-serif; }
+  table.logs tr:hover td { background: rgba(88,166,255,.05); }
+  .lvl { font-weight: 700; }
+  .lvl.ERROR { color: var(--bad); } .lvl.WARN { color: var(--warn); }
+  .lvl.INFO { color: var(--good); } .lvl.DEBUG, .lvl.TRACE { color: var(--muted); }
+  .empty { color: var(--muted); text-align: center; padding: 28px; font-size: 13px; }
+  .hint { color: var(--muted); font-size: 12px; margin-top: 8px; }
+</style>
+</head>
+<body>
+<header>
+  <span class="brand"><span class="dot" id="statusDot"></span> mocra <span style="color:var(--muted);font-weight:400">dashboard</span></span>
+  <input class="endpoint" id="endpoint" placeholder="http://127.0.0.1:8080" spellcheck="false" />
+  <input class="apikey" id="apikey" placeholder="API key(可选)" spellcheck="false" />
+  <button class="primary" id="connectBtn">连接</button>
+  <div class="spacer"></div>
+  <label class="meta">刷新
+    <select id="interval">
+      <option value="1000">1s</option>
+      <option value="2000" selected>2s</option>
+      <option value="5000">5s</option>
+      <option value="10000">10s</option>
+      <option value="0">暂停</option>
+    </select>
+  </label>
+  <span class="meta" id="lastUpdated">—</span>
+</header>
+
+<main>
+  <div class="grid">
+    <!-- 概览 / 引擎 -->
+    <section class="card third">
+      <h2>引擎</h2>
+      <div class="row" id="engineBadges"><span class="badge">未连接</span></div>
+      <div class="hint" id="engineHint">输入 endpoint 后点“连接”。</div>
+    </section>
+
+    <!-- 性能 / 主机资源 -->
+    <section class="card third">
+      <h2>性能 · 主机资源</h2>
+      <div class="meter">
+        <div class="lbl"><span>CPU</span><b id="cpuVal">—</b></div>
+        <div class="track"><div class="fill" id="cpuBar"></div></div>
+      </div>
+      <div class="meter">
+        <div class="lbl"><span>内存</span><b id="memVal">—</b></div>
+        <div class="track"><div class="fill" id="memBar"></div></div>
+      </div>
+      <div class="meter">
+        <div class="lbl"><span>Swap</span><b id="swapVal">—</b></div>
+        <div class="track"><div class="fill" id="swapBar"></div></div>
+      </div>
+    </section>
+
+    <!-- 集群 -->
+    <section class="card third" id="clusterCard" style="display:none">
+      <h2>集群 · Raft</h2>
+      <div class="kv" id="clusterKv"></div>
+    </section>
+
+    <!-- 任务 / 队列 -->
+    <section class="card">
+      <h2>任务 · 队列待处理</h2>
+      <div class="stats" id="queueStats"><div class="empty">未连接</div></div>
+    </section>
+
+    <!-- 日志 -->
+    <section class="card">
+      <h2>日志</h2>
+      <div class="logs-ctl">
+        <label class="meta">条数
+          <select id="logLimit">
+            <option value="100">100</option>
+            <option value="200" selected>200</option>
+            <option value="500">500</option>
+            <option value="1000">1000</option>
+          </select>
+        </label>
+        <label class="meta">级别
+          <select id="logLevel">
+            <option value="">全部</option>
+            <option value="ERROR">ERROR</option>
+            <option value="WARN">WARN+</option>
+            <option value="INFO">INFO+</option>
+          </select>
+        </label>
+        <button id="logPause">⏸ 暂停滚动</button>
+        <span class="meta" id="logCount"></span>
+      </div>
+      <div class="logwrap">
+        <table class="logs">
+          <thead><tr><th>时间</th><th>级别</th><th>模块</th><th>消息</th><th>task/trace</th></tr></thead>
+          <tbody id="logBody"><tr><td colspan="5" class="empty">未连接</td></tr></tbody>
+        </table>
+      </div>
+    </section>
+  </div>
+</main>
+
+<script>
+(function () {
+  "use strict";
+  var $ = function (id) { return document.getElementById(id); };
+
+  // 服务端直接托管本页时,默认指向同源;作为独立文件(file://)打开时,默认本地引擎。
+  var defaultEndpoint = (location.protocol === "http:" || location.protocol === "https:")
+    ? location.origin : "http://127.0.0.1:8080";
+
+  var state = {
+    base: "", apiKey: "", timer: null, intervalMs: 2000,
+    connected: false, logPaused: false, inFlight: false,
+  };
+
+  var LEVEL_RANK = { TRACE: 0, DEBUG: 1, INFO: 2, WARN: 3, ERROR: 4 };
+
+  function setDot(cls) { $("statusDot").className = "dot" + (cls ? " " + cls : ""); }
+
+  function fmtBytes(b) {
+    if (b == null) return "—";
+    var u = ["B", "KB", "MB", "GB", "TB"], i = 0, n = Number(b);
+    while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+    return n.toFixed(n >= 100 || i === 0 ? 0 : 1) + " " + u[i];
+  }
+  function pct(x) { return (x == null ? 0 : Number(x)).toFixed(1) + "%"; }
+  function barColor(p) { return p >= 90 ? "var(--bad)" : p >= 70 ? "var(--warn)" : "var(--good)"; }
+  function setMeter(barId, valId, percent, text) {
+    var p = Math.max(0, Math.min(100, Number(percent) || 0));
+    var bar = $(barId); bar.style.width = p + "%"; bar.style.background = barColor(p);
+    $(valId).textContent = text;
+  }
+
+  function apiUrl(path) { return state.base.replace(/\/$/, "") + path; }
+  function fetchJSON(path) {
+    var opts = { headers: {} };
+    if (state.apiKey) opts.headers["x-api-key"] = state.apiKey;
+    return fetch(apiUrl(path), opts).then(function (r) {
+      if (!r.ok) throw new Error(path + " → " + r.status);
+      return r.json();
+    });
+  }
+
+  function renderEngine(e) {
+    var badges = $("engineBadges"); badges.innerHTML = "";
+    if (!e) { badges.innerHTML = '<span class="badge">无数据</span>'; return; }
+    function b(txt, cls) { var s = document.createElement("span"); s.className = "badge" + (cls ? " " + cls : ""); s.textContent = txt; badges.appendChild(s); }
+    b("namespace: " + e.namespace, "accent");
+    b(e.single_node ? "单节点" : "多节点", e.single_node ? "" : "good");
+    b(e.clustered ? "已接入集群" : "无协调后端", e.clustered ? "good" : "");
+    b("待处理 " + (e.pending ? e.pending.total : 0));
+    $("engineHint").textContent = "";
+  }
+
+  function renderQueues(e) {
+    var wrap = $("queueStats");
+    if (!e || !e.pending) { wrap.innerHTML = '<div class="empty">无数据</div>'; return; }
+    var p = e.pending;
+    var items = [
+      ["task", p.task, ""], ["download", p.download, ""], ["response", p.response, ""],
+      ["parser", p.parser, ""], ["error", p.error, "err"], ["remote", p.remote_task, ""],
+      ["total", p.total, "total"],
+    ];
+    wrap.innerHTML = "";
+    items.forEach(function (it) {
+      var d = document.createElement("div"); d.className = "stat" + (it[2] ? " " + it[2] : "");
+      d.innerHTML = '<div class="n">' + (it[1] == null ? "—" : it[1]) + '</div><div class="k">' + it[0] + "</div>";
+      wrap.appendChild(d);
+    });
+  }
+
+  function renderSystem(s) {
+    if (!s) { setMeter("cpuBar", "cpuVal", 0, "—"); setMeter("memBar", "memVal", 0, "—"); setMeter("swapBar", "swapVal", 0, "—"); return; }
+    setMeter("cpuBar", "cpuVal", s.cpu_usage_percent, pct(s.cpu_usage_percent));
+    setMeter("memBar", "memVal", s.memory_usage_percent, pct(s.memory_usage_percent) + " · " + fmtBytes(s.memory_used_bytes) + " / " + fmtBytes(s.memory_total_bytes));
+    var swapPct = s.swap_total_bytes ? (s.swap_used_bytes / s.swap_total_bytes) * 100 : 0;
+    setMeter("swapBar", "swapVal", swapPct, fmtBytes(s.swap_used_bytes) + " / " + fmtBytes(s.swap_total_bytes));
+  }
+
+  function renderCluster(c) {
+    var card = $("clusterCard");
+    if (!c) { card.style.display = "none"; return; }
+    card.style.display = "";
+    var rows = [
+      ["node", c.node_id], ["角色", c.is_leader ? "leader" : "follower"],
+      ["current leader", c.current_leader == null ? "—" : c.current_leader],
+      ["term", c.term], ["members", c.member_count], ["voters", c.voter_count],
+      ["last applied", c.last_applied_index],
+    ];
+    $("clusterKv").innerHTML = rows.map(function (r) {
+      return '<div class="k">' + r[0] + '</div><div class="v">' + (r[1] == null ? "—" : r[1]) + "</div>";
+    }).join("");
+  }
+
+  function esc(s) { return String(s == null ? "" : s).replace(/[&<>]/g, function (c) { return { "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]; }); }
+  function renderLogs(list) {
+    var body = $("logBody");
+    var minRank = LEVEL_RANK[$("logLevel").value];
+    var rows = (list || []).filter(function (r) {
+      if (minRank == null) return true;
+      var rk = LEVEL_RANK[(r.level || "").toUpperCase()];
+      return rk == null || rk >= minRank;
+    });
+    $("logCount").textContent = rows.length ? rows.length + " 条" : "";
+    if (!rows.length) { body.innerHTML = '<tr><td colspan="5" class="empty">无日志</td></tr>'; return; }
+    body.innerHTML = rows.map(function (r) {
+      var lvl = (r.level || "").toUpperCase();
+      var t = r.time ? String(r.time).replace("T", " ").replace(/\.\d+.*$/, "") : "—";
+      var tag = r.task_id || r.trace_id || r.request_id || "";
+      return "<tr><td>" + esc(t) + '</td><td class="lvl ' + esc(lvl) + '">' + esc(lvl || "—") +
+        "</td><td>" + esc(r.module || "—") + '</td><td class="msg">' + esc(r.message || "") +
+        "</td><td>" + esc(tag) + "</td></tr>";
+    }).join("");
+  }
+
+  function poll() {
+    if (state.inFlight) return;
+    state.inFlight = true;
+    var limit = $("logLimit").value || "200";
+    Promise.allSettled([
+      fetchJSON("/observability/engine"),
+      fetchJSON("/observability/system"),
+      fetchJSON("/observability/cluster"),
+      state.logPaused ? Promise.resolve({ __skip: true }) : fetchJSON("/observability/logs?limit=" + limit),
+    ]).then(function (res) {
+      var engine = res[0].status === "fulfilled" ? res[0].value : null;
+      // engine 端点作为“是否连接”的判定基准。
+      if (res[0].status !== "fulfilled") { onDisconnect(res[0].reason); return; }
+      state.connected = true; setDot("on");
+      renderEngine(engine); renderQueues(engine);
+      renderSystem(res[1].status === "fulfilled" ? res[1].value : null);
+      renderCluster(res[2].status === "fulfilled" ? res[2].value : null);
+      if (res[3].status === "fulfilled" && !res[3].value.__skip) renderLogs(res[3].value);
+      $("lastUpdated").textContent = "更新于 " + new Date().toLocaleTimeString();
+    }).finally(function () { state.inFlight = false; });
+  }
+
+  function onDisconnect(err) {
+    state.connected = false; setDot("err");
+    $("engineBadges").innerHTML = '<span class="badge warn">连接失败</span>';
+    $("engineHint").textContent = "无法访问 " + state.base + " — " + (err && err.message ? err.message : "请检查 endpoint / CORS / dashboard 特性是否开启");
+    $("lastUpdated").textContent = "连接失败";
+  }
+
+  function schedule() {
+    if (state.timer) { clearInterval(state.timer); state.timer = null; }
+    if (state.intervalMs > 0) state.timer = setInterval(poll, state.intervalMs);
+  }
+
+  function connect() {
+    state.base = ($("endpoint").value || defaultEndpoint).trim();
+    state.apiKey = $("apikey").value.trim();
+    setDot(""); $("engineHint").textContent = "连接中…";
+    poll(); schedule();
+  }
+
+  // 事件绑定
+  $("connectBtn").addEventListener("click", connect);
+  $("endpoint").addEventListener("keydown", function (e) { if (e.key === "Enter") connect(); });
+  $("apikey").addEventListener("keydown", function (e) { if (e.key === "Enter") connect(); });
+  $("interval").addEventListener("change", function () { state.intervalMs = Number(this.value); schedule(); });
+  $("logLevel").addEventListener("change", poll);
+  $("logLimit").addEventListener("change", poll);
+  $("logPause").addEventListener("click", function () {
+    state.logPaused = !state.logPaused;
+    this.textContent = state.logPaused ? "▶ 恢复滚动" : "⏸ 暂停滚动";
+  });
+
+  // 初始化
+  $("endpoint").value = defaultEndpoint;
+  // 同源托管时自动连接;独立文件需用户点“连接”。
+  if (location.protocol === "http:" || location.protocol === "https:") connect();
+})();
+</script>
+</body>
+</html>

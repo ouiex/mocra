@@ -23,6 +23,12 @@ Cargo workspace. No backward compatibility with `0.2.x` internals.
   ack + nack retry/DLQ, integration-tested against a real server.
 - **Formal `MetadataStore` trait** — DB metadata access behind `Arc<dyn MetadataStore>` instead
   of a concrete repository; DB is optional.
+- **Admin dashboard (`dashboard`)** — enabling the feature exposes a read-only, CORS-enabled
+  observability HTTP API (engine/queue stats, host CPU/memory/swap, recent structured logs, Raft
+  cluster status) **and** a built-in single-file web dashboard served at `GET /` — open the
+  endpoint in a browser to see metrics / logs / tasks / performance, no frontend build required.
+  Facade: `.dashboard(port)` (keeps a standalone engine alive and captures logs so the panels have
+  data out of the box). See [`examples/dashboard.rs`].
 
 ### Changed
 
@@ -46,3 +52,4 @@ Cargo workspace. No backward compatibility with `0.2.x` internals.
 [`mocra-dag`]: crates/mocra-dag
 [`mocra-proxy`]: crates/mocra-proxy
 [`mocra-store`]: crates/mocra-store
+[`examples/dashboard.rs`]: examples/dashboard.rs

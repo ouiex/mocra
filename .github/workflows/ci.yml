@@ -52,6 +52,11 @@ jobs:
       - name: Test (store / DB)
         run: cargo test --lib --features store
 
+      - name: Test (dashboard)
+        run: |
+          cargo test --lib --features dashboard
+          cargo build --example dashboard --features dashboard
+
       # polars/excel are heavy; compile-check to catch feature-gating regressions.
       - name: Check (polars + excel)
         run: cargo check --lib --features polars,excel

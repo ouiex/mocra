@@ -3,7 +3,7 @@
 //! 面向 80% 场景的简单入口:实现一个 [`Spider`],用 [`Mocra::builder`] 三步跑起来,
 //! 通过 [`DataSink`] / [`on_item`] 拿到类型化数据,无需实现 `DataStoreMiddleware`。
 //!
-//! 现有的 [`ModuleTrait`](crate::common::interface::ModuleTrait) + DAG 仍是进阶路径;
+//! 现有的 [`ModuleTrait`] + DAG 仍是进阶路径;
 //! `Spider` 会被适配成一个单节点模块编译进现有引擎。
 //!
 //! 详见 `docs/refactor/02-target-api.md`。
@@ -488,6 +488,8 @@ pub struct MocraBuilder {
     modules: Vec<Arc<dyn ModuleTrait>>,
     #[cfg(feature = "cluster-embedded")]
     cluster: Option<ClusterConfig>,
+    #[cfg(feature = "dashboard")]
+    dashboard_port: Option<u16>,
 }
 
 impl MocraBuilder {
@@ -534,6 +536,28 @@ impl MocraBuilder {
         self
     }
 
+    /// 启用后台管理 / 监控 dashboard(需 `dashboard` 特性)。
+    ///
+    /// 引擎在 `port` 上暴露 admin + 可观测 HTTP API,供后台管理页面消费:
+    /// - `GET /metrics`(Prometheus 指标)、`GET /health`
+    /// - `GET /observability/cluster`(集群状态)、`GET /observability/engine`(队列/引擎)
+    /// - `GET /observability/system`(主机 CPU/内存/swap)、`GET /observability/logs?limit=N`(近期日志)
+    /// - `GET /nodes`、`GET /dlq`、`POST /control/pause|resume`、`POST /start_work`
+    ///
+    /// 另在 `GET /` 内置一个单文件前端页面:浏览器打开该端口即见 指标 / 日志 / 任务 / 性能
+    /// 面板(同源自动指向本引擎,无需手填 endpoint)。只读可观测端点(`/`、`/metrics`、
+    /// `/health`、`/observability/*`)免 API key 且开启 CORS,独立前端也可跨域消费;写操作端点仍需鉴权。
+    ///
+    /// 单机模式下额外把引擎切到「服务态」:关闭空闲自停(否则空闲 30s 退出、面板失联),
+    /// 并在未显式配日志时默认开启日志采集,让「日志」面板开箱即有数据。
+    ///
+    /// 从 `from_toml` 的 `[api]` 配置也能开启;此方法用于程序化(免 TOML)开启。
+    #[cfg(feature = "dashboard")]
+    pub fn dashboard(mut self, port: u16) -> Self {
+        self.dashboard_port = Some(port);
+        self
+    }
+
     /// 构建 State + Engine,注册所有 spider,启动引擎(阻塞至关闭)。
     ///
     /// - 提供了 [`from_toml`](MocraBuilder::from_toml) → 用该 config(可含 DB / Redis)。
@@ -569,6 +593,38 @@ impl MocraBuilder {
             .map_err(|e| Error::new(ErrorKind::Service, Some(e.to_string())))?;
 
         let state = Arc::new(state);
+        // dashboard:程序化开启时把端口写进 config.api,引擎 start 时据此起后台管理 HTTP API。
+        #[cfg(feature = "dashboard")]
+        if let Some(port) = self.dashboard_port {
+            let mut cfg = state.config.write().await;
+            cfg.api = Some(crate::common::model::config::Api {
+                port,
+                api_key: None,
+                rate_limit: None,
+            });
+            // dashboard 即「服务态」:单机默认会空闲 30s 自停,那样监控面板会随进程退出而失联。
+            // 程序化开启 dashboard 时关闭单机空闲自停,让可观测端点常驻(from_toml 的显式配置不受影响)。
+            if standalone {
+                cfg.crawler.idle_stop_secs = None;
+                // 未显式配日志时,默认开启日志采集,让 dashboard 的「日志」面板开箱即有数据:
+                // LogSinkLayer 把 log/tracing 事件送入内存环形缓冲,供 `/observability/logs` 读取。
+                if cfg.logger.is_none() {
+                    use crate::common::model::logger_config::{LogOutputConfig, LoggerConfig};
+                    cfg.logger = Some(LoggerConfig {
+                        enabled: Some(true),
+                        level: Some("info".to_string()),
+                        format: None,
+                        include: None,
+                        buffer: None,
+                        flush_interval_ms: None,
+                        outputs: vec![LogOutputConfig::Console],
+                        prometheus: None,
+                    });
+                }
+            }
+            drop(cfg);
+            log::info!("dashboard: admin/observability API on http://127.0.0.1:{port}");
+        }
         // 在 state 移入 engine 前捕获协调后端句柄:用于「种子只注入一次」的 leader 门,
         // 以及引擎停机后的优雅关闭。
         let coordination = state.coordination.clone();
@@ -747,5 +803,113 @@ mod cluster_config_tests {
         assert!(ClusterConfig::from_vars(None, Some("a".into()), None, None).is_err());
         assert!(ClusterConfig::from_vars(Some("x".into()), Some("a".into()), None, None).is_err());
         assert!(ClusterConfig::from_vars(Some("1".into()), None, None, None).is_err());
+    }
+}
+
+#[cfg(all(test, feature = "dashboard"))]
+mod dashboard_tests {
+    use super::*;
+
+    struct Noop;
+
+    #[async_trait]
+    impl Spider for Noop {
+        type Item = ();
+        fn name(&self) -> &str {
+            "noop"
+        }
+        async fn start(&self, _s: &mut Seeds) {}
+        async fn parse(&self, _r: Response, _c: &mut Ctx<Self::Item>) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    /// 端到端:`.dashboard(port)` 真的在该端口提供可观测 HTTP API。
+    #[tokio::test]
+    async fn dashboard_serves_observability_endpoints() {
+        let port = 17673u16;
+        let server = tokio::spawn(async move {
+            let _ = Mocra::builder()
+                .spider(Noop, on_item(|_: ()| async {}))
+                .dashboard(port)
+                .run()
+                .await;
+        });
+
+        let base = format!("http://127.0.0.1:{port}");
+        let client = reqwest::Client::new();
+
+        // 轮询 /health 直到 server 绑定。
+        let mut ready = false;
+        for _ in 0..60 {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            if let Ok(r) = client.get(format!("{base}/health")).send().await
+                && r.status().is_success()
+            {
+                ready = true;
+                break;
+            }
+        }
+        assert!(ready, "dashboard /health did not come up");
+
+        // /observability/engine → 引擎/队列快照。
+        let engine: serde_json::Value = client
+            .get(format!("{base}/observability/engine"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(engine["single_node"], serde_json::json!(true));
+        assert_eq!(engine["namespace"], serde_json::json!("mocra"));
+        assert!(engine["pending"]["total"].is_number());
+
+        // /observability/cluster → null(无集群协调后端)。
+        let cluster: serde_json::Value = client
+            .get(format!("{base}/observability/cluster"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert!(cluster.is_null());
+
+        // /observability/system → 200 + JSON(快照 null 或对象);顺带验证 CORS 头。
+        let sys = client
+            .get(format!("{base}/observability/system"))
+            .header("Origin", "http://localhost:3000")
+            .send()
+            .await
+            .unwrap();
+        assert!(sys.status().is_success());
+        assert!(
+            sys.headers().contains_key("access-control-allow-origin"),
+            "CORS header missing — 前端跨域会被拦"
+        );
+        let _sys_json: serde_json::Value = sys.json().await.unwrap();
+
+        // /observability/logs → 200 + JSON 数组。
+        let logs: serde_json::Value = client
+            .get(format!("{base}/observability/logs?limit=50"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert!(logs.is_array(), "logs 端点应返回数组");
+
+        // GET / → 内置单文件 dashboard 页面(HTML)。
+        let page = client.get(format!("{base}/")).send().await.unwrap();
+        assert!(page.status().is_success());
+        let html = page.text().await.unwrap();
+        assert!(
+            html.contains("mocra dashboard"),
+            "根路径应托管内置 dashboard 页面"
+        );
+
+        server.abort();
     }
 }

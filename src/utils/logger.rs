@@ -184,6 +184,33 @@ impl LogDispatcher {
     }
 }
 
+/// dashboard 日志 ring buffer:捕获最近日志供 `GET /observability/logs`(仅 `dashboard` 特性)。
+#[cfg(feature = "dashboard")]
+static LOG_RING: once_cell::sync::Lazy<std::sync::Mutex<std::collections::VecDeque<LogRecord>>> =
+    once_cell::sync::Lazy::new(|| std::sync::Mutex::new(std::collections::VecDeque::new()));
+
+#[cfg(feature = "dashboard")]
+const LOG_RING_CAP: usize = 1000;
+
+#[cfg(feature = "dashboard")]
+fn push_log_ring(record: &LogRecord) {
+    if let Ok(mut ring) = LOG_RING.lock() {
+        if ring.len() >= LOG_RING_CAP {
+            ring.pop_front();
+        }
+        ring.push_back(record.clone());
+    }
+}
+
+/// 最近 `limit` 条日志(最新在前)。供 dashboard `GET /observability/logs`。
+#[cfg(feature = "dashboard")]
+pub fn recent_logs(limit: usize) -> Vec<LogRecord> {
+    LOG_RING
+        .lock()
+        .map(|ring| ring.iter().rev().take(limit).cloned().collect())
+        .unwrap_or_default()
+}
+
 struct LogSinkLayer {
     dispatcher: Arc<LogDispatcher>,
 }
@@ -223,6 +250,8 @@ where
         record.retry_count = visitor.retry_count;
         record.traceback = visitor.traceback;
 
+        #[cfg(feature = "dashboard")]
+        push_log_ring(&record);
         self.dispatcher.emit(record);
     }
 }

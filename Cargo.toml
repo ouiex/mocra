@@ -30,6 +30,12 @@ exclude = [
 	"*.log",
 ]
 
+# docs.rs 用全特性构建,确保被特性门控的条目(如 cluster-embedded 的 API、
+# dashboard 可观测类型)在文档站可见,且 intra-doc 链接可解析。
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
 
 [dependencies]
 async-trait = "0.1"
@@ -72,6 +78,7 @@ md5 = "0.8"
 regex = { version = "1" }
 urlencoding = "2"
 axum = { version = "0.8", features = ["json"] }
+tower-http = { version = "0.6", features = ["cors"], optional = true }
 dashmap = "6"
 futures-util = "0.3"
 rand = "0.9.2"
@@ -123,6 +130,8 @@ store = ["dep:sea-orm", "dep:mocra-store"]
 # 内嵌 redb+Raft 控制面。开启后 `RaftCoordinationBackend` 实现 `CoordinationBackend`,
 # 可用自组网的 Raft 集群替换 Redis 协调(锁 / 选举 / KV)。
 cluster-embedded = ["dep:mocra-cluster"]
+# 后台管理 dashboard:开启后 engine 暴露 admin + 可观测 HTTP API(任务 / 集群 / 指标监控)。
+dashboard = ["dep:tower-http"]
 
 [lib]
 name = "mocra"
@@ -138,3 +147,9 @@ path = "examples/spider_quickstart.rs"
 name = "cluster_quickstart"
 path = "examples/cluster_quickstart.rs"
 required-features = ["cluster-embedded"]
+
+# 后台管理 dashboard 示例:需 dashboard(用到 `.dashboard(port)`)。
+[[example]]
+name = "dashboard"
+path = "examples/dashboard.rs"
+required-features = ["dashboard"]

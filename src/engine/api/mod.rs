@@ -5,3 +5,4 @@ pub(crate) mod dlq;
 pub(crate) mod auth;
 pub(crate) mod health;
 pub(crate) mod limit;
+pub mod observability;

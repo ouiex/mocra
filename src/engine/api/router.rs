@@ -10,13 +10,21 @@ use crate::engine::api::dlq::get_dlq;
 use crate::engine::api::auth::auth_middleware;
 use crate::engine::api::health;
 use crate::engine::api::limit;
+use crate::engine::api::observability;
+use tower_http::cors::CorsLayer;
 
 /// Configures and returns the Axum router for the Engine API.
 ///
 /// # Routes
-/// - Public:
+/// - Static / health (no API key, no rate limit):
+///   - `GET /`: built-in single-file admin dashboard (served with the `dashboard` feature)
+///   - `GET /health`: Health check
+/// - Monitoring (no API key, rate-limited) — for the dashboard / scrapers:
 ///   - `GET /metrics`: Prometheus metrics
-///   - `GET /health`: Health check (Excluded from Rate Limit)
+///   - `GET /observability/cluster`: Raft cluster status (`null` when standalone)
+///   - `GET /observability/engine`: engine / queue runtime snapshot
+///   - `GET /observability/system`: host CPU / memory / swap snapshot
+///   - `GET /observability/logs?limit=N`: recent structured logs (newest first)
 /// - Protected (Requires API Key, Rate Limited):
 ///   - `POST /start_work`: Inject a manual task
 ///   - `GET /nodes`: List active nodes
@@ -32,15 +40,33 @@ pub fn router(state: ApiState) -> Router {
         .route("/control/resume", post(resume_engine))
         .route_layer(middleware::from_fn_with_state(state.clone(), auth_middleware));
 
+    // 只读监控端点:无需 API key(与 /metrics 一致),仅限流。供后台管理页面轮询。
     let rate_limited_routes = Router::new()
         .route("/metrics", get(metrics_handler))
+        .route("/observability/cluster", get(observability::cluster_status))
+        .route("/observability/engine", get(observability::engine_stats))
+        .route("/observability/system", get(observability::system_stats))
+        .route("/observability/logs", get(observability::recent_logs))
         .merge(protected_routes)
         .route_layer(middleware::from_fn_with_state(state.clone(), limit::rate_limit_middleware));
 
     let health_route = Router::new()
+        .route("/", get(dashboard_page))
         .route("/health", get(health::health_check));
 
-    rate_limited_routes.merge(health_route).with_state(state)
+    rate_limited_routes
+        .merge(health_route)
+        .with_state(state)
+        // 允许独立前端(浏览器)跨域访问 dashboard API。
+        .layer(CorsLayer::permissive())
+}
+
+/// 内置后台管理页面(单文件、零构建的前端),随 `dashboard` 特性编译进二进制。
+///
+/// 浏览器打开引擎地址(`GET /`)即见 指标 / 日志 / 任务 / 性能 面板;页面同源托管时
+/// 自动指向本引擎,无需手填 endpoint。同一文件也可单独分发,填入任意 endpoint 使用。
+async fn dashboard_page() -> axum::response::Html<&'static str> {
+    axum::response::Html(include_str!("../../../dashboard/index.html"))
 }
 
 /// Handler for Prometheus metrics endpoint.

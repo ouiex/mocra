@@ -89,6 +89,19 @@ impl CoordinationBackend for RaftCoordinationBackend {
         self.cp.current_leader() == Some(self.cp.node_id())
     }
 
+    fn cluster_status(&self) -> Option<crate::sync::ClusterStatusView> {
+        let s = self.cp.status();
+        Some(crate::sync::ClusterStatusView {
+            node_id: s.node_id,
+            is_leader: s.is_leader,
+            current_leader: s.current_leader,
+            term: s.term,
+            last_applied_index: s.last_applied_index,
+            member_count: s.member_count,
+            voter_count: s.voter_count,
+        })
+    }
+
     async fn shutdown(&self) {
         if let Err(e) = self.cp.shutdown().await {
             log::warn!("cluster: raft control plane shutdown error: {e}");

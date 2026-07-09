@@ -65,12 +65,15 @@ impl Engine {
         } else {
             info!("Single-node mode detected, skipping Lua script preload");
         }
-        let api_config = self.state.config.read().await.api.clone();
-        if let Some(api) = api_config {
-            self.start_api(api.port).await;
-            info!("API server started on host:  http://127.0.0.1:{}", api.port);
-            if api.api_key.is_none() {
-                warn!("No API Key configured; API requests will be rejected. Set 'api.api_key' in config to enable access.");
+        #[cfg(feature = "dashboard")]
+        {
+            let api_config = self.state.config.read().await.api.clone();
+            if let Some(api) = api_config {
+                self.start_api(api.port).await;
+                info!("API server started on host:  http://127.0.0.1:{}", api.port);
+                if api.api_key.is_none() {
+                    warn!("No API Key configured; API requests will be rejected. Set 'api.api_key' in config to enable access.");
+                }
             }
         }
 
@@ -308,6 +311,7 @@ impl Engine {
     }
 
     /// Starts the HTTP API server in a detached task.
+    #[cfg(feature = "dashboard")]
     pub async fn start_api(&self, port: u16) {
         let queue_manager = self.queue_manager.clone();
         let prometheus_handle = self.prometheus_handle.clone();

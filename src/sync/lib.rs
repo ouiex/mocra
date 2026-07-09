@@ -7,7 +7,7 @@ pub mod leader;
 #[cfg(feature = "cluster-embedded")]
 pub mod raft_backend;
 
-pub use backend::CoordinationBackend;
+pub use backend::{ClusterStatusView, CoordinationBackend};
 pub use distributed::{DistributedSync, SyncAble, SyncService};
 #[cfg(feature = "queue-kafka")]
 pub use kafka::KafkaBackend;
