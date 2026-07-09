@@ -19,7 +19,7 @@ use std::sync::Arc;
 use crate::cacheable::{CacheAble, CacheService};
 use crate::common::interface::MiddlewareManager;
 use crate::common::model::{ModuleConfig, Request};
-use crate::common::state::State;
+use crate::common::context::PipelineContext;
 use crate::common::stream_stats::StreamStats;
 
 /// WebSocket download processor that delegates response publishing in post-process.
@@ -31,7 +31,7 @@ struct WebSocketDownloadProcessor {
     wss_downloader: Arc<WebSocketDownloader>,
     middleware_manager: Arc<MiddlewareManager>,
     cache_service: Arc<CacheService>,
-    state: Arc<State>,
+    state: Arc<PipelineContext>,
 }
 
 #[async_trait]
@@ -248,7 +248,7 @@ impl EventProcessorTrait<(Option<Request>, Option<ModuleConfig>), ()> for WebSoc
 /// Builds websocket request chain:
 /// config -> proxy middleware -> request middleware -> websocket download/subscription.
 pub async fn create_wss_download_chain(
-    state:Arc<State>,
+    state:Arc<PipelineContext>,
     downloader_manager: Arc<DownloaderManager>,
     queue_manager: Arc<QueueManager>,
     middleware_manager: Arc<MiddlewareManager>,

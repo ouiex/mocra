@@ -11,7 +11,7 @@ use crate::common::interface::middleware_manager::MiddlewareManager;
 use crate::common::model::data::DataEvent;
 use crate::common::model::message::{TaskErrorEvent, TaskEvent};
 use crate::common::model::{ModuleConfig, Response};
-use crate::common::state::State;
+use crate::common::context::PipelineContext;
 
 use log::{debug, error, info, warn};
 use metrics::counter;
@@ -35,7 +35,7 @@ pub struct ResponseModuleProcessor {
     #[allow(dead_code)]
     task_manager: Arc<TaskManager>,
     cache_service: Arc<CacheService>,
-    state: Arc<State>,
+    state: Arc<PipelineContext>,
     config_cache: Arc<DashMap<String, (Arc<ModuleConfig>, Instant)>>,
 }
 #[async_trait]
@@ -247,7 +247,7 @@ pub struct ResponseParserProcessor {
     #[allow(dead_code)]
     task_manager: Arc<TaskManager>,
     queue_manager: Arc<QueueManager>,
-    state: Arc<State>,
+    state: Arc<PipelineContext>,
     cache_service: Arc<CacheService>,
     event_bus: Option<Arc<EventBus>>,
 }
@@ -1020,7 +1020,7 @@ impl EventProcessorTrait<DataEvent, ()> for DataStoreProcessor {
 /// - All `Data` emitted from one response share the same module config context.
 /// - Data middleware and store stages run in parallel map form with skip-on-error strategy.
 pub async fn create_parser_chain(
-    state: Arc<State>,
+    state: Arc<PipelineContext>,
     #[allow(dead_code)]
     task_manager: Arc<TaskManager>,
     middleware_manager: Arc<MiddlewareManager>,

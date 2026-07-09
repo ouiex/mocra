@@ -116,9 +116,8 @@ impl Engine {
             zombie::start_zombie_cleaner(state_for_zombie, 600, compensator_for_zombie).await;
         });
 
-        let state_for_monitor = self.state.clone();
         tokio::spawn(async move {
-            SystemMonitor::new(15).run(state_for_monitor).await;
+            SystemMonitor::new(15).run().await;
         });
 
         let idle_stop_secs = self
@@ -191,7 +190,7 @@ impl Engine {
                 self.task_manager.clone(),
                 self.queue_manager.clone(),
                 self.event_bus.clone(),
-                self.state.clone(),
+                self.state.pipeline_ctx(),
                 if use_distributed_lua {
                     Some(self.lua_registry.clone())
                 } else {

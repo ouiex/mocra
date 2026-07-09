@@ -136,7 +136,7 @@ impl Engine {
         info!("Starting download processor");
         let download_chain = Arc::new(
             create_download_chain(
-                self.state.clone(),
+                self.state.pipeline_ctx(),
                 self.downloader_manager.clone(),
                 self.queue_manager.clone(),
                 self.middleware_manager.clone(),
@@ -147,7 +147,7 @@ impl Engine {
         );
         let wss_download_chain = Arc::new(
             create_wss_download_chain(
-                self.state.clone(),
+                self.state.pipeline_ctx(),
                 self.downloader_manager.clone(),
                 self.queue_manager.clone(),
                 self.middleware_manager.clone(),
@@ -742,7 +742,7 @@ impl Engine {
         info!("Starting response processor");
         let parser_chain = Arc::new(
             create_parser_chain(
-                self.state.clone(),
+                self.state.pipeline_ctx(),
                 self.task_manager.clone(),
                 self.middleware_manager.clone(),
                 self.queue_manager.clone(),

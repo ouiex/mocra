@@ -4,6 +4,7 @@
 //! including configuration, storage abstractions, processor chains, and operational
 //! policies.
 
+pub mod context;
 pub mod interface;
 pub mod model;
 pub mod processors;

@@ -13,7 +13,7 @@ use crate::errors::{Error, ModuleError, Result};
 use crate::common::model::chain_key;
 use crate::common::model::message::{TaskErrorEvent, TaskParserEvent, TaskEvent, UnifiedTaskInput};
 use crate::common::model::{ModuleConfig, Request};
-use crate::common::state::State;
+use crate::common::context::PipelineContext;
 
 use log::{debug, error, warn};
 use metrics::counter;
@@ -122,13 +122,13 @@ pub trait ThresholdDecisionService: Send + Sync {
 /// Default threshold decision service backed by `StatusTracker` and optional Lua atomics.
 #[derive(Clone)]
 pub struct StatusTrackerThresholdDecisionService {
-    state: Arc<State>,
+    state: Arc<PipelineContext>,
     lua_registry: Option<Arc<LuaScriptRegistry>>,
 }
 
 impl StatusTrackerThresholdDecisionService {
     /// Creates a service with fallback-safe behavior when Lua is unavailable.
-    pub fn new(state: Arc<State>, lua_registry: Option<Arc<LuaScriptRegistry>>) -> Self {
+    pub fn new(state: Arc<PipelineContext>, lua_registry: Option<Arc<LuaScriptRegistry>>) -> Self {
         Self { state, lua_registry }
     }
 }
@@ -430,7 +430,7 @@ impl ThresholdDecisionService for StatusTrackerThresholdDecisionService {
 /// - emit semantic events for observability.
 pub struct TaskModelProcessor {
     task_manager: Arc<TaskManager>,
-    state: Arc<State>,
+    state: Arc<PipelineContext>,
     queue_manager: Arc<QueueManager>,
     event_bus: Option<Arc<EventBus>>,
     threshold_decision_service: Arc<dyn ThresholdDecisionService>,
@@ -1109,7 +1109,7 @@ impl EventProcessorTrait<TaskErrorEvent, Task> for TaskModelProcessor {
 }
 
 pub struct TaskModuleProcessor {
-    state: Arc<State>,
+    state: Arc<PipelineContext>,
 }
 #[async_trait]
 impl ProcessorTrait<Task, Vec<Module>> for TaskModuleProcessor {
@@ -1302,7 +1302,7 @@ impl EventProcessorTrait<Module, SyncBoxStream<'static, Request>> for TaskProces
 }
 pub struct RequestPublish {
     queue_manager: Arc<QueueManager>,
-    state: Arc<State>,
+    state: Arc<PipelineContext>,
     deduplicator: Option<Arc<Deduplicator>>,
 }
 
@@ -1464,7 +1464,7 @@ impl EventProcessorTrait<Request, ()> for RequestPublish {
     }
 }
 pub struct ConfigProcessor {
-    pub state: Arc<State>,
+    pub state: Arc<PipelineContext>,
 }
 #[async_trait]
 impl ProcessorTrait<Request, (Request, Option<ModuleConfig>)> for ConfigProcessor {
@@ -1757,7 +1757,7 @@ impl<T: Send + Sync + 'static> EventProcessorTrait<SyncBoxStream<'static, SyncBo
     fn retry_status(&self, _input: &SyncBoxStream<'static, SyncBoxStream<'static, T>>, _retry_policy: &RetryPolicy) -> Option<EventEnvelope> { None }
 }
 
-async fn build_request_deduplicator(state: &Arc<State>) -> Option<Arc<Deduplicator>> {
+async fn build_request_deduplicator(state: &Arc<PipelineContext>) -> Option<Arc<Deduplicator>> {
     let dedup_ttl = state
         .config
         .read()
@@ -1818,7 +1818,7 @@ pub async fn create_unified_task_ingress_chain(
     task_manager: Arc<TaskManager>,
     queue_manager: Arc<QueueManager>,
     event_bus: Option<Arc<EventBus>>,
-    state: Arc<State>,
+    state: Arc<PipelineContext>,
     lua_registry: Option<Arc<LuaScriptRegistry>>,
 ) -> UnifiedTaskIngressChain {
     let task_concurrency = state.config.read().await.crawler.task_concurrency.unwrap_or(1024);

@@ -1,4 +1,3 @@
-use std::sync::Arc;
 use std::sync::RwLock;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::time::sleep;
@@ -6,7 +5,6 @@ use sysinfo::System;
 use log::{info, debug};
 use once_cell::sync::Lazy;
 use serde::Serialize;
-use crate::common::state::State;
 
 /// 主机资源快照(供 dashboard `GET /observability/system` 消费)。
 #[derive(Debug, Clone, Serialize)]
@@ -76,7 +74,7 @@ impl SystemMonitor {
     }
 
     /// Runs the monitor loop until task cancellation.
-    pub async fn run(mut self, _state: Arc<State>) {
+    pub async fn run(mut self) {
         info!("SystemMonitor started with interval {:?}", self.interval);
 
         // Initial refresh warms up system counters, then publish an immediate snapshot

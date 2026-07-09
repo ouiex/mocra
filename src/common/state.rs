@@ -3,7 +3,7 @@ use crate::utils::connector::create_redis_pool;
 #[cfg(feature = "store")]
 use crate::utils::connector::db_connection;
 
-use crate::common::model::config::Config;
+use crate::common::model::config::{Config, RedisConfig};
 use crate::common::config::ConfigProvider;
 use crate::common::config::file::FileConfigProvider;
 
@@ -77,6 +77,41 @@ pub struct State {
     /// 优先走它(替代 Redis 协调)。由 facade 在启动集群时注入(见 `cluster-embedded`)。
     pub coordination: Option<Arc<dyn crate::sync::CoordinationBackend>>,
 }
+
+/// 按名构造一个 Redis 连接池:单机模式或无对应配置时返回 `None`,否则建池
+/// (失败时带上主机 / 端口等上下文的 [`StateInitError::RedisPoolCreate`])。
+/// 供 `cache` / `cookie` 等共用,避免重复的建池样板。
+fn build_named_redis_pool(
+    name: &'static str,
+    redis: Option<&RedisConfig>,
+    single_node_mode: bool,
+) -> Result<Option<Pool>, StateInitError> {
+    if single_node_mode {
+        return Ok(None);
+    }
+    let Some(redis) = redis else {
+        return Ok(None);
+    };
+    let pool = create_redis_pool(
+        &redis.redis_host,
+        redis.redis_port,
+        redis.redis_db,
+        &redis.redis_username,
+        &redis.redis_password,
+        redis.pool_size,
+        redis.tls.unwrap_or(false),
+    )
+    .ok_or_else(|| StateInitError::RedisPoolCreate {
+        name,
+        host: redis.redis_host.clone(),
+        port: redis.redis_port,
+        db: redis.redis_db,
+        tls: redis.tls.unwrap_or(false),
+        pool_size: redis.pool_size,
+    })?;
+    Ok(Some(pool))
+}
+
 impl State {
     /// Creates a new State instance from a file-based configuration.
     ///
@@ -145,33 +180,8 @@ impl State {
             }
             None
         };
-        let cache_pool = if single_node_mode {
-            None
-        } else {
-            match config.cache.redis.as_ref() {
-                Some(redis) => {
-                    let pool = create_redis_pool(
-                        &redis.redis_host,
-                        redis.redis_port,
-                        redis.redis_db,
-                        &redis.redis_username,
-                        &redis.redis_password,
-                        redis.pool_size,
-                        redis.tls.unwrap_or(false),
-                    )
-                    .ok_or_else(|| StateInitError::RedisPoolCreate {
-                        name: "cache",
-                        host: redis.redis_host.clone(),
-                        port: redis.redis_port,
-                        db: redis.redis_db,
-                        tls: redis.tls.unwrap_or(false),
-                        pool_size: redis.pool_size,
-                    })?;
-                    Some(pool)
-                }
-                None => None,
-            }
-        };
+        let cache_pool =
+            build_named_redis_pool("cache", config.cache.redis.as_ref(), single_node_mode)?;
         {
             if let Some(pool) = cache_pool.as_ref() {
                 let mut cnn = pool
@@ -185,33 +195,8 @@ impl State {
             }
         }
         info!("cache pool connect successfully");
-        let cookie_pool = if single_node_mode {
-            None
-        } else {
-            match config.cookie.as_ref() {
-                Some(redis) => {
-                    let pool = create_redis_pool(
-                        &redis.redis_host,
-                        redis.redis_port,
-                        redis.redis_db,
-                        &redis.redis_username,
-                        &redis.redis_password,
-                        redis.pool_size,
-                        redis.tls.unwrap_or(false),
-                    )
-                    .ok_or_else(|| StateInitError::RedisPoolCreate {
-                        name: "cookie",
-                        host: redis.redis_host.clone(),
-                        port: redis.redis_port,
-                        db: redis.redis_db,
-                        tls: redis.tls.unwrap_or(false),
-                        pool_size: redis.pool_size,
-                    })?;
-                    Some(pool)
-                }
-                None => None,
-            }
-        };
+        let cookie_pool =
+            build_named_redis_pool("cookie", config.cookie.as_ref(), single_node_mode)?;
         info!("cookie pool connect successfully");
 
         // Reuse cache_pool for locker and limiter since they use the same config
@@ -355,6 +340,20 @@ impl State {
             status_tracker: error_tracker,
             redis: cache_pool,
             coordination,
+        })
+    }
+
+    /// 构造采集管线所需的[聚焦上下文](crate::common::context::PipelineContext)。
+    ///
+    /// 只克隆管线真正用到的三个共享服务(config / cache_service / status_tracker),
+    /// 让 chains 依赖窄化的 `PipelineContext` 而非整个 `State` —— 把核心管线与数据库 /
+    /// 协调后端 / 限流器等可选子系统解耦。三个 `Arc` 与 `State` 共享同一实例。
+    pub fn pipeline_ctx(&self) -> Arc<crate::common::context::PipelineContext> {
+        Arc::new(crate::common::context::PipelineContext {
+            config: self.config.clone(),
+            cache_service: self.cache_service.clone(),
+            status_tracker: self.status_tracker.clone(),
+            locker: self.locker.clone(),
         })
     }
 }

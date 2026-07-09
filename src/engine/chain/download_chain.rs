@@ -12,7 +12,7 @@ use crate::common::interface::middleware_manager::MiddlewareManager;
 use crate::common::model::ModuleConfig;
 use crate::common::model::download_config::DownloadConfig;
 use crate::common::model::{Request, Response};
-use crate::common::state::State;
+use crate::common::context::PipelineContext;
 use log::{debug, info, warn, error};
 use metrics::counter;
 use crate::queue::QueueManager;
@@ -33,7 +33,7 @@ use crate::engine::chain::backpressure::{BackpressureSendState, send_with_backpr
 /// executes the request, and maps outcomes into chain semantics.
 pub struct DownloadProcessor {
     pub(crate) downloader_manager: Arc<DownloaderManager>,
-    pub(crate) state: Arc<State>,
+    pub(crate) state: Arc<PipelineContext>,
     pub(crate) decision_cache: Arc<DashMap<String, (Instant, ErrorDecision)>>,
 }
 
@@ -410,7 +410,7 @@ for DownloadProcessor
 
 pub struct ResponsePublishProcessor {
     pub(crate) queue_manager: Arc<QueueManager>,
-    pub(crate) state:Arc<State>,
+    pub(crate) state:Arc<PipelineContext>,
 }
 
 #[async_trait]
@@ -942,7 +942,7 @@ for ProxyMiddlewareProcessor
 /// Builds request download chain:
 /// config -> proxy middleware -> request middleware -> download -> response middleware -> publish.
 pub async fn create_download_chain(
-    state: Arc<State>,
+    state: Arc<PipelineContext>,
     downloader_manager: Arc<DownloaderManager>,
     queue_manager: Arc<QueueManager>,
     middleware_manager: Arc<MiddlewareManager>,
