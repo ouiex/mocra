@@ -121,19 +121,19 @@ mimalloc = ["dep:mimalloc"]
 # `DataFrameStore` / `polars_utils` 等表格数据能力。
 polars = ["dep:polars", "dep:polars-lazy", "dep:polars-ops", "mocra-core/polars"]
 # Excel 解析(calamine → DataFrame),隐含开启 polars。
-excel = ["dep:calamine", "polars"]
+excel = ["dep:calamine", "polars", "mocra-core/excel"]
 # 数据面 Kafka 队列后端(默认关闭 —— 避免 rdkafka 的 cmake/C++ 构建负担)。
 queue-kafka = ["dep:rdkafka"]
 # 数据面 NATS(JetStream)队列后端 —— 轻量、无需 Redis,适合内嵌集群的数据面。
 queue-nats = ["dep:async-nats"]
 # 数据库 / 多租户元数据存储(sea-orm)。默认关闭 —— 无 DB standalone 模式不需要;
 # 开启后解锁 account × platform × module 的 DB 驱动任务模型。
-store = ["dep:sea-orm", "dep:mocra-store"]
+store = ["dep:sea-orm", "dep:mocra-store", "mocra-core/store"]
 # 内嵌 redb+Raft 控制面。开启后 `RaftCoordinationBackend` 实现 `CoordinationBackend`,
 # 可用自组网的 Raft 集群替换 Redis 协调(锁 / 选举 / KV)。
 cluster-embedded = ["dep:mocra-cluster"]
 # 后台管理 dashboard:开启后 engine 暴露 admin + 可观测 HTTP API(任务 / 集群 / 指标监控)。
-dashboard = ["dep:tower-http"]
+dashboard = ["dep:tower-http", "mocra-core/dashboard"]
 
 [lib]
 name = "mocra"

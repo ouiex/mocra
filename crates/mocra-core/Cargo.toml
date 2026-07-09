@@ -28,10 +28,31 @@ dashmap = "6"
 zstd = "0.13"
 flate2 = "1.1.9"
 metrics = "0.24"
+# utils(限流 / 锁 / 协调 / 日志 / 连接器 / 编码 等)
+chrono = { version = "0.4.43", features = ["serde"] }
+once_cell = "1"
+regex = "1"
+md5 = "0.8"
+reqwest = { version = "0.13", default-features = false, features = ["http2", "charset", "native-tls", "json", "gzip", "stream"] }
+uuid = { version = "1", features = ["serde", "v7", "zerocopy", "v4"] }
+tracing = "0.1"
+tracing-appender = "0.2"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "time", "json"] }
+tracing-log = "0.2"
+# store(sea-orm 连接器 / 事务) — 默认关闭
+sea-orm = { version = "1", features = ["postgres-array", "runtime-tokio-native-tls", "sqlx-postgres", "sqlx-sqlite"], optional = true }
+# excel(calamine → DataFrame) — 默认关闭,隐含 polars
+calamine = { version = "0.33.0", features = ["chrono", "dates"], optional = true }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }
 
 [features]
-# Data-frame support: adds the `From<PolarsError>` boundary on the core error type.
+# Data-frame support: adds the `From<PolarsError>` boundary on the core error type + polars_utils.
 polars = ["dep:polars"]
+# sea-orm connector / transaction helpers.
+store = ["dep:sea-orm"]
+# Excel parsing (calamine → DataFrame); implies polars.
+excel = ["dep:calamine", "polars"]
+# In-memory log ring buffer for the observability dashboard.
+dashboard = []
