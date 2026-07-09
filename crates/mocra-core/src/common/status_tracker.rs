@@ -96,7 +96,7 @@ impl ErrorStats {
     /// # Examples
     ///
     /// ```
-    /// use mocra::common::status_tracker::ErrorStats;
+    /// use mocra_core::common::status_tracker::ErrorStats;
     ///
     /// let mut stats = ErrorStats::default();
     /// stats.total_errors = 3;

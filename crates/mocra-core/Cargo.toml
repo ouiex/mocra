@@ -19,7 +19,8 @@ serde_json = "1"
 deadpool-redis = { version = "0.22", features = ["json", "script", "serde", "streams"] }
 mocra-proxy = { path = "../mocra-proxy" }
 mocra-dag = { path = "../mocra-dag" }
-polars = { version = "0.52.0", optional = true }
+mocra-store = { path = "../mocra-store", optional = true }
+polars = { version = "0.52.0", features = ["json", "lazy", "serde", "csv", "timezones", "strings", "ipc", "dtype-decimal"], optional = true }
 # cacheable(缓存服务:redis / 本地 / 两级后端)
 async-trait = "0.1"
 tokio = { version = "1", features = ["full"] }
@@ -39,6 +40,14 @@ tracing = "0.1"
 tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "time", "json"] }
 tracing-log = "0.2"
+# common(域模型 / 接口 / 状态 / 配置 / processor 链 等)
+cron = "0.15"
+futures = "0.3"
+indexmap = { version = "2", features = ["serde"] }
+reqwest_cookie_store = { version = "0.10", features = ["serde"] }
+url = "2"
+toml = "0.9"
+redis = { version = "0.32", features = ["tokio-comp", "safe_iterators", "tokio-native-tls-comp"] }
 # store(sea-orm 连接器 / 事务) — 默认关闭
 sea-orm = { version = "1", features = ["postgres-array", "runtime-tokio-native-tls", "sqlx-postgres", "sqlx-sqlite"], optional = true }
 # excel(calamine → DataFrame) — 默认关闭,隐含 polars
@@ -46,12 +55,13 @@ calamine = { version = "0.33.0", features = ["chrono", "dates"], optional = true
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }
+tempfile = "3"
 
 [features]
 # Data-frame support: adds the `From<PolarsError>` boundary on the core error type + polars_utils.
 polars = ["dep:polars"]
-# sea-orm connector / transaction helpers.
-store = ["dep:sea-orm"]
+# sea-orm connector / transaction helpers + multi-tenant entity re-export.
+store = ["dep:sea-orm", "dep:mocra-store"]
 # Excel parsing (calamine → DataFrame); implies polars.
 excel = ["dep:calamine", "polars"]
 # In-memory log ring buffer for the observability dashboard.

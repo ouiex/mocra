@@ -3,7 +3,7 @@ use crate::common::model::meta::MetaData;
 use crate::common::model::ExecutionMark;
 use crate::common::model::ModuleConfig;
 use crate::common::model::{Cookies, Headers};
-use crate::proxy::ProxyEnum;
+use mocra_proxy::ProxyEnum;
 use serde::{Deserialize, Serialize};
 use std::fmt::Display;
 use crate::utils::encrypt::md5;

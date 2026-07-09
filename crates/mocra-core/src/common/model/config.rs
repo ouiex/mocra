@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use crate::common::policy::PolicyConfig;
-use crate::proxy::ProxyConfig;
+use mocra_proxy::ProxyConfig;
 use std::fmt;
 
 /// API Configuration

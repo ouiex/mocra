@@ -110,7 +110,8 @@ js-v8    = ["dep:v8"]
   - **`errors`**:纯叶子(所有子错误类型同文件、无 `crate::` 引用),`polars` 特性经 `mocra-core/polars` 转发。
   - **`cacheable`**(多级缓存服务:redis/本地/两级后端):仅依赖 `errors`;`impl DagStore for CacheService` 一并从 host `schedule` shim 迁入 mocra-core(孤儿规则:trait=`mocra_dag`、类型=`mocra_core` 均在外部,impl 须落在拥有类型的 crate),mocra-core 增 `mocra-dag` 依赖(无环)。`dag_tests` 54 绿(适配行为不变)。
   - **`utils`**(限流/锁/协调/日志/连接器/编码 等):先把 `CoordinationBackend` 从 `common` 迁到 `utils::coordination`(其主消费者所在,`common::coordination` 留 re-export shim)打断 `common↔utils` 环;`cluster-embedded` 的 LockManager↔Raft 集成测试搬到 `sync` 测试套件。整树迁入 mocra-core,新增 `store`/`polars`/`excel`/`dashboard` 四个转发特性 + ~20 依赖(sea-orm/calamine 按特性可选)。mocra-core 各特性 clippy 净、59 测试;host 各特性全绿、145 测试。
-  - 后续迁 `common`,最终迁 `downloader` / `engine`(管线)。
+  - **`common`**(域模型 / 接口 / State / 配置 / processor 链 / 状态追踪 等,最大最核心):环已提前打断,依赖(cacheable/utils/errors 在 mocra-core;proxy/dag/store 是 crate)就绪,仅两处 `crate::proxy` 改直连 `mocra_proxy`;整树迁入 mocra-core,新增 cron/futures/indexmap/reqwest_cookie_store/url/toml/redis 依赖 + `store` 特性接上 `mocra-store`(实体再导出);mocra-core 补齐与主 crate 一致的结构性 clippy 豁免。mocra-core 各特性 clippy 净、98 测试 + doctest;host 各特性全绿、106 测试。
+  - 至此**基础层(errors/cacheable/utils/common)全部在 mocra-core**;只剩 `downloader` / `engine`(管线)。
 - [x] 抽 `mocra-dag` / `mocra-proxy`(现成干净)为独立 crate。**两者均已抽出、独立编译(不反依赖主 crate)、clippy `-D warnings` 净、CI 纳入**:
   - [`crates/mocra-proxy`](../../crates/mocra-proxy):自带 `ProxyError` / `Result`,`src/proxy` 转 shim `pub use mocra_proxy::*` + `impl From<mocra_proxy::ProxyError> for Error` 边界转换;9 个精简依赖。
   - [`crates/mocra-dag`](../../crates/mocra-dag):通用分布式 DAG 引擎,**运行时依赖 trait 化** —— `DagStore`(get/set/del/incr/eval_lua)抽象 `CacheService`、`DagEventSink` 抽象 `SyncService`,`crate::common::metrics` 内联;宿主 `src/schedule` 转 shim + adapter(`impl DagStore for CacheService`、`SyncAble for DagNodeSyncState`);**54 个测试留主 crate 用真实 `CacheService` 驱动、全绿**。

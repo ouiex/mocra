@@ -1,19 +1,6 @@
-//! Shared domain models, runtime state, and processing infrastructure.
+//! 共享域模型 / 运行时上下文已抽为独立 crate [`mocra_core`] 的 `common` 模块。
 //!
-//! This crate centralizes cross-cutting building blocks used by workspace crates,
-//! including configuration, storage abstractions, processor chains, and operational
-//! policies.
+//! 此模块保留为 re-export shim,使既有 `crate::common::*` 引用继续有效(零改动迁移);
+//! 新代码可直接 `use mocra_core::common::...`。
 
-pub mod context;
-pub mod coordination;
-pub mod interface;
-pub mod model;
-pub mod processors;
-pub mod state;
-pub mod status_tracker;
-pub mod stream_stats;
-pub mod registry;
-pub mod config;
-pub mod storage;
-pub mod policy;
-pub mod metrics;
+pub use mocra_core::common::*;

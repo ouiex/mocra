@@ -140,8 +140,8 @@ impl PolicyResolver {
     /// # Examples
     ///
     /// ```
-    /// use mocra::common::policy::{DlqPolicy, PolicyResolver};
-    /// use mocra::errors::ErrorKind;
+    /// use mocra_core::common::policy::{DlqPolicy, PolicyResolver};
+    /// use mocra_core::errors::ErrorKind;
     ///
     /// let resolver = PolicyResolver::new(None);
     /// let decision = resolver.resolve_with_kind(
