@@ -327,7 +327,7 @@ impl DataEvent {
             #[cfg(feature = "polars")]
             DataType::DataFrame(df_store) => match &df_store.data {
                 DataframeStoreData::Bytes(bytes) => bytes.len(),
-                DataframeStoreData::DataFrame(df) => df.height() as usize * df.width() as usize, // rough estimate: rows * columns
+                DataframeStoreData::DataFrame(df) => df.height() * df.width(), // rough estimate: rows * columns
             },
             DataType::File(file_store) => file_store.content.len(),
         }

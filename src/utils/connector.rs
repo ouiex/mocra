@@ -7,7 +7,7 @@ use dashmap::DashMap;
 
 // Global cache for connection pools
 #[cfg(feature = "store")]
-static CONNECTION_POOLS: Lazy<DashMap<String, DatabaseConnection>> = Lazy::new(|| DashMap::new());
+static CONNECTION_POOLS: Lazy<DashMap<String, DatabaseConnection>> = Lazy::new(DashMap::new);
 
 pub fn create_redis_pool(
     host: &str,

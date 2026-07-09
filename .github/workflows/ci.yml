@@ -80,9 +80,19 @@ jobs:
       - name: Build examples
         run: cargo build --examples --features cluster-embedded
 
-      # Warnings not yet denied crate-wide — but the cluster crate is kept clean.
       - name: Clippy (default, deny warnings)
         run: cargo clippy --lib -- -D warnings
+
+      # Gate every optional feature build too — the slim-default + optional-features
+      # design means feature-gated code is otherwise never `-D warnings`-checked.
+      - name: Clippy (feature matrix, deny warnings)
+        run: |
+          cargo clippy --lib --features store -- -D warnings
+          cargo clippy --lib --features dashboard -- -D warnings
+          cargo clippy --lib --features cluster-embedded -- -D warnings
+          cargo clippy --lib --features queue-nats -- -D warnings
+          cargo clippy --lib --features queue-kafka -- -D warnings
+          cargo clippy --lib --features polars,excel -- -D warnings
 
       - name: Clippy (mocra-cluster, deny warnings)
         run: cargo clippy -p mocra-cluster -- -D warnings
