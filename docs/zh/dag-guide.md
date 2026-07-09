@@ -69,17 +69,14 @@ async fn dag_definition(&self) -> Option<ModuleDagDefinition> {
 | `from` | `String` | 源节点 ID |
 | `to` | `String` | 目标节点 ID |
 
-## 编译
+## DAG 组装
 
-当你调用 `engine.register_module(module)` 时，引擎：
+模块的 DAG 在任务运行时**惰性组装** —— 不再在注册时预编译。每次运行时,引擎:
 
-1. 调用 `module.add_step()` 和 `module.dag_definition()`
-2. 如果 `add_step()` 返回了节点，将它们转换为 `legacy_step_0`、`legacy_step_1` 等
-3. 合并两种定义（如果都存在）
-4. 验证图是 DAG（无环）
-5. 构建带拓扑排序的编译后 `Dag`
-
-编译后的 DAG 可通过 `engine.get_module_dag("module_name")` 访问。
+1. 调用 `module.add_step()` 和 `module.dag_definition()`。
+2. 将 `add_step()` 的节点命名为 `legacy_step_0`、`legacy_step_1`…… 。
+3. 合并为单个 `ModuleDagDefinition`(两者都存在时)。
+4. 交给队列驱动的 `ModuleDagProcessor`,由它构建后继 / 入口节点拓扑,并按 `ExecutionMark.node_id` 路由执行。
 
 ## 执行模型
 

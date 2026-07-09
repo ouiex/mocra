@@ -67,7 +67,7 @@ js-v8    = ["dep:v8"]
 - [x] 移除库代码里的 `process::exit`(`common/state.rs`:删除 `new` / `new_with_provider` 退出包装,仅保留 `try_new*`)。v8 worker 内一处仍在 `js-v8` 特性内,后续处理。
 - [x] **特性门控 rdkafka** → `queue-kafka`(默认关闭,移除 cmake/C++ 构建负担;`queue`/`sync` 的 kafka 后端与相关测试随之门控)。已验证默认 `cargo check --lib --tests` 不再编译 rdkafka。
 - [x] **特性门控 polars / calamine** —— 三个 polars crate + calamine 改 `optional`;`polars = ["dep:polars", ...]`(修掉空壳)/ `excel = ["dep:calamine", "polars"]`,默认**全关**。`DataType` 新增始终存在的 `Empty` 默认变体,`DataFrame` 变体 + `DataFrameStore` + `polars_utils` / `excel_dataframe` / `type_convert`(零外部引用的死代码)全部门控。补 `serde/rc`(原先靠 polars 隐式带入 `Arc: Serialize`)。**默认依赖树不再含 polars**;`--features polars` / `excel` 恢复能力,测试全绿。(postgres 随 `store` 特性,已在 Phase 2 门控。)
-- [ ] 修正漂移的文档与示例:`run()`→`start()`、已删的 `Data`/`ParserData` 类型、`pre_process`/`cron` 签名(随 Phase 1 示例改写)。
+- [x] 修正漂移的文档与示例:`examples/` 已随 Phase 1 重写(不再引用已删类型);用户指南(en + zh 的 getting-started / module-development / dag-guide)修净 —— `engine.run()`→`start()`、`State::new`→`try_new(..).await.expect(..)`、`pre_process`/`post_process` 改 `Option<Arc<ModuleConfig>> -> Result<()>`、`cron` 改 `Option<CronConfig>`、删除已移除的 `get_module_dag` / 编译后 `Dag` 表述(改为惰性 `ModuleDagDefinition` + `ModuleDagProcessor`)。
 
 **产出**:能过 CI、默认精简依赖(已去 rdkafka/cmake)、示例可编译的基线。
 

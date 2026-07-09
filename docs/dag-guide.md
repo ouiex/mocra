@@ -69,17 +69,16 @@ async fn dag_definition(&self) -> Option<ModuleDagDefinition> {
 | `from` | `String` | Source node ID |
 | `to` | `String` | Target node ID |
 
-## Compilation
+## DAG assembly
 
-When you call `engine.register_module(module)`, the engine:
+The module's DAG is assembled lazily when a task runs — it is **not** precompiled at
+registration. For each run the engine:
 
-1. Calls `module.add_step()` and `module.dag_definition()`
-2. If `add_step()` returns nodes, converts them to `legacy_step_0`, `legacy_step_1`, etc.
-3. Merges both definitions (if present)
-4. Validates the graph is a DAG (no cycles)
-5. Builds a compiled `Dag` with topological ordering
-
-The compiled DAG is accessible via `engine.get_module_dag("module_name")`.
+1. Calls `module.add_step()` and `module.dag_definition()`.
+2. Namespaces any `add_step()` nodes as `legacy_step_0`, `legacy_step_1`, … .
+3. Merges both into one `ModuleDagDefinition` (when both are present).
+4. Feeds it to the queue-backed `ModuleDagProcessor`, which builds the successor /
+   entry-node topology used to route execution by `ExecutionMark.node_id`.
 
 ## Execution Model
 

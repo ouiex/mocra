@@ -93,10 +93,10 @@ impl ModuleTrait for MyModule {
 // 3. 运行引擎
 #[tokio::main]
 async fn main() {
-    let state = Arc::new(State::new("config.toml").await);
-    let engine = Engine::new(state, None).await;
+    let state = Arc::new(State::try_new("config.toml").await.expect("init state"));
+    let engine = Engine::new(state, None).await.expect("init engine");
     engine.register_module(MyModule::default_arc()).await;
-    engine.run().await;
+    engine.start().await;
 }
 ```
 

@@ -140,13 +140,13 @@ pub trait ModuleTrait: Send + Sync {
     }
 
     /// Pre-processing before the module starts (optional).
-    async fn pre_process(&self, _state: Arc<State>) {}
+    async fn pre_process(&self, _config: Option<Arc<ModuleConfig>>) -> Result<()> { Ok(()) }
 
     /// Post-processing after the module completes (optional).
-    async fn post_process(&self, _state: Arc<State>) {}
+    async fn post_process(&self, _config: Option<Arc<ModuleConfig>>) -> Result<()> { Ok(()) }
 
-    /// Cron schedule expression (optional).
-    fn cron(&self) -> Option<String> { None }
+    /// Cron schedule (optional).
+    fn cron(&self) -> Option<CronConfig> { None }
 }
 ```
 
@@ -231,14 +231,14 @@ Both are combined into a single DAG.
 ```rust
 #[tokio::main]
 async fn main() {
-    let state = Arc::new(State::new("config.toml").await);
-    let engine = Engine::new(state, None).await;
+    let state = Arc::new(State::try_new("config.toml").await.expect("init state"));
+    let engine = Engine::new(state, None).await.expect("init engine");
 
     // Register modules
     engine.register_module(MyModule::default_arc()).await;
 
     // Run the engine (blocks until shutdown)
-    engine.run().await;
+    engine.start().await;
 }
 ```
 
@@ -255,8 +255,8 @@ fn should_login(&self) -> bool { true }
 Return a cron expression to run the module periodically:
 
 ```rust
-fn cron(&self) -> Option<String> {
-    Some("0 */30 * * * *".into()) // every 30 minutes
+fn cron(&self) -> Option<CronConfig> {
+    Some(CronConfig::new("0 */30 * * * *")) // every 30 minutes
 }
 ```
 
