@@ -62,7 +62,7 @@ impl RateLimitConfig {
 /// 5. Supports dynamic key-level config updates.
 /// 6. Performs local calculations; Redis stores/synchronizes last-request time.
 /// 7. Stores key configs in Redis for persistence and dynamic updates.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct DistributedSlidingWindowRateLimiter {
     /// Redis connection pool.
     pool: Option<Arc<Pool>>,
@@ -94,6 +94,20 @@ pub struct DistributedSlidingWindowRateLimiter {
     /// Cache for suspension checks to reduce Redis load
     /// Key: identifier, Value: (Last Check Time, Suspend Until Timestamp)
     suspend_cache: Arc<DashMap<String, (Instant, Option<u64>)>>,
+    /// 可选协调后端(内嵌 Raft 等)。无 Redis 池时,用其成员数把全局限额**按节点分摊**
+    /// (近似分布式限流);有 Redis 池时不分摊(Redis 已提供原子全局限流)。
+    coordination: Option<Arc<dyn crate::sync::CoordinationBackend>>,
+}
+
+impl std::fmt::Debug for DistributedSlidingWindowRateLimiter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DistributedSlidingWindowRateLimiter")
+            .field("has_redis", &self.pool.is_some())
+            .field("has_coordination", &self.coordination.is_some())
+            .field("key_prefix", &self.key_prefix)
+            .field("default_config", &self.default_config)
+            .finish()
+    }
 }
 
 const TIME_OFFSET_REFRESH_SECS: u64 = 60;
@@ -108,6 +122,17 @@ impl DistributedSlidingWindowRateLimiter {
     pub fn new(
         limit_pool: Option<Arc<Pool>>,
         locker: Arc<DistributedLockManager>,
+        namespace: &str,
+        default_config: RateLimitConfig,
+    ) -> Self {
+        Self::new_with_coordination(limit_pool, locker, None, namespace, default_config)
+    }
+
+    /// 带协调后端构造:无 Redis 池的集群模式下,把全局限额按成员数分摊到每个节点。
+    pub fn new_with_coordination(
+        limit_pool: Option<Arc<Pool>>,
+        locker: Arc<DistributedLockManager>,
+        coordination: Option<Arc<dyn crate::sync::CoordinationBackend>>,
         namespace: &str,
         default_config: RateLimitConfig,
     ) -> Self {
@@ -131,7 +156,36 @@ impl DistributedSlidingWindowRateLimiter {
             local_wait_until: Arc::new(DashMap::new()),
             time_offset: Arc::new(RwLock::new(None)),
             suspend_cache: Arc::new(DashMap::new()),
+            coordination,
         }
+    }
+
+    /// 把每秒限额按集群成员数分摊(仅无 Redis 池且有协调后端时);
+    /// 有 Redis 池 → 原子全局限流,不分摊。返回值恒 > 0,避免区间计算除零。
+    fn share_rps(&self, rps: f32) -> f32 {
+        if self.pool.is_some() {
+            return rps;
+        }
+        let n = self
+            .coordination
+            .as_ref()
+            .map(|c| c.cluster_size().max(1))
+            .unwrap_or(1) as f32;
+        (rps / n).max(f32::MIN_POSITIVE)
+    }
+
+    /// 解析某标识符的**生效**限速配置:在 [`get_key_config`](Self::get_key_config)
+    /// 的全局配置上应用集群分摊。所有限流判定路径都应经此,而非直接读全局配置。
+    async fn effective_config(&self, identifier: &str) -> RateLimitConfig {
+        let mut cfg = match self.get_key_config(identifier).await {
+            Ok(c) => c,
+            Err(e) => {
+                error!("{e:?}");
+                self.default_config.clone()
+            }
+        };
+        cfg.max_requests_per_second = self.share_rps(cfg.max_requests_per_second);
+        cfg
     }
 
     /// Returns Redis key for stored last-request timestamp.
@@ -545,7 +599,7 @@ impl DistributedSlidingWindowRateLimiter {
                     .map_err(|e| RateLimitError::RedisError("redis connect error".into()))?;
 
                 // Set TTL based on request interval so record remains available for next check.
-                let config = self.get_key_config(identifier).await?;
+                let config = self.effective_config(identifier).await;
                 let min_interval_millis = (config.window_size_millis as f64
                     / config.max_requests_per_second as f64)
                     as u64;
@@ -595,13 +649,7 @@ impl DistributedSlidingWindowRateLimiter {
             return Ok(Some(wait));
         }
 
-        let config = match self.get_key_config(identifier).await {
-            Ok(cfg) => cfg,
-            Err(e) => {
-                error!("{e:?}");
-                self.default_config.clone()
-            }
-        };
+        let config = self.effective_config(identifier).await;
 
         let last_request_key = self.get_last_request_key(identifier);
         let min_interval_millis =
@@ -678,13 +726,7 @@ impl DistributedSlidingWindowRateLimiter {
             self.local_wait_until.remove(identifier);
         }
 
-        let config = match self.get_key_config(identifier).await {
-            Ok(cfg) => cfg,
-            Err(e) => {
-                error!("{e:?}");
-                self.default_config.clone()
-            }
-        };
+        let config = self.effective_config(identifier).await;
 
         let last_request_key = self.get_last_request_key(identifier);
         let min_interval_millis =
@@ -765,13 +807,7 @@ impl DistributedSlidingWindowRateLimiter {
     async fn reserve_permit(&self, identifier: &str) -> Result<u64> {
         let current_time = self.get_current_timestamp().await?;
 
-        let config = match self.get_key_config(identifier).await {
-            Ok(cfg) => cfg,
-            Err(e) => {
-                error!("{e:?}");
-                self.default_config.clone()
-            }
-        };
+        let config = self.effective_config(identifier).await;
 
         let last_request_key = self.get_last_request_key(identifier);
         let min_interval_millis =
@@ -849,13 +885,8 @@ impl DistributedSlidingWindowRateLimiter {
     /// No polling loop, no thundering-herd, no request abandonment.
     pub async fn wait_for_permit(&self, identifier: &str) -> Result<()> {
         // Phase 1: wait for any active suspension to clear.
-        loop {
-            match self.check_suspended(identifier).await? {
-                Some(remaining_ms) => {
-                    tokio::time::sleep(Duration::from_millis(remaining_ms)).await;
-                }
-                None => break,
-            }
+        while let Some(remaining_ms) = self.check_suspended(identifier).await? {
+            tokio::time::sleep(Duration::from_millis(remaining_ms)).await;
         }
 
         // Phase 2: reserve a slot in the rate-limit queue.
@@ -1078,6 +1109,69 @@ impl DistributedSlidingWindowRateLimiter {
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    /// 只覆写 `cluster_size` 的最小 CoordinationBackend,用于验证限额分摊。
+    struct SizeBackend(usize);
+    #[async_trait::async_trait]
+    impl crate::sync::CoordinationBackend for SizeBackend {
+        async fn publish(&self, _: &str, _: &[u8]) -> std::result::Result<(), String> {
+            Ok(())
+        }
+        async fn subscribe(
+            &self,
+            _: &str,
+        ) -> std::result::Result<tokio::sync::mpsc::Receiver<Vec<u8>>, String> {
+            let (_tx, rx) = tokio::sync::mpsc::channel(1);
+            Ok(rx)
+        }
+        async fn set(&self, _: &str, _: &[u8]) -> std::result::Result<(), String> {
+            Ok(())
+        }
+        async fn get(&self, _: &str) -> std::result::Result<Option<Vec<u8>>, String> {
+            Ok(None)
+        }
+        async fn cas(
+            &self,
+            _: &str,
+            _: Option<&[u8]>,
+            _: &[u8],
+        ) -> std::result::Result<bool, String> {
+            Ok(true)
+        }
+        async fn acquire_lock(&self, _: &str, _: &[u8], _: u64) -> std::result::Result<bool, String> {
+            Ok(true)
+        }
+        async fn renew_lock(&self, _: &str, _: &[u8], _: u64) -> std::result::Result<bool, String> {
+            Ok(true)
+        }
+        fn cluster_size(&self) -> usize {
+            self.0
+        }
+    }
+
+    #[test]
+    fn shares_global_limit_by_cluster_size() {
+        // 4 节点集群、无 Redis:每秒 8 的全局限额按节点分摊为每节点 2。
+        let locker = Arc::new(DistributedLockManager::new(None, "t"));
+        let backend: Arc<dyn crate::sync::CoordinationBackend> = Arc::new(SizeBackend(4));
+        let limiter = DistributedSlidingWindowRateLimiter::new_with_coordination(
+            None,
+            locker,
+            Some(backend),
+            "ns",
+            RateLimitConfig::new(8.0),
+        );
+        assert_eq!(limiter.share_rps(8.0), 2.0);
+
+        // 无协调后端 → 不分摊(单机语义不变)。
+        let plain = DistributedSlidingWindowRateLimiter::new(
+            None,
+            Arc::new(DistributedLockManager::new(None, "t")),
+            "ns",
+            RateLimitConfig::new(8.0),
+        );
+        assert_eq!(plain.share_rps(8.0), 8.0);
+    }
 
     #[tokio::test]
     async fn test_rate_limiter_local() {

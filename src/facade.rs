@@ -30,6 +30,7 @@ use crate::engine::engine::Engine;
 use crate::errors::{Error, ErrorKind, Result};
 
 use crate::common::config::ConfigProvider;
+use crate::common::config::file::FileConfigProvider;
 use crate::common::model::config::{
     CacheConfig, ChannelConfig, Config, CrawlerConfig, DatabaseConfig, DownloadConfig,
 };
@@ -307,11 +308,186 @@ impl Mocra {
     }
 }
 
+/// 内嵌集群配置(需 `cluster-embedded` 特性)。
+#[cfg(feature = "cluster-embedded")]
+#[derive(Debug, Clone)]
+pub struct ClusterConfig {
+    /// 本节点唯一 id。
+    pub node_id: u64,
+    /// 本节点绑定并对外的地址(如 `127.0.0.1:7001`)。
+    pub http_addr: String,
+    /// redb 状态机 + 日志目录。
+    pub data_dir: String,
+    /// 种子节点地址;为空 = 本节点自举一个新集群(首个核心),非空 = 向种子 join。
+    pub seeds: Vec<String>,
+    /// 可选 Raft 时序调参(默认适配局域网;广域网 / 高延迟可放大)。
+    pub raft_tuning: Option<mocra_cluster::RaftTuning>,
+}
+
+#[cfg(feature = "cluster-embedded")]
+impl ClusterConfig {
+    /// **自举**一个新集群的首个核心节点(`seeds` 为空)。
+    ///
+    /// ```ignore
+    /// Mocra::builder().spider(s, sink)
+    ///     .cluster(ClusterConfig::bootstrap(1, "127.0.0.1:7001", "./data/node-1"))
+    ///     .run().await?;
+    /// ```
+    pub fn bootstrap(
+        node_id: u64,
+        http_addr: impl Into<String>,
+        data_dir: impl Into<String>,
+    ) -> Self {
+        Self {
+            node_id,
+            http_addr: http_addr.into(),
+            data_dir: data_dir.into(),
+            seeds: Vec::new(),
+            raft_tuning: None,
+        }
+    }
+
+    /// **加入**已有集群:通过任意一个已知节点(种子)地址入网(作 learner)。
+    ///
+    /// ```ignore
+    /// .cluster(ClusterConfig::join(2, "127.0.0.1:7002", "./data/node-2", "127.0.0.1:7001"))
+    /// ```
+    pub fn join(
+        node_id: u64,
+        http_addr: impl Into<String>,
+        data_dir: impl Into<String>,
+        seed: impl Into<String>,
+    ) -> Self {
+        Self {
+            node_id,
+            http_addr: http_addr.into(),
+            data_dir: data_dir.into(),
+            seeds: vec![seed.into()],
+            raft_tuning: None,
+        }
+    }
+
+    /// 从环境变量读取集群配置 —— 便于**容器化部署**:同一镜像跨节点,仅换环境变量。
+    ///
+    /// - `MOCRA_NODE_ID`(必填,u64)
+    /// - `MOCRA_HTTP_ADDR`(必填,本节点对外地址)
+    /// - `MOCRA_DATA_DIR`(选填,缺省 `./mocra-data/node-{id}`)
+    /// - `MOCRA_SEEDS`(选填,逗号分隔的种子地址;为空 = 自举)
+    pub fn from_env() -> std::result::Result<Self, String> {
+        Self::from_vars(
+            std::env::var("MOCRA_NODE_ID").ok(),
+            std::env::var("MOCRA_HTTP_ADDR").ok(),
+            std::env::var("MOCRA_DATA_DIR").ok(),
+            std::env::var("MOCRA_SEEDS").ok(),
+        )
+    }
+
+    /// [`from_env`](Self::from_env) 的纯解析核心(便于单测,不读环境)。
+    fn from_vars(
+        node_id: Option<String>,
+        http_addr: Option<String>,
+        data_dir: Option<String>,
+        seeds: Option<String>,
+    ) -> std::result::Result<Self, String> {
+        let node_id = node_id
+            .ok_or("MOCRA_NODE_ID not set")?
+            .trim()
+            .parse::<u64>()
+            .map_err(|e| format!("MOCRA_NODE_ID invalid: {e}"))?;
+        let http_addr = http_addr
+            .filter(|s| !s.trim().is_empty())
+            .ok_or("MOCRA_HTTP_ADDR not set")?
+            .trim()
+            .to_string();
+        let data_dir = data_dir
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| format!("./mocra-data/node-{node_id}"));
+        let seeds = seeds
+            .map(|s| {
+                s.split(',')
+                    .map(|x| x.trim().to_string())
+                    .filter(|x| !x.is_empty())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        Ok(Self {
+            node_id,
+            http_addr,
+            data_dir,
+            seeds,
+            raft_tuning: None,
+        })
+    }
+
+    /// 自定义 Raft 时序(广域网 / 高延迟集群);默认适配局域网。
+    pub fn with_raft_tuning(mut self, tuning: mocra_cluster::RaftTuning) -> Self {
+        self.raft_tuning = Some(tuning);
+        self
+    }
+}
+
+/// 启动内嵌 redb+Raft 控制面并返回其 [`CoordinationBackend`](crate::sync::CoordinationBackend)。
+///
+/// `seeds` 空 → 自举新集群并等待选主;非空 → 向首个种子 join(作 learner)。
+#[cfg(feature = "cluster-embedded")]
+async fn start_embedded_cluster(
+    cluster: &ClusterConfig,
+) -> Result<Arc<dyn crate::sync::CoordinationBackend>> {
+    use crate::sync::RaftCoordinationBackend;
+    use mocra_cluster::RaftControlPlane;
+    let svc_err =
+        |e: mocra_cluster::ControlError| Error::new(ErrorKind::Service, Some(e.to_string()));
+
+    let cp = match cluster.raft_tuning.clone() {
+        Some(tuning) => RaftControlPlane::start_cluster_node_with(
+            cluster.node_id,
+            &cluster.data_dir,
+            cluster.http_addr.clone(),
+            tuning,
+        )
+        .await
+        .map_err(svc_err)?,
+        None => RaftControlPlane::start_cluster_node(
+            cluster.node_id,
+            &cluster.data_dir,
+            cluster.http_addr.clone(),
+        )
+        .await
+        .map_err(svc_err)?,
+    };
+
+    if cluster.seeds.is_empty() {
+        let mut init = std::collections::BTreeMap::new();
+        init.insert(cluster.node_id, cluster.http_addr.clone());
+        cp.init_cluster(init).await.map_err(svc_err)?;
+        cp.wait_leader(std::time::Duration::from_secs(10))
+            .await
+            .map_err(svc_err)?;
+        log::info!(
+            "cluster: bootstrapped new Raft cluster as node {} @ {}",
+            cluster.node_id,
+            cluster.http_addr
+        );
+    } else {
+        RaftControlPlane::join_cluster(&cluster.seeds[0], cluster.node_id, &cluster.http_addr)
+            .await
+            .map_err(svc_err)?;
+        log::info!(
+            "cluster: node {} joined via seed {}",
+            cluster.node_id,
+            cluster.seeds[0]
+        );
+    }
+    Ok(Arc::new(RaftCoordinationBackend::new(cp)))
+}
+
 /// [`Mocra`] 的构建器。
 #[derive(Default)]
 pub struct MocraBuilder {
     config_path: Option<String>,
     modules: Vec<Arc<dyn ModuleTrait>>,
+    #[cfg(feature = "cluster-embedded")]
+    cluster: Option<ClusterConfig>,
 }
 
 impl MocraBuilder {
@@ -346,31 +522,58 @@ impl MocraBuilder {
         self
     }
 
+    /// 启用内嵌 redb+Raft 控制面(需 `cluster-embedded` 特性)。
+    ///
+    /// - `seeds` 为空 → 本节点自举一个新集群(首个核心,方案 A)。
+    /// - `seeds` 非空 → 向种子节点 join(作 learner)。
+    ///
+    /// 开启后,引擎的选举 / 锁走 Raft 集群而非 Redis,无需外部 Redis。
+    #[cfg(feature = "cluster-embedded")]
+    pub fn cluster(mut self, cluster: ClusterConfig) -> Self {
+        self.cluster = Some(cluster);
+        self
+    }
+
     /// 构建 State + Engine,注册所有 spider,启动引擎(阻塞至关闭)。
     ///
     /// - 提供了 [`from_toml`](MocraBuilder::from_toml) → 用该 config(可含 DB / Redis)。
     /// - 未提供 → **无 DB / 单机** 默认配置,并为每个 spider 自动注入一个种子任务。
+    /// - 提供了 [`cluster`](MocraBuilder::cluster) → 起内嵌 Raft 控制面,协调走 Raft。
     pub async fn run(self) -> Result<()> {
-        let (state, standalone) = match &self.config_path {
-            Some(path) => (
-                State::try_new(path)
-                    .await
-                    .map_err(|e| Error::new(ErrorKind::Service, Some(e.to_string())))?,
-                false,
-            ),
-            None => {
-                let provider = StaticConfigProvider {
-                    config: default_standalone_config("mocra"),
-                };
-                (
-                    State::try_new_with_provider(Box::new(provider))
-                        .await
-                        .map_err(|e| Error::new(ErrorKind::Service, Some(e.to_string())))?,
-                    true,
-                )
+        let standalone = self.config_path.is_none();
+        let provider: Box<dyn ConfigProvider> = match &self.config_path {
+            Some(path) => Box::new(FileConfigProvider::new(path)),
+            None => Box::new(StaticConfigProvider {
+                config: default_standalone_config("mocra"),
+            }),
+        };
+
+        // 先于 State 起集群:控制面就绪后把协调后端交给 State,使分布式锁 / 选举
+        // 从构造起即走 Raft(而非无 Redis 时退化的进程内锁)。
+        let coordination: Option<Arc<dyn crate::sync::CoordinationBackend>> = {
+            #[cfg(feature = "cluster-embedded")]
+            {
+                match &self.cluster {
+                    Some(cluster) => Some(start_embedded_cluster(cluster).await?),
+                    None => None,
+                }
+            }
+            #[cfg(not(feature = "cluster-embedded"))]
+            {
+                None
             }
         };
+
+        let state = State::try_new_with_provider_and_coordination(provider, coordination)
+            .await
+            .map_err(|e| Error::new(ErrorKind::Service, Some(e.to_string())))?;
+
         let state = Arc::new(state);
+        // 在 state 移入 engine 前捕获协调后端句柄:用于「种子只注入一次」的 leader 门,
+        // 以及引擎停机后的优雅关闭。
+        let coordination = state.coordination.clone();
+        // 集群下「种子只注入一次」:仅 leader 注入,避免每节点重复注入 → N× 重复抓取。
+        let should_seed = coordination.as_ref().map(|c| c.is_leader()).unwrap_or(true);
         let engine = Engine::new(state, None).await?;
 
         let spider_names: Vec<String> = self.modules.iter().map(|m| m.name()).collect();
@@ -378,8 +581,10 @@ impl MocraBuilder {
             engine.register_module(module).await;
         }
 
-        // 单机模式:为每个 spider 注入一个种子任务(否则引擎空转)。
-        if standalone {
+        // 单机 / 集群 leader:为每个 spider 注入一个种子任务(否则引擎空转)。
+        // 集群 follower 跳过,避免 N× 重复注入。种子的跨节点分发取决于数据面 MQ:
+        // 配了分布式 MQ(Kafka/NATS/Redis)则扇出到各节点;默认内存队列则留在 leader。
+        if standalone && should_seed {
             let task_tx = engine.queue_manager.get_task_push_channel();
             for name in spider_names {
                 let ev = TaskEvent {
@@ -396,6 +601,11 @@ impl MocraBuilder {
         }
 
         engine.start().await;
+
+        // 引擎停机后优雅关闭集群控制面(释放 redb 句柄与 Raft 后台任务)。
+        if let Some(c) = &coordination {
+            c.shutdown().await;
+        }
         Ok(())
     }
 }
@@ -452,6 +662,7 @@ fn default_standalone_config(name: &str) -> Config {
             blob_storage: None,
             redis: None,
             kafka: None,
+            nats: None,
             compensator: None,
             minid_time: 12,
             capacity: 10000,
@@ -484,5 +695,57 @@ impl ConfigProvider for StaticConfigProvider {
         // 静态配置:不监听变更(发送端立即释放,State 的监听循环随即退出)。
         let (_tx, rx) = watch::channel(self.config.clone());
         Ok(rx)
+    }
+}
+
+#[cfg(all(test, feature = "cluster-embedded"))]
+mod cluster_config_tests {
+    use super::ClusterConfig;
+
+    #[test]
+    fn bootstrap_has_no_seeds_join_has_one() {
+        let boot = ClusterConfig::bootstrap(1, "127.0.0.1:7001", "./d1");
+        assert_eq!(boot.node_id, 1);
+        assert_eq!(boot.http_addr, "127.0.0.1:7001");
+        assert!(boot.seeds.is_empty(), "bootstrap 节点无种子(自举)");
+
+        let joined = ClusterConfig::join(2, "127.0.0.1:7002", "./d2", "127.0.0.1:7001");
+        assert_eq!(joined.node_id, 2);
+        assert_eq!(joined.seeds, vec!["127.0.0.1:7001".to_string()]);
+    }
+
+    #[test]
+    fn from_vars_parses_env_style_config() {
+        // 完整:含逗号分隔的多种子(join)。
+        let c = ClusterConfig::from_vars(
+            Some("3".into()),
+            Some("127.0.0.1:7003".into()),
+            Some("/data/n3".into()),
+            Some("127.0.0.1:7001, 127.0.0.1:7002".into()),
+        )
+        .unwrap();
+        assert_eq!(c.node_id, 3);
+        assert_eq!(c.http_addr, "127.0.0.1:7003");
+        assert_eq!(c.data_dir, "/data/n3");
+        assert_eq!(
+            c.seeds,
+            vec!["127.0.0.1:7001".to_string(), "127.0.0.1:7002".to_string()]
+        );
+
+        // 无种子 + 省略 data_dir → 自举 + 默认目录。
+        let boot = ClusterConfig::from_vars(
+            Some("1".into()),
+            Some("127.0.0.1:7001".into()),
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(boot.seeds.is_empty());
+        assert_eq!(boot.data_dir, "./mocra-data/node-1");
+
+        // 缺必填项 / 非法 id → 报错(不 panic)。
+        assert!(ClusterConfig::from_vars(None, Some("a".into()), None, None).is_err());
+        assert!(ClusterConfig::from_vars(Some("x".into()), Some("a".into()), None, None).is_err());
+        assert!(ClusterConfig::from_vars(Some("1".into()), None, None, None).is_err());
     }
 }

@@ -2,6 +2,10 @@
 pub use crate::facade::{
     on_item, ChannelSink, Ctx, DataSink, Mocra, MocraBuilder, Seeds, Spider,
 };
+#[cfg(feature = "cluster-embedded")]
+pub use crate::facade::ClusterConfig;
+#[cfg(feature = "cluster-embedded")]
+pub use mocra_cluster::RaftTuning;
 
 // Common Traits and Structs
 pub use crate::common::interface::{

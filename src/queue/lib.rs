@@ -2,6 +2,8 @@ pub mod channel;
 pub mod compensation;
 #[cfg(feature = "queue-kafka")]
 pub mod kafka;
+#[cfg(feature = "queue-nats")]
+pub mod nats;
 pub mod manager;
 pub mod redis;
 pub mod batcher;
@@ -38,6 +40,7 @@ pub const HEADER_CREATED_AT: &str = "x-created-at";
 pub const HEADER_NACK_REASON: &str = "x-nack-reason";
 
 #[derive(Debug, Clone, Copy)]
+#[derive(Default)]
 pub struct NackPolicy {
     pub max_retries: u32,
     pub backoff_ms: u64,
@@ -49,14 +52,6 @@ pub enum NackDisposition {
     Dlq,
 }
 
-impl Default for NackPolicy {
-    fn default() -> Self {
-        Self {
-            max_retries: 0,
-            backoff_ms: 0,
-        }
-    }
-}
 
 pub(crate) fn parse_attempt(headers: &HashMap<String, String>) -> u32 {
     headers
@@ -134,6 +129,10 @@ impl<T: std::fmt::Debug> std::fmt::Debug for QueuedItem<T> {
 impl<T: Identifiable> Identifiable for QueuedItem<T> {
     fn get_id(&self) -> String {
         self.inner.get_id()
+    }
+
+    fn partition_key(&self) -> String {
+        self.inner.partition_key()
     }
 }
 

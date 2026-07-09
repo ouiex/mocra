@@ -22,12 +22,12 @@ pub struct RedisBackend {
 
 impl RedisBackend {
     pub fn new(pool: Pool) -> Self {
-        let backend = Self { 
+        
+        Self { 
             pool,
             router: Arc::new(RwLock::new(StreamRouter { routes: HashMap::new() })),
             listener_started: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        };
-        backend
+        }
     }
 
     /// Spawn a single multiplexed listener that handles all subscriptions.
@@ -255,5 +255,26 @@ impl CoordinationBackend for RedisBackend {
             .await
             .map_err(|e| e.to_string())?;
         Ok(result)
+    }
+
+    async fn release_lock(&self, key: &str, value: &[u8]) -> Result<bool, String> {
+        let mut conn = self.pool.get().await.map_err(|e| e.to_string())?;
+        // CAS-del:仅当当前值仍是我们的 token 时删除。
+        let script = deadpool_redis::redis::Script::new(
+            r"
+            if redis.call('get', KEYS[1]) == ARGV[1] then
+                return redis.call('del', KEYS[1])
+            else
+                return 0
+            end
+            ",
+        );
+        let result: i64 = script
+            .key(key)
+            .arg(value)
+            .invoke_async(&mut conn)
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(result == 1)
     }
 }

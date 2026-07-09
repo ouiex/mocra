@@ -125,4 +125,8 @@ impl CoordinationBackend for KafkaBackend {
     async fn renew_lock(&self, key: &str, value: &[u8], ttl_ms: u64) -> Result<bool, String> {
         self.redis_backend.renew_lock(key, value, ttl_ms).await
     }
+
+    async fn release_lock(&self, key: &str, value: &[u8]) -> Result<bool, String> {
+        self.redis_backend.release_lock(key, value).await
+    }
 }

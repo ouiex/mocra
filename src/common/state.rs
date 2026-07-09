@@ -73,6 +73,9 @@ pub struct State {
     pub status_tracker: Arc<StatusTracker>,
     /// Underlying Redis pool (exposed for specialized components like LeaderElector)
     pub redis: Option<Pool>,
+    /// 可选的协调后端(如内嵌 redb+Raft)。设置后,引擎的 `LeaderElector` 等
+    /// 优先走它(替代 Redis 协调)。由 facade 在启动集群时注入(见 `cluster-embedded`)。
+    pub coordination: Option<Arc<dyn crate::sync::CoordinationBackend>>,
 }
 impl State {
     /// Creates a new State instance from a file-based configuration.
@@ -91,6 +94,16 @@ impl State {
     /// Starts a background task to watch for configuration changes.
     pub async fn try_new_with_provider(
         provider: Box<dyn ConfigProvider>,
+    ) -> Result<Self, StateInitError> {
+        Self::try_new_with_provider_and_coordination(provider, None).await
+    }
+
+    /// 同 [`try_new_with_provider`](Self::try_new_with_provider),但注入一个可选的
+    /// 协调后端(如内嵌 redb+Raft)。注入后,分布式锁 / 选举等**从构造起**即走该
+    /// 后端(而非无 Redis 时退化的进程内锁),使集群模式下的协调跨节点强一致。
+    pub async fn try_new_with_provider_and_coordination(
+        provider: Box<dyn ConfigProvider>,
+        coordination: Option<Arc<dyn crate::sync::CoordinationBackend>>,
     ) -> Result<Self, StateInitError> {
         let config = provider
             .load_config()
@@ -207,14 +220,16 @@ impl State {
 
         info!("locker and limit pools shared with cache pool");
 
-        let locker = Arc::new(DistributedLockManager::new(
+        let locker = Arc::new(DistributedLockManager::new_with_coordination(
             locker_pool.clone(),
+            coordination.clone(),
             &config.name,
         ));
 
-        let limiter = Arc::new(DistributedSlidingWindowRateLimiter::new(
+        let limiter = Arc::new(DistributedSlidingWindowRateLimiter::new_with_coordination(
             limit_pool.clone(),
             locker.clone(),
+            coordination.clone(),
             &config.name,
             RateLimitConfig {
                 max_requests_per_second: config.download_config.rate_limit,
@@ -225,9 +240,10 @@ impl State {
 
         let api_limiter = if let Some(api) = &config.api {
             if let Some(limit) = api.rate_limit {
-                Some(Arc::new(DistributedSlidingWindowRateLimiter::new(
+                Some(Arc::new(DistributedSlidingWindowRateLimiter::new_with_coordination(
                     limit_pool.clone(),
                     locker.clone(),
+                    coordination.clone(),
                     &format!("{}:api", config.name),
                     RateLimitConfig {
                         max_requests_per_second: limit as f32,
@@ -338,6 +354,7 @@ impl State {
             api_limiter,
             status_tracker: error_tracker,
             redis: cache_pool,
+            coordination,
         })
     }
 }

@@ -228,7 +228,7 @@ impl Engine {
             .unwrap_or_else(|| "retryable failure".to_string());
         let err = crate::errors::Error::new(
             crate::errors::ErrorKind::ProcessorChain,
-            Some(std::io::Error::new(std::io::ErrorKind::Other, reason.clone())),
+            Some(std::io::Error::other(reason.clone())),
         );
 
         let decision = policy_resolver.resolve_with_error(
@@ -285,7 +285,7 @@ impl Engine {
         let log_topic = cfg
             .logger
             .as_ref()
-            .and_then(|logger| Self::first_mq_topic(logger));
+            .and_then(Self::first_mq_topic);
         QueueManager::from_config_with_log_topic(cfg, log_topic.as_deref())
     }
 
@@ -332,25 +332,25 @@ impl Engine {
         config.outputs = logger
             .outputs
             .iter()
-            .filter_map(|output| match output {
-                crate::common::model::logger_config::LogOutputConfig::Console {} => {
-                    Some(AppLogOutputConfig::Console)
+            .map(|output| match output {
+                crate::common::model::logger_config::LogOutputConfig::Console => {
+                    AppLogOutputConfig::Console
                 }
                 crate::common::model::logger_config::LogOutputConfig::File {
                     path,
                     rotation,
                     ..
-                } => Some(AppLogOutputConfig::File {
+                } => AppLogOutputConfig::File {
                     path: PathBuf::from(path),
                     rotation: rotation.clone(),
-                }),
+                },
                 crate::common::model::logger_config::LogOutputConfig::Mq { format, .. } => {
                     if let Some(format) = format
                         && format.to_lowercase() != "json"
                     {
                         eprintln!("logger.outputs.mq.format only supports json, got {format}");
                     }
-                    Some(AppLogOutputConfig::Mq)
+                    AppLogOutputConfig::Mq
                 }
             })
             .collect();
@@ -370,7 +370,7 @@ impl Engine {
 
     fn base_level_from_filter(level: &str) -> Option<&str> {
         level
-            .split(|ch| ch == ',' || ch == ';')
+            .split([',', ';'])
             .map(|value| value.trim())
             .find(|value| !value.is_empty())
     }
@@ -426,11 +426,7 @@ impl Engine {
         let prometheus_handle = builder.install_recorder().ok();
 
         // Create event bus when enabled by configuration.
-        let event_bus = if let Some(conf) = &state.config.read().await.event_bus {
-            Some(Arc::new(EventBus::new(conf.capacity, conf.concurrency)))
-        } else {
-            None
-        };
+        let event_bus = state.config.read().await.event_bus.as_ref().map(|conf| Arc::new(EventBus::new(conf.capacity, conf.concurrency)));
         // Create global shutdown signal channel.
         let (shutdown_tx, _shutdown_rx) = broadcast::channel(1);
         
@@ -513,7 +509,7 @@ impl Engine {
                         QueueLogHandler::start(rx, queue_manager.clone(), "mq".to_string()).await;
                         info!("Registered MQ Logger for EventBus");
                     }
-                    LogOutputConfig::Console { .. } => {
+                    LogOutputConfig::Console => {
                         let rx = event_bus.subscribe("*".to_string()).await;
                         let level = log_config
                             .level
@@ -573,7 +569,15 @@ impl Engine {
         ));
 
         let redis_pool = state.redis.clone();
-        let leader_elector = if let Some(pool) = redis_pool {
+        let leader_elector = if let Some(backend) = state.coordination.clone() {
+            // 内嵌 redb+Raft 等协调后端优先(替代 Redis 协调)。
+            let (elector, _) = LeaderElector::new(
+                Some(backend),
+                format!("{}:leader:cron", namespace),
+                5000,
+            );
+            elector
+        } else if let Some(pool) = redis_pool {
             let backend = Arc::new(RedisBackend::new(pool));
             let (elector, _) = LeaderElector::new(
                 Some(backend),

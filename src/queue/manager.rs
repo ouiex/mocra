@@ -8,6 +8,8 @@ use crate::queue::compensation::{Compensator, Identifiable, RedisCompensator};
 use crate::queue::redis::RedisQueue;
 #[cfg(feature = "queue-kafka")]
 use crate::queue::kafka::KafkaQueue;
+#[cfg(feature = "queue-nats")]
+use crate::queue::nats::NatsQueue;
 use crate::common::policy::PolicyResolver;
 use crate::common::model::message::{TaskErrorEvent, TaskParserEvent, TaskEvent};
 use crate::common::model::{Request, Response, Prioritizable, Priority};
@@ -182,6 +184,33 @@ impl QueueManager {
                 let _ = kafka_config;
                 error!(
                     "channel_config.kafka is set but the `queue-kafka` feature is disabled; \
+                     falling back to in-memory queue"
+                );
+                QueueManager::new(None, channel_config.capacity)
+            };
+            qm
+        } else if let Some(nats_config) = &channel_config.nats {
+            #[cfg(feature = "queue-nats")]
+            let qm = match NatsQueue::new(
+                nats_config,
+                channel_config.minid_time,
+                namespace,
+                nack_policy,
+            ) {
+                Ok(nats_queue) => {
+                    info!("NatsQueue (JetStream) initialized successfully");
+                    QueueManager::new(Some(Arc::new(nats_queue)), channel_config.capacity)
+                }
+                Err(e) => {
+                    error!("NatsQueue init failed, fallback to in-memory queue: {}", e);
+                    QueueManager::new(None, channel_config.capacity)
+                }
+            };
+            #[cfg(not(feature = "queue-nats"))]
+            let qm = {
+                let _ = nats_config;
+                error!(
+                    "channel_config.nats is set but the `queue-nats` feature is disabled; \
                      falling back to in-memory queue"
                 );
                 QueueManager::new(None, channel_config.capacity)
@@ -482,11 +511,9 @@ impl QueueManager {
 
                 let results = join_all(tasks).await;
 
-                for res in results {
-                    if let Some((msg, item)) = res {
-                        if let Err(_e) = sender.send(item).await {
-                                let _ = msg.nack("Channel closed").await;
-                        }
+                for (msg, item) in results.into_iter().flatten() {
+                    if let Err(_e) = sender.send(item).await {
+                            let _ = msg.nack("Channel closed").await;
                     }
                 }
             }
@@ -771,6 +798,8 @@ impl QueueManager {
 
         for item in items {
             let id = item.get_id();
+            // 分区键用于 MQ 路由 / 分片(账号亲和);与去重 / 日志用的 id 相互独立。
+            let partition_key = item.partition_key();
             if let Some(id_list) = ids.as_mut() {
                 id_list.push(id.clone());
             }
@@ -784,7 +813,7 @@ impl QueueManager {
                 Ok(p) => {
                     let final_payload = compress_payload_owned(p, compression_threshold);
                     let headers = default_headers();
-                    payloads.push((Some(id), final_payload, headers));
+                    payloads.push((Some(partition_key), final_payload, headers));
                 }
                 Err(e) => {
                     error!("Failed to serialize item id={}: {}. Item will be skipped (unrecoverable).", id, e);

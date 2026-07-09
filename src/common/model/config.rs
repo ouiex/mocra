@@ -234,6 +234,30 @@ impl fmt::Debug for KafkaConfig {
     }
 }
 
+/// NATS (JetStream) Configuration
+#[derive(Serialize, Deserialize, Clone)]
+pub struct NatsConfig {
+    /// 服务器地址(如 `nats://127.0.0.1:4222`;逗号分隔多个)。
+    pub url: String,
+    /// 可选用户名。
+    pub username: Option<String>,
+    /// 可选密码。
+    pub password: Option<String>,
+    /// 可选 token 认证。
+    pub token: Option<String>,
+}
+
+impl fmt::Debug for NatsConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("NatsConfig")
+            .field("url", &self.url)
+            .field("username", &self.username)
+            .field("password", &self.password.as_ref().map(|_| "***REDACTED***"))
+            .field("token", &self.token.as_ref().map(|_| "***REDACTED***"))
+            .finish()
+    }
+}
+
 /// Blob Storage Configuration
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct BlobStorageConfig {
@@ -250,6 +274,9 @@ pub struct ChannelConfig {
     pub redis: Option<RedisConfig>,
     /// Kafka configuration for queue
     pub kafka: Option<KafkaConfig>,
+    /// NATS (JetStream) configuration for queue
+    #[serde(default)]
+    pub nats: Option<NatsConfig>,
     /// Compensator Redis configuration (for dead letter or retry)
     pub compensator: Option<RedisConfig>,
     /// Minimum ID time (snowflake/uuid related)
@@ -278,12 +305,6 @@ pub struct EventBusConfig {
     /// Concurrency limit for event handlers (default: 64)
     pub concurrency: usize,
 }
-
-/// Logger Queue Configuration (Deprecated, replaced by LoggerConfig in separate file)
-// #[derive(Serialize, Deserialize, Debug, Clone)]
-// pub struct LoggerConfig {
-//     ...
-// }
 
 /// Main Configuration
 #[derive(Serialize, Deserialize, Debug, Clone)]

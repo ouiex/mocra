@@ -2,8 +2,15 @@
 name = "mocra-cluster"
 version = "0.1.0"
 edition = "2024"
-description = "mocra 内嵌控制面:redb 状态机 + Raft 共识(重构 Phase 3)"
+rust-version = "1.85"
+description = "Embedded Raft + redb control plane for the mocra distributed crawler framework: leader election, distributed locks with fencing, membership, partition ownership."
 license = "MIT OR Apache-2.0"
+repository = "https://github.com/ouiex/mocra"
+homepage = "https://github.com/ouiex/mocra"
+documentation = "https://docs.rs/mocra-cluster"
+readme = "README.md"
+keywords = ["raft", "cluster", "consensus", "distributed", "redb"]
+categories = ["network-programming", "asynchronous", "database-implementations"]
 
 [dependencies]
 # 共识:Rust 事实标准的异步 Raft。storage-v2 让 RaftLogStorage/RaftStateMachine 可直接实现。
@@ -14,7 +21,11 @@ serde = { version = "1", features = ["derive"] }
 rmp-serde = "1"
 thiserror = "2"
 async-trait = "0.1"
-tokio = { version = "1", features = ["sync", "rt", "macros", "time"] }
+tokio = { version = "1", features = ["sync", "rt", "macros", "time", "net"] }
+# 节点间控制面 RPC(HTTP + msgpack)。控制面流量小,HTTP/msgpack 足够且自包含。
+# reqwest 最小特性:内部集群走 http://(无需 TLS);随 workspace 特性并集。
+axum = "0.8"
+reqwest = { version = "0.13", default-features = false }
 
 [dev-dependencies]
 tempfile = "3"

@@ -2,7 +2,7 @@
 # 详见 docs/refactor/04-roadmap.md。
 [workspace]
 resolver = "2"
-members = ["crates/mocra-cluster"]
+members = ["crates/mocra-cluster", "crates/mocra-proxy", "crates/mocra-dag", "crates/mocra-store"]
 
 [package]
 name = "mocra"
@@ -34,7 +34,7 @@ exclude = [
 [dependencies]
 async-trait = "0.1"
 reqwest = { version = "0.13", default-features = false, features = ["http2", "charset", "native-tls", "brotli","form", "cookies", "json", "socks", "gzip", "deflate", "zstd", "hickory-dns", "stream"] }
-serde = { version = "1", features = ["derive"] }
+serde = { version = "1", features = ["derive", "rc"] }
 thiserror = "2"
 toml = "0.9"
 uuid = { version = "1", features = ["serde", "v7","zerocopy", "v4"] }
@@ -46,6 +46,7 @@ deadpool-redis = { version = "0.22", features = ["json", "script", "serde","stre
 sea-orm = { version = "1", features = ["postgres-array", "runtime-tokio-native-tls", "sqlx-postgres", "sqlx-sqlite"], optional = true }
 redis = { version = "0.32", features = ["tokio-comp", "safe_iterators", "tokio-native-tls-comp"] }
 rdkafka = { version = "0.39", features = ["cmake-build"], optional = true }
+async-nats = { version = "0.38", optional = true }
 futures = "0.3"
 log = "0.4"
 chrono = { version = "0.4.43", features = ["serde"] }
@@ -58,11 +59,11 @@ once_cell = "1"
 reqwest_cookie_store = { version = "0.10", features = ["serde"] }
 v8 = { version = "145", optional = true }
 time = { version = "0.3", features = ["local-offset", "formatting", "parsing"] }
-polars = { version = "0.52.0", features = ["json", "lazy", "serde", "csv", "timezones", "strings", "ipc", "dtype-decimal"] }
-polars-lazy = { version = "0.52.0", features = ["pivot"] }
-polars-ops = { version = "0.52.0", features = ["pivot"] }
+polars = { version = "0.52.0", features = ["json", "lazy", "serde", "csv", "timezones", "strings", "ipc", "dtype-decimal"], optional = true }
+polars-lazy = { version = "0.52.0", features = ["pivot"], optional = true }
+polars-ops = { version = "0.52.0", features = ["pivot"], optional = true }
 chrono-tz = "0.10"
-calamine = { version = "0.33.0", features = ["chrono", "dates"] }
+calamine = { version = "0.33.0", features = ["chrono", "dates"], optional = true }
 semver = { version = "1", features = ["serde"] }
 dyn-clone = { version = "1" }
 base64 = { version = "0.22" }
@@ -90,6 +91,11 @@ bloomfilter = "3"
 siphasher = "1"
 tempfile = "3"
 indexmap = { version = "2", features = ["serde"] }
+# 内嵌控制面(redb + Raft)。默认关闭;开启后可用 Raft 替换 Redis 协调。
+mocra-cluster = { path = "crates/mocra-cluster", optional = true }
+mocra-proxy = { path = "crates/mocra-proxy" }
+mocra-dag = { path = "crates/mocra-dag" }
+mocra-store = { path = "crates/mocra-store", optional = true }
 
 [profile.release]
 lto = true
@@ -102,13 +108,33 @@ strip = true
 default = ["mimalloc"]
 js-v8 = ["dep:v8"]
 mimalloc = ["dep:mimalloc"]
-polars = []
+# 数据帧支持(polars)。默认关闭 —— 现有采集管线不依赖它,开启后解锁
+# `DataFrameStore` / `polars_utils` 等表格数据能力。
+polars = ["dep:polars", "dep:polars-lazy", "dep:polars-ops"]
+# Excel 解析(calamine → DataFrame),隐含开启 polars。
+excel = ["dep:calamine", "polars"]
 # 数据面 Kafka 队列后端(默认关闭 —— 避免 rdkafka 的 cmake/C++ 构建负担)。
 queue-kafka = ["dep:rdkafka"]
+# 数据面 NATS(JetStream)队列后端 —— 轻量、无需 Redis,适合内嵌集群的数据面。
+queue-nats = ["dep:async-nats"]
 # 数据库 / 多租户元数据存储(sea-orm)。默认关闭 —— 无 DB standalone 模式不需要;
 # 开启后解锁 account × platform × module 的 DB 驱动任务模型。
-store = ["dep:sea-orm"]
+store = ["dep:sea-orm", "dep:mocra-store"]
+# 内嵌 redb+Raft 控制面。开启后 `RaftCoordinationBackend` 实现 `CoordinationBackend`,
+# 可用自组网的 Raft 集群替换 Redis 协调(锁 / 选举 / KV)。
+cluster-embedded = ["dep:mocra-cluster"]
 
 [lib]
 name = "mocra"
 path = "src/lib.rs"
+
+# 门面快速上手(无 DB / 无 Redis 单机)。
+[[example]]
+name = "spider_quickstart"
+path = "examples/spider_quickstart.rs"
+
+# 内嵌集群示例:需 cluster-embedded(用到 `ClusterConfig`)。
+[[example]]
+name = "cluster_quickstart"
+path = "examples/cluster_quickstart.rs"
+required-features = ["cluster-embedded"]
