@@ -1,5 +1,67 @@
-//! mocra: single-package entry point.
-//! All former workspace crates are embedded as local modules under `src/`.
+//! **mocra** — a distributed, event-driven crawling and data-collection framework
+//! that runs as an embeddable Rust library.
+//!
+//! Implement a [`Spider`](crate::facade::Spider) and run it with
+//! [`Mocra::builder`](crate::facade::Mocra::builder) — **no database and no Redis**
+//! required on a single node. Typed output is delivered through
+//! [`DataSink`](crate::facade::DataSink) / [`on_item`](crate::facade::on_item).
+//!
+//! ```no_run
+//! use async_trait::async_trait;
+//! use mocra::prelude::*;
+//! use serde::Serialize;
+//!
+//! #[derive(Debug, Serialize)]
+//! struct Page {
+//!     url: String,
+//!     status: u16,
+//! }
+//!
+//! struct MySpider;
+//!
+//! #[async_trait]
+//! impl Spider for MySpider {
+//!     type Item = Page;
+//!
+//!     fn name(&self) -> &str {
+//!         "my_spider"
+//!     }
+//!
+//!     async fn start(&self, seeds: &mut Seeds) {
+//!         seeds.get("https://httpbin.org/get");
+//!     }
+//!
+//!     async fn parse(&self, res: Response, cx: &mut Ctx<Self::Item>) -> Result<()> {
+//!         cx.emit(Page {
+//!             url: res.module_id(),
+//!             status: res.status_code,
+//!         });
+//!         Ok(())
+//!     }
+//! }
+//!
+//! #[tokio::main]
+//! async fn main() -> Result<()> {
+//!     Mocra::builder()
+//!         .spider(
+//!             MySpider,
+//!             on_item(|page: Page| async move {
+//!                 println!("{} -> {}", page.url, page.status);
+//!             }),
+//!         )
+//!         .run()
+//!         .await
+//! }
+//! ```
+//!
+//! # Beyond a single node
+//!
+//! - **Cluster** (`cluster-embedded`): a self-organizing Raft + redb control plane via
+//!   `Mocra::builder().cluster(..)` — no external ZooKeeper / etcd / Redis.
+//! - **Dashboard** (`dashboard`): `.dashboard(port)` serves a built-in web dashboard
+//!   plus a read-only, CORS-enabled observability API (metrics / logs / tasks / performance).
+//!
+//! See the [`prelude`] for the curated public surface and [`facade`] for the entry types.
 
 // 结构性 clippy lint —— 现有设计取舍(参数数、类型复杂度、模块同名、error/枚举变体尺寸),
 // 非 bug;统一豁免,便于逐步对主 crate 收紧 `-D warnings`。

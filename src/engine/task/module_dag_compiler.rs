@@ -64,7 +64,7 @@ pub struct ModuleDagDefinition {
 impl ModuleDagDefinition {
     /// Returns a fluent builder.
     ///
-    /// ```
+    /// ```ignore
     /// let dag = ModuleDagDefinition::builder()
     ///     .edge(&login_node, &cate_list_node)
     ///     .edge(&cate_list_node, &brand_rank_downloader)

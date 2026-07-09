@@ -34,6 +34,10 @@ jobs:
       - name: Test (default features)
         run: cargo test --lib
 
+      # Compile-check the public-API doc examples (crate root quick-start etc.).
+      - name: Doc-tests
+        run: cargo test --doc
+
       - name: Test embedded cluster crate
         run: cargo test -p mocra-cluster
 

@@ -79,9 +79,9 @@ js-v8    = ["dep:v8"]
 - [x] `DataSink` trait + `on_item`(闭包 sink);`Spider::Item` 类型化出口(`ChannelSink` / `KafkaSink` 后补)。
 - [x] `Spider` → `ModuleTrait` / `ModuleNodeTrait` 适配器(单节点;`follow` 经元数据回灌 `generate`)。
 - [x] `Mocra::builder()` + `.spider(spider, sink)` + `.from_toml(path)` + `.run()`(已编译通过)。
-- [ ] **内存 metadata provider**:合成 account/platform、自动注入种子任务,**绕开 DB 强制要求**(L0 无 DB 运行)—— 归入 Phase 2 的 DB 可选化,当前 `run()` 仍需 `from_toml` 提供含 `db` 的 config。
-- [ ] 程序化默认配置(免 TOML)—— 同上,随 Phase 2。
-- [ ] 能编译的 doctest + 快速上手文档 + 端到端运行验证(需 mock server + sqlite)。
+- [x] **内存 metadata provider**:合成 account/platform、自动注入种子任务,**绕开 DB 强制要求**(L0 无 DB 运行)—— 已随 Phase 2 的 DB 可选化落地(`default_standalone_config` + `StaticConfigProvider`,`Mocra::builder().spider(..).run()` 免 TOML / 免 DB 直接跑)。
+- [x] 程序化默认配置(免 TOML)—— 同上,`Mocra::builder()` 无 `from_toml` 时用内置单机默认配置。
+- [~] 能编译的 doctest + 快速上手文档:crate 根 `//!` 加**编译校验的 quick-start doctest**(镜像 `spider_quickstart`,`cargo test --doc` 纳入 CI,防 API 漂移);端到端运行验证(mock server + sqlite)仍待补。
 
 **产出**:`Mocra::builder().spider(s, on_item(..)).run()` —— **无 DB、无 Redis 三行跑通**,已编译通过(依赖 Phase 2 的 DB 可选化)。运行时端到端验证进行中。
 
@@ -146,7 +146,7 @@ js-v8    = ["dep:v8"]
 
 ### Phase 4 · 发布打磨 · 🟢 低风险
 
-- [~] `examples/` 纳入 CI(已加 `cargo build --examples`);docs.rs:4 个子 crate `cargo doc` 净(0 告警);主 crate feature 组合 doc 验证待补。
+- [x] `examples/` 纳入 CI(`cargo build --examples`,含 dashboard 示例);docs.rs:4 个子 crate `cargo doc` 净(0 告警)+ **主 crate 全部 intra-doc 链接修净** + `[package.metadata.docs.rs] all-features`(门控条目在文档站可解析)+ crate 根 quick-start doctest;`cargo test --doc` 纳入 CI。
 - [x] 确立 **MSRV**(`rust-version = "1.85"`,edition 2024 基线,root + 4 crate)、`CHANGELOG.md`(记录本次重构)。语义版本纪律待正式发布确立。
 - [ ] 基准与对标(上手曲线 vs scrapy / colly;吞吐 vs 现 Redis 版)。
 - [~] 发布各 crate 到 crates.io:4 个子 crate 已备 README + 元数据(repository / keywords / categories / readme)、`cargo package` 通过(可发布);正式发布待定。
