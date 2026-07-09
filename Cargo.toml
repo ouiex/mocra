@@ -2,7 +2,7 @@
 # 详见 docs/refactor/04-roadmap.md。
 [workspace]
 resolver = "2"
-members = ["crates/mocra-cluster", "crates/mocra-proxy", "crates/mocra-dag", "crates/mocra-store"]
+members = ["crates/mocra-cluster", "crates/mocra-proxy", "crates/mocra-dag", "crates/mocra-store", "crates/mocra-core"]
 
 [package]
 name = "mocra"
@@ -103,6 +103,8 @@ mocra-cluster = { path = "crates/mocra-cluster", optional = true }
 mocra-proxy = { path = "crates/mocra-proxy" }
 mocra-dag = { path = "crates/mocra-dag" }
 mocra-store = { path = "crates/mocra-store", optional = true }
+# 共享运行时(错误类型起步,后续逐层迁入);host 经 shim 重导出保持 `crate::errors::*` 兼容。
+mocra-core = { path = "crates/mocra-core" }
 
 [profile.release]
 lto = true
@@ -117,7 +119,7 @@ js-v8 = ["dep:v8"]
 mimalloc = ["dep:mimalloc"]
 # 数据帧支持(polars)。默认关闭 —— 现有采集管线不依赖它,开启后解锁
 # `DataFrameStore` / `polars_utils` 等表格数据能力。
-polars = ["dep:polars", "dep:polars-lazy", "dep:polars-ops"]
+polars = ["dep:polars", "dep:polars-lazy", "dep:polars-ops", "mocra-core/polars"]
 # Excel 解析(calamine → DataFrame),隐含开启 polars。
 excel = ["dep:calamine", "polars"]
 # 数据面 Kafka 队列后端(默认关闭 —— 避免 rdkafka 的 cmake/C++ 构建负担)。

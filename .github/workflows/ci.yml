@@ -110,7 +110,12 @@ jobs:
       - name: Clippy (mocra-store, deny warnings)
         run: cargo clippy -p mocra-store -- -D warnings
 
+      - name: Test + Clippy (mocra-core, deny warnings)
+        run: |
+          cargo test -p mocra-core
+          cargo clippy -p mocra-core -- -D warnings
+
       - name: Docs (workspace crates, deny warnings)
-        run: cargo doc --no-deps -p mocra-cluster -p mocra-proxy -p mocra-dag -p mocra-store
+        run: cargo doc --no-deps -p mocra-cluster -p mocra-proxy -p mocra-dag -p mocra-store -p mocra-core
         env:
           RUSTDOCFLAGS: "-D warnings"

@@ -1,0 +1,25 @@
+[package]
+name = "mocra-core"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Core shared types for the mocra crawler framework (errors first; the shared runtime is being extracted here incrementally)."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/ouiex/mocra"
+homepage = "https://github.com/ouiex/mocra"
+documentation = "https://docs.rs/mocra-core"
+readme = "README.md"
+keywords = ["crawler", "scraping", "framework", "async"]
+categories = ["network-programming", "web-programming", "asynchronous"]
+
+[dependencies]
+thiserror = "2"
+serde = { version = "1", features = ["derive", "rc"] }
+serde_json = "1"
+deadpool-redis = { version = "0.22", features = ["json", "script", "serde", "streams"] }
+mocra-proxy = { path = "../mocra-proxy" }
+polars = { version = "0.52.0", optional = true }
+
+[features]
+# Data-frame support: adds the `From<PolarsError>` boundary on the core error type.
+polars = ["dep:polars"]
