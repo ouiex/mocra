@@ -6,3 +6,6 @@
 //! host `mocra` crate can become a thin facade over reusable, independently-compilable crates.
 
 pub mod errors;
+
+#[path = "cacheable/lib.rs"]
+pub mod cacheable;

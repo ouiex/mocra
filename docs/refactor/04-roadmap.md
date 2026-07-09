@@ -106,7 +106,10 @@ js-v8    = ["dep:v8"]
   (1) `ModuleDagDefinition` 及其类型从 `engine::task` 迁到 [`common::model::module_dag`](../../src/common/model/module_dag.rs)(策略/放置类型直接取自 `mocra_dag` crate),`ModuleTrait::dag_definition` 契约不再依赖 `engine`;
   (2) `CoordinationBackend` + `ClusterStatusView` 从 `sync` 迁到 [`common::coordination`](../../src/common/coordination.rs)(`sync::backend` 留 re-export shim),`State` 不再依赖 `sync`;
   (3) `utils` 的 `CoordinationBackend` 引用改指 `common`,`utils→sync` 生产依赖清零(仅剩一个 `cluster-embedded` 集成测试用 `RaftCoordinationBackend`)。**`common` 现为无环基础层**(仅依赖 `cacheable`/`utils`/`errors`/`proxy`/`mocra_dag`);默认/`store`/`dashboard`/`cluster-embedded` 全绿。
-- [~] **建 [`crates/mocra-core`](../../crates/mocra-core) 骨架并自底向上迁入(进行中)**:环打断后开始把基础层逐层迁进 `mocra-core`,host 经 shim 重导出保持 `crate::*` 兼容。**第 1 层 `errors` 已迁入** —— 纯叶子(所有子错误类型同文件、无 `crate::` 引用),`mocra_core::errors` 独立编译 + 4 测试绿,host `src/errors/lib.rs` 转 `pub use mocra_core::errors::*` shim,`polars` 特性经 `mocra-core/polars` 转发;CI 纳入 mocra-core 的 test/clippy/doc。后续逐层迁 `cacheable` / `utils` / `common`,最终迁 `downloader` / `engine`(管线)。
+- [~] **建 [`crates/mocra-core`](../../crates/mocra-core) 骨架并自底向上迁入(进行中)**:环打断后开始把基础层逐层迁进 `mocra-core`,host 经 shim 重导出保持 `crate::*` 兼容;CI 纳入 mocra-core 的 test/clippy/doc。已迁两层:
+  - **`errors`**:纯叶子(所有子错误类型同文件、无 `crate::` 引用),`polars` 特性经 `mocra-core/polars` 转发。
+  - **`cacheable`**(多级缓存服务:redis/本地/两级后端):仅依赖 `errors`;`impl DagStore for CacheService` 一并从 host `schedule` shim 迁入 mocra-core(孤儿规则:trait=`mocra_dag`、类型=`mocra_core` 均在外部,impl 须落在拥有类型的 crate),mocra-core 增 `mocra-dag` 依赖(无环)。`dag_tests` 54 绿(适配行为不变)。
+  - 后续逐层迁 `utils` / `common`,最终迁 `downloader` / `engine`(管线)。host 测试 196(errors/cacheable 各自的测试随模块迁到 mocra-core)。
 - [x] 抽 `mocra-dag` / `mocra-proxy`(现成干净)为独立 crate。**两者均已抽出、独立编译(不反依赖主 crate)、clippy `-D warnings` 净、CI 纳入**:
   - [`crates/mocra-proxy`](../../crates/mocra-proxy):自带 `ProxyError` / `Result`,`src/proxy` 转 shim `pub use mocra_proxy::*` + `impl From<mocra_proxy::ProxyError> for Error` 边界转换;9 个精简依赖。
   - [`crates/mocra-dag`](../../crates/mocra-dag):通用分布式 DAG 引擎,**运行时依赖 trait 化** —— `DagStore`(get/set/del/incr/eval_lua)抽象 `CacheService`、`DagEventSink` 抽象 `SyncService`,`crate::common::metrics` 内联;宿主 `src/schedule` 转 shim + adapter(`impl DagStore for CacheService`、`SyncAble for DagNodeSyncState`);**54 个测试留主 crate 用真实 `CacheService` 驱动、全绿**。

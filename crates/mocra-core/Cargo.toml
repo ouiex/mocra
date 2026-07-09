@@ -18,7 +18,19 @@ serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 deadpool-redis = { version = "0.22", features = ["json", "script", "serde", "streams"] }
 mocra-proxy = { path = "../mocra-proxy" }
+mocra-dag = { path = "../mocra-dag" }
 polars = { version = "0.52.0", optional = true }
+# cacheable(缓存服务:redis / 本地 / 两级后端)
+async-trait = "0.1"
+tokio = { version = "1", features = ["full"] }
+log = "0.4"
+dashmap = "6"
+zstd = "0.13"
+flate2 = "1.1.9"
+metrics = "0.24"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }
 
 [features]
 # Data-frame support: adds the `From<PolarsError>` boundary on the core error type.

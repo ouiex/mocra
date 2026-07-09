@@ -11,44 +11,12 @@ pub mod dag {
     pub use mocra_dag::*;
 }
 
-use std::time::Duration;
-
 use async_trait::async_trait;
-use deadpool_redis::redis::Value as RedisValue;
 
-use crate::cacheable::CacheService;
 use crate::sync::{SyncAble, SyncService};
 
-/// 把宿主的多级缓存服务适配为 dag 的分布式 KV / 原子后端。
-#[async_trait]
-impl DagStore for CacheService {
-    async fn get(&self, key: &str) -> Result<Option<Vec<u8>>, String> {
-        CacheService::get(self, key).await.map_err(|e| e.to_string())
-    }
-    async fn set(&self, key: &str, value: &[u8], ttl: Option<Duration>) -> Result<(), String> {
-        CacheService::set(self, key, value, ttl)
-            .await
-            .map_err(|e| e.to_string())
-    }
-    async fn del(&self, key: &str) -> Result<(), String> {
-        CacheService::del(self, key).await.map_err(|e| e.to_string())
-    }
-    async fn incr(&self, key: &str, delta: i64) -> Result<i64, String> {
-        CacheService::incr(self, key, delta)
-            .await
-            .map_err(|e| e.to_string())
-    }
-    async fn eval_lua(
-        &self,
-        script: &str,
-        keys: &[&str],
-        args: &[&str],
-    ) -> Result<RedisValue, String> {
-        CacheService::eval_lua(self, script, keys, args)
-            .await
-            .map_err(|e| e.to_string())
-    }
-}
+// `impl DagStore for CacheService` 已随 `CacheService` 迁入 `mocra-core`(孤儿规则:
+// trait 与类型均在外部 crate,impl 必须在拥有其一的 crate 里)。
 
 // SyncAble 是本地 trait、DagNodeSyncState 是外部类型 —— 孤儿规则允许在此 impl。
 impl SyncAble for DagNodeSyncState {
