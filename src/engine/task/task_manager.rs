@@ -4,7 +4,7 @@ use super::{
     module::Module,
 };
 #[cfg(feature = "store")]
-use super::repository::TaskRepository;
+use super::repository::{MetadataStore, TaskRepository};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use dashmap::DashMap;
@@ -186,7 +186,7 @@ impl TaskManager {
         let repository = state
             .db
             .as_ref()
-            .map(|db| TaskRepository::new((**db).clone()));
+            .map(|db| Arc::new(TaskRepository::new((**db).clone())) as Arc<dyn MetadataStore>);
         #[cfg(not(feature = "store"))]
         let repository = ();
 

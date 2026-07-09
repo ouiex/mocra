@@ -5,7 +5,7 @@ use super::{
 #[cfg(feature = "store")]
 use super::assembler::ConfigAssembler;
 #[cfg(feature = "store")]
-use super::repository::TaskRepository;
+use super::repository::MetadataStore;
 use crate::errors::{ModuleError::ModuleNotFound, Result};
 
 use crate::common::model::login_info::LoginInfo;
@@ -23,13 +23,14 @@ use uuid::Uuid;
 
 /// 有 `store` 特性时为 `Option<TaskRepository>`,否则为占位 `()`(始终无 DB / synthetic)。
 #[cfg(feature = "store")]
-type MaybeRepository = Option<TaskRepository>;
+type MaybeRepository = Option<Arc<dyn MetadataStore>>;
 #[cfg(not(feature = "store"))]
 type MaybeRepository = ();
 
 /// Task factory that materializes Task instances from runtime inputs.
 pub struct TaskFactory {
     /// `None`/占位 = 无 DB(standalone)模式,任务从内存模块注册表合成。
+    #[allow(dead_code)]
     repository: MaybeRepository,
     cache_service: Arc<CacheService>,
     cookie_service: Option<Arc<CacheService>>,
@@ -196,7 +197,7 @@ impl TaskFactory {
         #[cfg(feature = "store")]
         let result = match self.repository.as_ref() {
             Some(repository) => {
-                self.create_task_from_db(repository, platform_name, account_name, run_id)
+                self.create_task_from_db(&**repository, platform_name, account_name, run_id)
                     .await
             }
             None => {
@@ -215,7 +216,7 @@ impl TaskFactory {
     #[cfg(feature = "store")]
     async fn create_task_from_db(
         &self,
-        repository: &TaskRepository,
+        repository: &dyn MetadataStore,
         platform_name: &str,
         account_name: &str,
         run_id: Uuid,

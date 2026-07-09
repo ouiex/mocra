@@ -6,7 +6,7 @@ pub mod cron_config;
 pub mod data;
 pub mod download_config;
 #[cfg(feature = "store")]
-pub mod entity;
+pub use mocra_store::entity;
 pub mod headers;
 pub mod login_info;
 pub mod logger_config;

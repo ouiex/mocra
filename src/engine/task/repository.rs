@@ -9,6 +9,67 @@ use sea_orm::{
 use std::collections::HashMap;
 use std::sync::Arc;
 use crate::errors::OrmError;
+use async_trait::async_trait;
+
+/// 只读元数据存储抽象:从 DB 加载 `account × platform × module` 及中间件 / 关系。
+///
+/// 引擎持有 `Arc<dyn MetadataStore>`(而非具体 [`TaskRepository`]),把 DB 访问收敛为
+/// 正式接口 —— 便于替换后端、mock 测试,并为 `mocra-store` 收纳该逻辑铺路。
+#[async_trait]
+pub trait MetadataStore: Send + Sync {
+    async fn load_account(&self, account_name: &str) -> Result<AccountModel>;
+    async fn load_platform(&self, platform_name: &str) -> Result<PlatformModel>;
+    async fn load_account_platform_relation(
+        &self,
+        account_id: i32,
+        platform_id: i32,
+    ) -> Result<RelAccountPlatformModel>;
+    async fn load_modules_by_account_platform(
+        &self,
+        platform_name: &str,
+        account_name: &str,
+    ) -> Result<Vec<ModuleModel>>;
+    async fn load_module_by_account_platform_module(
+        &self,
+        platform_name: &str,
+        account_name: &str,
+        module_name: &[String],
+    ) -> Result<Vec<ModuleModel>>;
+    async fn load_module_platform_relations(
+        &self,
+        module_ids: &[i32],
+        platform_id: i32,
+    ) -> Result<HashMap<i32, RelModulePlatformModel>>;
+    async fn load_module_account_relations(
+        &self,
+        module_ids: &[i32],
+        account_id: i32,
+    ) -> Result<HashMap<i32, RelModuleAccountModel>>;
+    async fn load_module_platform_relation(
+        &self,
+        module_id: i32,
+        platform_id: i32,
+    ) -> Result<RelModulePlatformModel>;
+    async fn load_module_account_relation(
+        &self,
+        module_id: i32,
+        account_id: i32,
+    ) -> Result<RelModuleAccountModel>;
+    async fn load_module_data_middleware_relations(
+        &self,
+        module_ids: &[i32],
+    ) -> Result<HashMap<i32, Vec<RelModuleDataMiddlewareModel>>>;
+    async fn load_module_download_middleware_relations(
+        &self,
+        module_ids: &[i32],
+    ) -> Result<HashMap<i32, Vec<RelModuleDownloadMiddlewareModel>>>;
+    async fn load_data_middlewares(&self, middleware_ids: &[i32])
+    -> Result<Vec<DataMiddlewareModel>>;
+    async fn load_download_middlewares(
+        &self,
+        middleware_ids: &[i32],
+    ) -> Result<Vec<DownloadMiddlewareModel>>;
+}
 
 /// Read-focused repository for loading task-related entities from database.
 pub struct TaskRepository {
@@ -20,9 +81,12 @@ impl TaskRepository {
     pub fn new(db: DatabaseConnection) -> Self {
         Self { db: Arc::new(db) }
     }
+}
 
+#[async_trait]
+impl MetadataStore for TaskRepository {
     /// Loads enabled account by account name.
-    pub async fn load_account(&self, account_name: &str) -> Result<AccountModel> {
+    async fn load_account(&self, account_name: &str) -> Result<AccountModel> {
         let txn = begin_read(&self.db)
             .await
             .map_err(|e| OrmError::ConnectionError(e.to_string().into()))?;
@@ -75,7 +139,7 @@ impl TaskRepository {
     }
 
     /// Loads enabled platform by platform name.
-    pub async fn load_platform(&self, platform_name: &str) -> Result<PlatformModel> {
+    async fn load_platform(&self, platform_name: &str) -> Result<PlatformModel> {
         let txn = begin_read(&self.db)
             .await
             .map_err(|e| OrmError::ConnectionError(e.to_string().into()))?;
@@ -128,7 +192,7 @@ impl TaskRepository {
     }
 
     /// Loads enabled account-platform relation.
-    pub async fn load_account_platform_relation(
+    async fn load_account_platform_relation(
         &self,
         account_id: i32,
         platform_id: i32,
@@ -150,7 +214,7 @@ impl TaskRepository {
     }
 
     /// Loads all enabled modules bound to account-platform pair.
-    pub async fn load_modules_by_account_platform(
+    async fn load_modules_by_account_platform(
         &self,
         platform_name: &str,
         account_name: &str,
@@ -244,7 +308,7 @@ impl TaskRepository {
     }
 
     /// Loads selected modules by names under account-platform scope.
-    pub async fn load_module_by_account_platform_module(
+    async fn load_module_by_account_platform_module(
         &self,
         platform_name: &str,
         account_name: &str,
@@ -365,7 +429,7 @@ impl TaskRepository {
     }
 
     /// Batch loads module-platform relations keyed by module_id.
-    pub async fn load_module_platform_relations(
+    async fn load_module_platform_relations(
         &self,
         module_ids: &[i32],
         platform_id: i32,
@@ -391,7 +455,7 @@ impl TaskRepository {
     }
 
     /// Batch loads module-account relations keyed by module_id.
-    pub async fn load_module_account_relations(
+    async fn load_module_account_relations(
         &self,
         module_ids: &[i32],
         account_id: i32,
@@ -417,7 +481,7 @@ impl TaskRepository {
     }
 
     /// Loads module-platform relation for one module.
-    pub async fn load_module_platform_relation(
+    async fn load_module_platform_relation(
         &self,
         module_id: i32,
         platform_id: i32,
@@ -439,7 +503,7 @@ impl TaskRepository {
     }
 
     /// Loads module-account relation for one module.
-    pub async fn load_module_account_relation(
+    async fn load_module_account_relation(
         &self,
         module_id: i32,
         account_id: i32,
@@ -461,7 +525,7 @@ impl TaskRepository {
     }
 
     /// Batch loads module-data-middleware relations grouped by module id.
-    pub async fn load_module_data_middleware_relations(
+    async fn load_module_data_middleware_relations(
         &self,
         module_ids: &[i32],
     ) -> Result<HashMap<i32, Vec<RelModuleDataMiddlewareModel>>> {
@@ -488,7 +552,7 @@ impl TaskRepository {
     }
 
     /// Batch loads module-download-middleware relations grouped by module id.
-    pub async fn load_module_download_middleware_relations(
+    async fn load_module_download_middleware_relations(
         &self,
         module_ids: &[i32],
     ) -> Result<HashMap<i32, Vec<RelModuleDownloadMiddlewareModel>>> {
@@ -515,7 +579,7 @@ impl TaskRepository {
     }
 
     /// Batch loads enabled data middlewares by ids.
-    pub async fn load_data_middlewares(
+    async fn load_data_middlewares(
         &self,
         middleware_ids: &[i32],
     ) -> Result<Vec<DataMiddlewareModel>> {
@@ -534,7 +598,7 @@ impl TaskRepository {
     }
 
     /// Batch loads enabled download middlewares by ids.
-    pub async fn load_download_middlewares(
+    async fn load_download_middlewares(
         &self,
         middleware_ids: &[i32],
     ) -> Result<Vec<DownloadMiddlewareModel>> {
