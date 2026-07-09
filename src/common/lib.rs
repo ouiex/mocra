@@ -5,6 +5,7 @@
 //! policies.
 
 pub mod context;
+pub mod coordination;
 pub mod interface;
 pub mod model;
 pub mod processors;

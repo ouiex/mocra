@@ -1,9 +1,17 @@
+//! Module DAG definition types — the graph a [`ModuleTrait`](crate::common::interface::ModuleTrait)
+//! describes via `dag_definition()` / `add_step()`.
+//!
+//! These live in `common` (not `engine`) so the `ModuleTrait` contract does not depend on the
+//! engine — the engine's `ModuleDagProcessor` consumes them. Node-execution policy / placement
+//! types come from the standalone `mocra-dag` crate.
+
 use std::collections::HashMap;
 use std::sync::Arc;
+
 use indexmap::IndexMap;
+use mocra_dag::{DagNodeExecutionPolicy, NodePlacement};
 
 use crate::common::interface::ModuleNodeTrait;
-use crate::schedule::dag::{DagNodeExecutionPolicy, NodePlacement};
 
 #[derive(Clone)]
 pub struct ModuleDagNodeDef {
@@ -13,7 +21,7 @@ pub struct ModuleDagNodeDef {
     pub policy_override: Option<DagNodeExecutionPolicy>,
     pub tags: Vec<String>,
 }
-impl ModuleDagNodeDef{
+impl ModuleDagNodeDef {
     pub fn new(node: Arc<dyn ModuleNodeTrait>) -> Self {
         let key = node.stable_node_key();
         let node_id = if key.is_empty() {
@@ -46,9 +54,12 @@ pub struct ModuleDagEdgeDef {
     pub from: String,
     pub to: String,
 }
-impl ModuleDagEdgeDef{
+impl ModuleDagEdgeDef {
     pub fn new(from: &ModuleDagNodeDef, to: &ModuleDagNodeDef) -> Self {
-        Self { from: from.node_id.clone(), to: to.node_id.clone() }
+        Self {
+            from: from.node_id.clone(),
+            to: to.node_id.clone(),
+        }
     }
 }
 
@@ -192,12 +203,12 @@ mod tests {
     use async_trait::async_trait;
     use serde_json::Map;
 
+    use super::ModuleDagDefinition;
     use crate::common::interface::{ModuleNodeTrait, SyncBoxStream, ToSyncBoxStream};
     use crate::common::model::login_info::LoginInfo;
     use crate::common::model::message::TaskOutputEvent;
     use crate::common::model::{ModuleConfig, Request, Response};
     use crate::errors::Result;
-    use super::ModuleDagDefinition;
 
     struct DummyNode;
 
@@ -238,5 +249,4 @@ mod tests {
         assert_eq!(definition.edges[1].from, definition.nodes[1].node_id);
         assert_eq!(definition.edges[1].to, definition.nodes[2].node_id);
     }
-
 }

@@ -13,6 +13,7 @@ pub mod logger_config;
 pub mod message;
 pub mod meta;
 pub mod model_config;
+pub mod module_dag;
 pub mod priority;
 pub mod request;
 pub mod response;

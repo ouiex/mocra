@@ -96,7 +96,7 @@ pub struct DistributedSlidingWindowRateLimiter {
     suspend_cache: Arc<DashMap<String, (Instant, Option<u64>)>>,
     /// 可选协调后端(内嵌 Raft 等)。无 Redis 池时,用其成员数把全局限额**按节点分摊**
     /// (近似分布式限流);有 Redis 池时不分摊(Redis 已提供原子全局限流)。
-    coordination: Option<Arc<dyn crate::sync::CoordinationBackend>>,
+    coordination: Option<Arc<dyn crate::common::coordination::CoordinationBackend>>,
 }
 
 impl std::fmt::Debug for DistributedSlidingWindowRateLimiter {
@@ -132,7 +132,7 @@ impl DistributedSlidingWindowRateLimiter {
     pub fn new_with_coordination(
         limit_pool: Option<Arc<Pool>>,
         locker: Arc<DistributedLockManager>,
-        coordination: Option<Arc<dyn crate::sync::CoordinationBackend>>,
+        coordination: Option<Arc<dyn crate::common::coordination::CoordinationBackend>>,
         namespace: &str,
         default_config: RateLimitConfig,
     ) -> Self {
@@ -1113,7 +1113,7 @@ mod tests {
     /// 只覆写 `cluster_size` 的最小 CoordinationBackend,用于验证限额分摊。
     struct SizeBackend(usize);
     #[async_trait::async_trait]
-    impl crate::sync::CoordinationBackend for SizeBackend {
+    impl crate::common::coordination::CoordinationBackend for SizeBackend {
         async fn publish(&self, _: &str, _: &[u8]) -> std::result::Result<(), String> {
             Ok(())
         }
@@ -1153,7 +1153,7 @@ mod tests {
     fn shares_global_limit_by_cluster_size() {
         // 4 节点集群、无 Redis:每秒 8 的全局限额按节点分摊为每节点 2。
         let locker = Arc::new(DistributedLockManager::new(None, "t"));
-        let backend: Arc<dyn crate::sync::CoordinationBackend> = Arc::new(SizeBackend(4));
+        let backend: Arc<dyn crate::common::coordination::CoordinationBackend> = Arc::new(SizeBackend(4));
         let limiter = DistributedSlidingWindowRateLimiter::new_with_coordination(
             None,
             locker,

@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use crate::common::interface::ModuleTrait;
-use crate::engine::task::module_dag_compiler::{
+use crate::common::model::module_dag::{
     ModuleDagDefinition, ModuleDagEdgeDef, ModuleDagNodeDef,
 };
 
@@ -89,7 +89,7 @@ mod tests {
     use crate::common::model::login_info::LoginInfo;
     use crate::common::model::message::TaskOutputEvent;
     use crate::common::model::{ModuleConfig, Request, Response};
-    use crate::engine::task::module_dag_compiler::{ModuleDagDefinition, ModuleDagNodeDef};
+    use crate::common::model::module_dag::{ModuleDagDefinition, ModuleDagNodeDef};
     use crate::errors::Result;
 
     struct DummyNode;

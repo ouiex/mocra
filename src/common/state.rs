@@ -75,7 +75,7 @@ pub struct State {
     pub redis: Option<Pool>,
     /// 可选的协调后端(如内嵌 redb+Raft)。设置后,引擎的 `LeaderElector` 等
     /// 优先走它(替代 Redis 协调)。由 facade 在启动集群时注入(见 `cluster-embedded`)。
-    pub coordination: Option<Arc<dyn crate::sync::CoordinationBackend>>,
+    pub coordination: Option<Arc<dyn crate::common::coordination::CoordinationBackend>>,
 }
 
 /// 按名构造一个 Redis 连接池:单机模式或无对应配置时返回 `None`,否则建池
@@ -138,7 +138,7 @@ impl State {
     /// 后端(而非无 Redis 时退化的进程内锁),使集群模式下的协调跨节点强一致。
     pub async fn try_new_with_provider_and_coordination(
         provider: Box<dyn ConfigProvider>,
-        coordination: Option<Arc<dyn crate::sync::CoordinationBackend>>,
+        coordination: Option<Arc<dyn crate::common::coordination::CoordinationBackend>>,
     ) -> Result<Self, StateInitError> {
         let config = provider
             .load_config()

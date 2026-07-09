@@ -29,7 +29,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock;
 use uuid::Uuid;
 use crate::cacheable::{CacheAble, CacheService};
-use crate::engine::task::module_dag_compiler::ModuleDagDefinition;
+use crate::common::model::module_dag::ModuleDagDefinition;
 
 // ── Distributed gate types ──────────────────────────────────────────────────
 
@@ -624,7 +624,7 @@ impl ModuleDagProcessor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::task::module_dag_compiler::{ModuleDagDefinition, ModuleDagEdgeDef, ModuleDagNodeDef};
+    use crate::common::model::module_dag::{ModuleDagDefinition, ModuleDagEdgeDef, ModuleDagNodeDef};
     use crate::common::interface::{SyncBoxStream, ToSyncBoxStream};
     use crate::common::model::message::TaskOutputEvent;
     use crate::common::model::{ModuleConfig, Request, Response};

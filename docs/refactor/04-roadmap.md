@@ -102,6 +102,10 @@ js-v8    = ["dep:v8"]
   - **`MetadataStore` trait**(`repository.rs`):13 个 `load_*` 方法收敛为正式 trait,`TaskRepository` impl 它;引擎的 `MaybeRepository` 从 `Option<TaskRepository>` 改为 **`Option<Arc<dyn MetadataStore>>`** —— DB 访问经 trait 对象派发,便于替换 / mock。216 个 store 测试全绿。
 - [x] `MiddlewareManager` 去除未使用的 `Arc<State>` 死耦合(此前存了却从不读);`DownloaderManager` 从 `Arc<State>` 窄化为 `config`/`limiter`/`locker`/`cache_service` 四个具体依赖 —— 二者均可脱离 `State` 构造与测试。
 - [ ] 收敛 `pub` 边界(2214 → 精选):内部转 `pub(crate)`,精修 `prelude`。
+- [x] **打断 `common` 的依赖环(`mocra-core` 抽取前置)**:`common` 原本与 `engine` / `sync` 形成模块环,阻断分层抽取。三处环已断 ——
+  (1) `ModuleDagDefinition` 及其类型从 `engine::task` 迁到 [`common::model::module_dag`](../../src/common/model/module_dag.rs)(策略/放置类型直接取自 `mocra_dag` crate),`ModuleTrait::dag_definition` 契约不再依赖 `engine`;
+  (2) `CoordinationBackend` + `ClusterStatusView` 从 `sync` 迁到 [`common::coordination`](../../src/common/coordination.rs)(`sync::backend` 留 re-export shim),`State` 不再依赖 `sync`;
+  (3) `utils` 的 `CoordinationBackend` 引用改指 `common`,`utils→sync` 生产依赖清零(仅剩一个 `cluster-embedded` 集成测试用 `RaftCoordinationBackend`)。**`common` 现为无环基础层**(仅依赖 `cacheable`/`utils`/`errors`/`proxy`/`mocra_dag`);默认/`store`/`dashboard`/`cluster-embedded` 全绿。
 - [x] 抽 `mocra-dag` / `mocra-proxy`(现成干净)为独立 crate。**两者均已抽出、独立编译(不反依赖主 crate)、clippy `-D warnings` 净、CI 纳入**:
   - [`crates/mocra-proxy`](../../crates/mocra-proxy):自带 `ProxyError` / `Result`,`src/proxy` 转 shim `pub use mocra_proxy::*` + `impl From<mocra_proxy::ProxyError> for Error` 边界转换;9 个精简依赖。
   - [`crates/mocra-dag`](../../crates/mocra-dag):通用分布式 DAG 引擎,**运行时依赖 trait 化** —— `DagStore`(get/set/del/incr/eval_lua)抽象 `CacheService`、`DagEventSink` 抽象 `SyncService`,`crate::common::metrics` 内联;宿主 `src/schedule` 转 shim + adapter(`impl DagStore for CacheService`、`SyncAble for DagNodeSyncState`);**54 个测试留主 crate 用真实 `CacheService` 驱动、全绿**。

@@ -1,6 +1,6 @@
 use crate::common::model::login_info::LoginInfo;
 use crate::common::model::{Cookies, CronConfig, Headers, ModuleConfig, Request, Response};
-use crate::engine::task::module_dag_compiler::ModuleDagDefinition;
+use crate::common::model::module_dag::ModuleDagDefinition;
 // use crate::common::parser::ParserTrait;
 use crate::common::model::message::TaskOutputEvent;
 use async_trait::async_trait;
