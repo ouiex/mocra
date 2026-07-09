@@ -11,7 +11,7 @@ use tokio::time::sleep;
 use tracing::error;
 use uuid::Uuid;
 
-use crate::common::coordination::CoordinationBackend;
+use crate::utils::coordination::CoordinationBackend;
 
 #[derive(Debug)]
 pub enum LockError {

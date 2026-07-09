@@ -1,5 +1,6 @@
 pub mod batch_buffer;
 pub mod connector;
+pub mod coordination;
 pub mod date_utils;
 pub mod device_info;
 pub mod distributed_rate_limit;
