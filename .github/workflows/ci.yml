@@ -27,6 +27,10 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
+      # Fail fast on formatting before the heavier build / test / clippy steps.
+      - name: Format check
+        run: cargo fmt --all --check
+
       # rdkafka (queue-kafka feature) builds a vendored librdkafka via cmake, which needs
       # curl / ssl / sasl / zlib headers. All harmless when the feature is off.
       - name: Install system deps

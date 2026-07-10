@@ -37,7 +37,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-mocra = "0.2"
+mocra = "0.4"
 async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }
 tokio = { version = "1", features = ["full"] }
@@ -92,7 +92,7 @@ cargo run
 Enable `cluster-embedded` and start a **self-organizing Raft cluster** — register any node to any known node to form the network:
 
 ```toml
-mocra = { version = "0.2", features = ["cluster-embedded"] }
+mocra = { version = "0.4", features = ["cluster-embedded"] }
 ```
 
 ```rust
@@ -118,7 +118,7 @@ The **control plane** (leader election, distributed locks, membership, partition
 Enable the `dashboard` feature and call `.dashboard(port)` — the engine hosts a read-only observability API **and** a built-in single-file web UI. Open the port in a browser to see **metrics / logs / tasks / performance**; no frontend build, and no endpoint to type in (the page targets its own engine):
 
 ```toml
-mocra = { version = "0.2", features = ["dashboard"] }
+mocra = { version = "0.4", features = ["dashboard"] }
 ```
 
 ```rust
@@ -231,6 +231,23 @@ Mocra::builder()
 ```
 
 A Redis-backed control plane is also available without the embedded cluster: provide Redis in your TOML config (`from_toml`) and coordination (locks / election) routes through Redis instead of Raft. The data plane (message queue) is selected independently — Kafka (`queue-kafka`), NATS JetStream (`queue-nats`), Redis Streams, or in-memory.
+
+## Feature flags
+
+All optional; the default build is single-node with **no DB and no Redis**. Enable with
+`mocra = { version = "0.4", features = ["…"] }`.
+
+| Feature | Unlocks |
+|---|---|
+| `dashboard` | Read-only observability HTTP API + built-in web UI (`.dashboard(port)`) |
+| `cluster-embedded` | Embedded Raft + redb control plane (`.cluster(…)`) — no external coordinator |
+| `store` | DB-backed account × platform × module model (sea-orm) |
+| `queue-kafka` | Kafka data-plane queue backend |
+| `queue-nats` | NATS JetStream data-plane queue backend |
+| `polars` | DataFrame support (`DataFrameStore`, `polars_utils`) |
+| `excel` | Excel parsing (calamine → DataFrame); implies `polars` |
+| `js-v8` | Embedded V8 JS runtime for parse scripts |
+| `mimalloc` | mimalloc global allocator (**on by default**) |
 
 ## Documentation
 
