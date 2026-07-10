@@ -186,7 +186,7 @@ impl MiddlewareManager {
         let mut middleware: Vec<(DownloadMiddlewareHandle, u32)> = self
             .get_download_middleware(&req.download_middleware, config)
             .await;
-        middleware.sort_by(|x, y| x.1.cmp(&y.1));
+        middleware.sort_by_key(|x| x.1);
         for (middleware, _) in middleware {
             let mut middleware = middleware.lock().await;
             match middleware.before_request(req, config).await {
@@ -205,7 +205,7 @@ impl MiddlewareManager {
         let mut middleware: Vec<(DownloadMiddlewareHandle, u32)> = self
             .get_download_middleware(&resp.download_middleware, config)
             .await;
-        middleware.sort_by(|x, y| y.1.cmp(&x.1));
+        middleware.sort_by_key(|x| std::cmp::Reverse(x.1));
         for (middleware, _) in middleware {
             let mut middleware = middleware.lock().await;
             match middleware.after_response(resp, config).await {
@@ -220,7 +220,7 @@ impl MiddlewareManager {
         let mut middleware: Vec<(DataMiddlewareHandle, u32)> = self
             .get_data_middleware(&data.data_middleware, config)
             .await;
-        middleware.sort_by(|x, y| x.1.cmp(&y.1));
+        middleware.sort_by_key(|x| x.1);
         for (middleware, _) in middleware {
             let mut middleware = middleware.lock().await;
             match middleware.handle_data(data, config).await {

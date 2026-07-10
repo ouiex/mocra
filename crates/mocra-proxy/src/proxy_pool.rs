@@ -715,7 +715,7 @@ impl ProxyPool {
 
         // 收集所有隧道代理并按质量分数排序
         let mut tunnel_items = Vec::new();
-        for (_, pool) in pools.iter_mut() {
+        for pool in pools.values_mut() {
             for item in pool.iter_mut() {
                 if matches!(item.proxy, ProxyEnum::Tunnel(_)) {
                     tunnel_items.push(item);
@@ -862,7 +862,7 @@ impl ProxyPool {
                 .map(|(name, provider)| (name.clone(), provider.get_weight()))
                 .collect()
         };
-        providers.sort_by(|a, b| b.1.cmp(&a.1)); // 按权重降序排序
+        providers.sort_by_key(|x| std::cmp::Reverse(x.1)); // 按权重降序排序
         if let Some((provider_name, _)) = providers.first() {
             // 计算全局最短剩余时间并等待一次
             if let Some(min_remaining) = proxy_items
@@ -921,7 +921,7 @@ impl ProxyPool {
         let mut found = false;
         {
             let mut pools = self.pools.write().await;
-            for (_name, pool) in pools.iter_mut() {
+            for pool in pools.values_mut() {
                 for item in pool.iter_mut() {
                     if let ProxyEnum::Tunnel(ref t) = item.proxy
                         && t.endpoint == tunnel.endpoint {
@@ -958,7 +958,7 @@ impl ProxyPool {
         {
             // 遍历所有提供商的池查找代理
             let mut pools = self.pools.write().await;
-            for (_, pool) in pools.iter_mut() {
+            for pool in pools.values_mut() {
                 for item in pool.iter_mut() {
                     if item.proxy.eq(proxy) {
                         if success {
@@ -978,7 +978,7 @@ impl ProxyPool {
             }
 
             // 清理所有池中的无效代理
-            for (_, pool) in pools.iter_mut() {
+            for pool in pools.values_mut() {
                 pool.retain(|item| item.is_valid(self.config.max_errors));
             }
         } // 写锁作用域提前结束

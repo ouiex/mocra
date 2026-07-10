@@ -348,7 +348,7 @@ impl Deduplicator {
 
         let mut pipe = deadpool_redis::redis::pipe();
         for &idx in indices {
-            let key = format!("{}{}", prefix, &hashes[idx]);
+            let key = format!("{}{}", prefix, hashes[idx]);
             pipe.cmd("SET").arg(key).arg("1").arg("NX").arg("EX").arg(self.ttl);
             
             // Update L1 cache

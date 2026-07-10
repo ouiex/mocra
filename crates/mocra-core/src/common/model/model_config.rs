@@ -56,7 +56,7 @@ impl ModuleConfig {
         }
 
         // 3. Download middleware base config.
-        for (_, config) in self.download_middleware_config.iter() {
+        for config in self.download_middleware_config.values() {
             if let serde_json::Value::Object(download_config) = config {
                 for (key, value) in download_config {
                     merged.insert(key.clone(), value.clone());
@@ -65,7 +65,7 @@ impl ModuleConfig {
         }
 
         // 4. Data middleware base config.
-        for (_, config) in self.data_middleware_config.iter() {
+        for config in self.data_middleware_config.values() {
             if let serde_json::Value::Object(data_config) = config {
                 for (key, value) in data_config {
                     merged.insert(key.clone(), value.clone());
@@ -80,7 +80,7 @@ impl ModuleConfig {
         }
 
         // 5. Module-download-middleware relation config.
-        for (_, config) in self.rel_module_download_middleware_config.iter() {
+        for config in self.rel_module_download_middleware_config.values() {
             if let serde_json::Value::Object(rel_download_config) = config {
                 for (key, value) in rel_download_config {
                     merged.insert(key.clone(), value.clone());
@@ -89,7 +89,7 @@ impl ModuleConfig {
         }
 
         // 6. Module-data-middleware relation config.
-        for (_, config) in self.rel_module_data_middleware_config.iter() {
+        for config in self.rel_module_data_middleware_config.values() {
             if let serde_json::Value::Object(rel_data_config) = config {
                 for (key, value) in rel_data_config {
                     merged.insert(key.clone(), value.clone());
@@ -142,7 +142,7 @@ impl ModuleConfig {
             }
 
         // 4. Module-data-middleware relation config.
-        for (_, config) in self.rel_module_data_middleware_config.iter() {
+        for config in self.rel_module_data_middleware_config.values() {
             if let serde_json::Value::Object(rel_data_config) = config
                 && let Some(value) = rel_data_config.get(key) {
                     return Some(value);
@@ -150,7 +150,7 @@ impl ModuleConfig {
         }
 
         // 5. Module-download-middleware relation config.
-        for (_, config) in self.rel_module_download_middleware_config.iter() {
+        for config in self.rel_module_download_middleware_config.values() {
             if let serde_json::Value::Object(rel_download_config) = config
                 && let Some(value) = rel_download_config.get(key) {
                     return Some(value);
@@ -173,7 +173,7 @@ impl ModuleConfig {
                 return Some(value);
             }
         // 7. Data middleware base config.
-        for (_, config) in self.download_middleware_config.iter() {
+        for config in self.download_middleware_config.values() {
             if let serde_json::Value::Object(data_config) = config
                 && let Some(value) = data_config.get(key) {
                     return Some(value);
@@ -181,7 +181,7 @@ impl ModuleConfig {
         }
 
         // 8. Download middleware base config.
-        for (_, config) in self.data_middleware_config.iter() {
+        for config in self.data_middleware_config.values() {
             if let serde_json::Value::Object(download_config) = config
                 && let Some(value) = download_config.get(key) {
                     return Some(value);

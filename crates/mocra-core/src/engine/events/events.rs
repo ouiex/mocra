@@ -68,7 +68,7 @@ impl EventDomain {
     /// Returns the canonical lowercase domain key.
     ///
     /// ```
-    /// use mocra::engine::events::EventDomain;
+    /// use mocra_core::engine::events::EventDomain;
     /// assert_eq!(EventDomain::Engine.as_str(), "engine");
     /// assert_eq!(EventDomain::System.as_str(), "system");
     /// ```
@@ -84,7 +84,7 @@ impl EventType {
     /// Returns the canonical lowercase event type key.
     ///
     /// ```
-    /// use mocra::engine::events::EventType;
+    /// use mocra_core::engine::events::EventType;
     /// assert_eq!(EventType::RequestPublish.as_str(), "request_publish");
     /// ```
     pub fn as_str(&self) -> &'static str {
@@ -115,7 +115,7 @@ impl EventPhase {
     /// Returns the canonical lowercase phase key.
     ///
     /// ```
-    /// use mocra::engine::events::EventPhase;
+    /// use mocra_core::engine::events::EventPhase;
     /// assert_eq!(EventPhase::Retry.as_str(), "retry");
     /// ```
     pub fn as_str(&self) -> &'static str {
@@ -188,7 +188,7 @@ impl EventEnvelope {
     /// Builds the stable composite event key `domain.type.phase`.
     ///
     /// ```
-    /// use mocra::engine::events::{EventEnvelope, EventPhase, EventType};
+    /// use mocra_core::engine::events::{EventEnvelope, EventPhase, EventType};
     /// let evt = EventEnvelope::engine(EventType::ParserTaskModel, EventPhase::Completed, serde_json::json!({}));
     /// assert_eq!(evt.event_key(), "engine.parser_task_model.completed");
     /// ```

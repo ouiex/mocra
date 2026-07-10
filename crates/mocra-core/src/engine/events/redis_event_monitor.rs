@@ -165,8 +165,8 @@ impl RedisEventMonitor {
             "recent_downloads": performances,
             "statistics": {
                 "count": count,
-                "avg_duration_ms": if count > 0 { total_duration / count } else { 0 },
-                "avg_response_size": if count > 0 { total_size / count } else { 0 },
+                "avg_duration_ms": total_duration.checked_div(count).unwrap_or(0),
+                "avg_response_size": total_size.checked_div(count).unwrap_or(0),
                 "total_duration_ms": total_duration,
                 "total_response_size": total_size
             },
