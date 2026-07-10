@@ -38,3 +38,6 @@ pub mod sync;
 
 #[path = "schedule/lib.rs"]
 pub mod schedule;
+
+#[path = "engine/lib.rs"]
+pub mod engine;

@@ -62,6 +62,12 @@ rdkafka = { version = "0.39", features = ["cmake-build"], optional = true }
 async-nats = { version = "0.38", optional = true }
 # sync(协调集成:Redis / Kafka / 内嵌 Raft 后端)
 mocra-cluster = { path = "../mocra-cluster", optional = true }
+# engine(采集管线 / processor / 调度 / 监控 / 可观测 API)
+axum = { version = "0.8", features = ["json"] }
+bloomfilter = "3"
+metrics-exporter-prometheus = "0.18"
+sysinfo = "0.38"
+tower-http = { version = "0.6", features = ["cors"], optional = true }
 # store(sea-orm 连接器 / 事务) — 默认关闭
 sea-orm = { version = "1", features = ["postgres-array", "runtime-tokio-native-tls", "sqlx-postgres", "sqlx-sqlite"], optional = true }
 # excel(calamine → DataFrame) — 默认关闭,隐含 polars
@@ -78,8 +84,8 @@ polars = ["dep:polars"]
 store = ["dep:sea-orm", "dep:mocra-store"]
 # Excel parsing (calamine → DataFrame); implies polars.
 excel = ["dep:calamine", "polars"]
-# In-memory log ring buffer for the observability dashboard.
-dashboard = []
+# Observability dashboard: admin/observability HTTP API (tower-http CORS) + log ring buffer.
+dashboard = ["dep:tower-http"]
 # Data-plane MQ backends (default is in-memory / redis).
 queue-kafka = ["dep:rdkafka"]
 queue-nats = ["dep:async-nats"]

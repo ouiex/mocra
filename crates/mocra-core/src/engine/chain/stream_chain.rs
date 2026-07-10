@@ -14,7 +14,7 @@ use crate::queue::{QueueManager, QueuedItem};
 use crate::common::processors::processor::{
     ProcessorContext, ProcessorResult, ProcessorTrait, RetryPolicy,
 };
-use crate::proxy::ProxyManager;
+use mocra_proxy::ProxyManager;
 use std::sync::Arc;
 use crate::cacheable::{CacheAble, CacheService};
 use crate::common::interface::MiddlewareManager;

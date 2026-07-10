@@ -19,7 +19,7 @@ use crate::queue::QueueManager;
 use crate::common::processors::processor::{
     ProcessorContext, ProcessorResult, ProcessorTrait, RetryPolicy,
 };
-use crate::proxy::ProxyManager;
+use mocra_proxy::ProxyManager;
 use std::sync::Arc;
 use dashmap::DashMap;
 use std::time::{Instant, Duration};

@@ -25,7 +25,7 @@ use crate::queue::{QueueManager, QueuedItem};
 use crate::common::processors::processor::{ProcessorContext, RetryPolicy};
 use crate::common::model::message::UnifiedTaskInput;
 use crate::common::model::chain_key;
-use crate::proxy::ProxyManager;
+use mocra_proxy::ProxyManager;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{broadcast, watch};
