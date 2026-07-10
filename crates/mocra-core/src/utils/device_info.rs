@@ -176,7 +176,7 @@ fn get_network_interfaces_macos() -> Result<Vec<IpAddr>, Box<dyn std::error::Err
 #[cfg(target_os = "linux")]
 fn get_network_interfaces_linux() -> Result<Vec<IpAddr>, Box<dyn std::error::Error>> {
     // Prefer `ip` command.
-    if let Ok(output) = Command::new("ip").args(&["addr", "show"]).output() {
+    if let Ok(output) = Command::new("ip").args(["addr", "show"]).output() {
         let output_str = String::from_utf8_lossy(&output.stdout);
         return parse_ip_addr_output(&output_str);
     }
