@@ -28,6 +28,8 @@ exclude = [
 	"benchmarks/**",
 	".github/**",
 	".idea/**",
+	".cargo/**",
+	".claude/**",
 	"*.log",
 ]
 
