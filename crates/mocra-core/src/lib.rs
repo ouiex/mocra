@@ -26,3 +26,6 @@ pub mod utils;
 
 #[path = "common/lib.rs"]
 pub mod common;
+
+#[path = "downloader/lib.rs"]
+pub mod downloader;
