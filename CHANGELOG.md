@@ -38,8 +38,14 @@ Cargo workspace. No backward compatibility with `0.2.x` internals.
 ### Changed
 
 - **Split into a Cargo workspace** of reusable, independently-publishable crates that never
-  depend back on the host: [`mocra-cluster`], [`mocra-dag`] (generic distributed DAG engine),
-  [`mocra-proxy`] (proxy pool/manager), [`mocra-store`] (multi-tenant sea-orm entities).
+  depend back on the host: `mocra-core` (the entire runtime — errors, cache, utils, models,
+  downloader, queue, sync, scheduler, engine + admin API), [`mocra-cluster`], [`mocra-dag`]
+  (generic distributed DAG engine), [`mocra-proxy`] (proxy pool/manager), [`mocra-store`]
+  (multi-tenant sea-orm entities).
+- **The `mocra` crate is now a thin facade** — it re-exports `mocra-core` (via the `prelude`
+  and per-layer shims) and adds the ergonomic `Mocra::builder()` API. Its direct dependencies
+  dropped from ~65 to 12 (feature switches now forward to `mocra-core/<feature>` instead of
+  re-declaring `sea-orm` / `rdkafka` / `async-nats` / `polars` / `calamine` / `tower-http`).
 - **Default dependencies slimmed** — `sea-orm`, `rdkafka`, `polars`, `calamine` moved behind
   feature flags (`store`, `queue-kafka`, `polars`, `excel`); default build no longer compiles them.
 - Rate limiting shares the global limit by live cluster member count when clustered (no Redis).
