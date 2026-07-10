@@ -7,13 +7,13 @@
 从单 crate 拆成 workspace。许多子系统本就干净、与爬虫无关,天然适合独立成 crate。
 
 ```
-mocra/                       (workspace 根)
+mocra/                       (workspace 根 —— 同时是门面 crate `mocra`)
+│                            门面:Spider trait、Mocra 构建器、prelude、默认 sink、每层 shim
+│                            —— 用户唯一需要 import 的东西
 ├── crates/
-│   ├── mocra/               门面:Spider trait、Mocra 构建器、prelude、默认 sink
-│   │                        —— 用户唯一需要 import 的东西
-│   ├── mocra-core/          管线、processor 循环、中间件、下载器、模块运行时(解耦 State)
+│   ├── mocra-core/          整个运行时:errors/cacheable/utils/common/downloader/queue/
+│   │                        sync/schedule/engine + 可观测/admin API(队列后端 feature 门控)
 │   ├── mocra-cluster/       控制面:openraft + redb、CoordinationBackend 实现、分区归属、join API
-│   ├── mocra-queue/         数据面:MqBackend trait + Kafka/NATS/Redis/in-mem 实现
 │   ├── mocra-dag/           通用分布式 DAG 引擎(现 schedule/dag,零爬虫耦合)
 │   ├── mocra-proxy/         ProxyManager / ProxyPool(配置驱动、零 State)
 │   └── mocra-store/         (选配)account×platform×module 多租户模型、SeaORM 实体、Cron 批量调度
@@ -21,11 +21,16 @@ mocra/                       (workspace 根)
 └── docs/
 ```
 
+> **`mocra-queue` 不单独成 crate(2026-07 决定)。** queue 与领域深度耦合 —— 搬运 `TaskEvent`/
+> `Request`、读 mocra `Config`(Redis/NATS/Kafka)、用 `PolicyResolver` / metrics / blob 存储。
+> 拆出去要么造成 crate 环(mocra-core→mocra-queue→mocra-core),要么得把整个 4320 行队列模块
+> 泛型化(over 消息类型 M)才能解耦,而其领域耦合意味着独立 crate 会是个漏抽象。因此 queue 作为
+> mocra-core 的内部 `mod` 保留,后端(Kafka/NATS)继续用 `queue-kafka` / `queue-nats` 特性门控。
+
 依赖方向(单向,无环):
 
 ```
-mocra ──▶ mocra-core ──▶ mocra-queue
-  │           │      └──▶ mocra-dag
+mocra ──▶ mocra-core ──▶ mocra-dag
   │           ├────────▶ mocra-cluster ──▶ (openraft, redb)
   │           ├────────▶ mocra-proxy
   │           └────────▶ mocra-store   (仅 store 特性)
@@ -116,7 +121,9 @@ js-v8    = ["dep:v8"]
   - **`queue`**(数据面 MQ:内存/redis + kafka/nats 后端):仅依赖基础层 + rdkafka(queue-kafka)/async-nats(queue-nats),无孤儿 impl —— **零代码改动**整树迁入;mocra-core 新增 `queue-kafka`/`queue-nats` 两个转发特性 + rmp-serde/serde_path_to_error/crc32fast/rdkafka/async-nats 依赖。mocra-core 各特性 clippy 净、112 测试;host 各特性(含 queue-kafka/nats)全绿、92 测试。
   - **`sync` + `schedule`**(协调集成 + DAG 调度 adapter,一起迁 —— schedule 的 adapter 依赖 sync 的 trait):仅依赖基础层 + `mocra_cluster`(cluster-embedded)/rdkafka(queue-kafka),无孤儿 impl(SyncAble/DagEventSink 的 adapter 在 trait 所在 crate 内合法)。**零代码改动**整树迁入;mocra-core 增 `cluster-embedded` 转发特性 + `mocra-cluster` 可选依赖。raft 选主 / 锁协调等测试随之落到 mocra-core。mocra-core default 170 / cluster-embedded 174 测试、clippy 净;host default 34 / cluster-embedded 36 测试,各特性全绿。
   - **`engine`**(14183 行,管线核心:processor 链 / 任务运行时 / 调度 / zombie / 监控 / 可观测 API)—— **收官迁入**。仅 3 处 `crate::proxy`→`mocra_proxy`;`src/lua/`(Lua 脚本资源)与 `dashboard/`(内置前端)一并迁进 mocra-core,使 `include_str!` 相对路径不变。mocra-core 增 axum/bloomfilter/metrics-exporter-prometheus/sysinfo + `dashboard` 特性接上 tower-http。
-  - ✅ **mocra-core 抽取完成**:整个运行时(errors/cacheable/utils/common/downloader/queue/sync/schedule/engine)现都在 [`crates/mocra-core`](../../crates/mocra-core),host `mocra` 变为**薄门面**(facade + prelude + 每层 `pub use mocra_core::X::*` shim + bin + js_v8)。**全部 204 测试迁到 mocra-core**(host lib 0 单测,仅门面 doctest / dashboard 冒烟);mocra-core 各特性(default/store/dashboard/cluster-embedded/queue-nats/queue-kafka)clippy `-D warnings` 净;host 各特性全绿。后续可再把 `queue` 独立成 `mocra-queue`(路线图原规划),并清理 host 的冗余依赖声明。
+  - ✅ **mocra-core 抽取完成**:整个运行时(errors/cacheable/utils/common/downloader/queue/sync/schedule/engine)现都在 [`crates/mocra-core`](../../crates/mocra-core),host `mocra` 变为**薄门面**(facade + prelude + 每层 `pub use mocra_core::X::*` shim + bin + js_v8)。**全部 204 测试迁到 mocra-core**(host lib 0 单测,仅门面 doctest / dashboard 冒烟);mocra-core 各特性(default/store/dashboard/cluster-embedded/queue-nats/queue-kafka)clippy `-D warnings` 净;host 各特性全绿。
+  - ✅ **host 依赖瘦身**:门面直接依赖 65 → 12(rustc `unused_crate_dependencies` 定位,清零)。特性开关改为转发 `mocra-core/<feature>`(不再重复声明 sea-orm/rdkafka/async-nats/polars/calamine/tower-http);测试/示例依赖降为 dev-deps(reqwest/semver/serde);删 ~40 个纯传递依赖。
+  - ✅ **`queue` 决定不拆**(2026-07):与领域深度耦合(搬 `TaskEvent`/`Request`、读 mocra `Config`、用 blob 存储),拆分要么造 crate 环要么需整模块泛型化且得到漏抽象;保留为 mocra-core 内部 `mod`,后端仍 `queue-kafka`/`queue-nats` 门控。详见本文件顶部依赖树旁的说明。
 - [x] 抽 `mocra-dag` / `mocra-proxy`(现成干净)为独立 crate。**两者均已抽出、独立编译(不反依赖主 crate)、clippy `-D warnings` 净、CI 纳入**:
   - [`crates/mocra-proxy`](../../crates/mocra-proxy):自带 `ProxyError` / `Result`,`src/proxy` 转 shim `pub use mocra_proxy::*` + `impl From<mocra_proxy::ProxyError> for Error` 边界转换;9 个精简依赖。
   - [`crates/mocra-dag`](../../crates/mocra-dag):通用分布式 DAG 引擎,**运行时依赖 trait 化** —— `DagStore`(get/set/del/incr/eval_lua)抽象 `CacheService`、`DagEventSink` 抽象 `SyncService`,`crate::common::metrics` 内联;宿主 `src/schedule` 转 shim + adapter(`impl DagStore for CacheService`、`SyncAble for DagNodeSyncState`);**54 个测试留主 crate 用真实 `CacheService` 驱动、全绿**。
