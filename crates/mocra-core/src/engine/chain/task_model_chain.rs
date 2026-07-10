@@ -1,37 +1,36 @@
 #![allow(unused)]
 use crate::common::status_tracker::ErrorDecision;
-use log::info;
 use crate::engine::events::{
     EventBus, EventEnvelope, EventPhase, EventType, ModuleGenerateEvent, ParserTaskModelEvent,
     RequestEvent, TaskModelEvent,
 };
 use crate::engine::processors::event_processor::{EventAwareTypedChain, EventProcessorTrait};
+use log::info;
 
-
-use async_trait::async_trait;
-use crate::errors::{Error, ModuleError, Result};
-use crate::common::model::chain_key;
-use crate::common::model::message::{TaskErrorEvent, TaskParserEvent, TaskEvent, UnifiedTaskInput};
-use crate::common::model::{ModuleConfig, Request};
 use crate::common::context::PipelineContext;
+use crate::common::model::chain_key;
+use crate::common::model::message::{TaskErrorEvent, TaskEvent, TaskParserEvent, UnifiedTaskInput};
+use crate::common::model::{ModuleConfig, Request};
+use crate::errors::{Error, ModuleError, Result};
+use async_trait::async_trait;
 
-use log::{debug, error, warn};
-use metrics::counter;
-use crate::queue::{QueueManager, QueuedItem};
 use crate::common::processors::processor::{
     ProcessorContext, ProcessorResult, ProcessorTrait, RetryPolicy,
 };
 use crate::common::processors::processor_chain::ErrorStrategy;
-use std::sync::Arc;
-use uuid::Uuid;
-use futures::stream::{StreamExt};
-use std::marker::PhantomData;
+use crate::queue::{QueueManager, QueuedItem};
+use futures::stream::StreamExt;
+use log::{debug, error, warn};
+use metrics::counter;
 use serde_json::json;
+use std::marker::PhantomData;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
+use uuid::Uuid;
 
+use crate::engine::chain::backpressure::{BackpressureSendState, send_with_backpressure};
 use crate::engine::deduplication::Deduplicator;
 use crate::engine::lua::LuaScriptRegistry;
-use crate::engine::chain::backpressure::{BackpressureSendState, send_with_backpressure};
 
 /// High-level action produced by threshold checks in ingress chains.
 #[derive(Debug, Clone)]
@@ -129,14 +128,22 @@ pub struct StatusTrackerThresholdDecisionService {
 impl StatusTrackerThresholdDecisionService {
     /// Creates a service with fallback-safe behavior when Lua is unavailable.
     pub fn new(state: Arc<PipelineContext>, lua_registry: Option<Arc<LuaScriptRegistry>>) -> Self {
-        Self { state, lua_registry }
+        Self {
+            state,
+            lua_registry,
+        }
     }
 }
 
 #[async_trait]
 impl ThresholdDecisionService for StatusTrackerThresholdDecisionService {
     async fn task_precheck(&self, task_id: &str) -> ChainDecision {
-        match self.state.status_tracker.should_task_continue(task_id).await {
+        match self
+            .state
+            .status_tracker
+            .should_task_continue(task_id)
+            .await
+        {
             Ok(ErrorDecision::Continue) => ChainDecision::Continue,
             Ok(ErrorDecision::Terminate(reason)) => ChainDecision::TerminateTask {
                 reason,
@@ -160,7 +167,8 @@ impl ThresholdDecisionService for StatusTrackerThresholdDecisionService {
             input.run_id,
         );
 
-        if let (Some(lua_registry), Some(modules)) = (&self.lua_registry, input.account_task.module.as_ref())
+        if let (Some(lua_registry), Some(modules)) =
+            (&self.lua_registry, input.account_task.module.as_ref())
             && let Some(module_name) = modules.first()
         {
             let module_id = chain_key::module_runtime_id(
@@ -205,7 +213,8 @@ impl ThresholdDecisionService for StatusTrackerThresholdDecisionService {
                 Ok((0, _, _)) => return ChainDecision::Continue,
                 Ok((1, _, _)) => {
                     let retry_schedule_key = chain_key::error_retry_schedule_key(&task_id);
-                    let retry_member = format!("{}:{}:{}", task_id, module_id, input.prefix_request);
+                    let retry_member =
+                        format!("{}:{}:{}", task_id, module_id, input.prefix_request);
                     let schedule_keys = [retry_schedule_key.as_str()];
                     let schedule_args = [
                         retry_member.as_str(),
@@ -288,7 +297,10 @@ impl ThresholdDecisionService for StatusTrackerThresholdDecisionService {
                             );
                         }
                     }
-                    self.state.status_tracker.release_module_locker(&format!("{}-{}", module_id, input.run_id)).await;
+                    self.state
+                        .status_tracker
+                        .release_module_locker(&format!("{}-{}", module_id, input.run_id))
+                        .await;
                     return ChainDecision::TerminateModule {
                         reason: msg,
                         action_applied: true,
@@ -329,7 +341,11 @@ impl ThresholdDecisionService for StatusTrackerThresholdDecisionService {
                             );
                         }
                     }
-                    let _ = self.state.status_tracker.mark_task_terminated(&task_id).await;
+                    let _ = self
+                        .state
+                        .status_tracker
+                        .mark_task_terminated(&task_id)
+                        .await;
                     return ChainDecision::TerminateTask {
                         reason: msg,
                         action_applied: true,
@@ -388,7 +404,12 @@ impl ThresholdDecisionService for StatusTrackerThresholdDecisionService {
                     }
                 }
 
-                match self.state.status_tracker.should_module_continue(&module_id_scoped).await {
+                match self
+                    .state
+                    .status_tracker
+                    .should_module_continue(&module_id_scoped)
+                    .await
+                {
                     Ok(ErrorDecision::Terminate(reason)) => {
                         return ChainDecision::TerminateModule {
                             reason,
@@ -442,10 +463,16 @@ impl TaskModelProcessor {
     }
 
     async fn error_task_decide(&self, input: &TaskErrorEvent) -> ChainDecision {
-        self.threshold_decision_service.error_task_decide(input).await
+        self.threshold_decision_service
+            .error_task_decide(input)
+            .await
     }
 
-    async fn persist_error_retry_schedule(&self, input: &TaskErrorEvent, delay: std::time::Duration) {
+    async fn persist_error_retry_schedule(
+        &self,
+        input: &TaskErrorEvent,
+        delay: std::time::Duration,
+    ) {
         let task_id = chain_key::task_runtime_id(
             &input.account_task.platform,
             &input.account_task.account,
@@ -456,17 +483,15 @@ impl TaskModelProcessor {
             .module_id
             .clone()
             .or_else(|| {
-                input
-                    .account_task
-                    .module
-                    .as_ref()
-                    .and_then(|m| m.first().map(|name| {
+                input.account_task.module.as_ref().and_then(|m| {
+                    m.first().map(|name| {
                         chain_key::module_runtime_id(
                             &input.account_task.account,
                             &input.account_task.platform,
                             name,
                         )
-                    }))
+                    })
+                })
             })
             .unwrap_or_else(|| {
                 chain_key::module_runtime_id(
@@ -602,11 +627,17 @@ impl ProcessorTrait<TaskEvent, Task> for TaskModelProcessor {
             ChainDecision::TerminateTask { reason, .. } => {
                 error!(
                     "[TaskModelProcessor<TaskModel>] task terminated (pre-check): task_id={} reason={}",
-                    task_id,
-                    reason
+                    task_id, reason
                 );
-                if let Err(e) = self.queue_manager.send_to_dlq("task", &input, &reason).await {
-                    error!("[TaskModelProcessor<TaskModel>] failed to send to DLQ: {}", e);
+                if let Err(e) = self
+                    .queue_manager
+                    .send_to_dlq("task", &input, &reason)
+                    .await
+                {
+                    error!(
+                        "[TaskModelProcessor<TaskModel>] failed to send to DLQ: {}",
+                        e
+                    );
                 }
                 return ProcessorResult::FatalFailure(
                     ModuleError::TaskMaxError(reason.into()).into(),
@@ -673,10 +704,14 @@ impl ProcessorTrait<TaskEvent, Task> for TaskModelProcessor {
                 ProcessorResult::Success(task)
             }
             Err(e) => {
-                debug!("[TaskModelProcessor] load_with_model failed: account={} platform={} run_id={} error={e}",
-                    input.account, input.platform, input.run_id);
-                warn!("[TaskModelProcessor<TaskModel>] load_with_model failed, will retry: account={} platform={} run_id={} error={e}",
-                    input.account, input.platform, input.run_id);
+                debug!(
+                    "[TaskModelProcessor] load_with_model failed: account={} platform={} run_id={} error={e}",
+                    input.account, input.platform, input.run_id
+                );
+                warn!(
+                    "[TaskModelProcessor<TaskModel>] load_with_model failed, will retry: account={} platform={} run_id={} error={e}",
+                    input.account, input.platform, input.run_id
+                );
                 ProcessorResult::RetryableFailure(
                     context
                         .retry_policy
@@ -801,8 +836,7 @@ impl ProcessorTrait<TaskParserEvent, Task> for TaskModelProcessor {
             ChainDecision::TerminateTask { reason, .. } => {
                 error!(
                     "[TaskModelProcessor<ParserTaskModel>] task terminated (pre-check): task_id={} reason={}",
-                    task_id,
-                    reason
+                    task_id, reason
                 );
                 return ProcessorResult::FatalFailure(
                     ModuleError::TaskMaxError(reason.into()).into(),
@@ -813,12 +847,12 @@ impl ProcessorTrait<TaskParserEvent, Task> for TaskModelProcessor {
 
         let task = self.task_manager.load_parser(&input).await;
         match task {
-            Ok(task) => {
-                ProcessorResult::Success(task)
-            }
+            Ok(task) => ProcessorResult::Success(task),
             Err(e) => {
-                warn!("[TaskModelProcessor<ParserTaskModel>] load_parser failed, will retry: account={} platform={} run_id={} error={e}",
-                    input.account_task.account, input.account_task.platform, input.run_id);
+                warn!(
+                    "[TaskModelProcessor<ParserTaskModel>] load_parser failed, will retry: account={} platform={} run_id={} error={e}",
+                    input.account_task.account, input.account_task.platform, input.run_id
+                );
                 ProcessorResult::RetryableFailure(
                     context
                         .retry_policy
@@ -896,7 +930,11 @@ impl EventProcessorTrait<TaskParserEvent, Task> for TaskModelProcessor {
         ))
     }
 
-    fn retry_status(&self, input: &TaskParserEvent, retry_policy: &RetryPolicy) -> Option<EventEnvelope> {
+    fn retry_status(
+        &self,
+        input: &TaskParserEvent,
+        retry_policy: &RetryPolicy,
+    ) -> Option<EventEnvelope> {
         Some(EventEnvelope::engine(
             EventType::ParserTaskModel,
             EventPhase::Retry,
@@ -938,7 +976,8 @@ impl ProcessorTrait<TaskErrorEvent, Task> for TaskModelProcessor {
         );
         match self.error_task_decide(&input).await {
             ChainDecision::Continue => {
-                counter!("mocra_error_task_threshold_decision_total", "decision" => "continue").increment(1);
+                counter!("mocra_error_task_threshold_decision_total", "decision" => "continue")
+                    .increment(1);
                 debug!(
                     "[TaskModelProcessor<ErrorTaskModel>] task can continue: task_id={}",
                     task_id
@@ -948,7 +987,8 @@ impl ProcessorTrait<TaskErrorEvent, Task> for TaskModelProcessor {
                 delay,
                 action_applied,
             } => {
-                counter!("mocra_error_task_threshold_decision_total", "decision" => "retry_after").increment(1);
+                counter!("mocra_error_task_threshold_decision_total", "decision" => "retry_after")
+                    .increment(1);
                 if !(ChainDecision::RetryAfter {
                     delay,
                     action_applied,
@@ -959,7 +999,10 @@ impl ProcessorTrait<TaskErrorEvent, Task> for TaskModelProcessor {
                 }
                 let mut retry_policy = context.retry_policy.unwrap_or_default();
                 retry_policy.retry_delay = std::cmp::max(delay.as_millis() as u64, 1);
-                retry_policy.reason = Some(format!("error task retry after {}ms", retry_policy.retry_delay));
+                retry_policy.reason = Some(format!(
+                    "error task retry after {}ms",
+                    retry_policy.retry_delay
+                ));
                 return ProcessorResult::RetryableFailure(retry_policy);
             }
             ChainDecision::TerminateModule {
@@ -972,17 +1015,15 @@ impl ProcessorTrait<TaskErrorEvent, Task> for TaskModelProcessor {
                     .module_id
                     .clone()
                     .or_else(|| {
-                        input
-                            .account_task
-                            .module
-                            .as_ref()
-                            .and_then(|m| m.first().map(|name| {
+                        input.account_task.module.as_ref().and_then(|m| {
+                            m.first().map(|name| {
                                 chain_key::module_runtime_id(
                                     &input.account_task.account,
                                     &input.account_task.platform,
                                     name,
                                 )
-                            }))
+                            })
+                        })
                     })
                     .unwrap_or_else(|| {
                         chain_key::module_runtime_id(
@@ -997,7 +1038,8 @@ impl ProcessorTrait<TaskErrorEvent, Task> for TaskModelProcessor {
                 })
                 .action_applied()
                 {
-                    self.persist_terminate_mark(&input, Some(&module_id), &reason).await;
+                    self.persist_terminate_mark(&input, Some(&module_id), &reason)
+                        .await;
                 }
                 self.emit_threshold_terminated_event(&input, "terminate_module", &reason)
                     .await;
@@ -1026,11 +1068,17 @@ impl ProcessorTrait<TaskErrorEvent, Task> for TaskModelProcessor {
                     .await;
                 error!(
                     "[TaskModelProcessor<ErrorTaskModel>] task terminated (pre-check): task_id={} reason={}",
-                    task_id,
-                    reason
+                    task_id, reason
                 );
-                if let Err(e) = self.queue_manager.send_to_dlq("error_task", &input, &reason).await {
-                    error!("[TaskModelProcessor<ErrorTaskModel>] failed to send to DLQ: {}", e);
+                if let Err(e) = self
+                    .queue_manager
+                    .send_to_dlq("error_task", &input, &reason)
+                    .await
+                {
+                    error!(
+                        "[TaskModelProcessor<ErrorTaskModel>] failed to send to DLQ: {}",
+                        e
+                    );
                 }
                 return ProcessorResult::FatalFailure(
                     ModuleError::TaskMaxError(reason.into()).into(),
@@ -1040,12 +1088,12 @@ impl ProcessorTrait<TaskErrorEvent, Task> for TaskModelProcessor {
 
         let task = self.task_manager.load_error(&input).await;
         match task {
-            Ok(task) => {
-                ProcessorResult::Success(task)
-            }
+            Ok(task) => ProcessorResult::Success(task),
             Err(e) => {
-                warn!("[TaskModelProcessor<ErrorTaskModel>] load_error failed, will retry: account={} platform={} run_id={} error={e}",
-                    input.account_task.account, input.account_task.platform, input.run_id);
+                warn!(
+                    "[TaskModelProcessor<ErrorTaskModel>] load_error failed, will retry: account={} platform={} run_id={} error={e}",
+                    input.account_task.account, input.account_task.platform, input.run_id
+                );
                 ProcessorResult::RetryableFailure(
                     context
                         .retry_policy
@@ -1054,7 +1102,11 @@ impl ProcessorTrait<TaskErrorEvent, Task> for TaskModelProcessor {
             }
         }
     }
-    async fn pre_process(&self, _input: &TaskErrorEvent, _context: &ProcessorContext) -> Result<()> {
+    async fn pre_process(
+        &self,
+        _input: &TaskErrorEvent,
+        _context: &ProcessorContext,
+    ) -> Result<()> {
         Ok(())
     }
 }
@@ -1095,7 +1147,11 @@ impl EventProcessorTrait<TaskErrorEvent, Task> for TaskModelProcessor {
         ))
     }
 
-    fn retry_status(&self, input: &TaskErrorEvent, retry_policy: &RetryPolicy) -> Option<EventEnvelope> {
+    fn retry_status(
+        &self,
+        input: &TaskErrorEvent,
+        retry_policy: &RetryPolicy,
+    ) -> Option<EventEnvelope> {
         Some(EventEnvelope::engine(
             EventType::ParserTaskModel,
             EventPhase::Retry,
@@ -1230,7 +1286,8 @@ impl ProcessorTrait<Module, SyncBoxStream<'static, Request>> for TaskProcessor {
 
         // Context propagation path:
         // `TaskParserEvent.meta -> Task.metadata -> Module.bind_task_context -> Module.generate`.
-        let requests: SyncBoxStream<'static, Request> = match input.generate(meta, login_info).await {
+        let requests: SyncBoxStream<'static, Request> = match input.generate(meta, login_info).await
+        {
             Ok(stream) => stream,
             Err(e) => {
                 warn!("[TaskProcessor] generate error, will retry: {e}");
@@ -1263,7 +1320,11 @@ impl EventProcessorTrait<Module, SyncBoxStream<'static, Request>> for TaskProces
         ))
     }
 
-    fn finish_status(&self, input: &Module, _output: &SyncBoxStream<'static, Request>) -> Option<EventEnvelope> {
+    fn finish_status(
+        &self,
+        input: &Module,
+        _output: &SyncBoxStream<'static, Request>,
+    ) -> Option<EventEnvelope> {
         Some(EventEnvelope::engine(
             EventType::ModuleGenerate,
             EventPhase::Completed,
@@ -1326,9 +1387,7 @@ impl ProcessorTrait<Request, ()> for RequestPublish {
                 Ok(false) => {
                     info!(
                         "[RequestPublish] duplicate request skipped: request_id={} module_id={} hash={}",
-                        request_id,
-                        module_id,
-                        request_hash
+                        request_id, module_id, request_hash
                     );
                     return ProcessorResult::Success(());
                 }
@@ -1336,17 +1395,14 @@ impl ProcessorTrait<Request, ()> for RequestPublish {
                 Err(e) => {
                     warn!(
                         "[RequestPublish] deduplication check failed, allowing request: request_id={} module_id={} error={}",
-                        request_id,
-                        module_id,
-                        e
+                        request_id, module_id, e
                     );
                 }
             }
         }
         info!(
             "[RequestPublish] publish request: request_id={} module_id={}",
-            request_id,
-            module_id
+            request_id, module_id
         );
 
         // Persist request for downstream fallback/recovery.
@@ -1367,7 +1423,8 @@ impl ProcessorTrait<Request, ()> for RequestPublish {
         match send_with_backpressure(&tx, QueuedItem::new(input)).await {
             Ok(BackpressureSendState::Direct) => {}
             Ok(BackpressureSendState::RecoveredFromFull) => {
-                counter!("mocra_request_publish_backpressure_total", "reason" => "queue_full").increment(1);
+                counter!("mocra_request_publish_backpressure_total", "reason" => "queue_full")
+                    .increment(1);
                 warn!(
                     "[RequestPublish] queue full, falling back to awaited send: request_id={} module_id={} remaining_capacity={}",
                     request_id,
@@ -1377,7 +1434,8 @@ impl ProcessorTrait<Request, ()> for RequestPublish {
             }
             Err(err) => {
                 if err.after_full {
-                    counter!("mocra_request_publish_backpressure_total", "reason" => "queue_full").increment(1);
+                    counter!("mocra_request_publish_backpressure_total", "reason" => "queue_full")
+                        .increment(1);
                     warn!(
                         "[RequestPublish] queue full before close: request_id={} module_id={} remaining_capacity={}",
                         request_id,
@@ -1385,7 +1443,8 @@ impl ProcessorTrait<Request, ()> for RequestPublish {
                         tx.capacity()
                     );
                 }
-                counter!("mocra_request_publish_backpressure_total", "reason" => "queue_closed").increment(1);
+                counter!("mocra_request_publish_backpressure_total", "reason" => "queue_closed")
+                    .increment(1);
                 let retry_reason = format!(
                     "request queue closed: request_id={} module_id={}",
                     err.item.inner.id,
@@ -1410,7 +1469,8 @@ impl ProcessorTrait<Request, ()> for RequestPublish {
     ) -> ProcessorResult<()> {
         // If we can't publish the request after retries, release the module lock
         // to avoid locking out future runs of this module.
-        self.state.status_tracker
+        self.state
+            .status_tracker
             .release_module_locker(&input.module_runtime_id())
             .await;
         ProcessorResult::FatalFailure(error)
@@ -1496,7 +1556,10 @@ impl ProcessorTrait<Request, (Request, Option<ModuleConfig>)> for ConfigProcesso
         }
     }
     async fn pre_process(&self, _input: &Request, _context: &ProcessorContext) -> Result<()> {
-        self.state.status_tracker.lock_module(&_input.module_runtime_id()).await;
+        self.state
+            .status_tracker
+            .lock_module(&_input.module_runtime_id())
+            .await;
         Ok(())
     }
     async fn handle_error(
@@ -1535,13 +1598,13 @@ impl EventProcessorTrait<Request, (Request, Option<ModuleConfig>)> for ConfigPro
     }
 }
 
+use crate::cacheable::CacheAble;
+use crate::engine::task::module::Module;
+use crate::engine::task::{Task, TaskManager};
 use futures::stream::Stream;
 use std::pin::Pin;
-use crate::cacheable::{CacheAble};
-use crate::engine::task::{Task, TaskManager};
-use crate::engine::task::module::Module;
 
-pub type SyncBoxStream<'a, T> = Pin<Box<dyn Stream<Item=T> + Send + Sync + 'a>>;
+pub type SyncBoxStream<'a, T> = Pin<Box<dyn Stream<Item = T> + Send + Sync + 'a>>;
 
 /// Converts a vector into a boxed stream for stream-native chain stages.
 pub struct VecToStreamProcessor<T> {
@@ -1563,7 +1626,9 @@ impl<T> VecToStreamProcessor<T> {
 }
 
 #[async_trait]
-impl<T: Send + Sync + 'static> ProcessorTrait<Vec<T>, SyncBoxStream<'static, T>> for VecToStreamProcessor<T> {
+impl<T: Send + Sync + 'static> ProcessorTrait<Vec<T>, SyncBoxStream<'static, T>>
+    for VecToStreamProcessor<T>
+{
     fn name(&self) -> &'static str {
         "VecToStreamProcessor"
     }
@@ -1580,12 +1645,28 @@ impl<T: Send + Sync + 'static> ProcessorTrait<Vec<T>, SyncBoxStream<'static, T>>
 }
 
 #[async_trait]
-impl<T: Send + Sync + 'static> EventProcessorTrait<Vec<T>, SyncBoxStream<'static, T>> for VecToStreamProcessor<T> {
-    fn pre_status(&self, _input: &Vec<T>) -> Option<EventEnvelope> { None }
-    fn finish_status(&self, _input: &Vec<T>, _output: &SyncBoxStream<'static, T>) -> Option<EventEnvelope> { None }
-    fn working_status(&self, _input: &Vec<T>) -> Option<EventEnvelope> { None }
-    fn error_status(&self, _input: &Vec<T>, _err: &Error) -> Option<EventEnvelope> { None }
-    fn retry_status(&self, _input: &Vec<T>, _retry_policy: &RetryPolicy) -> Option<EventEnvelope> { None }
+impl<T: Send + Sync + 'static> EventProcessorTrait<Vec<T>, SyncBoxStream<'static, T>>
+    for VecToStreamProcessor<T>
+{
+    fn pre_status(&self, _input: &Vec<T>) -> Option<EventEnvelope> {
+        None
+    }
+    fn finish_status(
+        &self,
+        _input: &Vec<T>,
+        _output: &SyncBoxStream<'static, T>,
+    ) -> Option<EventEnvelope> {
+        None
+    }
+    fn working_status(&self, _input: &Vec<T>) -> Option<EventEnvelope> {
+        None
+    }
+    fn error_status(&self, _input: &Vec<T>, _err: &Error) -> Option<EventEnvelope> {
+        None
+    }
+    fn retry_status(&self, _input: &Vec<T>, _retry_policy: &RetryPolicy) -> Option<EventEnvelope> {
+        None
+    }
 }
 
 pub struct FlattenStreamVecProcessor<T> {
@@ -1617,8 +1698,9 @@ impl<T> FlattenStreamVecProcessor<T> {
 }
 
 #[async_trait]
-impl<T: Send + Sync + 'static> ProcessorTrait<SyncBoxStream<'static, Vec<T>>, SyncBoxStream<'static, T>>
-for FlattenStreamVecProcessor<T>
+impl<T: Send + Sync + 'static>
+    ProcessorTrait<SyncBoxStream<'static, Vec<T>>, SyncBoxStream<'static, T>>
+    for FlattenStreamVecProcessor<T>
 {
     fn name(&self) -> &'static str {
         "FlattenStreamVecProcessor"
@@ -1645,12 +1727,37 @@ for FlattenStreamVecProcessor<T>
 }
 
 #[async_trait]
-impl<T: Send + Sync + 'static> EventProcessorTrait<SyncBoxStream<'static, Vec<T>>, SyncBoxStream<'static, T>> for FlattenStreamVecProcessor<T> {
-    fn pre_status(&self, _input: &SyncBoxStream<'static, Vec<T>>) -> Option<EventEnvelope> { None }
-    fn finish_status(&self, _input: &SyncBoxStream<'static, Vec<T>>, _output: &SyncBoxStream<'static, T>) -> Option<EventEnvelope> { None }
-    fn working_status(&self, _input: &SyncBoxStream<'static, Vec<T>>) -> Option<EventEnvelope> { None }
-    fn error_status(&self, _input: &SyncBoxStream<'static, Vec<T>>, _err: &Error) -> Option<EventEnvelope> { None }
-    fn retry_status(&self, _input: &SyncBoxStream<'static, Vec<T>>, _retry_policy: &RetryPolicy) -> Option<EventEnvelope> { None }
+impl<T: Send + Sync + 'static>
+    EventProcessorTrait<SyncBoxStream<'static, Vec<T>>, SyncBoxStream<'static, T>>
+    for FlattenStreamVecProcessor<T>
+{
+    fn pre_status(&self, _input: &SyncBoxStream<'static, Vec<T>>) -> Option<EventEnvelope> {
+        None
+    }
+    fn finish_status(
+        &self,
+        _input: &SyncBoxStream<'static, Vec<T>>,
+        _output: &SyncBoxStream<'static, T>,
+    ) -> Option<EventEnvelope> {
+        None
+    }
+    fn working_status(&self, _input: &SyncBoxStream<'static, Vec<T>>) -> Option<EventEnvelope> {
+        None
+    }
+    fn error_status(
+        &self,
+        _input: &SyncBoxStream<'static, Vec<T>>,
+        _err: &Error,
+    ) -> Option<EventEnvelope> {
+        None
+    }
+    fn retry_status(
+        &self,
+        _input: &SyncBoxStream<'static, Vec<T>>,
+        _retry_policy: &RetryPolicy,
+    ) -> Option<EventEnvelope> {
+        None
+    }
 }
 
 pub struct StreamLoggerProcessor<T> {
@@ -1679,7 +1786,7 @@ impl<T> StreamLoggerProcessor<T> {
 
 #[async_trait]
 impl<T: Send + Sync + 'static> ProcessorTrait<SyncBoxStream<'static, T>, SyncBoxStream<'static, T>>
-for StreamLoggerProcessor<T>
+    for StreamLoggerProcessor<T>
 {
     fn name(&self) -> &'static str {
         "StreamLoggerProcessor"
@@ -1703,12 +1810,37 @@ for StreamLoggerProcessor<T>
 }
 
 #[async_trait]
-impl<T: Send + Sync + 'static> EventProcessorTrait<SyncBoxStream<'static, T>, SyncBoxStream<'static, T>> for StreamLoggerProcessor<T> {
-    fn pre_status(&self, _input: &SyncBoxStream<'static, T>) -> Option<EventEnvelope> { None }
-    fn finish_status(&self, _input: &SyncBoxStream<'static, T>, _output: &SyncBoxStream<'static, T>) -> Option<EventEnvelope> { None }
-    fn working_status(&self, _input: &SyncBoxStream<'static, T>) -> Option<EventEnvelope> { None }
-    fn error_status(&self, _input: &SyncBoxStream<'static, T>, _err: &Error) -> Option<EventEnvelope> { None }
-    fn retry_status(&self, _input: &SyncBoxStream<'static, T>, _retry_policy: &RetryPolicy) -> Option<EventEnvelope> { None }
+impl<T: Send + Sync + 'static>
+    EventProcessorTrait<SyncBoxStream<'static, T>, SyncBoxStream<'static, T>>
+    for StreamLoggerProcessor<T>
+{
+    fn pre_status(&self, _input: &SyncBoxStream<'static, T>) -> Option<EventEnvelope> {
+        None
+    }
+    fn finish_status(
+        &self,
+        _input: &SyncBoxStream<'static, T>,
+        _output: &SyncBoxStream<'static, T>,
+    ) -> Option<EventEnvelope> {
+        None
+    }
+    fn working_status(&self, _input: &SyncBoxStream<'static, T>) -> Option<EventEnvelope> {
+        None
+    }
+    fn error_status(
+        &self,
+        _input: &SyncBoxStream<'static, T>,
+        _err: &Error,
+    ) -> Option<EventEnvelope> {
+        None
+    }
+    fn retry_status(
+        &self,
+        _input: &SyncBoxStream<'static, T>,
+        _retry_policy: &RetryPolicy,
+    ) -> Option<EventEnvelope> {
+        None
+    }
 }
 
 pub struct FlattenStreamProcessor<T> {
@@ -1730,8 +1862,9 @@ impl<T> FlattenStreamProcessor<T> {
 }
 
 #[async_trait]
-impl<T: Send + Sync + 'static> ProcessorTrait<SyncBoxStream<'static, SyncBoxStream<'static, T>>, SyncBoxStream<'static, T>>
-for FlattenStreamProcessor<T>
+impl<T: Send + Sync + 'static>
+    ProcessorTrait<SyncBoxStream<'static, SyncBoxStream<'static, T>>, SyncBoxStream<'static, T>>
+    for FlattenStreamProcessor<T>
 {
     fn name(&self) -> &'static str {
         "FlattenStreamProcessor"
@@ -1749,12 +1882,45 @@ for FlattenStreamProcessor<T>
 }
 
 #[async_trait]
-impl<T: Send + Sync + 'static> EventProcessorTrait<SyncBoxStream<'static, SyncBoxStream<'static, T>>, SyncBoxStream<'static, T>> for FlattenStreamProcessor<T> {
-    fn pre_status(&self, _input: &SyncBoxStream<'static, SyncBoxStream<'static, T>>) -> Option<EventEnvelope> { None }
-    fn finish_status(&self, _input: &SyncBoxStream<'static, SyncBoxStream<'static, T>>, _output: &SyncBoxStream<'static, T>) -> Option<EventEnvelope> { None }
-    fn working_status(&self, _input: &SyncBoxStream<'static, SyncBoxStream<'static, T>>) -> Option<EventEnvelope> { None }
-    fn error_status(&self, _input: &SyncBoxStream<'static, SyncBoxStream<'static, T>>, _err: &Error) -> Option<EventEnvelope> { None }
-    fn retry_status(&self, _input: &SyncBoxStream<'static, SyncBoxStream<'static, T>>, _retry_policy: &RetryPolicy) -> Option<EventEnvelope> { None }
+impl<T: Send + Sync + 'static>
+    EventProcessorTrait<
+        SyncBoxStream<'static, SyncBoxStream<'static, T>>,
+        SyncBoxStream<'static, T>,
+    > for FlattenStreamProcessor<T>
+{
+    fn pre_status(
+        &self,
+        _input: &SyncBoxStream<'static, SyncBoxStream<'static, T>>,
+    ) -> Option<EventEnvelope> {
+        None
+    }
+    fn finish_status(
+        &self,
+        _input: &SyncBoxStream<'static, SyncBoxStream<'static, T>>,
+        _output: &SyncBoxStream<'static, T>,
+    ) -> Option<EventEnvelope> {
+        None
+    }
+    fn working_status(
+        &self,
+        _input: &SyncBoxStream<'static, SyncBoxStream<'static, T>>,
+    ) -> Option<EventEnvelope> {
+        None
+    }
+    fn error_status(
+        &self,
+        _input: &SyncBoxStream<'static, SyncBoxStream<'static, T>>,
+        _err: &Error,
+    ) -> Option<EventEnvelope> {
+        None
+    }
+    fn retry_status(
+        &self,
+        _input: &SyncBoxStream<'static, SyncBoxStream<'static, T>>,
+        _retry_policy: &RetryPolicy,
+    ) -> Option<EventEnvelope> {
+        None
+    }
 }
 
 async fn build_request_deduplicator(state: &Arc<PipelineContext>) -> Option<Arc<Deduplicator>> {
@@ -1821,7 +1987,13 @@ pub async fn create_unified_task_ingress_chain(
     state: Arc<PipelineContext>,
     lua_registry: Option<Arc<LuaScriptRegistry>>,
 ) -> UnifiedTaskIngressChain {
-    let task_concurrency = state.config.read().await.crawler.task_concurrency.unwrap_or(1024);
+    let task_concurrency = state
+        .config
+        .read()
+        .await
+        .crawler
+        .task_concurrency
+        .unwrap_or(1024);
     let parser_concurrency = {
         let cfg = state.config.read().await;
         cfg.crawler
@@ -1837,9 +2009,27 @@ pub async fn create_unified_task_ingress_chain(
             .or(cfg.crawler.task_concurrency)
             .unwrap_or(4)
     };
-    let task_publish_concurrency = state.config.read().await.crawler.publish_concurrency.unwrap_or(1024);
-    let parser_publish_concurrency = state.config.read().await.crawler.publish_concurrency.unwrap_or(256);
-    let error_publish_concurrency = state.config.read().await.crawler.publish_concurrency.unwrap_or(32);
+    let task_publish_concurrency = state
+        .config
+        .read()
+        .await
+        .crawler
+        .publish_concurrency
+        .unwrap_or(1024);
+    let parser_publish_concurrency = state
+        .config
+        .read()
+        .await
+        .crawler
+        .publish_concurrency
+        .unwrap_or(256);
+    let error_publish_concurrency = state
+        .config
+        .read()
+        .await
+        .crawler
+        .publish_concurrency
+        .unwrap_or(32);
 
     let task_deduplicator = build_request_deduplicator(&state).await;
     let task_chain = Arc::new(
@@ -1866,12 +2056,14 @@ pub async fn create_unified_task_ingress_chain(
                 ErrorStrategy::Skip,
             )
             .then_one_shot(FlattenStreamProcessor::new())
-            .then_one_shot(StreamLoggerProcessor::new("AfterFlatten").with_logger(|req: &Request| {
-                info!(
-                    "[FlattenStreamProcessor] yielding request: request_id={}",
-                    req.id
-                );
-            }))
+            .then_one_shot(StreamLoggerProcessor::new("AfterFlatten").with_logger(
+                |req: &Request| {
+                    info!(
+                        "[FlattenStreamProcessor] yielding request: request_id={}",
+                        req.id
+                    );
+                },
+            ))
             .then_map_stream_in_with_strategy::<(), _>(
                 RequestPublish {
                     queue_manager: queue_manager.clone(),

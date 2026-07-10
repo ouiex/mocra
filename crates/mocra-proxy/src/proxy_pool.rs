@@ -1,6 +1,6 @@
-use async_trait::async_trait;
 use crate::error::ProxyError;
 use crate::error::Result;
+use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::cmp::{Ordering, PartialEq};
 use std::collections::HashMap;
@@ -249,8 +249,11 @@ pub struct DirectProxy {
 
 impl DirectProxy {
     fn to_static_ip_proxy(&self, index: usize) -> Result<StaticIpProxyEntry> {
-        let parsed = Url::parse(&self.url)
-            .map_err(|e| ProxyError::InvalidConfig(format!("invalid direct proxy url '{}': {e}", self.url).into()))?;
+        let parsed = Url::parse(&self.url).map_err(|e| {
+            ProxyError::InvalidConfig(
+                format!("invalid direct proxy url '{}': {e}", self.url).into(),
+            )
+        })?;
 
         let scheme = parsed.scheme().to_ascii_lowercase();
         let proxy_type = match scheme.as_str() {
@@ -266,17 +269,17 @@ impl DirectProxy {
                         scheme
                     )
                     .into(),
-                ))
+                ));
             }
         }
         .to_string();
 
-        let host = parsed
-            .host_str()
-            .ok_or_else(|| ProxyError::InvalidConfig(format!("direct proxy missing host: {}", self.url).into()))?;
-        let port = parsed
-            .port_or_known_default()
-            .ok_or_else(|| ProxyError::InvalidConfig(format!("direct proxy missing port: {}", self.url).into()))?;
+        let host = parsed.host_str().ok_or_else(|| {
+            ProxyError::InvalidConfig(format!("direct proxy missing host: {}", self.url).into())
+        })?;
+        let port = parsed.port_or_known_default().ok_or_else(|| {
+            ProxyError::InvalidConfig(format!("direct proxy missing port: {}", self.url).into())
+        })?;
 
         let username = if parsed.username().is_empty() {
             None
@@ -420,7 +423,11 @@ impl ProxyPoolBuilder {
                     pool.add_static_ip_proxy(entry.into_proxy_item()).await;
                 }
                 Err(e) => {
-                    log::warn!("[ProxyConfig] skip invalid direct proxy '{}': {}", direct.url, e);
+                    log::warn!(
+                        "[ProxyConfig] skip invalid direct proxy '{}': {}",
+                        direct.url,
+                        e
+                    );
                 }
             }
         }
@@ -449,8 +456,9 @@ impl ProxyItem {
     pub fn new_for_tunnel(tunnel: Tunnel) -> Self {
         let expire_time = if let Ok(datetime) = OffsetDateTime::parse(&tunnel.expire_time, &Rfc3339)
         {
-            (datetime - OffsetDateTime::from_unix_timestamp(0).unwrap_or(OffsetDateTime::UNIX_EPOCH))
-                .unsigned_abs()
+            (datetime
+                - OffsetDateTime::from_unix_timestamp(0).unwrap_or(OffsetDateTime::UNIX_EPOCH))
+            .unsigned_abs()
         } else {
             Duration::from_secs(360 * 24 * 60 * 60)
                 + SystemTime::now()
@@ -475,7 +483,9 @@ impl ProxyItem {
     }
     pub fn new_for_ip_proxy(ip_proxy: IpProxy, ip_provider: &IpProvider) -> Self {
         let expire_time = Duration::from_secs(ip_provider.proxy_expire_time)
-            + SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default(); // 默认5分钟
+            + SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default(); // 默认5分钟
         Self {
             proxy: ProxyEnum::IpProxy(ip_proxy),
             error_count: 0,
@@ -490,9 +500,15 @@ impl ProxyItem {
         }
     }
 
-    pub fn new_for_static_ip_proxy(ip_proxy: IpProxy, provider_name: String, rate_limit: f32) -> Self {
+    pub fn new_for_static_ip_proxy(
+        ip_proxy: IpProxy,
+        provider_name: String,
+        rate_limit: f32,
+    ) -> Self {
         let expire_time = Duration::from_secs(360 * 24 * 60 * 60)
-            + SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
+            + SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default();
         Self {
             proxy: ProxyEnum::IpProxy(ip_proxy),
             error_count: 0,
@@ -508,7 +524,9 @@ impl ProxyItem {
     }
 
     pub fn is_expired(&self) -> bool {
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default();
         now > self.expire_time
     }
 
@@ -519,13 +537,21 @@ impl ProxyItem {
     pub fn record_success(&mut self, response_time: Duration) {
         self.success_count += 1;
         self.response_time = Some(response_time);
-        self.last_used = Some(SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default());
+        self.last_used = Some(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default(),
+        );
         self.update_success_rate();
     }
 
     pub fn record_error(&mut self) {
         self.error_count += 1;
-        self.last_used = Some(SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default());
+        self.last_used = Some(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default(),
+        );
         self.update_success_rate();
         // 失败同样计入本窗口请求数，保持与选择时的一致性
         self.rate_limit_tracker.record_request();
@@ -547,7 +573,9 @@ impl ProxyItem {
         }
 
         // 最近使用时间影响分数
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default();
         let time_since_last_use = if let Some(last_used) = self.last_used {
             (now - last_used).as_secs()
         } else {
@@ -924,16 +952,17 @@ impl ProxyPool {
             for pool in pools.values_mut() {
                 for item in pool.iter_mut() {
                     if let ProxyEnum::Tunnel(ref t) = item.proxy
-                        && t.endpoint == tunnel.endpoint {
-                            if success {
-                                item.record_success(
-                                    response_time.unwrap_or(Duration::from_millis(1000)),
-                                );
-                            } else {
-                                item.record_error();
-                            }
-                            found = true;
+                        && t.endpoint == tunnel.endpoint
+                    {
+                        if success {
+                            item.record_success(
+                                response_time.unwrap_or(Duration::from_millis(1000)),
+                            );
+                        } else {
+                            item.record_error();
                         }
+                        found = true;
+                    }
                 }
             }
         } // 写锁作用域提前结束

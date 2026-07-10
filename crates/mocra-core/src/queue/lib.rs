@@ -1,18 +1,18 @@
+pub mod batcher;
 pub mod channel;
 pub mod compensation;
+pub mod compression;
 #[cfg(feature = "queue-kafka")]
 pub mod kafka;
+pub mod manager;
 #[cfg(feature = "queue-nats")]
 pub mod nats;
-pub mod manager;
 pub mod redis;
-pub mod batcher;
-pub mod compression;
 
+use crate::errors::Result;
 pub use crate::queue::channel::Channel;
 use async_trait::async_trait;
 pub use compensation::{Compensator, Identifiable, RedisCompensator};
-use crate::errors::Result;
 pub use manager::QueueManager;
 pub use redis::RedisQueue;
 use tokio::sync::mpsc;
@@ -26,11 +26,15 @@ pub enum AckAction {
     /// Message processed successfully
     Ack,
     /// Message processing failed
-    Nack(String, std::sync::Arc<Vec<u8>>, std::sync::Arc<HashMap<String, String>>), // reason, payload, headers
+    Nack(
+        String,
+        std::sync::Arc<Vec<u8>>,
+        std::sync::Arc<HashMap<String, String>>,
+    ), // reason, payload, headers
 }
 
-use std::collections::HashMap;
 use futures::future::BoxFuture;
+use std::collections::HashMap;
 
 pub type AckFn = Box<dyn FnOnce() -> BoxFuture<'static, Result<()>> + Send + Sync>;
 pub type NackFn = Box<dyn FnOnce(String) -> BoxFuture<'static, Result<()>> + Send + Sync>;
@@ -39,8 +43,7 @@ pub const HEADER_ATTEMPT: &str = "x-attempt";
 pub const HEADER_CREATED_AT: &str = "x-created-at";
 pub const HEADER_NACK_REASON: &str = "x-nack-reason";
 
-#[derive(Debug, Clone, Copy)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct NackPolicy {
     pub max_retries: u32,
     pub backoff_ms: u64,
@@ -51,7 +54,6 @@ pub enum NackDisposition {
     Retry { next_attempt: u32 },
     Dlq,
 }
-
 
 pub(crate) fn parse_attempt(headers: &HashMap<String, String>) -> u32 {
     headers
@@ -79,15 +81,23 @@ pub struct QueuedItem<T> {
 
 impl<T> QueuedItem<T> {
     pub fn new(inner: T) -> Self {
-        Self { inner, ack_fn: None, nack_fn: None }
+        Self {
+            inner,
+            ack_fn: None,
+            nack_fn: None,
+        }
     }
-    
-    pub fn with_ack<A, N>(inner: T, ack: A, nack: N) -> Self 
+
+    pub fn with_ack<A, N>(inner: T, ack: A, nack: N) -> Self
     where
         A: FnOnce() -> BoxFuture<'static, Result<()>> + Send + Sync + 'static,
         N: FnOnce(String) -> BoxFuture<'static, Result<()>> + Send + Sync + 'static,
     {
-         Self { inner, ack_fn: Some(Box::new(ack)), nack_fn: Some(Box::new(nack)) }
+        Self {
+            inner,
+            ack_fn: Some(Box::new(ack)),
+            nack_fn: Some(Box::new(nack)),
+        }
     }
 
     pub async fn ack(mut self) -> Result<()> {
@@ -97,7 +107,7 @@ impl<T> QueuedItem<T> {
             Ok(())
         }
     }
-    
+
     pub async fn nack(mut self, reason: String) -> Result<()> {
         if let Some(f) = self.nack_fn.take() {
             f(reason).await
@@ -159,35 +169,48 @@ impl std::fmt::Debug for Message {
 impl Message {
     pub async fn ack(&self) -> Result<()> {
         // Send the ID back to the backend to acknowledge the message
-        self.ack_tx.send((self.id.clone(), AckAction::Ack)).await.map_err(|_| {
-            crate::errors::error::QueueError::OperationFailed(Box::new(std::io::Error::other(
-                "Failed to send ACK signal",
-            )))
-            .into()
-        })
+        self.ack_tx
+            .send((self.id.clone(), AckAction::Ack))
+            .await
+            .map_err(|_| {
+                crate::errors::error::QueueError::OperationFailed(Box::new(std::io::Error::other(
+                    "Failed to send ACK signal",
+                )))
+                .into()
+            })
     }
 
     pub async fn nack(&self, reason: impl Into<String>) -> Result<()> {
         let headers = self.headers.clone();
         self.ack_tx
-            .send((self.id.clone(), AckAction::Nack(reason.into(), self.payload.clone(), headers)))
+            .send((
+                self.id.clone(),
+                AckAction::Nack(reason.into(), self.payload.clone(), headers),
+            ))
             .await
             .map_err(|_| {
-            crate::errors::error::QueueError::OperationFailed(Box::new(std::io::Error::other(
-                "Failed to send NACK signal",
-            )))
-            .into()
-        })
+                crate::errors::error::QueueError::OperationFailed(Box::new(std::io::Error::other(
+                    "Failed to send NACK signal",
+                )))
+                .into()
+            })
     }
 }
 
 #[async_trait]
 pub trait MqBackend: Send + Sync {
     async fn publish(&self, topic: &str, key: Option<&str>, payload: &[u8]) -> Result<()> {
-        self.publish_with_headers(topic, key, payload, &HashMap::new()).await
+        self.publish_with_headers(topic, key, payload, &HashMap::new())
+            .await
     }
-    
-    async fn publish_with_headers(&self, topic: &str, key: Option<&str>, payload: &[u8], headers: &HashMap<String, String>) -> Result<()>;
+
+    async fn publish_with_headers(
+        &self,
+        topic: &str,
+        key: Option<&str>,
+        payload: &[u8],
+        headers: &HashMap<String, String>,
+    ) -> Result<()>;
 
     async fn publish_batch(&self, topic: &str, items: &[(Option<String>, Vec<u8>)]) -> Result<()> {
         for (key, payload) in items {
@@ -195,10 +218,15 @@ pub trait MqBackend: Send + Sync {
         }
         Ok(())
     }
-    
-    async fn publish_batch_with_headers(&self, topic: &str, items: &[(Option<String>, Vec<u8>, HashMap<String, String>)]) -> Result<()> {
+
+    async fn publish_batch_with_headers(
+        &self,
+        topic: &str,
+        items: &[(Option<String>, Vec<u8>, HashMap<String, String>)],
+    ) -> Result<()> {
         for (key, payload, headers) in items {
-            self.publish_with_headers(topic, key.as_deref(), payload, headers).await?;
+            self.publish_with_headers(topic, key.as_deref(), payload, headers)
+                .await?;
         }
         Ok(())
     }
@@ -210,5 +238,9 @@ pub trait MqBackend: Send + Sync {
 
     /// Read messages from the Dead Letter Queue (DLQ).
     /// Returns a list of (id, payload, reason, original_id).
-    async fn read_dlq(&self, topic: &str, count: usize) -> Result<Vec<(String, Vec<u8>, String, String)>>;
+    async fn read_dlq(
+        &self,
+        topic: &str,
+        count: usize,
+    ) -> Result<Vec<(String, Vec<u8>, String, String)>>;
 }

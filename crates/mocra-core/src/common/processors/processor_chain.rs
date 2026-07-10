@@ -1,8 +1,8 @@
 #![allow(unused)]
 use crate::common::processors::processor::{ProcessorContext, ProcessorResult, ProcessorTrait};
-use async_trait::async_trait;
 use crate::errors::Error;
 use crate::errors::ProcessorChainError;
+use async_trait::async_trait;
 use futures::{Stream, StreamExt, stream};
 use log::{debug, error, info, warn};
 use std::any::{Any, TypeId};
@@ -120,7 +120,10 @@ where
             error!("Pre-processing failed for {}: {}", self.processor.name(), e);
             return ProcessorResult::FatalFailure(e);
         }
-        info!("[ChainStep] {} process loop starting", self.processor.name());
+        info!(
+            "[ChainStep] {} process loop starting",
+            self.processor.name()
+        );
 
         loop {
             // Cancellation check.
@@ -1174,8 +1177,13 @@ impl ProcessorChain {
             // Execute processor (retry behavior is handled inside `TypedProcessorExecutor`).
             match step.executor.execute(current_data, context.clone()).await {
                 ProcessorResult::Success(output) => {
-                    info!("Processor [{} / {}] {} completed in {:?}",
-                        idx + 1, self.steps.len(), step.name, step_start.elapsed());
+                    info!(
+                        "Processor [{} / {}] {} completed in {:?}",
+                        idx + 1,
+                        self.steps.len(),
+                        step.name,
+                        step_start.elapsed()
+                    );
                     current_data = output;
                 }
                 ProcessorResult::RetryableFailure(_retry_policy) => {
@@ -1503,9 +1511,9 @@ mod tests {
     use super::*;
 
     use crate::common::processors::processor::RetryPolicy;
+    use crate::utils::logger;
     use futures::stream::{BoxStream, StreamExt};
     use std::sync::Once;
-    use crate::utils::logger;
 
     static INIT: Once = Once::new();
     fn init_logger() {

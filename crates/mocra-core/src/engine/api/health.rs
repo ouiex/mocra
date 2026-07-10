@@ -1,5 +1,5 @@
-use axum::{extract::State, Json};
 use crate::engine::api::state::ApiState;
+use axum::{Json, extract::State};
 use serde::Serialize;
 // use sea_orm::ConnectionTrait; // for ping() - DatabaseConnection implements it inherently or via Deref?
 
@@ -24,16 +24,20 @@ pub struct HealthResponse {
 
 impl ComponentStatus {
     fn up() -> Self {
-        Self { status: "up".to_string(), error: None }
+        Self {
+            status: "up".to_string(),
+            error: None,
+        }
     }
     fn down(e: impl ToString) -> Self {
-        Self { status: "down".to_string(), error: Some(e.to_string()) }
+        Self {
+            status: "down".to_string(),
+            error: Some(e.to_string()),
+        }
     }
 }
 
-pub async fn health_check(
-    State(state): State<ApiState>,
-) -> Json<HealthResponse> {
+pub async fn health_check(State(state): State<ApiState>) -> Json<HealthResponse> {
     // Check Redis
     let redis_status = match state.state.cache_service.ping().await {
         Ok(_) => ComponentStatus::up(),

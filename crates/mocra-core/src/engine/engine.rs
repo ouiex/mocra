@@ -1,50 +1,51 @@
 // #![allow(unused)]
-use crate::utils::device_info::get_primary_local_ip;
-use crate::engine::zombie;
-use crate::engine::monitor::SystemMonitor;
-use crate::engine::events::{
-    EventBus, RedisEventHandler,
-};
 use crate::downloader::DownloaderManager;
+use crate::engine::events::{EventBus, RedisEventHandler};
+use crate::engine::monitor::SystemMonitor;
+use crate::engine::zombie;
 use crate::queue::Identifiable;
+use crate::utils::device_info::get_primary_local_ip;
 
+use crate::common::policy::{DlqPolicy, PolicyResolver};
 use crate::engine::chain::{
-    create_download_chain, create_parser_chain, create_unified_task_ingress_chain,
-    UnifiedTaskIngressChain,
+    UnifiedTaskIngressChain, create_download_chain, create_parser_chain,
+    create_unified_task_ingress_chain,
 };
 use crate::engine::events::{EventEnvelope, EventPhase, EventType, HealthCheckEvent};
-use crate::common::policy::{DlqPolicy, PolicyResolver};
 use metrics::counter;
 
-use crate::engine::chain::stream_chain::create_wss_download_chain;
-use futures::{StreamExt, FutureExt};
 use crate::common::state::State;
-use log::{error, info, warn};
+use crate::engine::chain::stream_chain::create_wss_download_chain;
 use crate::queue::{QueueManager, QueuedItem};
+use futures::{FutureExt, StreamExt};
+use log::{error, info, warn};
 
-use crate::common::processors::processor::{ProcessorContext, RetryPolicy};
-use crate::common::model::message::UnifiedTaskInput;
-use crate::common::model::chain_key;
-use mocra_proxy::ProxyManager;
-use std::path::PathBuf;
-use std::sync::Arc;
-use tokio::sync::{broadcast, watch};
 use crate::common::interface::{
     DataMiddlewareHandle, DataStoreMiddlewareHandle, DownloadMiddlewareHandle, MiddlewareManager,
     ModuleTrait,
 };
+use crate::common::model::chain_key;
+use crate::common::model::message::UnifiedTaskInput;
+use crate::common::processors::processor::{ProcessorContext, RetryPolicy};
 use crate::common::registry::NodeRegistry;
-use crate::utils::connector::create_redis_pool;
-use crate::engine::task::TaskManager;
-use crate::engine::runner::ProcessorRunner;
 use crate::engine::lua::LuaScriptRegistry;
-use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
+use crate::engine::runner::ProcessorRunner;
 use crate::engine::scheduler::CronScheduler;
+use crate::engine::task::TaskManager;
 use crate::sync::{LeaderElector, RedisBackend};
-use uuid::Uuid;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use crate::utils::connector::create_redis_pool;
 use crate::utils::logger as app_logger;
-use crate::utils::logger::{LogOutputConfig as AppLogOutputConfig, LoggerConfig as AppLoggerConfig, LogSender as AppLogSender, PrometheusConfig as AppPrometheusConfig};
+use crate::utils::logger::{
+    LogOutputConfig as AppLogOutputConfig, LogSender as AppLogSender,
+    LoggerConfig as AppLoggerConfig, PrometheusConfig as AppPrometheusConfig,
+};
+use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
+use mocra_proxy::ProxyManager;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use tokio::sync::{broadcast, watch};
+use uuid::Uuid;
 
 mod processors;
 mod runtime;
@@ -156,12 +157,8 @@ impl Engine {
     ) where
         T: serde::Serialize + Identifiable + Send + Sync,
     {
-        let decision = policy_resolver.resolve_with_error(
-            "engine",
-            Some(event_type),
-            Some("failed"),
-            err,
-        );
+        let decision =
+            policy_resolver.resolve_with_error("engine", Some(event_type), Some("failed"), err);
         let action = if decision.policy.retryable {
             "retry"
         } else if decision.policy.dlq == DlqPolicy::Never {
@@ -230,12 +227,8 @@ impl Engine {
             Some(std::io::Error::other(reason.clone())),
         );
 
-        let decision = policy_resolver.resolve_with_error(
-            "engine",
-            Some(event_type),
-            Some("retry"),
-            &err,
-        );
+        let decision =
+            policy_resolver.resolve_with_error("engine", Some(event_type), Some("retry"), &err);
         let action = if decision.policy.retryable {
             "retry"
         } else if decision.policy.dlq == DlqPolicy::Never {
@@ -281,23 +274,18 @@ impl Engine {
 
     /// Initializes queue manager with optional log topic derived from logger outputs.
     fn init_queue_manager(cfg: &crate::common::model::config::Config) -> Arc<QueueManager> {
-        let log_topic = cfg
-            .logger
-            .as_ref()
-            .and_then(Self::first_mq_topic);
+        let log_topic = cfg.logger.as_ref().and_then(Self::first_mq_topic);
         QueueManager::from_config_with_log_topic(cfg, log_topic.as_deref())
     }
 
     fn first_mq_topic(
         logger: &crate::common::model::logger_config::LoggerConfig,
     ) -> Option<String> {
-        logger.outputs.iter().find_map(|output| {
-            match output {
-                crate::common::model::logger_config::LogOutputConfig::Mq { topic, .. } => {
-                    Some(topic.clone())
-                }
-                _ => None,
+        logger.outputs.iter().find_map(|output| match output {
+            crate::common::model::logger_config::LogOutputConfig::Mq { topic, .. } => {
+                Some(topic.clone())
             }
+            _ => None,
         })
     }
 
@@ -378,13 +366,11 @@ impl Engine {
         logger: &crate::common::model::logger_config::LoggerConfig,
         queue_manager: Arc<QueueManager>,
     ) -> Option<AppLogSender> {
-        let mq_output = logger.outputs.iter().find_map(|output| {
-            match output {
-                crate::common::model::logger_config::LogOutputConfig::Mq { buffer, .. } => {
-                    Some(*buffer)
-                }
-                _ => None,
+        let mq_output = logger.outputs.iter().find_map(|output| match output {
+            crate::common::model::logger_config::LogOutputConfig::Mq { buffer, .. } => {
+                Some(*buffer)
             }
+            _ => None,
         })?;
 
         let buffer = mq_output.or(logger.buffer).unwrap_or(10000);
@@ -418,17 +404,26 @@ impl Engine {
     ///
     /// # Arguments
     /// * `state` - Shared application state.
-    pub async fn new(state: Arc<State>, queue_manager: Option<Arc<QueueManager>>) -> crate::errors::Result<Self> {
+    pub async fn new(
+        state: Arc<State>,
+        queue_manager: Option<Arc<QueueManager>>,
+    ) -> crate::errors::Result<Self> {
         // Initialize Prometheus recorder
         let builder = PrometheusBuilder::new();
         // Ignore error if recorder is already installed (e.g. in tests)
         let prometheus_handle = builder.install_recorder().ok();
 
         // Create event bus when enabled by configuration.
-        let event_bus = state.config.read().await.event_bus.as_ref().map(|conf| Arc::new(EventBus::new(conf.capacity, conf.concurrency)));
+        let event_bus = state
+            .config
+            .read()
+            .await
+            .event_bus
+            .as_ref()
+            .map(|conf| Arc::new(EventBus::new(conf.capacity, conf.concurrency)));
         // Create global shutdown signal channel.
         let (shutdown_tx, _shutdown_rx) = broadcast::channel(1);
-        
+
         let (pause_tx, _) = watch::channel(false);
         // Pause Poller
         let state_clone = Arc::clone(&state);
@@ -437,20 +432,22 @@ impl Engine {
         let pause_key = {
             let ns = state_clone.cache_service.namespace();
             if ns.is_empty() {
-                warn!("Cache namespace is empty; set config.name to avoid cross-app pause collisions");
+                warn!(
+                    "Cache namespace is empty; set config.name to avoid cross-app pause collisions"
+                );
                 "engine:pause".to_string()
             } else {
                 format!("{ns}:engine:pause")
             }
         };
-        
+
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(5));
             loop {
                 tokio::select! {
                     _ = interval.tick() => {
                         let is_paused = matches!(state_clone.cache_service.get(&pause_key).await, Ok(Some(_)));
-                        
+
                         if *pause_tx_clone.borrow() != is_paused {
                             let _ = pause_tx_clone.send(is_paused);
                             if is_paused {
@@ -490,7 +487,8 @@ impl Engine {
         if let Some(logger_config) = &cfg.logger {
             if logger_config.enabled.unwrap_or(true) {
                 let app_config = Self::build_app_logger_config(logger_config, &namespace);
-                let log_sender = Self::setup_mq_log_sender(logger_config, queue_manager.clone()).await;
+                let log_sender =
+                    Self::setup_mq_log_sender(logger_config, queue_manager.clone()).await;
                 let _ = app_logger::init_logger(app_config).await;
                 if let Some(sender) = log_sender {
                     let _ = app_logger::set_log_sender(sender);
@@ -503,32 +501,37 @@ impl Engine {
             if log_config.enabled == Some(false) {
                 info!("Logger disabled; skipping EventBus log handlers");
             } else {
-            use crate::common::model::logger_config::LogOutputConfig;
-            use crate::engine::events::handlers::{queue_handler::QueueLogHandler, console_handler::ConsoleLogHandler};
+                use crate::common::model::logger_config::LogOutputConfig;
+                use crate::engine::events::handlers::{
+                    console_handler::ConsoleLogHandler, queue_handler::QueueLogHandler,
+                };
 
-            for output in &log_config.outputs {
-                match output {
-                    LogOutputConfig::Mq { .. } => {
-                        let rx = event_bus.subscribe("*".to_string()).await;
-                        QueueLogHandler::start(rx, queue_manager.clone(), "mq".to_string()).await;
-                        info!("Registered MQ Logger for EventBus");
-                    }
-                    LogOutputConfig::Console => {
-                        let rx = event_bus.subscribe("*".to_string()).await;
-                        let level = log_config
-                            .level
-                            .as_deref()
-                            .and_then(Self::base_level_from_filter)
-                            .unwrap_or("info")
-                            .to_string();
-                        ConsoleLogHandler::start(rx, level).await;
-                        info!("Registered Console Logger for EventBus");
-                    }
-                    LogOutputConfig::File { .. } => {
-                        info!("Registered File Logger for EventBus (Handled by Global Tracing)");
+                for output in &log_config.outputs {
+                    match output {
+                        LogOutputConfig::Mq { .. } => {
+                            let rx = event_bus.subscribe("*".to_string()).await;
+                            QueueLogHandler::start(rx, queue_manager.clone(), "mq".to_string())
+                                .await;
+                            info!("Registered MQ Logger for EventBus");
+                        }
+                        LogOutputConfig::Console => {
+                            let rx = event_bus.subscribe("*".to_string()).await;
+                            let level = log_config
+                                .level
+                                .as_deref()
+                                .and_then(Self::base_level_from_filter)
+                                .unwrap_or("info")
+                                .to_string();
+                            ConsoleLogHandler::start(rx, level).await;
+                            info!("Registered Console Logger for EventBus");
+                        }
+                        LogOutputConfig::File { .. } => {
+                            info!(
+                                "Registered File Logger for EventBus (Handled by Global Tracing)"
+                            );
+                        }
                     }
                 }
-            }
             }
         } else if cfg.logger.is_some() {
             info!("EventBus disabled; skipping logger EventBus handlers");
@@ -548,10 +551,12 @@ impl Engine {
             Some(Arc::new(
                 ProxyManager::from_proxy_config(&proxy_config)
                     .await
-                    .map_err(|e| crate::errors::Error::new(
-                        crate::errors::ErrorKind::Service,
-                        Some(format!("Failed to create ProxyManager: {}", e)),
-                    ))?,
+                    .map_err(|e| {
+                        crate::errors::Error::new(
+                            crate::errors::ErrorKind::Service,
+                            Some(format!("Failed to create ProxyManager: {}", e)),
+                        )
+                    })?,
             ))
         } else {
             None
@@ -575,19 +580,13 @@ impl Engine {
         let redis_pool = state.redis.clone();
         let leader_elector = if let Some(backend) = state.coordination.clone() {
             // 内嵌 redb+Raft 等协调后端优先(替代 Redis 协调)。
-            let (elector, _) = LeaderElector::new(
-                Some(backend),
-                format!("{}:leader:cron", namespace),
-                5000,
-            );
+            let (elector, _) =
+                LeaderElector::new(Some(backend), format!("{}:leader:cron", namespace), 5000);
             elector
         } else if let Some(pool) = redis_pool {
             let backend = Arc::new(RedisBackend::new(pool));
-            let (elector, _) = LeaderElector::new(
-                Some(backend),
-                format!("{}:leader:cron", namespace),
-                5000,
-            );
+            let (elector, _) =
+                LeaderElector::new(Some(backend), format!("{}:leader:cron", namespace), 5000);
             elector
         } else {
             // Single node mode or no redis - always leader
@@ -595,13 +594,16 @@ impl Engine {
             elector
         };
 
-        let cron_scheduler = Arc::new(CronScheduler::new(
-            task_manager.clone(),
-            state.clone(),
-            queue_manager.clone(),
-            shutdown_tx.subscribe(),
-            leader_elector,
-        ).await);
+        let cron_scheduler = Arc::new(
+            CronScheduler::new(
+                task_manager.clone(),
+                state.clone(),
+                queue_manager.clone(),
+                shutdown_tx.subscribe(),
+                leader_elector,
+            )
+            .await,
+        );
 
         let lua_registry = Arc::new(LuaScriptRegistry::new_default());
 

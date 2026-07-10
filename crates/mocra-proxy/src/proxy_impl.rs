@@ -163,10 +163,10 @@ async fn check_proxy_health(proxy: &IpProxy) -> bool {
             .proxy(p)
             .timeout(Duration::from_secs(5))
             .build()
-        {
-             // Use a lightweight check
-            return client.head("http://www.baidu.com").send().await.is_ok();
-        }
+    {
+        // Use a lightweight check
+        return client.head("http://www.baidu.com").send().await.is_ok();
+    }
     false
 }
 
@@ -187,7 +187,9 @@ mod tests {
             proxy_expire_time: 300,
             weight: Some(10),
         };
-        let loader = KuaiDaiLiLoader { config: config.clone() };
+        let loader = KuaiDaiLiLoader {
+            config: config.clone(),
+        };
         assert_eq!(loader.get_name(), "kuaidaili");
         assert_eq!(loader.get_weight(), 10);
         assert!(loader.is_retry_code(&429));

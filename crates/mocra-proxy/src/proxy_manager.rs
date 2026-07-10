@@ -1,5 +1,5 @@
-use crate::proxy_pool::*;
 use crate::error::{ProxyError, Result};
+use crate::proxy_pool::*;
 use std::time::Duration;
 
 pub struct ProxyManager {

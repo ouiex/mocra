@@ -87,7 +87,12 @@ impl StateMachine {
                     CmdResult::Bool(false)
                 }
             }
-            Cmd::AcquireLock { key, holder, now_ms, ttl_ms } => {
+            Cmd::AcquireLock {
+                key,
+                holder,
+                now_ms,
+                ttl_ms,
+            } => {
                 let mut locks = w.open_table(LOCKS).map_err(redb_err)?;
                 let cur = match locks.get(key.as_str()).map_err(redb_err)? {
                     Some(g) => Some(decode_lock(g.value())?),
@@ -122,7 +127,12 @@ impl StateMachine {
                     CmdResult::Fencing(None)
                 }
             }
-            Cmd::RenewLock { key, holder, now_ms, ttl_ms } => {
+            Cmd::RenewLock {
+                key,
+                holder,
+                now_ms,
+                ttl_ms,
+            } => {
                 let mut locks = w.open_table(LOCKS).map_err(redb_err)?;
                 let cur = match locks.get(key.as_str()).map_err(redb_err)? {
                     Some(g) => Some(decode_lock(g.value())?),
@@ -181,7 +191,8 @@ impl StateMachine {
                 locks.push((k.value().to_string(), v.value().to_vec()));
             }
         }
-        rmp_serde::to_vec(&SmDump { kv, locks }).map_err(|e| StateMachineError::Codec(e.to_string()))
+        rmp_serde::to_vec(&SmDump { kv, locks })
+            .map_err(|e| StateMachineError::Codec(e.to_string()))
     }
 
     /// 从快照恢复:清空 kv / locks 并载入。
@@ -227,17 +238,31 @@ mod tests {
     fn kv_and_cas() {
         let dir = tempfile::tempdir().unwrap();
         let sm = sm(&dir);
-        sm.apply(&Cmd::Set { key: b"x".to_vec(), value: b"1".to_vec() }).unwrap();
+        sm.apply(&Cmd::Set {
+            key: b"x".to_vec(),
+            value: b"1".to_vec(),
+        })
+        .unwrap();
         assert_eq!(sm.get(b"x").unwrap(), Some(b"1".to_vec()));
 
         // CAS 失败(expect 不匹配)。
         assert_eq!(
-            sm.apply(&Cmd::Cas { key: b"x".to_vec(), expect: Some(b"9".to_vec()), value: b"2".to_vec() }).unwrap(),
+            sm.apply(&Cmd::Cas {
+                key: b"x".to_vec(),
+                expect: Some(b"9".to_vec()),
+                value: b"2".to_vec()
+            })
+            .unwrap(),
             CmdResult::Bool(false)
         );
         // CAS 成功。
         assert_eq!(
-            sm.apply(&Cmd::Cas { key: b"x".to_vec(), expect: Some(b"1".to_vec()), value: b"2".to_vec() }).unwrap(),
+            sm.apply(&Cmd::Cas {
+                key: b"x".to_vec(),
+                expect: Some(b"1".to_vec()),
+                value: b"2".to_vec()
+            })
+            .unwrap(),
             CmdResult::Bool(true)
         );
         assert_eq!(sm.get(b"x").unwrap(), Some(b"2".to_vec()));
@@ -250,33 +275,73 @@ mod tests {
 
         // a 获取锁 -> fencing token 1。
         assert_eq!(
-            sm.apply(&Cmd::AcquireLock { key: "k".into(), holder: "a".into(), now_ms: 1000, ttl_ms: 5000 }).unwrap(),
+            sm.apply(&Cmd::AcquireLock {
+                key: "k".into(),
+                holder: "a".into(),
+                now_ms: 1000,
+                ttl_ms: 5000
+            })
+            .unwrap(),
             CmdResult::Fencing(Some(1))
         );
         // b 在未过期时被拒。
         assert_eq!(
-            sm.apply(&Cmd::AcquireLock { key: "k".into(), holder: "b".into(), now_ms: 2000, ttl_ms: 5000 }).unwrap(),
+            sm.apply(&Cmd::AcquireLock {
+                key: "k".into(),
+                holder: "b".into(),
+                now_ms: 2000,
+                ttl_ms: 5000
+            })
+            .unwrap(),
             CmdResult::Fencing(None)
         );
         // 过期后 b 获取 -> fencing token 递增到 2。
         assert_eq!(
-            sm.apply(&Cmd::AcquireLock { key: "k".into(), holder: "b".into(), now_ms: 7000, ttl_ms: 5000 }).unwrap(),
+            sm.apply(&Cmd::AcquireLock {
+                key: "k".into(),
+                holder: "b".into(),
+                now_ms: 7000,
+                ttl_ms: 5000
+            })
+            .unwrap(),
             CmdResult::Fencing(Some(2))
         );
         // a 续租失败(已非持有者)。
         assert_eq!(
-            sm.apply(&Cmd::RenewLock { key: "k".into(), holder: "a".into(), now_ms: 8000, ttl_ms: 5000 }).unwrap(),
+            sm.apply(&Cmd::RenewLock {
+                key: "k".into(),
+                holder: "a".into(),
+                now_ms: 8000,
+                ttl_ms: 5000
+            })
+            .unwrap(),
             CmdResult::Bool(false)
         );
         // b 续租成功。
         assert_eq!(
-            sm.apply(&Cmd::RenewLock { key: "k".into(), holder: "b".into(), now_ms: 9000, ttl_ms: 5000 }).unwrap(),
+            sm.apply(&Cmd::RenewLock {
+                key: "k".into(),
+                holder: "b".into(),
+                now_ms: 9000,
+                ttl_ms: 5000
+            })
+            .unwrap(),
             CmdResult::Bool(true)
         );
         // b 释放后 a 可获取。
-        sm.apply(&Cmd::ReleaseLock { key: "k".into(), holder: "b".into() }).unwrap();
+        sm.apply(&Cmd::ReleaseLock {
+            key: "k".into(),
+            holder: "b".into(),
+        })
+        .unwrap();
         assert_eq!(
-            sm.apply(&Cmd::AcquireLock { key: "k".into(), holder: "a".into(), now_ms: 10000, ttl_ms: 5000 }).unwrap(),
+            sm.apply(&Cmd::AcquireLock {
+                key: "k".into(),
+                holder: "a".into(),
+                now_ms: 10000,
+                ttl_ms: 5000
+            })
+            .unwrap(),
             CmdResult::Fencing(Some(3))
         );
     }

@@ -85,12 +85,19 @@ impl NatsQueue {
             .ctx
             .get_or_try_init(|| async {
                 let opts = async_nats::ConnectOptions::new();
-                let opts = match (&self.config.username, &self.config.password, &self.config.token) {
+                let opts = match (
+                    &self.config.username,
+                    &self.config.password,
+                    &self.config.token,
+                ) {
                     (Some(u), Some(p), _) => opts.user_and_password(u.clone(), p.clone()),
                     (_, _, Some(t)) => opts.token(t.clone()),
                     _ => opts,
                 };
-                let client = opts.connect(self.config.url.clone()).await.map_err(nats_err)?;
+                let client = opts
+                    .connect(self.config.url.clone())
+                    .await
+                    .map_err(nats_err)?;
                 info!("NatsQueue connected to {}", self.config.url);
                 Ok::<_, crate::errors::Error>(async_nats::jetstream::new(client))
             })
@@ -297,7 +304,13 @@ impl MqBackend for NatsQueue {
         Ok(())
     }
 
-    async fn send_to_dlq(&self, topic: &str, _id: &str, payload: &[u8], reason: &str) -> Result<()> {
+    async fn send_to_dlq(
+        &self,
+        topic: &str,
+        _id: &str,
+        payload: &[u8],
+        reason: &str,
+    ) -> Result<()> {
         let js = self.ensure_stream().await?;
         let mut h = async_nats::HeaderMap::new();
         h.insert(HEADER_NACK_REASON, reason);
@@ -367,7 +380,10 @@ mod tests {
             .expect("timed out waiting for message")
             .expect("channel closed");
         assert_eq!(msg.payload.as_slice(), b"hello-nats");
-        assert_eq!(msg.headers.get(HEADER_ATTEMPT).map(String::as_str), Some("0"));
+        assert_eq!(
+            msg.headers.get(HEADER_ATTEMPT).map(String::as_str),
+            Some("0")
+        );
         assert_eq!(msg.headers.get("custom").map(String::as_str), Some("v1"));
         msg.ack().await.unwrap();
     }
@@ -398,7 +414,10 @@ mod tests {
             .await
             .expect("timeout m1")
             .expect("closed m1");
-        assert_eq!(m1.headers.get(HEADER_ATTEMPT).map(String::as_str), Some("0"));
+        assert_eq!(
+            m1.headers.get(HEADER_ATTEMPT).map(String::as_str),
+            Some("0")
+        );
         m1.nack("boom-fail-1").await.unwrap();
 
         // 第二次:attempt 1 → nack → 投 DLQ。
@@ -406,7 +425,10 @@ mod tests {
             .await
             .expect("timeout m2")
             .expect("closed m2");
-        assert_eq!(m2.headers.get(HEADER_ATTEMPT).map(String::as_str), Some("1"));
+        assert_eq!(
+            m2.headers.get(HEADER_ATTEMPT).map(String::as_str),
+            Some("1")
+        );
         m2.nack("boom-fail-2").await.unwrap();
 
         // 第三次:不应再收到(已进 DLQ subject,不匹配 consumer filter)。

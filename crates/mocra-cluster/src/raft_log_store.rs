@@ -17,9 +17,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use openraft::storage::{LogFlushed, LogState, RaftLogStorage};
-use openraft::{
-    Entry, LogId, OptionalSend, RaftLogReader, StorageError, StorageIOError, Vote,
-};
+use openraft::{Entry, LogId, OptionalSend, RaftLogReader, StorageError, StorageIOError, Vote};
 use redb::{Database, ReadableTable, TableDefinition};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -59,10 +57,14 @@ impl RedbLogStore {
     /// 打开(或创建)一个 redb 支撑的日志存储。
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StateMachineIo> {
         let db = Database::create(path).map_err(|e| StateMachineIo(e.to_string()))?;
-        let w = db.begin_write().map_err(|e| StateMachineIo(e.to_string()))?;
+        let w = db
+            .begin_write()
+            .map_err(|e| StateMachineIo(e.to_string()))?;
         {
-            w.open_table(LOGS).map_err(|e| StateMachineIo(e.to_string()))?;
-            w.open_table(META).map_err(|e| StateMachineIo(e.to_string()))?;
+            w.open_table(LOGS)
+                .map_err(|e| StateMachineIo(e.to_string()))?;
+            w.open_table(META)
+                .map_err(|e| StateMachineIo(e.to_string()))?;
         }
         w.commit().map_err(|e| StateMachineIo(e.to_string()))?;
         Ok(Self { db: Arc::new(db) })

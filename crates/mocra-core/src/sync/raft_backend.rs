@@ -35,7 +35,10 @@ fn u64_from(b: &[u8]) -> u64 {
 #[async_trait]
 impl CoordinationBackend for RaftCoordinationBackend {
     async fn set(&self, key: &str, value: &[u8]) -> Result<(), String> {
-        self.cp.set(key.as_bytes(), value).await.map_err(|e| e.to_string())
+        self.cp
+            .set(key.as_bytes(), value)
+            .await
+            .map_err(|e| e.to_string())
     }
 
     async fn get(&self, key: &str) -> Result<Option<Vec<u8>>, String> {
@@ -112,7 +115,11 @@ impl CoordinationBackend for RaftCoordinationBackend {
         let seq_key = format!("__psq/{topic}");
         // 对每 topic 序号做 cas 原子自增,再写消息(Raft 强一致 + 持久)。
         loop {
-            let cur = self.cp.get(seq_key.as_bytes()).await.map_err(|e| e.to_string())?;
+            let cur = self
+                .cp
+                .get(seq_key.as_bytes())
+                .await
+                .map_err(|e| e.to_string())?;
             let next = cur.as_deref().map(u64_from).unwrap_or(0) + 1;
             let ok = self
                 .cp
@@ -245,4 +252,3 @@ mod tests {
         assert!(be.acquire_lock("L", b"owner2", 5000).await.unwrap());
     }
 }
-

@@ -1,17 +1,17 @@
-use std::sync::Arc;
-use async_trait::async_trait;
 use crate::common::model::config::RedisConfig;
 use crate::common::model::{
     Request, Response,
-    message::{TaskErrorEvent, TaskParserEvent, TaskEvent},
+    message::{TaskErrorEvent, TaskEvent, TaskParserEvent},
 };
 use crate::errors::Result;
 use crate::errors::error::QueueError;
+use crate::utils::logger::LogModel;
+use async_trait::async_trait;
+use deadpool_redis::redis;
 use log::{error, warn};
+use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::time::Duration;
-use crate::utils::logger::LogModel;
-use deadpool_redis::redis;
 
 /// Trait for objects that can be uniquely identified for compensation purposes.
 pub trait Identifiable {
@@ -119,7 +119,10 @@ impl RedisCompensator {
                 match client.get_multiplexed_async_connection().await {
                     Ok(c) => break Some(c),
                     Err(e) => {
-                        error!("Failed to connect to Redis in compensator: {}. Retrying in 1s...", e);
+                        error!(
+                            "Failed to connect to Redis in compensator: {}. Retrying in 1s...",
+                            e
+                        );
                         tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
                     }
                 }
@@ -129,30 +132,30 @@ impl RedisCompensator {
             const MAX_BATCH_BACKLOG: usize = 10_000;
 
             while let Some(msg) = rx.recv().await {
-                 batch.push(msg);
-                 // Try to drain more if available, up to limit
-                 while batch.len() < 100 {
-                      match rx.try_recv() {
-                          Ok(m) => batch.push(m),
-                          Err(_) => break, 
-                      }
-                 }
+                batch.push(msg);
+                // Try to drain more if available, up to limit
+                while batch.len() < 100 {
+                    match rx.try_recv() {
+                        Ok(m) => batch.push(m),
+                        Err(_) => break,
+                    }
+                }
 
-                 // Cap batch size to prevent unbounded growth during prolonged outages.
-                 if batch.len() > MAX_BATCH_BACKLOG {
-                     let dropped = batch.len() - MAX_BATCH_BACKLOG;
-                     batch.drain(..dropped);
-                     warn!(
-                         "Compensator batch exceeded {} limit, dropped {} oldest messages",
-                         MAX_BATCH_BACKLOG, dropped
-                     );
-                 }
+                // Cap batch size to prevent unbounded growth during prolonged outages.
+                if batch.len() > MAX_BATCH_BACKLOG {
+                    let dropped = batch.len() - MAX_BATCH_BACKLOG;
+                    batch.drain(..dropped);
+                    warn!(
+                        "Compensator batch exceeded {} limit, dropped {} oldest messages",
+                        MAX_BATCH_BACKLOG, dropped
+                    );
+                }
 
-                 // Reconnect if connection is lost
-                 if conn.is_none() {
-                     let mut reconnect_attempts = 0u32;
-                     loop {
-                         match client.get_multiplexed_async_connection().await {
+                // Reconnect if connection is lost
+                if conn.is_none() {
+                    let mut reconnect_attempts = 0u32;
+                    loop {
+                        match client.get_multiplexed_async_connection().await {
                             Ok(c) => {
                                 conn = Some(c);
                                 break;
@@ -163,36 +166,40 @@ impl RedisCompensator {
                                     error!(
                                         "Compensator failed to reconnect after {} attempts: {}. \
                                          Keeping {} messages for next cycle.",
-                                        reconnect_attempts, e, batch.len()
+                                        reconnect_attempts,
+                                        e,
+                                        batch.len()
                                     );
                                     break;
                                 }
-                                let backoff = Duration::from_millis(500 * (1u64 << reconnect_attempts.min(4)));
+                                let backoff = Duration::from_millis(
+                                    500 * (1u64 << reconnect_attempts.min(4)),
+                                );
                                 error!(
                                     "Failed to reconnect to Redis in compensator (attempt {}): {}. Retrying in {:?}...",
                                     reconnect_attempts, e, backoff
                                 );
                                 tokio::time::sleep(backoff).await;
                             }
-                         }
-                     }
-                     if conn.is_none() {
-                         // Keep batch for next recv cycle instead of dropping
-                         continue;
-                     }
-                 }
+                        }
+                    }
+                    if conn.is_none() {
+                        // Keep batch for next recv cycle instead of dropping
+                        continue;
+                    }
+                }
 
-                 let active_conn = match conn.as_mut() {
-                     Some(c) => c,
-                     None => {
+                let active_conn = match conn.as_mut() {
+                    Some(c) => c,
+                    None => {
                         // Keep batch for next cycle instead of dropping
                         continue;
-                     }, 
-                 };
+                    }
+                };
 
-                 let mut pipe = redis::pipe();
-                 
-                 for msg in batch.drain(..) {
+                let mut pipe = redis::pipe();
+
+                for msg in batch.drain(..) {
                     match msg {
                         CompensationMessage::Add { topic, id, payload } => {
                             let tag = format!("{{{}:compensation:{}}}", namespace, topic);
@@ -203,7 +210,8 @@ impl RedisCompensator {
                                 .unwrap()
                                 .as_secs();
 
-                            pipe.zadd(&zset_key, &id, now).hset(&hash_key, &id, payload.as_slice());
+                            pipe.zadd(&zset_key, &id, now)
+                                .hset(&hash_key, &id, payload.as_slice());
                         }
                         CompensationMessage::Remove { topic, id } => {
                             let tag = format!("{{{}:compensation:{}}}", namespace, topic);
@@ -213,12 +221,15 @@ impl RedisCompensator {
                             pipe.zrem(&zset_key, &id).hdel(&hash_key, &id);
                         }
                     }
-                 }
+                }
 
-                 if let Err(e) = pipe.query_async::<()>(active_conn).await {
-                     error!("Failed to execute batch compensation task in Redis: {}. Resetting connection.", e);
-                     conn = None; // Force reconnect
-                 }
+                if let Err(e) = pipe.query_async::<()>(active_conn).await {
+                    error!(
+                        "Failed to execute batch compensation task in Redis: {}. Resetting connection.",
+                        e
+                    );
+                    conn = None; // Force reconnect
+                }
             }
         });
 

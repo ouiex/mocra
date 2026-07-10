@@ -1,11 +1,11 @@
-use crate::queue::QueuedItem;
 use crate::common::model::message::TaskEvent;
 use crate::common::model::message::{TaskErrorEvent, TaskParserEvent};
 use crate::common::model::{Request, Response};
+use crate::queue::QueuedItem;
+use crate::utils::logger::LogModel;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::sync::mpsc::{Receiver, Sender, channel};
-use crate::utils::logger::LogModel;
 
 /// 消息队列通道管理器
 ///

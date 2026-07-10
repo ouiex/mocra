@@ -1,31 +1,31 @@
-use crate::queue::QueuedItem;
+use crate::common::context::PipelineContext;
+use crate::common::interface::middleware_manager::MiddlewareManager;
+use crate::common::model::ModuleConfig;
+use crate::common::model::download_config::DownloadConfig;
+use crate::common::model::{Request, Response};
+use crate::common::processors::processor::{
+    ProcessorContext, ProcessorResult, ProcessorTrait, RetryPolicy,
+};
+use crate::common::status_tracker::ErrorDecision;
+use crate::downloader::DownloaderManager;
 use crate::engine::chain::ConfigProcessor;
+use crate::engine::chain::backpressure::{BackpressureSendState, send_with_backpressure};
 use crate::engine::events::{
     DownloadEvent, EventBus, EventEnvelope, EventPhase, EventType, RequestMiddlewareEvent,
     ResponseEvent,
 };
 use crate::engine::processors::event_processor::{EventAwareTypedChain, EventProcessorTrait};
-use async_trait::async_trait;
-use crate::downloader::DownloaderManager;
 use crate::errors::{Error, ModuleError, Result};
-use crate::common::interface::middleware_manager::MiddlewareManager;
-use crate::common::model::ModuleConfig;
-use crate::common::model::download_config::DownloadConfig;
-use crate::common::model::{Request, Response};
-use crate::common::context::PipelineContext;
-use log::{debug, info, warn, error};
-use metrics::counter;
 use crate::queue::QueueManager;
-use crate::common::processors::processor::{
-    ProcessorContext, ProcessorResult, ProcessorTrait, RetryPolicy,
-};
-use mocra_proxy::ProxyManager;
-use std::sync::Arc;
+use crate::queue::QueuedItem;
+use async_trait::async_trait;
 use dashmap::DashMap;
-use std::time::{Instant, Duration};
-use crate::common::status_tracker::ErrorDecision;
+use log::{debug, error, info, warn};
+use metrics::counter;
+use mocra_proxy::ProxyManager;
 use serde_json::json;
-use crate::engine::chain::backpressure::{BackpressureSendState, send_with_backpressure};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 /// Download-stage processor.
 ///
@@ -38,8 +38,11 @@ pub struct DownloadProcessor {
 }
 
 #[async_trait]
-impl ProcessorTrait<(Option<Request>, Option<ModuleConfig>), (Option<Response>, Option<ModuleConfig>)>
-for DownloadProcessor
+impl
+    ProcessorTrait<
+        (Option<Request>, Option<ModuleConfig>),
+        (Option<Response>, Option<ModuleConfig>),
+    > for DownloadProcessor
 {
     fn name(&self) -> &'static str {
         "DownloadProcessor"
@@ -58,10 +61,18 @@ for DownloadProcessor
         info!(
             "[DownloadProcessor] begin process: request_id={} retry={}",
             request.id,
-            context.retry_policy.as_ref().map(|r| r.current_retry).unwrap_or(0)
+            context
+                .retry_policy
+                .as_ref()
+                .map(|r| r.current_retry)
+                .unwrap_or(0)
         );
 
-        let is_retry = context.retry_policy.as_ref().map(|r| r.current_retry > 0).unwrap_or(false);
+        let is_retry = context
+            .retry_policy
+            .as_ref()
+            .map(|r| r.current_retry > 0)
+            .unwrap_or(false);
 
         if !is_retry {
             // Defensive checks in distributed mode: ingress and download may run on different nodes.
@@ -86,9 +97,14 @@ for DownloadProcessor
             let task_decision_result = match cached_task_decision {
                 Some(res) => res,
                 None => {
-                    let res = self.state.status_tracker.should_task_continue(&task_id).await;
+                    let res = self
+                        .state
+                        .status_tracker
+                        .should_task_continue(&task_id)
+                        .await;
                     if let Ok(ref d) = res {
-                        self.decision_cache.insert(task_id.clone(), (Instant::now(), d.clone()));
+                        self.decision_cache
+                            .insert(task_id.clone(), (Instant::now(), d.clone()));
                     }
                     res
                 }
@@ -139,9 +155,14 @@ for DownloadProcessor
             let decision_result = match cached_decision {
                 Some(res) => res,
                 None => {
-                    let res = self.state.status_tracker.should_module_continue(&module_id).await;
+                    let res = self
+                        .state
+                        .status_tracker
+                        .should_module_continue(&module_id)
+                        .await;
                     if let Ok(ref d) = res {
-                        self.decision_cache.insert(module_id.clone(), (Instant::now(), d.clone()));
+                        self.decision_cache
+                            .insert(module_id.clone(), (Instant::now(), d.clone()));
                     }
                     res
                 }
@@ -182,12 +203,18 @@ for DownloadProcessor
         info!("[DownloadProcessor] loading config: request_id={}", _req_id);
         let download_config =
             DownloadConfig::load(&input.1, &self.state.config.read().await.download_config);
-        info!("[DownloadProcessor] getting downloader: request_id={}", _req_id);
+        info!(
+            "[DownloadProcessor] getting downloader: request_id={}",
+            _req_id
+        );
         let downloader = self
             .downloader_manager
             .get_downloader(&request, download_config)
             .await;
-        info!("[DownloadProcessor] starting download: request_id={}", _req_id);
+        info!(
+            "[DownloadProcessor] starting download: request_id={}",
+            _req_id
+        );
 
         let module_id = request.module_runtime_id();
         let task_id = request.task_runtime_id();
@@ -236,39 +263,47 @@ for DownloadProcessor
                 if retry_policy.should_retry() {
                     debug!(
                         "[DownloadProcessor] download failed, will retry locally: account={} platform={} module={} url={} request_id={} retry={}/{} reason={}",
-                        account, platform, module_id, url, request_id, retry_policy.current_retry, retry_policy.max_retries, e
+                        account,
+                        platform,
+                        module_id,
+                        url,
+                        request_id,
+                        retry_policy.current_retry,
+                        retry_policy.max_retries,
+                        e
                     );
                     return ProcessorResult::RetryableFailure(
-                        retry_policy.with_reason(e.to_string())
+                        retry_policy.with_reason(e.to_string()),
                     );
                 }
 
                 warn!(
                     "[DownloadProcessor] download failed after max retries: account={} platform={} module={} url={} request_id={} reason={}",
-                    account,
-                    platform,
-                    module_id,
-                    url,
-                    request_id,
-                    e
+                    account, platform, module_id, url, request_id, e
                 );
 
                 // 2) Retries exhausted; record error and follow tracker decision.
-                match self.state
+                match self
+                    .state
                     .status_tracker
                     .record_download_error(&task_id, &module_id, &request_id.to_string(), &e)
                     .await
                 {
                     Ok(ErrorDecision::Terminate(reason)) => {
-                        error!("[DownloadProcessor] terminate: account={} platform={} module={} url={} request_id={} reason={}",
-                            account, platform, module_id, url, request_id, reason);
+                        error!(
+                            "[DownloadProcessor] terminate: account={} platform={} module={} url={} request_id={} reason={}",
+                            account, platform, module_id, url, request_id, reason
+                        );
                         ProcessorResult::FatalFailure(
-                            ModuleError::ModuleMaxError(reason.into()).into()
+                            ModuleError::ModuleMaxError(reason.into()).into(),
                         )
                     }
                     // Continue/RetryAfter/Skip all map to dropping current request here.
                     Ok(_) => {
-                        warn!("[DownloadProcessor] skip request after max retries (recorded in tracker): request_id={}", request_id);
+                        warn!(
+                            "[DownloadProcessor] skip request after max retries (recorded in tracker): request_id={}",
+                            request_id
+                        );
                         ProcessorResult::Success((None, input.1))
                     }
                     Err(err) => {
@@ -315,14 +350,21 @@ for DownloadProcessor
 }
 
 #[async_trait]
-impl EventProcessorTrait<(Option<Request>, Option<ModuleConfig>), (Option<Response>, Option<ModuleConfig>)>
-for DownloadProcessor
+impl
+    EventProcessorTrait<
+        (Option<Request>, Option<ModuleConfig>),
+        (Option<Response>, Option<ModuleConfig>),
+    > for DownloadProcessor
 {
     fn pre_status(&self, input: &(Option<Request>, Option<ModuleConfig>)) -> Option<EventEnvelope> {
         match &input.0 {
             Some(request) => {
                 let ev: DownloadEvent = request.into();
-                Some(EventEnvelope::engine(EventType::Download, EventPhase::Started, ev))
+                Some(EventEnvelope::engine(
+                    EventType::Download,
+                    EventPhase::Started,
+                    ev,
+                ))
             }
             None => Some(EventEnvelope::system_error(
                 "download_skipped_without_request",
@@ -342,7 +384,11 @@ for DownloadProcessor
                 if let Some(resp) = &out.0 {
                     ev.status_code = Some(resp.status_code);
                 }
-                Some(EventEnvelope::engine(EventType::Download, EventPhase::Completed, ev))
+                Some(EventEnvelope::engine(
+                    EventType::Download,
+                    EventPhase::Completed,
+                    ev,
+                ))
             }
             None => Some(EventEnvelope::system_error(
                 "download_skipped_without_request",
@@ -351,11 +397,18 @@ for DownloadProcessor
         }
     }
 
-    fn working_status(&self, input: &(Option<Request>, Option<ModuleConfig>)) -> Option<EventEnvelope> {
+    fn working_status(
+        &self,
+        input: &(Option<Request>, Option<ModuleConfig>),
+    ) -> Option<EventEnvelope> {
         match &input.0 {
             Some(request) => {
                 let ev: DownloadEvent = request.into();
-                Some(EventEnvelope::engine(EventType::Download, EventPhase::Started, ev))
+                Some(EventEnvelope::engine(
+                    EventType::Download,
+                    EventPhase::Started,
+                    ev,
+                ))
             }
             None => Some(EventEnvelope::system_error(
                 "download_skipped_without_request",
@@ -364,7 +417,11 @@ for DownloadProcessor
         }
     }
 
-    fn error_status(&self, input: &(Option<Request>, Option<ModuleConfig>), err: &Error) -> Option<EventEnvelope> {
+    fn error_status(
+        &self,
+        input: &(Option<Request>, Option<ModuleConfig>),
+        err: &Error,
+    ) -> Option<EventEnvelope> {
         match &input.0 {
             Some(request) => {
                 let ev: DownloadEvent = request.into();
@@ -410,7 +467,7 @@ for DownloadProcessor
 
 pub struct ResponsePublishProcessor {
     pub(crate) queue_manager: Arc<QueueManager>,
-    pub(crate) state:Arc<PipelineContext>,
+    pub(crate) state: Arc<PipelineContext>,
 }
 
 #[async_trait]
@@ -440,11 +497,11 @@ impl ProcessorTrait<Option<Response>, ()> for ResponsePublishProcessor {
         };
         // [LOG_OPTIMIZATION] debug!("[ResponsePublish] start queue send: request_id={}", id);
         let item = QueuedItem::new(input);
-        
+
         // OPTIMIZATION: Try local channel first to avoid serialization overhead
         // If local channel is full or closed, fall back to the configured backend (Redis/Kafka)
         let result = self.queue_manager.try_send_local_response(item);
-        
+
         if let Err(e) = match result {
             Ok(_) => {
                 debug!("[ResponsePublish] Sent response locally: request_id={}", id);
@@ -499,9 +556,7 @@ impl ProcessorTrait<Option<Response>, ()> for ResponsePublishProcessor {
                 retry_policy.retry_delay = delay_ms.max(1);
             }
             retry_policy.reason = Some(e);
-            return ProcessorResult::RetryableFailure(
-                retry_policy,
-            );
+            return ProcessorResult::RetryableFailure(retry_policy);
         }
         debug!("[ResponsePublish] end queue send: request_id={}", id);
         // [LOG_OPTIMIZATION] debug!("[ResponsePublish] end queue send: request_id={}", id);
@@ -519,7 +574,10 @@ impl ProcessorTrait<Option<Response>, ()> for ResponsePublishProcessor {
             //     resp.module_id(),
             //     resp.id
             // );
-            self.state.status_tracker.lock_module(&resp.module_runtime_id()).await;
+            self.state
+                .status_tracker
+                .lock_module(&resp.module_runtime_id())
+                .await;
             // [LOG_OPTIMIZATION]
             // debug!(
             //     "[ResponsePublish] lock module acquired: module_id={} request_id={}",
@@ -537,7 +595,8 @@ impl ProcessorTrait<Option<Response>, ()> for ResponsePublishProcessor {
     ) -> ProcessorResult<()> {
         if let Some(resp) = input {
             // Ensure we release the lock if publishing the response ultimately fails
-            self.state.status_tracker
+            self.state
+                .status_tracker
                 .release_module_locker(&resp.module_runtime_id())
                 .await;
 
@@ -613,7 +672,11 @@ impl EventProcessorTrait<Option<Response>, ()> for ResponsePublishProcessor {
         }
     }
 
-    fn retry_status(&self, input: &Option<Response>, retry_policy: &RetryPolicy) -> Option<EventEnvelope> {
+    fn retry_status(
+        &self,
+        input: &Option<Response>,
+        retry_policy: &RetryPolicy,
+    ) -> Option<EventEnvelope> {
         match input {
             Some(resp) => Some(EventEnvelope::engine(
                 EventType::ResponsePublish,
@@ -636,7 +699,7 @@ pub struct RequestMiddlewareProcessor {
 }
 #[async_trait]
 impl ProcessorTrait<(Request, Option<ModuleConfig>), (Option<Request>, Option<ModuleConfig>)>
-for RequestMiddlewareProcessor
+    for RequestMiddlewareProcessor
 {
     fn name(&self) -> &'static str {
         "DownloadMiddlewareProcessor"
@@ -661,7 +724,7 @@ for RequestMiddlewareProcessor
 }
 #[async_trait]
 impl EventProcessorTrait<(Request, Option<ModuleConfig>), (Option<Request>, Option<ModuleConfig>)>
-for RequestMiddlewareProcessor
+    for RequestMiddlewareProcessor
 {
     fn pre_status(&self, input: &(Request, Option<ModuleConfig>)) -> Option<EventEnvelope> {
         Some(EventEnvelope::engine(
@@ -697,7 +760,11 @@ for RequestMiddlewareProcessor
         ))
     }
 
-    fn error_status(&self, input: &(Request, Option<ModuleConfig>), err: &Error) -> Option<EventEnvelope> {
+    fn error_status(
+        &self,
+        input: &(Request, Option<ModuleConfig>),
+        err: &Error,
+    ) -> Option<EventEnvelope> {
         Some(EventEnvelope::engine_error(
             EventType::RequestMiddleware,
             EventPhase::Failed,
@@ -727,7 +794,7 @@ pub struct ResponseMiddlewareProcessor {
 }
 #[async_trait]
 impl ProcessorTrait<(Option<Response>, Option<ModuleConfig>), Option<Response>>
-for ResponseMiddlewareProcessor
+    for ResponseMiddlewareProcessor
 {
     fn name(&self) -> &'static str {
         "DownloadMiddlewareProcessor"
@@ -757,9 +824,12 @@ for ResponseMiddlewareProcessor
 }
 #[async_trait]
 impl EventProcessorTrait<(Option<Response>, Option<ModuleConfig>), Option<Response>>
-for ResponseMiddlewareProcessor
+    for ResponseMiddlewareProcessor
 {
-    fn pre_status(&self, input: &(Option<Response>, Option<ModuleConfig>)) -> Option<EventEnvelope> {
+    fn pre_status(
+        &self,
+        input: &(Option<Response>, Option<ModuleConfig>),
+    ) -> Option<EventEnvelope> {
         match &input.0 {
             Some(resp) => Some(EventEnvelope::engine(
                 EventType::ResponseMiddleware,
@@ -791,7 +861,10 @@ for ResponseMiddlewareProcessor
         }
     }
 
-    fn working_status(&self, input: &(Option<Response>, Option<ModuleConfig>)) -> Option<EventEnvelope> {
+    fn working_status(
+        &self,
+        input: &(Option<Response>, Option<ModuleConfig>),
+    ) -> Option<EventEnvelope> {
         match &input.0 {
             Some(resp) => Some(EventEnvelope::engine(
                 EventType::ResponseMiddleware,
@@ -852,7 +925,7 @@ pub struct ProxyMiddlewareProcessor {
 
 #[async_trait]
 impl ProcessorTrait<(Request, Option<ModuleConfig>), (Request, Option<ModuleConfig>)>
-for ProxyMiddlewareProcessor
+    for ProxyMiddlewareProcessor
 {
     fn name(&self) -> &'static str {
         "ProxyMiddlewareProcessor"
@@ -863,9 +936,10 @@ for ProxyMiddlewareProcessor
         input: (Request, Option<ModuleConfig>),
         context: ProcessorContext,
     ) -> ProcessorResult<(Request, Option<ModuleConfig>)> {
-        let enable_proxy = input.1.as_ref().is_some_and(|cfg| {
-            cfg.get_config::<bool>("enable_proxy").unwrap_or(false)
-        });
+        let enable_proxy = input
+            .1
+            .as_ref()
+            .is_some_and(|cfg| cfg.get_config::<bool>("enable_proxy").unwrap_or(false));
         if !enable_proxy {
             debug!(
                 "[ProxyMiddleware] proxy disabled for request_id={} module_id={}",
@@ -908,7 +982,7 @@ for ProxyMiddlewareProcessor
 }
 #[async_trait]
 impl EventProcessorTrait<(Request, Option<ModuleConfig>), (Request, Option<ModuleConfig>)>
-for ProxyMiddlewareProcessor
+    for ProxyMiddlewareProcessor
 {
     fn pre_status(&self, _input: &(Request, Option<ModuleConfig>)) -> Option<EventEnvelope> {
         None
@@ -926,7 +1000,11 @@ for ProxyMiddlewareProcessor
         None
     }
 
-    fn error_status(&self, _input: &(Request, Option<ModuleConfig>), _err: &Error) -> Option<EventEnvelope> {
+    fn error_status(
+        &self,
+        _input: &(Request, Option<ModuleConfig>),
+        _err: &Error,
+    ) -> Option<EventEnvelope> {
         None
     }
 
@@ -951,18 +1029,20 @@ pub async fn create_download_chain(
 ) -> EventAwareTypedChain<Request, ()> {
     let download_processor = DownloadProcessor {
         downloader_manager,
-        state:state.clone(),
+        state: state.clone(),
         decision_cache: Arc::new(DashMap::new()),
     };
     let response_publish = ResponsePublishProcessor {
         queue_manager,
-        state:state.clone(),
+        state: state.clone(),
     };
     let request_middleware = RequestMiddlewareProcessor {
         middleware_manager: middleware_manager.clone(),
     };
     let response_middleware = ResponseMiddlewareProcessor { middleware_manager };
-    let config_processor = ConfigProcessor {state: state.clone() };
+    let config_processor = ConfigProcessor {
+        state: state.clone(),
+    };
     let proxy_middleware = ProxyMiddlewareProcessor { proxy_manager };
 
     EventAwareTypedChain::<Request, Request>::new(event_bus)

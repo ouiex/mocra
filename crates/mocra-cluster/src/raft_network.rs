@@ -21,7 +21,9 @@ pub struct StubNetwork;
 pub struct StubConnection;
 
 fn stub_err() -> std::io::Error {
-    std::io::Error::other("stub network: multi-node RPC not implemented (single-node control plane)")
+    std::io::Error::other(
+        "stub network: multi-node RPC not implemented (single-node control plane)",
+    )
 }
 
 impl RaftNetworkFactory<TypeConfig> for StubNetwork {

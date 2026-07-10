@@ -14,7 +14,7 @@ use openraft::Config;
 use crate::cmd::{Cmd, CmdResult};
 use crate::control::{ControlError, ControlPlane};
 use crate::raft::{MocraRaft, Node, NodeId};
-use crate::raft_http::{raft_router, HttpNetwork, JoinRequest};
+use crate::raft_http::{HttpNetwork, JoinRequest, raft_router};
 use crate::raft_log_store::RedbLogStore;
 use crate::raft_network::StubNetwork;
 use crate::raft_store::StateMachineStore;
@@ -114,7 +114,12 @@ impl RaftControlPlane {
         members.insert(node_id, Node::default());
         let _ = raft.initialize(members).await;
 
-        Ok(Self { node_id, raft, sm, client: reqwest::Client::new() })
+        Ok(Self {
+            node_id,
+            raft,
+            sm,
+            client: reqwest::Client::new(),
+        })
     }
 
     /// 起一个**集群**节点:HTTP 网络 + 自带 HTTP server(暴露 Raft RPC 与 `/cluster/join`)。
@@ -169,11 +174,19 @@ impl RaftControlPlane {
             let _ = axum::serve(listener, router).await;
         });
 
-        Ok(Self { node_id, raft, sm, client: reqwest::Client::new() })
+        Ok(Self {
+            node_id,
+            raft,
+            sm,
+            client: reqwest::Client::new(),
+        })
     }
 
     /// 初始化一个新集群(把给定 `{id: addr}` 作为初始投票集;通常只在第一个核心节点上调用一次)。
-    pub async fn init_cluster(&self, members: BTreeMap<NodeId, String>) -> Result<(), ControlError> {
+    pub async fn init_cluster(
+        &self,
+        members: BTreeMap<NodeId, String>,
+    ) -> Result<(), ControlError> {
         let m: BTreeMap<NodeId, Node> = members
             .into_iter()
             .map(|(id, addr)| (id, Node::new(addr)))
@@ -368,20 +381,21 @@ impl RaftControlPlane {
         for attempt in 0..MAX_ATTEMPTS {
             match self.raft.client_write(cmd.clone()).await {
                 Ok(resp) => return Ok(resp.data),
-                Err(RaftError::APIError(ClientWriteError::ForwardToLeader(f))) => match &f.leader_node
-                {
-                    // 已知 leader:转发一次(HTTP 失败即返回,不重试 —— 结果不确定)。
-                    Some(node) => {
-                        return forward_write_to_leader(&self.client, &node.addr, &cmd).await;
+                Err(RaftError::APIError(ClientWriteError::ForwardToLeader(f))) => {
+                    match &f.leader_node {
+                        // 已知 leader:转发一次(HTTP 失败即返回,不重试 —— 结果不确定)。
+                        Some(node) => {
+                            return forward_write_to_leader(&self.client, &node.addr, &cmd).await;
+                        }
+                        // 选举中无 leader:命令未提交,退避后重试(安全)。
+                        None => {
+                            tokio::time::sleep(std::time::Duration::from_millis(
+                                150 * (attempt as u64 + 1),
+                            ))
+                            .await;
+                        }
                     }
-                    // 选举中无 leader:命令未提交,退避后重试(安全)。
-                    None => {
-                        tokio::time::sleep(std::time::Duration::from_millis(
-                            150 * (attempt as u64 + 1),
-                        ))
-                        .await;
-                    }
-                },
+                }
                 Err(e) => return Err(ControlError::Raft(e.to_string())),
             }
         }
@@ -472,12 +486,7 @@ impl ControlPlane for RaftControlPlane {
         }
     }
 
-    async fn renew_lock(
-        &self,
-        key: &str,
-        holder: &str,
-        ttl_ms: u64,
-    ) -> Result<bool, ControlError> {
+    async fn renew_lock(&self, key: &str, holder: &str, ttl_ms: u64) -> Result<bool, ControlError> {
         match self
             .write(Cmd::RenewLock {
                 key: key.to_string(),
@@ -556,7 +565,10 @@ mod tests {
             cp.wait_leader(Duration::from_secs(10)).await.unwrap();
             cp.set(b"persist", b"value").await.unwrap();
             assert!(cp.cas(b"persist", Some(b"value"), b"v2").await.unwrap());
-            assert_eq!(cp.acquire_lock("L", "owner", 60_000).await.unwrap(), Some(1));
+            assert_eq!(
+                cp.acquire_lock("L", "owner", 60_000).await.unwrap(),
+                Some(1)
+            );
             // 优雅关闭以释放 redb 句柄;已提交数据落盘。cp 随块结束 drop。
             cp.shutdown().await.unwrap();
         }
@@ -829,8 +841,14 @@ mod tests {
         cp1.add_learner(2, a2).await.unwrap();
         assert_eq!(cp1.member_count(), 2);
         let set2: BTreeSet<u32> = cp1.owned_partitions().into_iter().collect();
-        assert!(set2.is_subset(&set1), "node 1's partitions must only shrink");
-        assert!(set2.len() < set1.len(), "node 2 must take a share from node 1");
+        assert!(
+            set2.is_subset(&set1),
+            "node 1's partitions must only shrink"
+        );
+        assert!(
+            set2.len() < set1.len(),
+            "node 2 must take a share from node 1"
+        );
 
         // 节点 3 入网:HRW 关键不变量 —— 节点 1 的归属只会失去,**绝不重新获得**分区
         //(set3 ⊆ set2);节点 3 从节点 1/2 各分走一部分。
@@ -841,7 +859,10 @@ mod tests {
             set3.is_subset(&set2),
             "node 1 must never regain a partition when node 3 joins"
         );
-        assert!(set3.len() < set1.len(), "node 1 sheds partitions overall as cluster grows");
+        assert!(
+            set3.len() < set1.len(),
+            "node 1 sheds partitions overall as cluster grows"
+        );
     }
 
     #[tokio::test]
@@ -904,7 +925,10 @@ mod tests {
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
-        assert!(wrote, "surviving majority could not commit a write after failover");
+        assert!(
+            wrote,
+            "surviving majority could not commit a write after failover"
+        );
 
         // 另一存活节点最终读到新值(经 Raft 复制),且崩溃前的数据仍在。
         let mut replicated = false;
@@ -915,7 +939,10 @@ mod tests {
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
-        assert!(replicated, "post-failover write did not replicate to the other survivor");
+        assert!(
+            replicated,
+            "post-failover write did not replicate to the other survivor"
+        );
         assert_eq!(cp3.get(b"before").await.unwrap(), Some(b"crash".to_vec()));
     }
 }

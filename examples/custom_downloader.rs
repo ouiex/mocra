@@ -132,7 +132,10 @@ async fn main() -> Result<()> {
         .spider(
             Demo,
             on_item(|item: Item| async move {
-                println!("[item] served_by={} :: {} ({})", item.served_by, item.title, item.url);
+                println!(
+                    "[item] served_by={} :: {} ({})",
+                    item.served_by, item.title, item.url
+                );
             }),
         )
         // 整体替换默认 reqwest。

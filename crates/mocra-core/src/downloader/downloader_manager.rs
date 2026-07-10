@@ -1,16 +1,16 @@
+use crate::cacheable::CacheService;
+use crate::common::model::Request;
+use crate::common::model::config::Config;
+use crate::common::model::download_config::DownloadConfig;
 use crate::downloader::request_downloader::RequestDownloader;
 use crate::downloader::{Downloader, WebSocketDownloader};
-use crate::common::model::Request;
-use crate::common::model::download_config::DownloadConfig;
-use crate::common::model::config::Config;
-use crate::cacheable::CacheService;
-use crate::utils::redis_lock::DistributedLockManager;
 use crate::utils::distributed_rate_limit::DistributedSlidingWindowRateLimiter;
-use tokio::sync::RwLock;
+use crate::utils::redis_lock::DistributedLockManager;
 use dashmap::DashMap;
 use deadpool_redis::redis::Script;
 use std::sync::Arc;
 use std::time::SystemTime;
+use tokio::sync::RwLock;
 
 pub struct DownloaderManager {
     /// 应用配置(命名空间名等);此前吃整个 `Arc<State>`,现窄化为具体依赖(重构 Phase 2)。
@@ -46,7 +46,9 @@ impl DownloaderManager {
             let cfg = app_config.read().await;
             (
                 cfg.download_config.pool_size.unwrap_or(200),
-                cfg.download_config.max_response_size.unwrap_or(10 * 1024 * 1024),
+                cfg.download_config
+                    .max_response_size
+                    .unwrap_or(10 * 1024 * 1024),
             )
         };
 
@@ -89,7 +91,9 @@ impl DownloaderManager {
     ///
     /// This updates the rate limit configuration for an active downloader instance.
     pub async fn set_limit(&self, limit_id: &str, limit: f32) {
-        let downloader = self.task_downloader.get(limit_id)
+        let downloader = self
+            .task_downloader
+            .get(limit_id)
             .map(|d| dyn_clone::clone_box(d.value().as_ref()));
         // guard dropped here — never hold DashMap Ref across .await
         if let Some(d) = downloader {
@@ -138,17 +142,18 @@ impl DownloaderManager {
         // Execute Lua script
         let pool = self.locker.get_pool();
         if let Some(pool) = pool
-            && let Ok(mut conn) = pool.get().await {
-                let result: Result<Vec<String>, _> = script
-                    .key(&key)
-                    .arg(max_score)
-                    .invoke_async(&mut conn)
-                    .await;
+            && let Ok(mut conn) = pool.get().await
+        {
+            let result: Result<Vec<String>, _> = script
+                .key(&key)
+                .arg(max_score)
+                .invoke_async(&mut conn)
+                .await;
 
-                if let Ok(keys) = result {
-                    expired_keys = keys;
-                }
+            if let Ok(keys) = result {
+                expired_keys = keys;
             }
+        }
 
         // Remove expired keys from local map
         for key in &expired_keys {
@@ -166,14 +171,15 @@ impl DownloaderManager {
             if downloader.health_check().await.is_err() {
                 self.task_downloader.remove(&key);
                 if let Some(pool) = pool
-                    && let Ok(mut conn) = pool.get().await {
-                        let _: () = deadpool_redis::redis::cmd("ZREM")
-                            .arg(&key)
-                            .arg(&key)
-                            .query_async(&mut conn)
-                            .await
-                            .unwrap_or(());
-                    }
+                    && let Ok(mut conn) = pool.get().await
+                {
+                    let _: () = deadpool_redis::redis::cmd("ZREM")
+                        .arg(&key)
+                        .arg(&key)
+                        .query_async(&mut conn)
+                        .await
+                        .unwrap_or(());
+                }
             }
         }
     }
@@ -227,15 +233,16 @@ impl DownloaderManager {
 
             tokio::spawn(async move {
                 if let Some(pool) = pool
-                    && let Ok(mut conn) = pool.get().await {
-                        let _: () = deadpool_redis::redis::cmd("ZADD")
-                            .arg(&key)
-                            .arg(current_time_clone)
-                            .arg(&module_id_clone)
-                            .query_async(&mut conn)
-                            .await
-                            .unwrap_or(());
-                    }
+                    && let Ok(mut conn) = pool.get().await
+                {
+                    let _: () = deadpool_redis::redis::cmd("ZADD")
+                        .arg(&key)
+                        .arg(current_time_clone)
+                        .arg(&module_id_clone)
+                        .query_async(&mut conn)
+                        .await
+                        .unwrap_or(());
+                }
             });
         }
 
@@ -248,33 +255,37 @@ impl DownloaderManager {
         // guard dropped here
         let config = if let Some(cached) = cached_config {
             if cached != download_config {
-                self.config.insert(module_id.clone(), download_config.clone());
+                self.config
+                    .insert(module_id.clone(), download_config.clone());
                 download_config.clone()
             } else {
                 cached
             }
         } else {
-            self.config.insert(module_id.clone(), download_config.clone());
+            self.config
+                .insert(module_id.clone(), download_config.clone());
             download_config.clone()
         };
 
         // Determine effective limit_id here to ensure rate limiter gets correct key
         let limit_id = if request.limit_id.is_empty() {
-             request.module_id()
+            request.module_id()
         } else {
-             request.limit_id.clone()
+            request.limit_id.clone()
         };
 
         // Get or create downloader.
         // Clone the cached downloader and drop the DashMap guard before any .await.
         // Holding a DashMap Ref across an await can deadlock the Tokio runtime
         // (parking_lot RwLock blocks the OS thread).
-        let cached_downloader = self.task_downloader.get(&module_id)
+        let cached_downloader = self
+            .task_downloader
+            .get(&module_id)
             .map(|d| dyn_clone::clone_box(d.value().as_ref()));
         // guard dropped here
         if let Some(d) = cached_downloader {
-              d.set_config(&limit_id, config).await;
-              return d;
+            d.set_config(&limit_id, config).await;
+            return d;
         }
 
         let new_downloader = if let Some(registered) = self.downloader.get(&config.downloader) {

@@ -1,15 +1,15 @@
 #![allow(unused)]
 use crate::common::model::entity::*;
-use crate::errors::{ Result};
+use crate::errors::OrmError;
+use crate::errors::Result;
 use crate::utils::txn::begin_read;
+use async_trait::async_trait;
 use sea_orm::{
     ColumnTrait, ConnectionTrait, DatabaseConnection, DbBackend, EntityTrait, QueryFilter,
     Statement, TryGetable, Value,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
-use crate::errors::OrmError;
-use async_trait::async_trait;
 
 /// 只读元数据存储抽象:从 DB 加载 `account × platform × module` 及中间件 / 关系。
 ///
@@ -63,8 +63,10 @@ pub trait MetadataStore: Send + Sync {
         &self,
         module_ids: &[i32],
     ) -> Result<HashMap<i32, Vec<RelModuleDownloadMiddlewareModel>>>;
-    async fn load_data_middlewares(&self, middleware_ids: &[i32])
-    -> Result<Vec<DataMiddlewareModel>>;
+    async fn load_data_middlewares(
+        &self,
+        middleware_ids: &[i32],
+    ) -> Result<Vec<DataMiddlewareModel>>;
     async fn load_download_middlewares(
         &self,
         middleware_ids: &[i32],
@@ -106,9 +108,11 @@ impl MetadataStore for TaskRepository {
                 })?
                 .ok_or_else(|| OrmError::NotFound)?;
 
-            let id: i32 = row
-                .try_get("", "id")
-                .map_err(|e| OrmError::QueryExecutionError(format!("load_account(sqlite id decode) failed: {e}").into()))?;
+            let id: i32 = row.try_get("", "id").map_err(|e| {
+                OrmError::QueryExecutionError(
+                    format!("load_account(sqlite id decode) failed: {e}").into(),
+                )
+            })?;
             let now = chrono::Utc::now().naive_utc();
             let account = AccountModel {
                 id,
@@ -129,9 +133,7 @@ impl MetadataStore for TaskRepository {
             .one(&txn)
             .await
             .map_err(|e| {
-                OrmError::QueryExecutionError(
-                    format!("load_account(filter) failed: {e}").into(),
-                )
+                OrmError::QueryExecutionError(format!("load_account(filter) failed: {e}").into())
             })?
             .ok_or_else(|| OrmError::NotFound)?;
 
@@ -159,9 +161,11 @@ impl MetadataStore for TaskRepository {
                 })?
                 .ok_or_else(|| OrmError::NotFound)?;
 
-            let id: i32 = row
-                .try_get("", "id")
-                .map_err(|e| OrmError::QueryExecutionError(format!("load_platform(sqlite id decode) failed: {e}").into()))?;
+            let id: i32 = row.try_get("", "id").map_err(|e| {
+                OrmError::QueryExecutionError(
+                    format!("load_platform(sqlite id decode) failed: {e}").into(),
+                )
+            })?;
             let now = chrono::Utc::now().naive_utc();
             let platform = PlatformModel {
                 id,
@@ -182,9 +186,7 @@ impl MetadataStore for TaskRepository {
             .one(&txn)
             .await
             .map_err(|e| {
-                OrmError::QueryExecutionError(
-                    format!("load_platform(filter) failed: {e}").into(),
-                )
+                OrmError::QueryExecutionError(format!("load_platform(filter) failed: {e}").into())
             })?
             .ok_or_else(|| OrmError::NotFound)?;
 
@@ -417,9 +419,7 @@ impl MetadataStore for TaskRepository {
 
         let module = ModuleEntity::find()
             .from_raw_sql(Statement::from_sql_and_values(
-                db_backend,
-                module_sql,
-                values,
+                db_backend, module_sql, values,
             ))
             .all(&txn)
             .await

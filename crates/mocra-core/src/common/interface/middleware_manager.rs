@@ -1,11 +1,11 @@
 #![allow(unused)]
-use crate::errors::Result;
 use crate::common::interface::middleware::{
     DataMiddlewareHandle, DataStoreMiddlewareHandle, DownloadMiddlewareHandle,
 };
-use crate::common::model::data::DataEvent;
 use crate::common::model::ModuleConfig;
+use crate::common::model::data::DataEvent;
 use crate::common::model::{Request, Response};
+use crate::errors::Result;
 use futures::future::join_all;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -83,10 +83,7 @@ impl MiddlewareManager {
         middlewares.push(middleware);
         index.insert(name, pos);
     }
-    pub async fn register_data_middleware_from_vec(
-        &self,
-        middlewares: Vec<DataMiddlewareHandle>,
-    ) {
+    pub async fn register_data_middleware_from_vec(&self, middlewares: Vec<DataMiddlewareHandle>) {
         let mut existing = self.data_middleware.write().await;
         let mut index = self.data_index.write().await;
         for middleware in middlewares {
@@ -181,7 +178,11 @@ impl MiddlewareManager {
         out
     }
 
-    pub async fn handle_request(&self, request: Request, config: &Option<ModuleConfig>) -> Option<Request> {
+    pub async fn handle_request(
+        &self,
+        request: Request,
+        config: &Option<ModuleConfig>,
+    ) -> Option<Request> {
         let mut req = request;
         let mut middleware: Vec<(DownloadMiddlewareHandle, u32)> = self
             .get_download_middleware(&req.download_middleware, config)
@@ -215,7 +216,11 @@ impl MiddlewareManager {
         }
         Some(resp)
     }
-    pub async fn handle_data(&self, data: DataEvent, config: &Option<ModuleConfig>) -> Option<DataEvent> {
+    pub async fn handle_data(
+        &self,
+        data: DataEvent,
+        config: &Option<ModuleConfig>,
+    ) -> Option<DataEvent> {
         let mut data = data;
         let mut middleware: Vec<(DataMiddlewareHandle, u32)> = self
             .get_data_middleware(&data.data_middleware, config)
@@ -261,10 +266,7 @@ impl MiddlewareManager {
         });
 
         let mut results: Vec<(String, Result<()>)> = join_all(tasks).await;
-        results
-            .into_iter()
-            .filter(|x| x.1.is_err())
-            .collect()
+        results.into_iter().filter(|x| x.1.is_err()).collect()
     }
     pub async fn handle_store_data_with_middleware(
         &self,
@@ -292,9 +294,6 @@ impl MiddlewareManager {
         });
 
         let mut results: Vec<(String, Result<()>)> = join_all(tasks).await;
-        results
-            .into_iter()
-            .filter(|x| x.1.is_err())
-            .collect()
+        results.into_iter().filter(|x| x.1.is_err()).collect()
     }
 }

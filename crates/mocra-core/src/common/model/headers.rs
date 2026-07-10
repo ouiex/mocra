@@ -1,6 +1,6 @@
+use crate::cacheable::CacheAble;
 use reqwest::header::{HeaderMap, HeaderValue};
 use serde::{Deserialize, Serialize};
-use crate::cacheable::CacheAble;
 use std::fmt;
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -12,12 +12,16 @@ pub struct HeaderItem {
 impl fmt::Debug for HeaderItem {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let key_lower = self.key.to_lowercase();
-        let value = if key_lower.contains("auth") || key_lower.contains("cookie") || key_lower.contains("secret") || key_lower.contains("token") {
+        let value = if key_lower.contains("auth")
+            || key_lower.contains("cookie")
+            || key_lower.contains("secret")
+            || key_lower.contains("token")
+        {
             "***REDACTED***"
         } else {
             &self.value
         };
-        
+
         f.debug_struct("HeaderItem")
             .field("key", &self.key)
             .field("value", &value)
@@ -182,12 +186,11 @@ impl From<HeaderMap> for Headers {
     }
 }
 
-impl CacheAble for Headers{
+impl CacheAble for Headers {
     fn field() -> impl AsRef<str> {
         "headers"
     }
 }
-
 
 #[test]
 fn test() {

@@ -1,7 +1,7 @@
-use axum::extract::{Query, State};
-use axum::Json;
-use serde::{Deserialize, Serialize};
 use crate::engine::api::state::ApiState;
+use axum::Json;
+use axum::extract::{Query, State};
+use serde::{Deserialize, Serialize};
 
 /// Parameters for inspecting the Dead Letter Queue
 #[derive(Deserialize)]
@@ -18,7 +18,7 @@ pub struct DlqMessageResponse {
     /// Message ID in DLQ
     pub id: String,
     /// Message content (UTF-8 string)
-    pub payload: String, 
+    pub payload: String,
     /// Reason for failure (if available)
     pub reason: String,
     /// Original message ID before failure
@@ -37,19 +37,23 @@ pub async fn get_dlq(
 
     match state.queue_manager.read_dlq(&topic, count).await {
         Ok(messages) => {
-            let response: Vec<DlqMessageResponse> = messages.into_iter().map(|(id, payload, reason, original_id)| {
-                // Try to convert payload to string (utf8)
-                let payload_str = String::from_utf8(payload).unwrap_or_else(|_| "Invalid UTF-8 payload".to_string());
-                
-                DlqMessageResponse {
-                    id,
-                    payload: payload_str,
-                    reason,
-                    original_id,
-                }
-            }).collect();
+            let response: Vec<DlqMessageResponse> = messages
+                .into_iter()
+                .map(|(id, payload, reason, original_id)| {
+                    // Try to convert payload to string (utf8)
+                    let payload_str = String::from_utf8(payload)
+                        .unwrap_or_else(|_| "Invalid UTF-8 payload".to_string());
+
+                    DlqMessageResponse {
+                        id,
+                        payload: payload_str,
+                        reason,
+                        original_id,
+                    }
+                })
+                .collect();
             Json(response)
-        },
+        }
         Err(e) => {
             log::error!("Failed to read DLQ: {}", e);
             Json(vec![])

@@ -2,8 +2,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::cacheable::CacheService;
-use deadpool_redis::redis::from_redis_value;
 use crate::errors::CacheError;
+use deadpool_redis::redis::from_redis_value;
 use log::{info, warn};
 
 #[derive(Clone)]
@@ -59,7 +59,10 @@ impl LuaScriptRegistry {
                         .write()
                         .await
                         .insert(spec.name.to_string(), sha.clone());
-                    info!("[LuaScriptRegistry] script loaded: {} => {}", spec.name, sha);
+                    info!(
+                        "[LuaScriptRegistry] script loaded: {} => {}",
+                        spec.name, sha
+                    );
                 }
                 Err(err) => {
                     warn!(

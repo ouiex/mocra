@@ -1,5 +1,5 @@
-use serde::{Deserialize, Serialize};
 use crate::cacheable::CacheAble;
+use serde::{Deserialize, Serialize};
 #[derive(Serialize, Deserialize)]
 /// is close or not
 pub struct StreamStats(pub bool);

@@ -1,15 +1,15 @@
-use std::sync::Arc;
-#[cfg(feature = "store")]
-use tokio::time::{Duration, sleep};
-use log::info;
-#[cfg(feature = "store")]
-use log::{error, warn};
 use crate::common::state::State;
 use crate::queue::compensation::Compensator;
 #[cfg(feature = "store")]
-use sea_orm::{ConnectionTrait, Statement, TransactionTrait};
+use chrono::{DateTime, Utc};
+use log::info;
 #[cfg(feature = "store")]
-use chrono::{Utc, DateTime};
+use log::{error, warn};
+#[cfg(feature = "store")]
+use sea_orm::{ConnectionTrait, Statement, TransactionTrait};
+use std::sync::Arc;
+#[cfg(feature = "store")]
+use tokio::time::{Duration, sleep};
 
 /// Starts a periodic cleaner for stale `Running` tasks.
 ///
@@ -27,7 +27,10 @@ pub async fn start_zombie_cleaner(
     }
     #[cfg(feature = "store")]
     {
-        info!("ZombieTaskCleaner started with threshold {}s", zombie_threshold_secs);
+        info!(
+            "ZombieTaskCleaner started with threshold {}s",
+            zombie_threshold_secs
+        );
 
         loop {
             sleep(Duration::from_secs(60)).await;
@@ -68,7 +71,9 @@ async fn clean_zombies(
         "UPDATE base.task_result SET status = 'Failed', error = 'Zombie Task Detected (Timeout)' WHERE status = 'Running' AND updated_at < '{}'",
         formatted_time
     );
-    let res = txn.execute(Statement::from_string(backend, update_sql)).await?;
+    let res = txn
+        .execute(Statement::from_string(backend, update_sql))
+        .await?;
     let affected = res.rows_affected();
 
     // Remove compensation records only for rows actually transitioned.
@@ -78,7 +83,10 @@ async fn clean_zombies(
                 "SELECT id FROM base.task_result WHERE status = 'Failed' AND error = 'Zombie Task Detected (Timeout)' AND updated_at < '{}'",
                 formatted_time
             );
-            if let Ok(rows) = txn.query_all(Statement::from_string(backend, select_sql)).await {
+            if let Ok(rows) = txn
+                .query_all(Statement::from_string(backend, select_sql))
+                .await
+            {
                 for row in &rows {
                     if let Ok(id) = row.try_get::<String>("", "id") {
                         let _ = comp.remove_task("task", &id).await;

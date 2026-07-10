@@ -1,10 +1,10 @@
-use async_trait::async_trait;
-use crate::common::model::config::Config;
 use super::ConfigProvider;
-use tokio::sync::watch;
-use redis::AsyncCommands;
+use crate::common::model::config::Config;
+use async_trait::async_trait;
 use log::{error, info};
+use redis::AsyncCommands;
 use std::time::Duration;
+use tokio::sync::watch;
 
 /// Redis-backed configuration provider.
 ///
@@ -29,10 +29,14 @@ impl RedisConfigProvider {
             key: key.to_string(),
         })
     }
-    
+
     /// Fetches config from Redis.
     async fn fetch_config(&self) -> Result<Config, String> {
-        let mut con = self.client.get_multiplexed_async_connection().await.map_err(|e| e.to_string())?;
+        let mut con = self
+            .client
+            .get_multiplexed_async_connection()
+            .await
+            .map_err(|e| e.to_string())?;
         let config_str: String = con.get(&self.key).await.map_err(|e| e.to_string())?;
         serde_json::from_str(&config_str).map_err(|e| e.to_string())
     }
@@ -47,42 +51,42 @@ impl ConfigProvider for RedisConfigProvider {
     async fn watch(&self) -> Result<watch::Receiver<Config>, String> {
         let initial_config = self.load_config().await?;
         let (tx, rx) = watch::channel(initial_config);
-        
+
         let client = self.client.clone();
         let key = self.key.clone();
 
         tokio::spawn(async move {
             let mut last_config_str = String::new();
-            
+
             loop {
                 tokio::time::sleep(Duration::from_secs(10)).await;
-                
+
                 let mut con = match client.get_multiplexed_async_connection().await {
                     Ok(c) => c,
                     Err(e) => {
-                         error!("Failed to get redis connection: {}", e);
-                         continue;
+                        error!("Failed to get redis connection: {}", e);
+                        continue;
                     }
                 };
 
                 let config_str: String = match con.get(&key).await {
                     Ok(s) => s,
                     Err(e) => {
-                         error!("Failed to fetch config from Redis: {}", e);
-                         continue;
+                        error!("Failed to fetch config from Redis: {}", e);
+                        continue;
                     }
                 };
 
                 if config_str != last_config_str {
                     match serde_json::from_str::<Config>(&config_str) {
                         Ok(config) => {
-                             info!("Config changed in Redis, reloading...");
-                             if let Err(e) = tx.send(config) {
-                                 error!("Failed to send config update: {}", e);
-                                 break;
-                             }
-                             last_config_str = config_str;
-                        },
+                            info!("Config changed in Redis, reloading...");
+                            if let Err(e) = tx.send(config) {
+                                error!("Failed to send config update: {}", e);
+                                break;
+                            }
+                            last_config_str = config_str;
+                        }
                         Err(e) => error!("Failed to parse config: {}", e),
                     }
                 }

@@ -1,12 +1,12 @@
 use super::*;
-use async_trait::async_trait;
 use crate::common::model::Request;
 use crate::common::policy::{PolicyConfig, PolicyOverride};
 use crate::errors::ErrorKind;
 use crate::queue::{Message, MqBackend};
+use async_trait::async_trait;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 
 #[derive(Clone, Default)]
@@ -16,7 +16,12 @@ struct TestBackend {
 
 #[async_trait]
 impl MqBackend for TestBackend {
-    async fn publish(&self, _topic: &str, _key: Option<&str>, _payload: &[u8]) -> crate::errors::Result<()> {
+    async fn publish(
+        &self,
+        _topic: &str,
+        _key: Option<&str>,
+        _payload: &[u8],
+    ) -> crate::errors::Result<()> {
         Ok(())
     }
 
@@ -38,7 +43,11 @@ impl MqBackend for TestBackend {
         Ok(())
     }
 
-    async fn subscribe(&self, _topic: &str, _sender: mpsc::Sender<Message>) -> crate::errors::Result<()> {
+    async fn subscribe(
+        &self,
+        _topic: &str,
+        _sender: mpsc::Sender<Message>,
+    ) -> crate::errors::Result<()> {
         Ok(())
     }
 
@@ -60,7 +69,11 @@ impl MqBackend for TestBackend {
         Ok(())
     }
 
-    async fn read_dlq(&self, _topic: &str, _count: usize) -> crate::errors::Result<Vec<(String, Vec<u8>, String, String)>> {
+    async fn read_dlq(
+        &self,
+        _topic: &str,
+        _count: usize,
+    ) -> crate::errors::Result<Vec<(String, Vec<u8>, String, String)>> {
         Ok(Vec::new())
     }
 }
@@ -131,7 +144,7 @@ async fn retryable_failure_policy_can_route_to_dlq() {
     assert_eq!(dlq_entries[0].0, "request");
 }
 
-use crate::queue::{QueuedItem, Identifiable};
+use crate::queue::{Identifiable, QueuedItem};
 
 #[derive(Clone)]
 struct TestItem {
@@ -153,7 +166,9 @@ async fn test_processor_failure_triggers_nack() {
     let nack_reason_clone = nack_reason.clone();
 
     let item = QueuedItem::with_ack(
-        TestItem { id: "test-1".to_string() },
+        TestItem {
+            id: "test-1".to_string(),
+        },
         move || {
             let ack_count_clone = ack_count_clone.clone();
             Box::pin(async move {

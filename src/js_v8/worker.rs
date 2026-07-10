@@ -1,7 +1,7 @@
 use crate::js_v8::v8::{JsReturn, V8Engine};
 use std::path::Path;
-use std::sync::{mpsc, Arc, Mutex};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, mpsc};
 use tokio::sync::oneshot;
 
 /// A job submitted to the single-threaded JS worker.
@@ -34,7 +34,10 @@ impl JsWorkerPool {
         }
         let mut workers = Vec::with_capacity(size);
         for i in 0..size {
-            workers.push(JsWorker::new_with_source(source.clone()).map_err(|e| format!("Failed to create worker {}: {}", i, e))?);
+            workers.push(
+                JsWorker::new_with_source(source.clone())
+                    .map_err(|e| format!("Failed to create worker {}: {}", i, e))?,
+            );
         }
         Ok(Self {
             workers,
@@ -90,15 +93,16 @@ impl JsWorker {
                 let _ = ready_tx.send(Ok(()));
 
                 while let Ok(job) = rx.recv() {
-                    let res = Self::call_engine(&mut engine, &job.func, &job.args)
-                        .map_err(|e| e);
+                    let res = Self::call_engine(&mut engine, &job.func, &job.args).map_err(|e| e);
                     let _ = job.reply.send(res);
                 }
             })
             .map_err(|e| format!("spawn worker failed: {e}"))?;
 
         match ready_rx.recv() {
-            Ok(Ok(())) => Ok(Self { tx: Arc::new(Mutex::new(tx)) }),
+            Ok(Ok(())) => Ok(Self {
+                tx: Arc::new(Mutex::new(tx)),
+            }),
             Ok(Err(e)) => Err(e),
             Err(e) => Err(format!("worker init channel closed: {e}")),
         }
@@ -107,13 +111,19 @@ impl JsWorker {
     /// Call a global JS function with stringified return value.
     pub async fn call_js(&self, func: &str, args: Vec<String>) -> Result<String, String> {
         let (reply_tx, reply_rx) = oneshot::channel();
-        let job = JsJob { func: func.to_string(), args, reply: reply_tx };
+        let job = JsJob {
+            func: func.to_string(),
+            args,
+            reply: reply_tx,
+        };
         self.tx
             .lock()
             .map_err(|_| "worker sender poisoned".to_string())?
             .send(job)
             .map_err(|e| format!("send job failed: {e}"))?;
-        reply_rx.await.map_err(|e| format!("recv reply failed: {e}"))?
+        reply_rx
+            .await
+            .map_err(|e| format!("recv reply failed: {e}"))?
     }
 
     fn call_engine(engine: &mut V8Engine, func: &str, args: &[String]) -> Result<String, String> {
@@ -150,7 +160,11 @@ mod tests {
     async fn test_worker_pool() {
         // Create a temporary JS file
         let mut file = NamedTempFile::new().unwrap();
-        write!(file, "function add(a, b) {{ return parseInt(a) + parseInt(b); }}").unwrap();
+        write!(
+            file,
+            "function add(a, b) {{ return parseInt(a) + parseInt(b); }}"
+        )
+        .unwrap();
         let path = file.path();
 
         // Create a pool with 2 workers
@@ -161,7 +175,9 @@ mod tests {
         for i in 0..10 {
             let pool = pool.clone();
             handles.push(tokio::spawn(async move {
-                let res = pool.call_js("add", vec![i.to_string(), "10".to_string()]).await;
+                let res = pool
+                    .call_js("add", vec![i.to_string(), "10".to_string()])
+                    .await;
                 (i, res)
             }));
         }
@@ -172,4 +188,3 @@ mod tests {
         }
     }
 }
-

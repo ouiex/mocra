@@ -1,9 +1,9 @@
 use super::backend::CacheBackend;
 use super::local_backend::LocalBackend;
 use super::redis_backend::RedisBackend;
-use deadpool_redis::redis::Value as RedisValue;
-use deadpool_redis::Pool;
 use crate::errors::CacheError;
+use deadpool_redis::Pool;
+use deadpool_redis::redis::Value as RedisValue;
 use log::{debug, warn};
 use metrics::{counter, histogram};
 use std::sync::Arc;
@@ -17,7 +17,12 @@ pub struct TwoLevelCacheBackend {
 }
 
 impl TwoLevelCacheBackend {
-    pub fn new(redis_pool: Pool, compression_threshold: usize, l1_ttl_secs: u64, l1_max_entries: usize) -> Self {
+    pub fn new(
+        redis_pool: Pool,
+        compression_threshold: usize,
+        l1_ttl_secs: u64,
+        l1_max_entries: usize,
+    ) -> Self {
         Self {
             l1_cache: Arc::new(LocalBackend::new()),
             l2_cache: Arc::new(RedisBackend::new(redis_pool, compression_threshold)),
@@ -124,11 +129,20 @@ impl CacheBackend for TwoLevelCacheBackend {
         self.l2_cache.keys(pattern).await
     }
 
-    async fn keys_with_limit(&self, pattern: &str, limit: usize) -> Result<Vec<String>, CacheError> {
+    async fn keys_with_limit(
+        &self,
+        pattern: &str,
+        limit: usize,
+    ) -> Result<Vec<String>, CacheError> {
         self.l2_cache.keys_with_limit(pattern, limit).await
     }
 
-    async fn set_nx(&self, key: &str, value: &[u8], ttl: Option<Duration>) -> Result<bool, CacheError> {
+    async fn set_nx(
+        &self,
+        key: &str,
+        value: &[u8],
+        ttl: Option<Duration>,
+    ) -> Result<bool, CacheError> {
         let result = self.l2_cache.set_nx(key, value, ttl).await?;
 
         if result {
@@ -139,7 +153,12 @@ impl CacheBackend for TwoLevelCacheBackend {
         Ok(result)
     }
 
-    async fn set_nx_batch(&self, keys: &[&str], value: &[u8], ttl: Option<Duration>) -> Result<Vec<bool>, CacheError> {
+    async fn set_nx_batch(
+        &self,
+        keys: &[&str],
+        value: &[u8],
+        ttl: Option<Duration>,
+    ) -> Result<Vec<bool>, CacheError> {
         let results = self.l2_cache.set_nx_batch(keys, value, ttl).await?;
 
         let l1_ttl_final = ttl.map(|t| t.min(self.l1_ttl)).unwrap_or(self.l1_ttl);
@@ -209,7 +228,12 @@ impl CacheBackend for TwoLevelCacheBackend {
         self.l2_cache.zadd(key, score, member).await
     }
 
-    async fn zrangebyscore(&self, key: &str, min: f64, max: f64) -> Result<Vec<Vec<u8>>, CacheError> {
+    async fn zrangebyscore(
+        &self,
+        key: &str,
+        min: f64,
+        max: f64,
+    ) -> Result<Vec<Vec<u8>>, CacheError> {
         self.l2_cache.zrangebyscore(key, min, max).await
     }
 
@@ -221,11 +245,21 @@ impl CacheBackend for TwoLevelCacheBackend {
         self.l2_cache.script_load(script).await
     }
 
-    async fn evalsha(&self, sha: &str, keys: &[&str], args: &[&str]) -> Result<RedisValue, CacheError> {
+    async fn evalsha(
+        &self,
+        sha: &str,
+        keys: &[&str],
+        args: &[&str],
+    ) -> Result<RedisValue, CacheError> {
         self.l2_cache.evalsha(sha, keys, args).await
     }
 
-    async fn eval_lua(&self, script: &str, keys: &[&str], args: &[&str]) -> Result<RedisValue, CacheError> {
+    async fn eval_lua(
+        &self,
+        script: &str,
+        keys: &[&str],
+        args: &[&str],
+    ) -> Result<RedisValue, CacheError> {
         self.l2_cache.eval_lua(script, keys, args).await
     }
 }

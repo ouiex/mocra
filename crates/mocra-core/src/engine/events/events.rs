@@ -1,10 +1,9 @@
-
-use serde::{Deserialize, Serialize};
-use uuid::Uuid;
-use crate::common::model::message::{TaskErrorEvent, TaskParserEvent, TaskEvent};
+use crate::common::model::message::{TaskErrorEvent, TaskEvent, TaskParserEvent};
 use crate::common::model::{Request, Response};
 use crate::engine::task::module::Module;
 use crate::errors::{Error, ErrorKind};
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 /// Top-level domain that namespaces event families.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -193,7 +192,12 @@ impl EventEnvelope {
     /// assert_eq!(evt.event_key(), "engine.parser_task_model.completed");
     /// ```
     pub fn event_key(&self) -> String {
-        format!("{}.{}.{}", self.domain.as_str(), self.event_type.as_str(), self.phase.as_str())
+        format!(
+            "{}.{}.{}",
+            self.domain.as_str(),
+            self.event_type.as_str(),
+            self.phase.as_str()
+        )
     }
 
     pub fn now_ms() -> u128 {
@@ -207,8 +211,8 @@ impl EventEnvelope {
 #[cfg(test)]
 mod tests {
     use super::{EventEnvelope, EventPhase, EventType, ParserTaskModelEvent};
-    use crate::common::model::message::{TaskErrorEvent, TaskParserEvent, TaskEvent};
     use crate::common::model::ExecutionMark;
+    use crate::common::model::message::{TaskErrorEvent, TaskEvent, TaskParserEvent};
     use serde_json::json;
     use uuid::Uuid;
 
@@ -222,10 +226,19 @@ mod tests {
 
     #[test]
     fn task_model_chain_semantic_event_types_have_stable_names() {
-        assert_eq!(EventType::ParserTaskProduced.as_str(), "parser_task_produced");
+        assert_eq!(
+            EventType::ParserTaskProduced.as_str(),
+            "parser_task_produced"
+        );
         assert_eq!(EventType::ErrorTaskProduced.as_str(), "error_task_produced");
-        assert_eq!(EventType::ModuleStepAdvanced.as_str(), "module_step_advanced");
-        assert_eq!(EventType::ModuleStepFallback.as_str(), "module_step_fallback");
+        assert_eq!(
+            EventType::ModuleStepAdvanced.as_str(),
+            "module_step_advanced"
+        );
+        assert_eq!(
+            EventType::ModuleStepFallback.as_str(),
+            "module_step_fallback"
+        );
     }
 
     #[test]
@@ -282,7 +295,6 @@ pub struct TaskModelEvent {
     pub account: String,
     pub platform: String,
     pub modules: Option<Vec<String>>,
-    
 }
 impl From<&TaskEvent> for TaskModelEvent {
     fn from(value: &TaskEvent) -> Self {
@@ -324,7 +336,6 @@ impl From<&TaskErrorEvent> for ParserTaskModelEvent {
     }
 }
 
-
 /// Event payload emitted when a concrete module instance is generated.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModuleGenerateEvent {
@@ -342,7 +353,6 @@ impl From<&Module> for ModuleGenerateEvent {
         }
     }
 }
-
 
 /// Event payload for outbound request publication.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -443,7 +453,6 @@ impl From<&crate::common::model::data::DataEvent> for DataMiddlewareEvent {
     }
 }
 
-
 /// Event payload for final data-store persistence stages.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DataStoreEvent {
@@ -461,7 +470,7 @@ impl From<&crate::common::model::data::DataEvent> for DataStoreEvent {
             platform: value.platform.clone(),
             module: value.module.clone(),
             request_id: value.request_id.to_string(),
-            schema_size: (0,0),
+            schema_size: (0, 0),
             store_middleware: None,
         }
     }
@@ -514,8 +523,6 @@ impl From<&Response> for ResponseEvent {
         }
     }
 }
-
-
 
 /// Event payload for periodic component health reporting.
 #[derive(Debug, Clone, Serialize, Deserialize)]

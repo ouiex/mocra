@@ -1,12 +1,12 @@
 use super::backend::CoordinationBackend;
-use dashmap::DashMap;
-use once_cell::sync::Lazy;
-use serde::{Serialize, Deserialize, de::DeserializeOwned};
 use crate::common::model::config::SyncConfig;
 use crate::common::policy::{DlqPolicy, PolicyResolver};
 use crate::errors::ErrorKind;
+use dashmap::DashMap;
 use metrics::counter;
+use once_cell::sync::Lazy;
 use rmp_serde as rmps;
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::{broadcast, watch};
@@ -151,7 +151,9 @@ impl SyncService {
     ) -> Self {
         let mut envelope_enabled = config.envelope_enabled;
         if !config.allow_rollback && !envelope_enabled {
-            eprintln!("SyncConfig: allow_rollback=false requires envelope_enabled=true; enabling envelope automatically");
+            eprintln!(
+                "SyncConfig: allow_rollback=false requires envelope_enabled=true; enabling envelope automatically"
+            );
             envelope_enabled = true;
         }
         let options = SyncOptions {
@@ -370,8 +372,7 @@ impl SyncService {
             let options = self.options;
             let mut last_version: u64 = 0;
             let initial_value = {
-                let lock = local_state.value.read()
-                    .unwrap_or_else(|e| e.into_inner());
+                let lock = local_state.value.read().unwrap_or_else(|e| e.into_inner());
                 if let Some(bytes) = &*lock {
                     match Self::decode_value::<T>(options, bytes) {
                         Ok((v, version)) => {
@@ -437,8 +438,7 @@ impl SyncService {
         } else {
             let local_state = self.get_local_state(&topic);
             {
-                let mut lock = local_state.value.write()
-                    .unwrap_or_else(|e| e.into_inner());
+                let mut lock = local_state.value.write().unwrap_or_else(|e| e.into_inner());
                 *lock = Some(bytes.clone());
             }
             let _ = local_state.tx.send(bytes);
@@ -494,8 +494,7 @@ impl SyncService {
             // Local Mode: Just lock and update
             let local_state = self.get_local_state(&topic);
 
-            let mut lock = local_state.value.write()
-                .unwrap_or_else(|e| e.into_inner());
+            let mut lock = local_state.value.write().unwrap_or_else(|e| e.into_inner());
 
             let mut state = if let Some(ref bytes) = *lock {
                 Self::decode_value::<T>(self.options, bytes).map(|(v, _)| v)?
@@ -526,18 +525,15 @@ impl SyncService {
             let kv_key = self.kv_key_for(&topic);
             let data = backend.get(&kv_key).await?;
             if let Some(bytes) = data {
-                Self::decode_value::<T>(self.options, &bytes)
-                    .map(|(v, _)| Some(v))
+                Self::decode_value::<T>(self.options, &bytes).map(|(v, _)| Some(v))
             } else {
                 Ok(None)
             }
         } else {
             let local_state = self.get_local_state(&topic);
-            let lock = local_state.value.read()
-                .unwrap_or_else(|e| e.into_inner());
+            let lock = local_state.value.read().unwrap_or_else(|e| e.into_inner());
             if let Some(bytes) = &*lock {
-                Self::decode_value::<T>(self.options, bytes)
-                    .map(|(v, _)| Some(v))
+                Self::decode_value::<T>(self.options, bytes).map(|(v, _)| Some(v))
             } else {
                 Ok(None)
             }

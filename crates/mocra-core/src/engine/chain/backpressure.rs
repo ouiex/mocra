@@ -37,11 +37,9 @@ pub async fn send_with_backpressure<T>(
                 after_full: true,
             }),
         },
-        Err(tokio::sync::mpsc::error::TrySendError::Closed(item)) => {
-            Err(BackpressureSendError {
-                item,
-                after_full: false,
-            })
-        }
+        Err(tokio::sync::mpsc::error::TrySendError::Closed(item)) => Err(BackpressureSendError {
+            item,
+            after_full: false,
+        }),
     }
 }

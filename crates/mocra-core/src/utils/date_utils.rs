@@ -325,8 +325,9 @@ mod tests {
     fn test_add_days() {
         let base = NaiveDate::from_ymd_opt(2025, 10, 28).unwrap();
         let date = DateUtils::add_days(-1, Some(base));
-        let start_date = DateUtils::first_day_of_week(Some(DateUtils::first_day_of_month(Some(base))))
-            .sub(chrono::Duration::days(1));
+        let start_date =
+            DateUtils::first_day_of_week(Some(DateUtils::first_day_of_month(Some(base))))
+                .sub(chrono::Duration::days(1));
         let end_date = DateUtils::last_day_of_week(Some(DateUtils::last_day_of_month(Some(base))))
             .sub(chrono::Duration::days(1));
         let tz = FixedOffset::east_opt(8 * 3600).unwrap();

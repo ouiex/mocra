@@ -1,20 +1,20 @@
+use crate::common::interface::{
+    DataMiddlewareHandle, DataStoreMiddlewareHandle, ModuleTrait, SyncBoxStream,
+};
+use crate::common::model::login_info::LoginInfo;
+use crate::common::model::message::TaskOutputEvent;
+use crate::common::model::scope::{AccountInfo, PlatformInfo};
+use crate::common::model::{Cookies, Headers, ModuleConfig, Request, Response};
+use crate::engine::task::module_dag_processor::ModuleDagProcessor;
+use crate::errors::RequestError;
 use crate::errors::Result;
+use futures::StreamExt;
 use log::warn;
 use serde::ser::SerializeStruct;
 use serde::{Serialize, Serializer};
 use serde_json::Map;
 use std::sync::Arc;
 use uuid::Uuid;
-use futures::StreamExt;
-use crate::common::interface::{
-    DataMiddlewareHandle, DataStoreMiddlewareHandle, ModuleTrait, SyncBoxStream,
-};
-use crate::common::model::scope::{AccountInfo, PlatformInfo};
-use crate::common::model::login_info::LoginInfo;
-use crate::common::model::{Cookies, Headers, ModuleConfig, Response,Request};
-use crate::common::model::message::TaskOutputEvent;
-use crate::errors::RequestError;
-use crate::engine::task::module_dag_processor::ModuleDagProcessor;
 
 /// Runtime module instance bound to account/platform context.
 ///
@@ -113,56 +113,61 @@ impl Module {
         let run_id = self.run_id;
         let prefix_request = self.prefix_request;
         let config = self.config.clone();
-        let stream = request_stream
-            .map(move |mut request| {
-                if request.id.is_nil() {
-                    request.id = Uuid::now_v7();
-                }
-                request.module = module_name.clone();
-                request.platform = platform_name.clone();
-                let mut merged_download_middleware = request.download_middleware.clone();
-                merged_download_middleware.extend(download_middleware.clone());
-                merged_download_middleware.sort();
-                merged_download_middleware.dedup();
-                request.download_middleware = merged_download_middleware;
+        let stream = request_stream.map(move |mut request| {
+            if request.id.is_nil() {
+                request.id = Uuid::now_v7();
+            }
+            request.module = module_name.clone();
+            request.platform = platform_name.clone();
+            let mut merged_download_middleware = request.download_middleware.clone();
+            merged_download_middleware.extend(download_middleware.clone());
+            merged_download_middleware.sort();
+            merged_download_middleware.dedup();
+            request.download_middleware = merged_download_middleware;
 
-                let mut merged_data_middleware = request.data_middleware.clone();
-                merged_data_middleware.extend(data_middleware.clone());
-                merged_data_middleware.sort();
-                merged_data_middleware.dedup();
-                request.data_middleware = merged_data_middleware;
-                request.account = account_name.clone();
-                request.task_finished = finished;
-                request.run_id = run_id;
-                request.prefix_request = prefix_request;
+            let mut merged_data_middleware = request.data_middleware.clone();
+            merged_data_middleware.extend(data_middleware.clone());
+            merged_data_middleware.sort();
+            merged_data_middleware.dedup();
+            request.data_middleware = merged_data_middleware;
+            request.account = account_name.clone();
+            request.task_finished = finished;
+            request.run_id = run_id;
+            request.prefix_request = prefix_request;
 
-                if request.headers.is_empty() && !headers.is_empty() {
-                    request = request.with_headers(headers.clone());
-                }
-                if !cookies.is_empty() {
-                    request = request.with_cookies(cookies.clone());
-                }
+            if request.headers.is_empty() && !headers.is_empty() {
+                request = request.with_headers(headers.clone());
+            }
+            if !cookies.is_empty() {
+                request = request.with_cookies(cookies.clone());
+            }
 
-                if let Some(ref info) = login_info {
-                    let cookies = Cookies::from(info);
-                    let headers = Headers::from(info);
-                    request.headers.merge(&headers);
-                    request.cookies.merge(&cookies);
-                    request = request.with_login_info(info);
-                }
-                request.limit_id = limit_id.clone().unwrap_or(request.module_id());
-                request = request
-                    .with_module_config(&config)
-                    .with_task_config(task_meta.clone());
-                if let Some(downloader) = config.get_config::<String>("downloader") {
-                    request.downloader = downloader;
-                } else {
-                    request.downloader = "request_downloader".to_string();
-                }
-                log::debug!("[Module] request prepared: account={} platform={} module={} url={} request_id={}",
-                    request.account, request.platform, request.module, request.url, request.id);
-                request
-            });
+            if let Some(ref info) = login_info {
+                let cookies = Cookies::from(info);
+                let headers = Headers::from(info);
+                request.headers.merge(&headers);
+                request.cookies.merge(&cookies);
+                request = request.with_login_info(info);
+            }
+            request.limit_id = limit_id.clone().unwrap_or(request.module_id());
+            request = request
+                .with_module_config(&config)
+                .with_task_config(task_meta.clone());
+            if let Some(downloader) = config.get_config::<String>("downloader") {
+                request.downloader = downloader;
+            } else {
+                request.downloader = "request_downloader".to_string();
+            }
+            log::debug!(
+                "[Module] request prepared: account={} platform={} module={} url={} request_id={}",
+                request.account,
+                request.platform,
+                request.module,
+                request.url,
+                request.id
+            );
+            request
+        });
         Ok(Box::pin(stream))
     }
 
@@ -172,8 +177,13 @@ impl Module {
     /// are provided, following `ModuleDagOrchestrator::compile_module` priority rules.
     pub async fn add_step(&self) {
         if let Err(e) = self.module.pre_process(Some(self.config.clone())).await {
-            warn!("module pre_process failed: account={} platform={} module={} error={}",
-                self.account.name, self.platform.name, self.module.name(), e);
+            warn!(
+                "module pre_process failed: account={} platform={} module={} error={}",
+                self.account.name,
+                self.platform.name,
+                self.module.name(),
+                e
+            );
         }
 
         use crate::engine::task::module_dag_orchestrator::ModuleDagOrchestrator;
@@ -227,7 +237,6 @@ impl Module {
             self.module.name()
         )
     }
-
 }
 
 impl Serialize for Module {
@@ -247,13 +256,12 @@ impl Serialize for Module {
     }
 }
 
-
 /// Assembly helper for creating Module runtime instances.
-pub struct ModuleEntity{
-    pub module_work:Arc<dyn ModuleTrait>,
-    pub download_middleware:Vec<Arc<dyn ModuleTrait>>,
-    pub data_middleware:Vec<DataMiddlewareHandle>,
-    pub store_middleware:Vec<DataStoreMiddlewareHandle>,
+pub struct ModuleEntity {
+    pub module_work: Arc<dyn ModuleTrait>,
+    pub download_middleware: Vec<Arc<dyn ModuleTrait>>,
+    pub data_middleware: Vec<DataMiddlewareHandle>,
+    pub store_middleware: Vec<DataStoreMiddlewareHandle>,
 }
 
 impl From<Arc<dyn ModuleTrait>> for ModuleEntity {
@@ -268,19 +276,19 @@ impl From<Arc<dyn ModuleTrait>> for ModuleEntity {
 }
 impl ModuleEntity {
     /// Adds a download middleware module.
-    pub fn add_download_middleware(mut self, middleware: Arc<dyn ModuleTrait>)->Self {
+    pub fn add_download_middleware(mut self, middleware: Arc<dyn ModuleTrait>) -> Self {
         self.download_middleware.push(middleware);
         self
     }
 
     /// Adds a data middleware implementation.
-    pub fn add_data_middleware(mut self, middleware: DataMiddlewareHandle) ->Self{
+    pub fn add_data_middleware(mut self, middleware: DataMiddlewareHandle) -> Self {
         self.data_middleware.push(middleware);
         self
     }
 
     /// Adds a data store middleware implementation.
-    pub fn add_store_middleware(mut self, middleware: DataStoreMiddlewareHandle)->Self {
+    pub fn add_store_middleware(mut self, middleware: DataStoreMiddlewareHandle) -> Self {
         self.store_middleware.push(middleware);
         self
     }
@@ -289,12 +297,12 @@ impl ModuleEntity {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use async_trait::async_trait;
     use crate::cacheable::CacheService;
     use crate::common::interface::{ModuleTrait, SyncBoxStream, ToSyncBoxStream};
     use crate::common::model::message::TaskOutputEvent;
     use crate::common::model::{Request, Response};
     use crate::engine::task::module_dag_processor::ModuleDagProcessor;
+    use async_trait::async_trait;
 
     struct LoginRequiredTestModule;
 
@@ -364,7 +372,10 @@ mod tests {
 
         let (bound_meta, bound_login) = module.runtime_task_context();
         assert_eq!(bound_meta.get("k"), Some(&serde_json::json!("v")));
-        assert_eq!(bound_login.as_ref().map(|x| x.useragent.clone()), Some(login.useragent));
+        assert_eq!(
+            bound_login.as_ref().map(|x| x.useragent.clone()),
+            Some(login.useragent)
+        );
     }
 
     #[tokio::test]
@@ -374,7 +385,10 @@ mod tests {
             Ok(_) => panic!("should fail without login info"),
             Err(err) => {
                 let msg = err.to_string();
-                assert!(msg.contains("module need login"), "unexpected error message: {msg}");
+                assert!(
+                    msg.contains("module need login"),
+                    "unexpected error message: {msg}"
+                );
             }
         }
     }

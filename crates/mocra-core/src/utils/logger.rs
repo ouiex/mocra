@@ -178,7 +178,8 @@ impl LogDispatcher {
                 continue;
             }
             if sink.emit(&record).is_err() {
-                metrics::counter!("mocra_log_sink_errors_total", "sink" => sink.name()).increment(1);
+                metrics::counter!("mocra_log_sink_errors_total", "sink" => sink.name())
+                    .increment(1);
             }
         }
     }

@@ -1,19 +1,19 @@
-use crate::common::model::login_info::LoginInfo;
-use crate::common::model::meta::MetaData;
+use crate::cacheable::CacheAble;
+use crate::common::interface::storage::{BlobStorage, Offloadable};
 use crate::common::model::ExecutionMark;
 use crate::common::model::ModuleConfig;
+use crate::common::model::login_info::LoginInfo;
+use crate::common::model::meta::MetaData;
 use crate::common::model::{Cookies, Headers};
-use mocra_proxy::ProxyEnum;
-use serde::{Deserialize, Serialize};
-use std::fmt::Display;
 use crate::utils::encrypt::md5;
-use uuid::Uuid;
-use crate::cacheable::CacheAble;
-use once_cell::sync::OnceCell;
-use crate::common::interface::storage::{Offloadable, BlobStorage};
-use std::sync::Arc;
 use async_trait::async_trait;
 use log::warn;
+use mocra_proxy::ProxyEnum;
+use once_cell::sync::OnceCell;
+use serde::{Deserialize, Serialize};
+use std::fmt::Display;
+use std::sync::Arc;
+use uuid::Uuid;
 
 pub enum RequestMethod {
     Post,
@@ -60,7 +60,7 @@ impl From<RequestMethod> for String {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize,)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Request {
     pub id: Uuid,
     pub platform: String,
@@ -191,7 +191,10 @@ impl Request {
     /// Run-scoped module identifier for error tracking. Includes `run_id` to isolate
     /// error state across different DAG runs.
     pub fn module_runtime_id(&self) -> String {
-        format!("{}-{}-{}-{}", self.account, self.platform, self.module, self.run_id)
+        format!(
+            "{}-{}-{}-{}",
+            self.account, self.platform, self.module, self.run_id
+        )
     }
     pub fn with_params(mut self, params: Vec<(impl AsRef<str>, impl AsRef<str>)>) -> Self {
         self.params = Some(
@@ -324,7 +327,6 @@ impl Request {
         self
     }
 }
-
 
 impl CacheAble for Request {
     fn field() -> impl AsRef<str> {

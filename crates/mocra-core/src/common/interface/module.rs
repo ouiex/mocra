@@ -1,15 +1,14 @@
 use crate::common::model::login_info::LoginInfo;
-use crate::common::model::{Cookies, CronConfig, Headers, ModuleConfig, Request, Response};
 use crate::common::model::module_dag::ModuleDagDefinition;
+use crate::common::model::{Cookies, CronConfig, Headers, ModuleConfig, Request, Response};
 // use crate::common::parser::ParserTrait;
 use crate::common::model::message::TaskOutputEvent;
-use async_trait::async_trait;
 use crate::errors::Result;
+use async_trait::async_trait;
 use futures::Stream;
 use serde_json::Map;
 use std::pin::Pin;
 use std::sync::Arc;
-
 
 pub type SyncBoxStream<'a, T> = Pin<Box<dyn Stream<Item = T> + Send + Sync + 'a>>;
 
@@ -27,7 +26,6 @@ pub trait ModuleTrait: Send + Sync {
         Cookies::default()
     }
 
-
     fn default_arc() -> Arc<dyn ModuleTrait>
     where
         Self: Sized;
@@ -38,15 +36,15 @@ pub trait ModuleTrait: Send + Sync {
     async fn dag_definition(&self) -> Option<ModuleDagDefinition> {
         None
     }
-    async fn add_step(&self)->Vec<Arc<dyn ModuleNodeTrait>> {
+    async fn add_step(&self) -> Vec<Arc<dyn ModuleNodeTrait>> {
         vec![]
     }
-    async fn pre_process(&self, _config: Option<Arc<ModuleConfig>>,) -> Result<()> {
+    async fn pre_process(&self, _config: Option<Arc<ModuleConfig>>) -> Result<()> {
         Ok(())
     }
     // Called after `ModuleDagProcessor` finishes all nodes, for finalization logic.
     // Responses may not yet pass through `DataMiddleware`, so do not depend on final processed output.
-    async fn post_process(&self, _config: Option<Arc<ModuleConfig>>,) -> Result<()> {
+    async fn post_process(&self, _config: Option<Arc<ModuleConfig>>) -> Result<()> {
         Ok(())
     }
     /// Returns cron schedule config for this module.
@@ -74,7 +72,7 @@ pub trait ModuleNodeTrait: Send + Sync {
         response: Response,
         _config: Option<Arc<ModuleConfig>>,
     ) -> Result<TaskOutputEvent>;
-    fn retryable(&self) -> bool{
+    fn retryable(&self) -> bool {
         true
     }
     /// Returns a stable, unique string key for this node type within the DAG.
@@ -104,7 +102,7 @@ where
     fn to_stream(self) -> SyncBoxStream<'static, T> {
         Box::pin(futures::stream::iter(self))
     }
-    
+
     fn into_stream_ok(self) -> Result<SyncBoxStream<'static, T>> {
         Ok(Box::pin(futures::stream::iter(self)))
     }

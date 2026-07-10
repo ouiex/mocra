@@ -9,11 +9,11 @@
 /// - Thresholds can lead to `Skip` (request) or `Terminate` (module/task).
 use crate::cacheable::{CacheAble, CacheService};
 use crate::errors::{CacheError, Error, Result};
+use crate::utils::redis_lock::DistributedLockManager;
 use log::warn;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH, Instant};
-use crate::utils::redis_lock::DistributedLockManager;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// High-level category assigned to an error record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -280,12 +280,12 @@ impl StatusTracker {
     /// This intentionally does not decrement historical module/task counters.
     pub async fn record_download_success(&self, request_id: &str) -> Result<()> {
         let request_key = format!("request:{}:download", request_id);
-        
+
         // [OPTIMIZATION]
         // If the request succeeded, we don't need to load stats from Redis just to update an in-memory object we throw away.
         // We only need to clear any cached error state for this request.
         // If there were errors in Redis, they will expire naturally (TTL).
-        
+
         if self.cache.contains_key(&request_key) {
             self.cache.remove(&request_key);
         }
@@ -370,7 +370,7 @@ impl StatusTracker {
     /// Records a parse success by clearing request-local cached parse state.
     pub async fn record_parse_success(&self, request_id: &str) -> Result<()> {
         let request_key = format!("request:{}:parse", request_id);
-        
+
         // [OPTIMIZATION] Skip loading stats from Redis. Just clear local cache.
         if self.cache.contains_key(&request_key) {
             self.cache.remove(&request_key);
@@ -469,7 +469,7 @@ impl StatusTracker {
         }
 
         let task_key = format!("task:{}:total", task_id);
-        
+
         let (terminated_res, count_res) = tokio::join!(
             self.is_task_terminated(task_id),
             self.get_error_count(&task_key)
@@ -500,7 +500,7 @@ impl StatusTracker {
 
     /// Loads stats from in-memory cache first, then storage.
     pub async fn get_stats(&self, key: &str) -> Result<ErrorStats> {
-         if let Some(entry) = self.cache.get(key) {
+        if let Some(entry) = self.cache.get(key) {
             let (stats, expires_at) = entry.value();
             if Instant::now() < *expires_at {
                 // log::debug!("[StatusTracker] Cache HIT for {}", key);
@@ -516,20 +516,26 @@ impl StatusTracker {
 
     pub async fn get_stats_no_cache(&self, key: &str) -> Result<ErrorStats> {
         let stats_res = ErrorStats::sync(key, &self.cache_service).await;
-        
+
         match stats_res {
             Ok(Some(stats)) => {
-                self.cache.insert(key.to_string(), (stats.clone(), Instant::now() + Duration::from_secs(10)));
+                self.cache.insert(
+                    key.to_string(),
+                    (stats.clone(), Instant::now() + Duration::from_secs(10)),
+                );
                 Ok(stats)
             }
             Ok(None) => {
                 // [OPTIMIZATION] Cache default (empty) stats to prevent Redis penetration for non-existent keys
                 // This is critical for "is_terminated" checks which query random/empty keys frequently
                 let stats = ErrorStats::default();
-                self.cache.insert(key.to_string(), (stats.clone(), Instant::now() + Duration::from_secs(5)));
+                self.cache.insert(
+                    key.to_string(),
+                    (stats.clone(), Instant::now() + Duration::from_secs(5)),
+                );
                 Ok(stats)
             }
-            Err(e) => Err(Error::from(e))
+            Err(e) => Err(Error::from(e)),
         }
     }
 
@@ -559,9 +565,10 @@ impl StatusTracker {
                     .source
                     .as_ref()
                     .and_then(|s| s.downcast_ref::<CacheError>())
-                    && matches!(cache_err, CacheError::NotFound) {
-                        return Ok(false);
-                    }
+                    && matches!(cache_err, CacheError::NotFound)
+                {
+                    return Ok(false);
+                }
                 warn!(
                     "[ErrorTracker] task terminated check failed: task_id={}, error: {}",
                     task_id, e
@@ -597,9 +604,10 @@ impl StatusTracker {
                     .source
                     .as_ref()
                     .and_then(|s| s.downcast_ref::<CacheError>())
-                    && matches!(cache_err, CacheError::NotFound) {
-                        return Ok(false);
-                    }
+                    && matches!(cache_err, CacheError::NotFound)
+                {
+                    return Ok(false);
+                }
                 warn!(
                     "[ErrorTracker] module terminated check failed: module_id={}, error: {}",
                     module_id, e
@@ -632,13 +640,13 @@ impl StatusTracker {
         // Optimization: Use separate keys for counters to avoid read-modify-write cycle of big JSON
         let count_key = format!("{}:total_errors", key);
         let total = self.cache_service.incr(&count_key, 1).await? as usize;
-        
+
         let consecutive_key = format!("{}:consecutive_errors", key);
         let _ = self.cache_service.incr(&consecutive_key, 1).await;
 
         // SKIP UPDATING BIG JSON.
         // We sacrifice "errors_by_category" visibility in Redis for speed.
-        
+
         Ok(total)
     }
 
@@ -649,12 +657,11 @@ impl StatusTracker {
         let _ = self.cache_service.incr(&count_key, -(amount as i64)).await;
 
         let consecutive_key = format!("{}:consecutive_errors", key);
-         // Reset consecutive errors
+        // Reset consecutive errors
         let _ = self.cache_service.set(&consecutive_key, b"0", None).await;
 
         Ok(())
     }
-    
 
     /// Increments success counters.
     async fn increment_success(&self, key: &str) -> Result<()> {
@@ -682,7 +689,7 @@ impl StatusTracker {
             let count = s.parse::<usize>().unwrap_or(0);
             return Ok(count);
         }
-        
+
         // Fallback: If not found in atomic counter, check maybe it's in old JSON format (migration support)
         // Or just return 0. Returning 0 is safer/faster.
         Ok(0)
@@ -695,7 +702,10 @@ impl StatusTracker {
 
     /// Saves stats and refreshes short-lived in-memory cache.
     async fn save_stats_with_ttl(&self, key: &str, stats: &ErrorStats) -> Result<()> {
-        self.cache.insert(key.to_string(), (stats.clone(), Instant::now() + Duration::from_secs(10)));
+        self.cache.insert(
+            key.to_string(),
+            (stats.clone(), Instant::now() + Duration::from_secs(10)),
+        );
         stats
             .send(key, &self.cache_service)
             .await
@@ -759,7 +769,6 @@ impl StatusTracker {
             .ok();
     }
 }
-
 
 #[cfg(test)]
 mod tests {

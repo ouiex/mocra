@@ -1,16 +1,16 @@
 use super::*;
+use crate::cacheable::CacheService;
+use crate::sync::SyncService;
+use crate::utils::connector::create_redis_pool;
 use async_trait::async_trait;
-use dashmap::mapref::entry::Entry;
 use dashmap::DashMap;
+use dashmap::mapref::entry::Entry;
 use redis::AsyncCommands;
 use redis::Script;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 use uuid::Uuid;
-use crate::cacheable::CacheService;
-use crate::sync::SyncService;
-use crate::utils::connector::create_redis_pool;
 
 fn i64_to_payload(v: i64) -> TaskPayload {
     TaskPayload::from_bytes(v.to_le_bytes().to_vec())
@@ -26,15 +26,7 @@ fn payload_to_i64(payload: &TaskPayload) -> i64 {
 }
 
 fn local_redis_cache_service(namespace: &str) -> Option<Arc<CacheService>> {
-    let pool = create_redis_pool(
-        "127.0.0.1",
-        6379,
-        0,
-        &None,
-        &None,
-        Some(16),
-        false,
-    )?;
+    let pool = create_redis_pool("127.0.0.1", 6379, 0, &None, &None, Some(16), false)?;
     Some(Arc::new(CacheService::new(
         Some(pool),
         namespace.to_string(),
@@ -45,7 +37,9 @@ fn local_redis_cache_service(namespace: &str) -> Option<Arc<CacheService>> {
 
 struct TestNode {
     logic: Arc<
-        dyn Fn(NodeExecutionContext) -> std::pin::Pin<
+        dyn Fn(
+                NodeExecutionContext,
+            ) -> std::pin::Pin<
                 Box<dyn std::future::Future<Output = Result<TaskPayload, DagError>> + Send>,
             > + Send
             + Sync,
@@ -433,13 +427,12 @@ impl DagNodeDispatcher for RedisTracingDispatcher {
                 node_id: node_id.to_string(),
                 reason: format!("redis lpush failed: {e}"),
             })?;
-        let _: f64 = conn
-            .hincr(&worker_key, worker, 1)
-            .await
-            .map_err(|e| DagError::NodeExecutionFailed {
+        let _: f64 = conn.hincr(&worker_key, worker, 1).await.map_err(|e| {
+            DagError::NodeExecutionFailed {
                 node_id: node_id.to_string(),
                 reason: format!("redis hincr failed: {e}"),
-            })?;
+            }
+        })?;
 
         executor.start(context).await
     }
@@ -517,7 +510,10 @@ fn add_node_checks_preceding_exists() {
         error: None,
     });
     let err = dag
-        .add_node(Some(&[fake]), node(|_ctx| async move { Ok(i64_to_payload(1)) }))
+        .add_node(
+            Some(&[fake]),
+            node(|_ctx| async move { Ok(i64_to_payload(1)) }),
+        )
         .err()
         .expect("expected preceding node check to fail");
     assert!(matches!(err, DagError::PrecedingNodeNotFound(_)));
@@ -542,7 +538,10 @@ fn add_node_rejects_end_node_as_predecessor() {
     let mut dag = Dag::new();
     let end = dag.control_end_ptr();
     let err = dag
-        .add_node(Some(&[end]), node(|_ctx| async move { Ok(i64_to_payload(1)) }))
+        .add_node(
+            Some(&[end]),
+            node(|_ctx| async move { Ok(i64_to_payload(1)) }),
+        )
         .err()
         .expect("expected end node predecessor rejection");
     assert!(matches!(err, DagError::InvalidPrecedingControlNode(_)));
@@ -723,10 +722,11 @@ async fn execute_parallel_file_lifecycle_validates_dag_node_trait_genericity() {
                         reason: "missing path payload".to_string(),
                     })?;
 
-                let content = std::fs::read_to_string(&path).map_err(|e| DagError::NodeExecutionFailed {
-                    node_id: "FILE_READ".to_string(),
-                    reason: e.to_string(),
-                })?;
+                let content =
+                    std::fs::read_to_string(&path).map_err(|e| DagError::NodeExecutionFailed {
+                        node_id: "FILE_READ".to_string(),
+                        reason: e.to_string(),
+                    })?;
                 Ok(TaskPayload::from_bytes(content.into_bytes()))
             }),
         )
@@ -762,7 +762,10 @@ async fn execute_parallel_file_lifecycle_validates_dag_node_trait_genericity() {
         .map(payload_to_string)
         .expect("read node output should exist");
     assert_eq!(actual_content, expected_content);
-    assert!(!file_path.exists(), "file should be deleted by FILE_DELETE node");
+    assert!(
+        !file_path.exists(),
+        "file should be deleted by FILE_DELETE node"
+    );
 }
 
 #[tokio::test]
@@ -833,7 +836,11 @@ async fn execute_parallel_fan_in_waits_for_all_upstream() {
 async fn execute_parallel_simulated_full_workflow() {
     let mut dag = Dag::new();
     let source = dag
-        .add_node_with_id(None, "S", node(|_ctx| async move { Ok(i64_to_payload(10)) }))
+        .add_node_with_id(
+            None,
+            "S",
+            node(|_ctx| async move { Ok(i64_to_payload(10)) }),
+        )
         .unwrap();
 
     let x = dag
@@ -937,7 +944,11 @@ async fn execute_parallel_returns_node_failure() {
 async fn execute_parallel_remote_node_requires_dispatcher() {
     let mut dag = Dag::new();
     let n = dag
-        .add_node_with_id(None, "REMOTE", node(|_ctx| async move { Ok(i64_to_payload(1)) }))
+        .add_node_with_id(
+            None,
+            "REMOTE",
+            node(|_ctx| async move { Ok(i64_to_payload(1)) }),
+        )
         .unwrap();
     dag.set_node_placement(
         &n,
@@ -978,7 +989,11 @@ async fn execute_parallel_node_panic_is_captured_with_node_context() {
 
     let err = DagScheduler::new(dag).execute_parallel().await.unwrap_err();
     match err {
-        DagError::RetryExhausted { node_id, last_error, .. } => {
+        DagError::RetryExhausted {
+            node_id,
+            last_error,
+            ..
+        } => {
             assert_eq!(node_id, "PANIC_NODE");
             assert!(last_error.contains("node task panicked"));
             assert!(last_error.contains("panic-for-test"));
@@ -998,41 +1013,33 @@ async fn execute_parallel_event_driven_allows_cross_layer_overlap() {
         .add_node_with_id(None, "A", node(|_ctx| async move { Ok(i64_to_payload(1)) }))
         .unwrap();
 
-    dag.add_node_with_id(
-        None,
-        "F",
-        {
+    dag.add_node_with_id(None, "F", {
+        let f_done = f_done.clone();
+        node(move |_ctx| {
             let f_done = f_done.clone();
-            node(move |_ctx| {
-                let f_done = f_done.clone();
-                async move {
-                    tokio::time::sleep(Duration::from_millis(250)).await;
-                    f_done.store(true, Ordering::SeqCst);
-                    Ok(i64_to_payload(6))
-                }
-            })
-        },
-    )
+            async move {
+                tokio::time::sleep(Duration::from_millis(250)).await;
+                f_done.store(true, Ordering::SeqCst);
+                Ok(i64_to_payload(6))
+            }
+        })
+    })
     .unwrap();
 
-    dag.add_node_with_id(
-        Some(&[a]),
-        "B",
-        {
+    dag.add_node_with_id(Some(&[a]), "B", {
+        let f_done = f_done.clone();
+        let b_saw_f_done = b_saw_f_done.clone();
+        node(move |_ctx| {
             let f_done = f_done.clone();
             let b_saw_f_done = b_saw_f_done.clone();
-            node(move |_ctx| {
-                let f_done = f_done.clone();
-                let b_saw_f_done = b_saw_f_done.clone();
-                async move {
-                    if f_done.load(Ordering::SeqCst) {
-                        b_saw_f_done.store(true, Ordering::SeqCst);
-                    }
-                    Ok(i64_to_payload(2))
+            async move {
+                if f_done.load(Ordering::SeqCst) {
+                    b_saw_f_done.store(true, Ordering::SeqCst);
                 }
-            })
-        },
-    )
+                Ok(i64_to_payload(2))
+            }
+        })
+    })
     .unwrap();
 
     let scheduler = DagScheduler::new(dag);
@@ -1135,7 +1142,11 @@ async fn execute_parallel_ready_queue_dedup_avoids_duplicate_dispatch() {
     let b_attempts = Arc::new(AtomicUsize::new(0));
 
     let a = dag
-        .add_node_with_id(None, "RQ_A", node(|_ctx| async move { Ok(i64_to_payload(1)) }))
+        .add_node_with_id(
+            None,
+            "RQ_A",
+            node(|_ctx| async move { Ok(i64_to_payload(1)) }),
+        )
         .unwrap();
 
     let b = {
@@ -1148,7 +1159,9 @@ async fn execute_parallel_ready_queue_dedup_avoids_duplicate_dispatch() {
                 async move {
                     let now = b_attempts.fetch_add(1, Ordering::SeqCst);
                     if now == 0 {
-                        return Err(DagError::InvalidPayloadEnvelope("rq_b_first_fail".to_string()));
+                        return Err(DagError::InvalidPayloadEnvelope(
+                            "rq_b_first_fail".to_string(),
+                        ));
                     }
                     Ok(i64_to_payload(2))
                 }
@@ -1375,11 +1388,16 @@ async fn execute_parallel_singleflight_for_inflight_same_idempotency_key() {
 #[tokio::test]
 async fn execute_parallel_emits_syncable_state() {
     let mut dag = Dag::new();
-    dag.add_node_with_id(None, "S1", node(|_ctx| async move { Ok(i64_to_payload(11)) }))
-        .unwrap();
+    dag.add_node_with_id(
+        None,
+        "S1",
+        node(|_ctx| async move { Ok(i64_to_payload(11)) }),
+    )
+    .unwrap();
 
     let sync_service = SyncService::new(None, "dag_schedule_test".to_string());
-    let scheduler = DagScheduler::new(dag).with_event_sink(Arc::new(DagSyncSink(sync_service.clone())));
+    let scheduler =
+        DagScheduler::new(dag).with_event_sink(Arc::new(DagSyncSink(sync_service.clone())));
 
     let _ = scheduler.execute_parallel().await.unwrap();
     let latest = sync_service
@@ -1554,10 +1572,18 @@ async fn execute_parallel_dashmap_dispatcher_simulates_multi_worker_execution() 
     let mut dag = Dag::new();
 
     let n1 = dag
-        .add_node_with_id(None, "DW1", node(|_ctx| async move { Ok(i64_to_payload(2)) }))
+        .add_node_with_id(
+            None,
+            "DW1",
+            node(|_ctx| async move { Ok(i64_to_payload(2)) }),
+        )
         .unwrap();
     let n2 = dag
-        .add_node_with_id(None, "DW2", node(|_ctx| async move { Ok(i64_to_payload(3)) }))
+        .add_node_with_id(
+            None,
+            "DW2",
+            node(|_ctx| async move { Ok(i64_to_payload(3)) }),
+        )
         .unwrap();
     dag.set_node_placement(
         &n1,
@@ -1639,10 +1665,18 @@ async fn execute_parallel_redis_dispatcher_records_multi_worker_traffic() {
 
     let mut dag = Dag::new();
     let r1 = dag
-        .add_node_with_id(None, "RR1", node(|_ctx| async move { Ok(i64_to_payload(4)) }))
+        .add_node_with_id(
+            None,
+            "RR1",
+            node(|_ctx| async move { Ok(i64_to_payload(4)) }),
+        )
         .unwrap();
     let r2 = dag
-        .add_node_with_id(None, "RR2", node(|_ctx| async move { Ok(i64_to_payload(6)) }))
+        .add_node_with_id(
+            None,
+            "RR2",
+            node(|_ctx| async move { Ok(i64_to_payload(6)) }),
+        )
         .unwrap();
     dag.set_node_placement(
         &r1,
@@ -1686,18 +1720,16 @@ async fn execute_parallel_redis_dispatcher_records_multi_worker_traffic() {
 
     let report = scheduler.execute_parallel().await.unwrap();
     assert_eq!(
-        payload_to_i64(
-            report
-                .outputs
-                .get("RR_SUM")
-                .expect("RR_SUM output missing")
-        ),
+        payload_to_i64(report.outputs.get("RR_SUM").expect("RR_SUM output missing")),
         10
     );
 
     let mut conn = client.get_multiplexed_async_connection().await.unwrap();
     let dispatches: Vec<String> = conn.lrange(&dispatch_key, 0, -1).await.unwrap_or_default();
-    assert!(dispatches.len() >= 2, "redis should record remote dispatches");
+    assert!(
+        dispatches.len() >= 2,
+        "redis should record remote dispatches"
+    );
     let workers: Vec<String> = conn.hkeys(&worker_key).await.unwrap_or_default();
     assert!(workers.iter().any(|w| w == "redis-worker-a"));
     assert!(workers.iter().any(|w| w == "redis-worker-b"));
@@ -1786,7 +1818,8 @@ async fn execute_parallel_redis_singleflight_cross_worker_runs_once() {
         circuit_breaker_failure_threshold: None,
         circuit_breaker_open_ms: 0,
     };
-    dag.set_node_execution_policy(&n1, sf_policy.clone()).unwrap();
+    dag.set_node_execution_policy(&n1, sf_policy.clone())
+        .unwrap();
     dag.set_node_execution_policy(&n2, sf_policy).unwrap();
 
     let dispatcher = Arc::new(RedisTracingDispatcher {
@@ -1923,20 +1956,14 @@ async fn execute_parallel_run_guard_blocks_duplicate_run_in_memory() {
         "dag:run-lock:mem",
         3_000,
     );
-    let scheduler_2 = DagScheduler::new(build_two_node_dag()).with_run_guard(
-        guard,
-        "dag:run-lock:mem",
-        3_000,
-    );
+    let scheduler_2 =
+        DagScheduler::new(build_two_node_dag()).with_run_guard(guard, "dag:run-lock:mem", 3_000);
 
     let first = tokio::spawn(async move { scheduler_1.execute_parallel().await });
     tokio::time::sleep(Duration::from_millis(15)).await;
     let second = scheduler_2.execute_parallel().await;
 
-    assert!(matches!(
-        second,
-        Err(DagError::RunAlreadyInProgress { .. })
-    ));
+    assert!(matches!(second, Err(DagError::RunAlreadyInProgress { .. })));
 
     let first_report = first
         .await
@@ -2336,7 +2363,8 @@ async fn execute_parallel_failure_snapshot_allows_resume_without_rerunning_succe
     assert!(snap.succeeded_outputs.contains_key("FR_A"));
     assert!(!snap.succeeded_outputs.contains_key("FR_B"));
 
-    let scheduler_second = DagScheduler::new(dag).with_run_state_store(store.clone(), "resume-key-fail-1");
+    let scheduler_second =
+        DagScheduler::new(dag).with_run_state_store(store.clone(), "resume-key-fail-1");
     let report = scheduler_second.execute_parallel().await.unwrap();
     assert_eq!(
         payload_to_i64(report.outputs.get("FR_B").expect("FR_B missing")),
@@ -2402,20 +2430,34 @@ async fn execute_parallel_real_redis_remote_dispatch_worker_flow() {
 
     let mut dag = Dag::new();
     let src = dag
-        .add_node_with_id(None, "RR_SRC", node(|_ctx| async move { Ok(i64_to_payload(10)) }))
+        .add_node_with_id(
+            None,
+            "RR_SRC",
+            node(|_ctx| async move { Ok(i64_to_payload(10)) }),
+        )
         .unwrap();
     let a = dag
         .add_node_with_id(
             Some(&[src.clone()]),
             "RR_A",
-            node(|_ctx| async move { Err(DagError::NodeExecutionFailed { node_id: "RR_A".into(), reason: "should not execute locally".into() }) }),
+            node(|_ctx| async move {
+                Err(DagError::NodeExecutionFailed {
+                    node_id: "RR_A".into(),
+                    reason: "should not execute locally".into(),
+                })
+            }),
         )
         .unwrap();
     let b = dag
         .add_node_with_id(
             Some(&[src]),
             "RR_B",
-            node(|_ctx| async move { Err(DagError::NodeExecutionFailed { node_id: "RR_B".into(), reason: "should not execute locally".into() }) }),
+            node(|_ctx| async move {
+                Err(DagError::NodeExecutionFailed {
+                    node_id: "RR_B".into(),
+                    reason: "should not execute locally".into(),
+                })
+            }),
         )
         .unwrap();
     dag.set_node_placement(
@@ -2852,7 +2894,10 @@ async fn execute_parallel_real_redis_remote_worker_reclaims_stale_processing_job
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    assert!(moved, "expected to move one queued job into stale processing");
+    assert!(
+        moved,
+        "expected to move one queued job into stale processing"
+    );
 
     let _ = redis::cmd("SADD")
         .arg(&workers_key)
@@ -2934,9 +2979,11 @@ async fn execute_parallel_real_redis_remote_worker_skips_canceled_request_before
         .dispatch("CANCEL_NODE", &placement, local_executor, context)
         .await
         .unwrap_err();
-    assert!(dispatch_err
-        .to_string()
-        .contains("remote dispatch response timeout"));
+    assert!(
+        dispatch_err
+            .to_string()
+            .contains("remote dispatch response timeout")
+    );
 
     let stop = Arc::new(AtomicBool::new(false));
     let execute_count_clone = execute_count.clone();
@@ -2967,7 +3014,8 @@ async fn execute_parallel_real_redis_remote_worker_skips_canceled_request_before
 }
 
 #[tokio::test]
-async fn execute_parallel_real_redis_remote_worker_canceled_request_not_dlq_even_if_delivery_counter_high() {
+async fn execute_parallel_real_redis_remote_worker_canceled_request_not_dlq_even_if_delivery_counter_high()
+ {
     let client = match redis::Client::open("redis://127.0.0.1:6379/") {
         Ok(c) => c,
         Err(_) => return,
@@ -3133,16 +3181,16 @@ async fn execute_parallel_real_redis_remote_dispatch_multi_dag_concurrent() {
                 .add_node_with_id(
                     Some(&[src]),
                     "MR_STEP",
-                    node(|_ctx| async move { Err(DagError::NodeExecutionFailed { node_id: "MR_STEP".into(), reason: "should not execute locally".into() }) }),
+                    node(|_ctx| async move {
+                        Err(DagError::NodeExecutionFailed {
+                            node_id: "MR_STEP".into(),
+                            reason: "should not execute locally".into(),
+                        })
+                    }),
                 )
                 .unwrap();
-            dag.set_node_placement(
-                &step,
-                NodePlacement::Remote {
-                    worker_group,
-                },
-            )
-            .unwrap();
+            dag.set_node_placement(&step, NodePlacement::Remote { worker_group })
+                .unwrap();
 
             let scheduler = DagScheduler::new(dag)
                 .with_dispatcher(dispatcher)
@@ -3214,24 +3262,15 @@ async fn execute_parallel_redis_run_guard_blocks_duplicate_then_allows_reentry()
         client: client.clone(),
     });
 
-    let scheduler_1 = DagScheduler::new(build_two_node_dag()).with_run_guard(
-        guard.clone(),
-        &lock_key,
-        5_000,
-    );
-    let scheduler_2 = DagScheduler::new(build_two_node_dag()).with_run_guard(
-        guard.clone(),
-        &lock_key,
-        5_000,
-    );
+    let scheduler_1 =
+        DagScheduler::new(build_two_node_dag()).with_run_guard(guard.clone(), &lock_key, 5_000);
+    let scheduler_2 =
+        DagScheduler::new(build_two_node_dag()).with_run_guard(guard.clone(), &lock_key, 5_000);
 
     let first = tokio::spawn(async move { scheduler_1.execute_parallel().await });
     tokio::time::sleep(Duration::from_millis(15)).await;
     let second = scheduler_2.execute_parallel().await;
-    assert!(matches!(
-        second,
-        Err(DagError::RunAlreadyInProgress { .. })
-    ));
+    assert!(matches!(second, Err(DagError::RunAlreadyInProgress { .. })));
 
     let first_report = first
         .await
@@ -3242,11 +3281,8 @@ async fn execute_parallel_redis_run_guard_blocks_duplicate_then_allows_reentry()
         5
     );
 
-    let scheduler_3 = DagScheduler::new(build_two_node_dag()).with_run_guard(
-        guard,
-        &lock_key,
-        5_000,
-    );
+    let scheduler_3 =
+        DagScheduler::new(build_two_node_dag()).with_run_guard(guard, &lock_key, 5_000);
     let third_report = scheduler_3
         .execute_parallel()
         .await
@@ -3306,10 +3342,7 @@ async fn execute_parallel_redis_run_guard_heartbeat_prevents_ttl_expiry() {
         .with_run_guard(guard, &lock_key, 120)
         .with_run_guard_heartbeat_ms(Some(40));
     let second = scheduler_2.execute_parallel().await;
-    assert!(matches!(
-        second,
-        Err(DagError::RunAlreadyInProgress { .. })
-    ));
+    assert!(matches!(second, Err(DagError::RunAlreadyInProgress { .. })));
 
     let first_report = first
         .await

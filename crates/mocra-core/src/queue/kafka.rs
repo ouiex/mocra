@@ -1,14 +1,17 @@
-use crate::queue::{AckAction, Message, MqBackend, NackPolicy, NackDisposition, decide_nack, parse_attempt, HEADER_ATTEMPT, HEADER_NACK_REASON};
-use async_trait::async_trait;
 use crate::common::model::config::KafkaConfig;
 use crate::errors::Result;
 use crate::errors::error::QueueError;
+use crate::queue::{
+    AckAction, HEADER_ATTEMPT, HEADER_NACK_REASON, Message, MqBackend, NackDisposition, NackPolicy,
+    decide_nack, parse_attempt,
+};
+use async_trait::async_trait;
 use log::{error, info, warn};
+use metrics::counter;
 use rdkafka::config::ClientConfig;
 use rdkafka::consumer::{Consumer, StreamConsumer};
-use rdkafka::message::{Headers, OwnedHeaders, Message as KafkaMessageTrait};
+use rdkafka::message::{Headers, Message as KafkaMessageTrait, OwnedHeaders};
 use rdkafka::producer::{FutureProducer, FutureRecord, Producer};
-use metrics::counter;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -16,7 +19,7 @@ use tokio::sync::mpsc;
 use rdkafka::admin::{AdminClient, AdminOptions, AlterConfig, NewTopic, ResourceSpecifier};
 use rdkafka::client::DefaultClientContext;
 
-use std::collections::{HashMap, HashSet, BTreeSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::RwLock;
 
 #[derive(Clone)]
@@ -79,9 +82,10 @@ impl KafkaQueue {
     async fn ensure_topic_exists(&self, topic_name: &str) -> Result<()> {
         // Check cache first
         if let Ok(cache) = self.known_topics.read()
-            && cache.contains(topic_name) {
-                return Ok(());
-            }
+            && cache.contains(topic_name)
+        {
+            return Ok(());
+        }
 
         // Try to create topic using AdminClient
         // We do this optimistically. If it exists, we'll get an error which we can ignore/handle.
@@ -125,9 +129,9 @@ impl KafkaQueue {
                         .topics()
                         .iter()
                         .any(|t| t.name() == topic && t.error().is_none())
-                    {
-                        return Ok(());
-                    }
+                {
+                    return Ok(());
+                }
                 // Small sleep to avoid busy loop
                 std::thread::sleep(Duration::from_millis(100));
             }
@@ -153,7 +157,13 @@ impl KafkaQueue {
 
 #[async_trait]
 impl MqBackend for KafkaQueue {
-    async fn publish_with_headers(&self, topic: &str, key: Option<&str>, payload: &[u8], headers: &HashMap<String, String>) -> Result<()> {
+    async fn publish_with_headers(
+        &self,
+        topic: &str,
+        key: Option<&str>,
+        payload: &[u8],
+        headers: &HashMap<String, String>,
+    ) -> Result<()> {
         let topic_key = format!("{}-{}", self.namespace, topic);
 
         // Retry loop for publishing
@@ -178,12 +188,15 @@ impl MqBackend for KafkaQueue {
             if let Some(k) = key {
                 record = record.key(k);
             } else {
-                 record = record.key("");
+                record = record.key("");
             }
-            
+
             let mut kafka_headers = OwnedHeaders::new();
             for (k, v) in headers {
-                kafka_headers = kafka_headers.insert(rdkafka::message::Header { key: k, value: Some(v.as_bytes()) });
+                kafka_headers = kafka_headers.insert(rdkafka::message::Header {
+                    key: k,
+                    value: Some(v.as_bytes()),
+                });
             }
             record = record.headers(kafka_headers);
 
@@ -192,9 +205,12 @@ impl MqBackend for KafkaQueue {
                 Ok(_) => Ok(()),
                 Err((e, _)) => {
                     // Check if it's an unknown topic error
-                    let is_unknown = matches!(&e, rdkafka::error::KafkaError::MessageProduction(
-                        rdkafka::types::RDKafkaErrorCode::UnknownTopic,
-                    ));
+                    let is_unknown = matches!(
+                        &e,
+                        rdkafka::error::KafkaError::MessageProduction(
+                            rdkafka::types::RDKafkaErrorCode::UnknownTopic,
+                        )
+                    );
 
                     if is_unknown || retries > 0 {
                         warn!(
@@ -222,11 +238,19 @@ impl MqBackend for KafkaQueue {
     }
 
     async fn publish_batch(&self, topic: &str, items: &[(Option<String>, Vec<u8>)]) -> Result<()> {
-        let items_with_headers: Vec<(Option<String>, Vec<u8>, HashMap<String, String>)> = items.iter().map(|(k, p)| (k.clone(), p.clone(), HashMap::new())).collect();
-        self.publish_batch_with_headers(topic, &items_with_headers).await
+        let items_with_headers: Vec<(Option<String>, Vec<u8>, HashMap<String, String>)> = items
+            .iter()
+            .map(|(k, p)| (k.clone(), p.clone(), HashMap::new()))
+            .collect();
+        self.publish_batch_with_headers(topic, &items_with_headers)
+            .await
     }
 
-    async fn publish_batch_with_headers(&self, topic: &str, items: &[(Option<String>, Vec<u8>, HashMap<String, String>)]) -> Result<()> {
+    async fn publish_batch_with_headers(
+        &self,
+        topic: &str,
+        items: &[(Option<String>, Vec<u8>, HashMap<String, String>)],
+    ) -> Result<()> {
         let topic_key = format!("{}-{}", self.namespace, topic);
 
         // Ensure topic exists (naive check once for the batch)
@@ -237,29 +261,34 @@ impl MqBackend for KafkaQueue {
                 .map(|c| c.contains(&topic_key))
                 .unwrap_or(false);
 
-            if !known
-                && let Err(e) = self.ensure_topic_exists(&topic_key).await {
-                     warn!("Failed to ensure topic {} exists for batch: {}", topic_key, e);
-                }
+            if !known && let Err(e) = self.ensure_topic_exists(&topic_key).await {
+                warn!(
+                    "Failed to ensure topic {} exists for batch: {}",
+                    topic_key, e
+                );
+            }
         }
 
         let mut futures = Vec::with_capacity(items.len());
-        
+
         for (key, payload, headers) in items {
-             let mut record = FutureRecord::to(&topic_key).payload(payload);
-             if let Some(k) = key {
-                 record = record.key(k.as_str());
-             } else {
-                 record = record.key("");
-             }
-             
-             let mut kafka_headers = OwnedHeaders::new();
-             for (k, v) in headers {
-                 kafka_headers = kafka_headers.insert(rdkafka::message::Header { key: k, value: Some(v.as_bytes()) });
-             }
-             record = record.headers(kafka_headers);
-             
-             futures.push(self.producer.send(record, Duration::from_secs(5)));
+            let mut record = FutureRecord::to(&topic_key).payload(payload);
+            if let Some(k) = key {
+                record = record.key(k.as_str());
+            } else {
+                record = record.key("");
+            }
+
+            let mut kafka_headers = OwnedHeaders::new();
+            for (k, v) in headers {
+                kafka_headers = kafka_headers.insert(rdkafka::message::Header {
+                    key: k,
+                    value: Some(v.as_bytes()),
+                });
+            }
+            record = record.headers(kafka_headers);
+
+            futures.push(self.producer.send(record, Duration::from_secs(5)));
         }
 
         // Wait for all
@@ -276,9 +305,13 @@ impl MqBackend for KafkaQueue {
         if error_count > 0 {
             // We return an error if ANY failed, but some might have succeeded.
             // For now, we just report failure.
-            return Err(QueueError::OperationFailed(Box::new(std::io::Error::other(
-                format!("Failed to publish {} messages in batch", error_count),
-            ))).into());
+            return Err(
+                QueueError::OperationFailed(Box::new(std::io::Error::other(format!(
+                    "Failed to publish {} messages in batch",
+                    error_count
+                ))))
+                .into(),
+            );
         }
 
         Ok(())
@@ -312,7 +345,7 @@ impl MqBackend for KafkaQueue {
                 .set("session.timeout.ms", "6000")
                 .set("enable.auto.commit", "false")
                 .set("auto.offset.reset", "earliest");
-            
+
             // Re-apply security config (cannot easily share config from new() due to moving)
             if let (Some(user), Some(pass)) = (&kafka_config.username, &kafka_config.password) {
                 if kafka_config.tls.unwrap_or(false) {
@@ -328,8 +361,7 @@ impl MqBackend for KafkaQueue {
                 client_config.set("security.protocol", "SSL");
             }
 
-            let consumer: StreamConsumer = match client_config.create()
-            {
+            let consumer: StreamConsumer = match client_config.create() {
                 Ok(c) => c,
                 Err(e) => {
                     error!("Failed to create Kafka consumer: {}", e);
@@ -345,7 +377,7 @@ impl MqBackend for KafkaQueue {
             let consumer = Arc::new(consumer);
             let ack_consumer = consumer.clone();
             let (ack_tx, mut ack_rx) = mpsc::channel::<(String, AckAction)>(1000);
-            
+
             // Shared state for In-Flight tracking: Partition -> Set of Offsets
             let in_flight_tracker = Arc::new(RwLock::new(HashMap::<i32, BTreeSet<i64>>::new()));
             let tracker_producer = in_flight_tracker.clone();
@@ -360,108 +392,138 @@ impl MqBackend for KafkaQueue {
                     let should_commit = match action {
                         AckAction::Ack => true,
                         AckAction::Nack(reason, payload, headers) => {
-                             let attempt = parse_attempt(&headers);
-                             let disposition = decide_nack(nack_policy, attempt);
-                             let action_label = match disposition {
-                                 NackDisposition::Retry { .. } => "retry",
-                                 NackDisposition::Dlq => "dlq",
-                             };
-                             counter!(
-                                 "mocra_policy_decisions_total",
-                                 "domain" => "queue",
-                                 "event_type" => "nack",
-                                 "phase" => "failed",
-                                 "kind" => "queue",
-                                 "action" => action_label
-                             )
-                             .increment(1);
+                            let attempt = parse_attempt(&headers);
+                            let disposition = decide_nack(nack_policy, attempt);
+                            let action_label = match disposition {
+                                NackDisposition::Retry { .. } => "retry",
+                                NackDisposition::Dlq => "dlq",
+                            };
+                            counter!(
+                                "mocra_policy_decisions_total",
+                                "domain" => "queue",
+                                "event_type" => "nack",
+                                "phase" => "failed",
+                                "kind" => "queue",
+                                "action" => action_label
+                            )
+                            .increment(1);
 
-                             let parts: Vec<&str> = id_str.split(':').collect();
-                             if !parts.is_empty() {
-                                 let original_topic = parts[0];
+                            let parts: Vec<&str> = id_str.split(':').collect();
+                            if !parts.is_empty() {
+                                let original_topic = parts[0];
 
-                                 if let NackDisposition::Retry { next_attempt } = disposition {
-                                     if nack_policy.backoff_ms > 0 {
-                                         tokio::time::sleep(Duration::from_millis(nack_policy.backoff_ms)).await;
-                                     }
+                                if let NackDisposition::Retry { next_attempt } = disposition {
+                                    if nack_policy.backoff_ms > 0 {
+                                        tokio::time::sleep(Duration::from_millis(
+                                            nack_policy.backoff_ms,
+                                        ))
+                                        .await;
+                                    }
 
-                                     let mut next_headers = (*headers).clone();
-                                     next_headers.insert(HEADER_ATTEMPT.to_string(), next_attempt.to_string());
-                                     next_headers.insert(HEADER_NACK_REASON.to_string(), reason.clone());
+                                    let mut next_headers = (*headers).clone();
+                                    next_headers.insert(
+                                        HEADER_ATTEMPT.to_string(),
+                                        next_attempt.to_string(),
+                                    );
+                                    next_headers
+                                        .insert(HEADER_NACK_REASON.to_string(), reason.clone());
 
-                                     let mut record = FutureRecord::to(original_topic).payload(payload.as_slice()).key("");
-                                     let mut kafka_headers = OwnedHeaders::new();
-                                     for (k, v) in &next_headers {
-                                         kafka_headers = kafka_headers.insert(rdkafka::message::Header { key: k, value: Some(v.as_bytes()) });
-                                     }
-                                     record = record.headers(kafka_headers);
+                                    let mut record = FutureRecord::to(original_topic)
+                                        .payload(payload.as_slice())
+                                        .key("");
+                                    let mut kafka_headers = OwnedHeaders::new();
+                                    for (k, v) in &next_headers {
+                                        kafka_headers =
+                                            kafka_headers.insert(rdkafka::message::Header {
+                                                key: k,
+                                                value: Some(v.as_bytes()),
+                                            });
+                                    }
+                                    record = record.headers(kafka_headers);
 
-                                     if let Err((e, _)) = dlq_producer.send(record, Duration::from_secs(5)).await {
-                                         error!("Failed to retry publish to {}: {:?}", original_topic, e);
-                                         false
-                                     } else {
-                                         true
-                                     }
-                                 } else {
-                                     let dlq_topic = format!("{}-dlq", original_topic);
-                                     let record = FutureRecord::to(&dlq_topic).payload(payload.as_slice()).key(&reason);
-                                     if let Err((e, _)) = dlq_producer.send(record, Duration::from_secs(5)).await {
-                                         error!("Failed to send to DLQ {}: {:?}", dlq_topic, e);
-                                         false
-                                     } else {
-                                         true
-                                     }
-                                 }
-                             } else {
-                                 true
-                             }
+                                    if let Err((e, _)) =
+                                        dlq_producer.send(record, Duration::from_secs(5)).await
+                                    {
+                                        error!(
+                                            "Failed to retry publish to {}: {:?}",
+                                            original_topic, e
+                                        );
+                                        false
+                                    } else {
+                                        true
+                                    }
+                                } else {
+                                    let dlq_topic = format!("{}-dlq", original_topic);
+                                    let record = FutureRecord::to(&dlq_topic)
+                                        .payload(payload.as_slice())
+                                        .key(&reason);
+                                    if let Err((e, _)) =
+                                        dlq_producer.send(record, Duration::from_secs(5)).await
+                                    {
+                                        error!("Failed to send to DLQ {}: {:?}", dlq_topic, e);
+                                        false
+                                    } else {
+                                        true
+                                    }
+                                }
+                            } else {
+                                true
+                            }
                         }
                     };
 
                     if should_commit {
                         let parts: Vec<&str> = id_str.split(':').collect();
                         if parts.len() == 3 {
-                             let topic_name = parts[0];
-                             if let (Ok(partition), Ok(offset)) = (parts[1].parse::<i32>(), parts[2].parse::<i64>()) {
-                                 
-                                 // Update Tracker
-                                 let commit_offset = {
-                                     let mut tracker = tracker_consumer.write().unwrap();
-                                     if let Some(set) = tracker.get_mut(&partition) {
-                                         set.remove(&offset);
-                                         // Update max_acked
-                                         let current_max = max_acked.entry(partition).or_insert(-1);
-                                         if offset > *current_max {
-                                             *current_max = offset;
-                                         }
-                                         
-                                         if let Some(&min_inflight) = set.iter().next() {
-                                             // If there are gaps, we can only commit up to the first gap.
-                                             // min_inflight is the first message STILL processing.
-                                             // So we can safely commit 'min_inflight'. 
-                                             // (Kafka commit offset N means "I have processed N-1, give me N next")
-                                             Some(min_inflight)
-                                         } else {
-                                             // No in-flight messages. We can commit max_acked + 1.
-                                             Some(*current_max + 1)
-                                         }
-                                     } else {
-                                         // Should not happen if logic is correct
-                                         None
-                                     }
-                                 };
+                            let topic_name = parts[0];
+                            if let (Ok(partition), Ok(offset)) =
+                                (parts[1].parse::<i32>(), parts[2].parse::<i64>())
+                            {
+                                // Update Tracker
+                                let commit_offset = {
+                                    let mut tracker = tracker_consumer.write().unwrap();
+                                    if let Some(set) = tracker.get_mut(&partition) {
+                                        set.remove(&offset);
+                                        // Update max_acked
+                                        let current_max = max_acked.entry(partition).or_insert(-1);
+                                        if offset > *current_max {
+                                            *current_max = offset;
+                                        }
 
-                                 if let Some(off) = commit_offset {
-                                     let mut tpl = rdkafka::TopicPartitionList::new();
-                                     tpl.add_partition_offset(topic_name, partition, rdkafka::Offset::Offset(off)).ok();
-                                     // We use Async commit. It is non-blocking.
-                                     // Using commit (not store_offset) ensures it's sent to broker.
-                                     if let Err(e) = ack_consumer.commit(&tpl, rdkafka::consumer::CommitMode::Async) {
-                                         // Use debug level for commit errors to avoid log spam (e.g. rebalance in progress)
-                                         log::debug!("Failed to commit kafka message: {}", e);
-                                     }
-                                 }
-                             }
+                                        if let Some(&min_inflight) = set.iter().next() {
+                                            // If there are gaps, we can only commit up to the first gap.
+                                            // min_inflight is the first message STILL processing.
+                                            // So we can safely commit 'min_inflight'.
+                                            // (Kafka commit offset N means "I have processed N-1, give me N next")
+                                            Some(min_inflight)
+                                        } else {
+                                            // No in-flight messages. We can commit max_acked + 1.
+                                            Some(*current_max + 1)
+                                        }
+                                    } else {
+                                        // Should not happen if logic is correct
+                                        None
+                                    }
+                                };
+
+                                if let Some(off) = commit_offset {
+                                    let mut tpl = rdkafka::TopicPartitionList::new();
+                                    tpl.add_partition_offset(
+                                        topic_name,
+                                        partition,
+                                        rdkafka::Offset::Offset(off),
+                                    )
+                                    .ok();
+                                    // We use Async commit. It is non-blocking.
+                                    // Using commit (not store_offset) ensures it's sent to broker.
+                                    if let Err(e) = ack_consumer
+                                        .commit(&tpl, rdkafka::consumer::CommitMode::Async)
+                                    {
+                                        // Use debug level for commit errors to avoid log spam (e.g. rebalance in progress)
+                                        log::debug!("Failed to commit kafka message: {}", e);
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -474,19 +536,22 @@ impl MqBackend for KafkaQueue {
                             let partition = m.partition();
                             let offset = m.offset();
                             let id = format!("{}:{}:{}", m.topic(), partition, offset);
-                            
+
                             // Register in-flight
                             {
                                 let mut tracker = tracker_producer.write().unwrap();
                                 tracker.entry(partition).or_default().insert(offset);
                             }
-                            
+
                             let mut headers = HashMap::new();
                             if let Some(h) = m.headers() {
                                 for i in 0..h.count() {
                                     let header = h.get(i);
                                     if let Some(v) = header.value {
-                                        headers.insert(header.key.to_string(), String::from_utf8_lossy(v).to_string());
+                                        headers.insert(
+                                            header.key.to_string(),
+                                            String::from_utf8_lossy(v).to_string(),
+                                        );
                                     }
                                 }
                             }
@@ -579,18 +644,28 @@ impl MqBackend for KafkaQueue {
         Ok(())
     }
 
-    async fn send_to_dlq(&self, topic: &str, _id: &str, payload: &[u8], reason: &str) -> Result<()> {
+    async fn send_to_dlq(
+        &self,
+        topic: &str,
+        _id: &str,
+        payload: &[u8],
+        reason: &str,
+    ) -> Result<()> {
         let topic_key = format!("{}-{}-dlq", self.namespace, topic);
         let record = FutureRecord::to(&topic_key).payload(payload).key(reason);
-        
+
         match self.producer.send(record, Duration::from_secs(5)).await {
             Ok(_) => Ok(()),
             Err((e, _)) => Err(QueueError::PushFailed(Box::new(e)).into()),
         }
     }
 
-    async fn read_dlq(&self, _topic: &str, _count: usize) -> Result<Vec<(String, Vec<u8>, String, String)>> {
-        // Kafka DLQ inspection requires a consumer which is heavy. 
+    async fn read_dlq(
+        &self,
+        _topic: &str,
+        _count: usize,
+    ) -> Result<Vec<(String, Vec<u8>, String, String)>> {
+        // Kafka DLQ inspection requires a consumer which is heavy.
         // Not implemented for now.
         warn!("DLQ inspection not implemented for KafkaQueue yet");
         Ok(Vec::new())

@@ -59,10 +59,10 @@ pub fn to_numeric(input: &str) -> Option<f64> {
                 | '九'
                 | '两'
         )
-    })
-        && let Ok(v) = s.parse::<f64>() {
-            return Some(v);
-        }
+    }) && let Ok(v) = s.parse::<f64>()
+    {
+        return Some(v);
+    }
 
     // If contains full Chinese numerals, attempt Chinese parsing path.
 
@@ -158,31 +158,33 @@ pub fn to_numeric(input: &str) -> Option<f64> {
         // Handle trailing big/small unit after pure Arabic/decimal number like "1.2万"
         let trailing_multiplier;
         if let Some(last) = int_part.chars().last()
-            && let Some(m) = big_unit(last).or_else(|| small_unit(last)) {
-                // ensure preceding chars contain a digit
-                let core = &int_part[..int_part.len() - last.len_utf8()];
-                if core.chars().all(|c| c.is_ascii_digit()) && !core.is_empty() {
-                    trailing_multiplier = m;
-                    // rebuild s to parse the core as plain number later
-                    if let Ok(base) = core.parse::<f64>() {
-                        let mut value = base * trailing_multiplier;
-                        if let Some(dec) = decimal_part.as_ref() {
-                            // decimal after unit ambiguous: treat as fractional appended to base before multiplier? Keep simple: base.dec * multiplier
-                            let dec_digits: String =
-                                dec.chars().filter(|c| c.is_ascii_digit()).collect();
-                            if !dec_digits.is_empty()
-                                && let Ok(frac_int) = dec_digits.parse::<f64>() {
-                                    value += frac_int / 10_f64.powi(dec_digits.len() as i32)
-                                        * trailing_multiplier;
-                                }
+            && let Some(m) = big_unit(last).or_else(|| small_unit(last))
+        {
+            // ensure preceding chars contain a digit
+            let core = &int_part[..int_part.len() - last.len_utf8()];
+            if core.chars().all(|c| c.is_ascii_digit()) && !core.is_empty() {
+                trailing_multiplier = m;
+                // rebuild s to parse the core as plain number later
+                if let Ok(base) = core.parse::<f64>() {
+                    let mut value = base * trailing_multiplier;
+                    if let Some(dec) = decimal_part.as_ref() {
+                        // decimal after unit ambiguous: treat as fractional appended to base before multiplier? Keep simple: base.dec * multiplier
+                        let dec_digits: String =
+                            dec.chars().filter(|c| c.is_ascii_digit()).collect();
+                        if !dec_digits.is_empty()
+                            && let Ok(frac_int) = dec_digits.parse::<f64>()
+                        {
+                            value += frac_int / 10_f64.powi(dec_digits.len() as i32)
+                                * trailing_multiplier;
                         }
-                        if percent {
-                            value /= 100.0;
-                        }
-                        return Some(value);
                     }
+                    if percent {
+                        value /= 100.0;
+                    }
+                    return Some(value);
                 }
             }
+        }
 
         // Parse Chinese integer part into number
         let mut section_total = 0_f64; // accumulates within current 10^8 or 10^4 section

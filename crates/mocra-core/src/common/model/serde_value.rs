@@ -11,8 +11,8 @@ pub mod option_value {
         // Serialize Value as String for cross-format compatibility
         match value {
             Some(v) => {
-                 let s = serde_json::to_string(v).map_err(serde::ser::Error::custom)?;
-                 serializer.serialize_some(&s)
+                let s = serde_json::to_string(v).map_err(serde::ser::Error::custom)?;
+                serializer.serialize_some(&s)
             }
             None => serializer.serialize_none(),
         }

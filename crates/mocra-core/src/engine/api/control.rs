@@ -1,11 +1,9 @@
-use axum::{Json, extract::State};
-use axum::http::StatusCode;
-use crate::engine::api::state::ApiState;
 use crate::common::registry::NodeInfo;
+use crate::engine::api::state::ApiState;
+use axum::http::StatusCode;
+use axum::{Json, extract::State};
 
-pub async fn get_nodes(
-    State(state): State<ApiState>,
-) -> Json<Vec<NodeInfo>> {
+pub async fn get_nodes(State(state): State<ApiState>) -> Json<Vec<NodeInfo>> {
     match state.node_registry.get_active_nodes().await {
         Ok(nodes) => Json(nodes),
         Err(e) => {
@@ -15,9 +13,7 @@ pub async fn get_nodes(
     }
 }
 
-pub async fn pause_engine(
-    State(state): State<ApiState>,
-) -> StatusCode {
+pub async fn pause_engine(State(state): State<ApiState>) -> StatusCode {
     let key = pause_key(&state);
     // Check CacheService API. Assuming set(key, value, ttl)
     if let Err(e) = state.state.cache_service.set(&key, b"1", None).await {
@@ -27,9 +23,7 @@ pub async fn pause_engine(
     StatusCode::OK
 }
 
-pub async fn resume_engine(
-    State(state): State<ApiState>,
-) -> StatusCode {
+pub async fn resume_engine(State(state): State<ApiState>) -> StatusCode {
     let key = pause_key(&state);
     // Check CacheService API. Assuming del(key)
     if let Err(e) = state.state.cache_service.del(&key).await {

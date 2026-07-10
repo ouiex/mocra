@@ -104,7 +104,10 @@ impl ModuleDagDefinition {
             edges.push(ModuleDagEdgeDef::new(&nodes[idx - 1], &nodes[idx]));
         }
 
-        let entry_nodes = nodes.first().map(|n| vec![n.node_id.clone()]).unwrap_or_default();
+        let entry_nodes = nodes
+            .first()
+            .map(|n| vec![n.node_id.clone()])
+            .unwrap_or_default();
 
         Self {
             nodes,
@@ -145,8 +148,12 @@ impl ModuleDagBuilder {
     /// (subsequent calls with the same `node_id` are silently ignored so
     /// the same `ModuleDagNodeDef` reference is safe to reuse across calls).
     pub fn edge(mut self, from: &ModuleDagNodeDef, to: &ModuleDagNodeDef) -> Self {
-        self.nodes.entry(from.node_id.clone()).or_insert_with(|| from.clone());
-        self.nodes.entry(to.node_id.clone()).or_insert_with(|| to.clone());
+        self.nodes
+            .entry(from.node_id.clone())
+            .or_insert_with(|| from.clone());
+        self.nodes
+            .entry(to.node_id.clone())
+            .or_insert_with(|| to.clone());
         self.edges.push(ModuleDagEdgeDef {
             from: from.node_id.clone(),
             to: to.node_id.clone(),
@@ -156,7 +163,9 @@ impl ModuleDagBuilder {
 
     /// Registers an isolated node (no edges). Useful for single-node DAGs.
     pub fn node(mut self, node: &ModuleDagNodeDef) -> Self {
-        self.nodes.entry(node.node_id.clone()).or_insert_with(|| node.clone());
+        self.nodes
+            .entry(node.node_id.clone())
+            .or_insert_with(|| node.clone());
         self
     }
 
@@ -243,7 +252,10 @@ mod tests {
 
         assert_eq!(definition.nodes.len(), 3);
         assert_eq!(definition.edges.len(), 2);
-        assert_eq!(definition.entry_nodes, vec![definition.nodes[0].node_id.clone()]);
+        assert_eq!(
+            definition.entry_nodes,
+            vec![definition.nodes[0].node_id.clone()]
+        );
         assert_eq!(definition.edges[0].from, definition.nodes[0].node_id);
         assert_eq!(definition.edges[0].to, definition.nodes[1].node_id);
         assert_eq!(definition.edges[1].from, definition.nodes[1].node_id);

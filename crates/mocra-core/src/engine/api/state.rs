@@ -1,8 +1,8 @@
-use crate::queue::QueueManager;
-use std::sync::Arc;
-use metrics_exporter_prometheus::PrometheusHandle;
-use crate::common::state::State;
 use crate::common::registry::NodeRegistry;
+use crate::common::state::State;
+use crate::queue::QueueManager;
+use metrics_exporter_prometheus::PrometheusHandle;
+use std::sync::Arc;
 
 #[derive(Clone)]
 pub struct ApiState {

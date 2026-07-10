@@ -27,8 +27,10 @@ pub fn compress_payload_owned(data: Vec<u8>, threshold: usize) -> Vec<u8> {
 pub fn decompress_payload<'a>(payload: &'a [u8]) -> Cow<'a, [u8]> {
     // Try Zstd first (magic: 0x28 0xB5 0x2F 0xFD)
     if payload.len() > 4
-        && payload[0] == 0x28 && payload[1] == 0xB5
-        && payload[2] == 0x2F && payload[3] == 0xFD
+        && payload[0] == 0x28
+        && payload[1] == 0xB5
+        && payload[2] == 0x2F
+        && payload[3] == 0xFD
     {
         match zstd::stream::decode_all(payload) {
             Ok(decoded) => Cow::Owned(decoded),

@@ -45,7 +45,13 @@ pub fn ptm_key(
     )
 }
 
-pub fn advance_gate_key(run_id: Uuid, module_id: &str, from: usize, to: usize, prefix: Uuid) -> String {
+pub fn advance_gate_key(
+    run_id: Uuid,
+    module_id: &str,
+    from: usize,
+    to: usize,
+    prefix: Uuid,
+) -> String {
     format!(
         "chain:gate:advance:{}:{}:{}:{}:{}",
         run_id, module_id, from, to, prefix
@@ -56,15 +62,28 @@ pub fn module_step_advance_once_key(run_id: Uuid, module_id: &str, step_idx: usi
     format!("chain:gate:step:{}:{}:{}", run_id, module_id, step_idx)
 }
 
-pub fn module_step_fallback_once_key(run_id: Uuid, module_id: &str, step_idx: usize, prefix: Uuid) -> String {
+pub fn module_step_fallback_once_key(
+    run_id: Uuid,
+    module_id: &str,
+    step_idx: usize,
+    prefix: Uuid,
+) -> String {
     format!(
         "chain:gate:fallback:{}:{}:{}:{}",
         run_id, module_id, step_idx, prefix
     )
 }
 
-pub fn legacy_module_step_advance_once_key(run_id: Uuid, module_id: &str, step_idx: usize) -> String {
-    format!("{}:step:{}", legacy_execution_state_key(run_id, module_id), step_idx)
+pub fn legacy_module_step_advance_once_key(
+    run_id: Uuid,
+    module_id: &str,
+    step_idx: usize,
+) -> String {
+    format!(
+        "{}:step:{}",
+        legacy_execution_state_key(run_id, module_id),
+        step_idx
+    )
 }
 
 pub fn legacy_module_step_fallback_once_key(
@@ -81,7 +100,13 @@ pub fn legacy_module_step_fallback_once_key(
     )
 }
 
-pub fn error_emit_key(run_id: Uuid, module_id: &str, step: usize, prefix: Uuid, error_hash: &str) -> String {
+pub fn error_emit_key(
+    run_id: Uuid,
+    module_id: &str,
+    step: usize,
+    prefix: Uuid,
+    error_hash: &str,
+) -> String {
     format!(
         "chain:error:emit:{}:{}:{}:{}:{}",
         run_id, module_id, step, prefix, error_hash
@@ -112,14 +137,30 @@ pub fn error_retry_schedule_key(task_id: &str) -> String {
 
 /// One-shot advance gate per (run, module, from_node, to_node).
 /// Prevents n concurrent parsers from each synthesizing a placeholder to the same successor.
-pub fn dag_node_advance_gate_key(run_id: Uuid, module_id: &str, node_id: &str, successor_id: &str) -> String {
-    format!("dag:gate:advance:{}:{}:{}:{}", run_id, module_id, node_id, successor_id)
+pub fn dag_node_advance_gate_key(
+    run_id: Uuid,
+    module_id: &str,
+    node_id: &str,
+    successor_id: &str,
+) -> String {
+    format!(
+        "dag:gate:advance:{}:{}:{}:{}",
+        run_id, module_id, node_id, successor_id
+    )
 }
 
 /// One-shot fallback gate per (run, module, node, prefix_request).
 /// Prevents infinite fallback loops when generate() fails on a non-entry node.
-pub fn dag_node_fallback_gate_key(run_id: Uuid, module_id: &str, node_id: &str, prefix: Uuid) -> String {
-    format!("dag:gate:fallback:{}:{}:{}:{}", run_id, module_id, node_id, prefix)
+pub fn dag_node_fallback_gate_key(
+    run_id: Uuid,
+    module_id: &str,
+    node_id: &str,
+    prefix: Uuid,
+) -> String {
+    format!(
+        "dag:gate:fallback:{}:{}:{}:{}",
+        run_id, module_id, node_id, prefix
+    )
 }
 
 /// Distributed stop signal key for a DAG processor run.
@@ -157,8 +198,9 @@ mod tests {
             execution_state_key(run_id, "a-x-m1"),
             "chain:exec:0194e7af-90f0-7c0a-a3cb-4f8f7d11ed88:a-x-m1"
         );
-        assert!(advance_gate_key(run_id, "a-x-m1", 1, 2, prefix)
-            .starts_with("chain:gate:advance:"));
+        assert!(
+            advance_gate_key(run_id, "a-x-m1", 1, 2, prefix).starts_with("chain:gate:advance:")
+        );
         assert_eq!(
             parser_processed_key("mocra", "abc"),
             "mocra:processed:parser:abc"

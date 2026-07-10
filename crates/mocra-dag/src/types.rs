@@ -5,7 +5,6 @@ use std::error::Error;
 use std::fmt::{Display, Formatter};
 use std::sync::Arc;
 
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DagError {
     DuplicateNode(String),
@@ -14,7 +13,10 @@ pub enum DagError {
     CycleDetected,
     EmptyGraph,
     MissingNodeCompute(String),
-    NodeExecutionFailed { node_id: String, reason: String },
+    NodeExecutionFailed {
+        node_id: String,
+        reason: String,
+    },
     RetryExhausted {
         node_id: String,
         attempts: usize,
@@ -22,12 +24,28 @@ pub enum DagError {
         retryable: bool,
         last_error: String,
     },
-    TaskJoinFailed { node_id: String, reason: String },
-    RunAlreadyInProgress { lock_key: String },
-    RunGuardAcquireFailed { lock_key: String, reason: String },
-    RunGuardRenewFailed { lock_key: String, reason: String },
-    RunGuardReleaseFailed { lock_key: String, reason: String },
-    MissingRunFencingToken { resource: String },
+    TaskJoinFailed {
+        node_id: String,
+        reason: String,
+    },
+    RunAlreadyInProgress {
+        lock_key: String,
+    },
+    RunGuardAcquireFailed {
+        lock_key: String,
+        reason: String,
+    },
+    RunGuardRenewFailed {
+        lock_key: String,
+        reason: String,
+    },
+    RunGuardReleaseFailed {
+        lock_key: String,
+        reason: String,
+    },
+    MissingRunFencingToken {
+        resource: String,
+    },
     FencingTokenRejected {
         resource: String,
         token: u64,
@@ -38,8 +56,14 @@ pub enum DagError {
     ReservedControlNode(String),
     InvalidPrecedingControlNode(String),
     RemoteDispatchNotConfigured(String),
-    NodeTimeout { node_id: String, timeout_ms: u64 },
-    ExecutionTimeout { run_id: String, timeout_ms: u64 },
+    NodeTimeout {
+        node_id: String,
+        timeout_ms: u64,
+    },
+    ExecutionTimeout {
+        run_id: String,
+        timeout_ms: u64,
+    },
     ExecutionIncomplete {
         run_id: String,
         unfinished_nodes: usize,
@@ -84,13 +108,22 @@ impl Display for DagError {
                 write!(f, "dag run already in progress: lock_key={lock_key}")
             }
             DagError::RunGuardAcquireFailed { lock_key, reason } => {
-                write!(f, "dag run guard acquire failed: lock_key={lock_key} reason={reason}")
+                write!(
+                    f,
+                    "dag run guard acquire failed: lock_key={lock_key} reason={reason}"
+                )
             }
             DagError::RunGuardRenewFailed { lock_key, reason } => {
-                write!(f, "dag run guard renew failed: lock_key={lock_key} reason={reason}")
+                write!(
+                    f,
+                    "dag run guard renew failed: lock_key={lock_key} reason={reason}"
+                )
             }
             DagError::RunGuardReleaseFailed { lock_key, reason } => {
-                write!(f, "dag run guard release failed: lock_key={lock_key} reason={reason}")
+                write!(
+                    f,
+                    "dag run guard release failed: lock_key={lock_key} reason={reason}"
+                )
             }
             DagError::MissingRunFencingToken { resource } => {
                 write!(f, "missing run fencing token for resource: {resource}")
@@ -124,10 +157,16 @@ impl Display for DagError {
                 node_id,
                 timeout_ms,
             } => {
-                write!(f, "node execution timeout: node={node_id} timeout_ms={timeout_ms}")
+                write!(
+                    f,
+                    "node execution timeout: node={node_id} timeout_ms={timeout_ms}"
+                )
             }
             DagError::ExecutionTimeout { run_id, timeout_ms } => {
-                write!(f, "dag execution timeout: run_id={run_id} timeout_ms={timeout_ms}")
+                write!(
+                    f,
+                    "dag execution timeout: run_id={run_id} timeout_ms={timeout_ms}"
+                )
             }
             DagError::ExecutionIncomplete {
                 run_id,

@@ -1,13 +1,13 @@
+use crate::cacheable::CacheAble;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use crate::cacheable::CacheAble;
 
 /// Module-level configuration snapshot.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModuleConfig {
-    pub account_config: serde_json::Value,  // Configuration loaded from account table.
+    pub account_config: serde_json::Value, // Configuration loaded from account table.
     pub platform_config: serde_json::Value, // Configuration loaded from platform table.
-    pub module_config: serde_json::Value,   // Configuration defined on the module itself.
+    pub module_config: serde_json::Value,  // Configuration defined on the module itself.
     pub data_middleware_config: HashMap<String, serde_json::Value>, // Data middleware configs.
     pub download_middleware_config: HashMap<String, serde_json::Value>, // Download middleware configs.
     pub rel_account_platform_config: serde_json::Value,
@@ -125,105 +125,122 @@ impl ModuleConfig {
     pub fn get_config_value(&self, key: &str) -> Option<&serde_json::Value> {
         // 1. Highest priority: module self config.
         if let serde_json::Value::Object(module_config) = &self.module_config
-            && let Some(value) = module_config.get(key) {
-                return Some(value);
-            }
+            && let Some(value) = module_config.get(key)
+        {
+            return Some(value);
+        }
 
         // 2. Module-platform relation config.
         if let serde_json::Value::Object(rel_platform_config) = &self.rel_module_platform_config
-            && let Some(value) = rel_platform_config.get(key) {
-                return Some(value);
-            }
+            && let Some(value) = rel_platform_config.get(key)
+        {
+            return Some(value);
+        }
 
         // 3. Module-account relation config.
         if let serde_json::Value::Object(rel_account_config) = &self.rel_module_account_config
-            && let Some(value) = rel_account_config.get(key) {
-                return Some(value);
-            }
+            && let Some(value) = rel_account_config.get(key)
+        {
+            return Some(value);
+        }
 
         // 4. Module-data-middleware relation config.
         for config in self.rel_module_data_middleware_config.values() {
             if let serde_json::Value::Object(rel_data_config) = config
-                && let Some(value) = rel_data_config.get(key) {
-                    return Some(value);
-                }
+                && let Some(value) = rel_data_config.get(key)
+            {
+                return Some(value);
+            }
         }
 
         // 5. Module-download-middleware relation config.
         for config in self.rel_module_download_middleware_config.values() {
             if let serde_json::Value::Object(rel_download_config) = config
-                && let Some(value) = rel_download_config.get(key) {
-                    return Some(value);
-                }
+                && let Some(value) = rel_download_config.get(key)
+            {
+                return Some(value);
+            }
         }
 
         if let serde_json::Value::Object(rel_account_platform_config) =
             &self.rel_account_platform_config
-            && let Some(value) = rel_account_platform_config.get(key) {
-                return Some(value);
-            }
+            && let Some(value) = rel_account_platform_config.get(key)
+        {
+            return Some(value);
+        }
         // 6. Platform base config.
         if let serde_json::Value::Object(platform_config) = &self.platform_config
-            && let Some(value) = platform_config.get(key) {
-                return Some(value);
-            }
+            && let Some(value) = platform_config.get(key)
+        {
+            return Some(value);
+        }
         // Account base config.
         if let serde_json::Value::Object(account_config) = &self.account_config
-            && let Some(value) = account_config.get(key) {
-                return Some(value);
-            }
+            && let Some(value) = account_config.get(key)
+        {
+            return Some(value);
+        }
         // 7. Data middleware base config.
         for config in self.download_middleware_config.values() {
             if let serde_json::Value::Object(data_config) = config
-                && let Some(value) = data_config.get(key) {
-                    return Some(value);
-                }
+                && let Some(value) = data_config.get(key)
+            {
+                return Some(value);
+            }
         }
 
         // 8. Download middleware base config.
         for config in self.data_middleware_config.values() {
             if let serde_json::Value::Object(download_config) = config
-                && let Some(value) = download_config.get(key) {
-                    return Some(value);
-                }
+                && let Some(value) = download_config.get(key)
+            {
+                return Some(value);
+            }
         }
         None
     }
     pub fn get_middleware_weight(&self, middleware_name: &str) -> Option<u32> {
-        if let Some(serde_json::Value::Object(obj)) = self.download_middleware_config.get(middleware_name)
-            && let Some(weight) = obj.get("weight") {
-                return weight.as_u64().map(|v| v as u32);
-            }
+        if let Some(serde_json::Value::Object(obj)) =
+            self.download_middleware_config.get(middleware_name)
+            && let Some(weight) = obj.get("weight")
+        {
+            return weight.as_u64().map(|v| v as u32);
+        }
         if let Some(serde_json::Value::Object(obj)) = self
             .rel_module_download_middleware_config
             .get(middleware_name)
-            && let Some(weight) = obj.get("weight") {
-                return weight.as_u64().map(|v| v as u32);
-            }
+            && let Some(weight) = obj.get("weight")
+        {
+            return weight.as_u64().map(|v| v as u32);
+        }
         None
     }
     pub fn get_task_config(&self, key: &str) -> Option<&serde_json::Value> {
         if let serde_json::Value::Object(account_config) = &self.account_config
-            && let Some(value) = account_config.get(key) {
-                return Some(value);
-            }
+            && let Some(value) = account_config.get(key)
+        {
+            return Some(value);
+        }
         if let serde_json::Value::Object(platform_config) = &self.platform_config
-            && let Some(value) = platform_config.get(key) {
-                return Some(value);
-            }
+            && let Some(value) = platform_config.get(key)
+        {
+            return Some(value);
+        }
         if let serde_json::Value::Object(rel_account_platform_config) =
             &self.rel_account_platform_config
-            && let Some(value) = rel_account_platform_config.get(key) {
-                return Some(value);
-            }
+            && let Some(value) = rel_account_platform_config.get(key)
+        {
+            return Some(value);
+        }
         None
     }
-    
+
     pub fn get_config<T: serde::de::DeserializeOwned>(&self, key: &str) -> Option<T> {
         if let Some(value) = self.get_config_value(key)
-            && let Ok(config) = serde_json::from_value::<T>(value.clone()) {
-                return Some(config);
-            }
+            && let Ok(config) = serde_json::from_value::<T>(value.clone())
+        {
+            return Some(config);
+        }
         None
     }
 }

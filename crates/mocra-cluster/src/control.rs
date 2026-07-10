@@ -46,12 +46,7 @@ pub trait ControlPlane: Send + Sync {
         holder: &str,
         ttl_ms: u64,
     ) -> Result<Option<u64>, ControlError>;
-    async fn renew_lock(
-        &self,
-        key: &str,
-        holder: &str,
-        ttl_ms: u64,
-    ) -> Result<bool, ControlError>;
+    async fn renew_lock(&self, key: &str, holder: &str, ttl_ms: u64) -> Result<bool, ControlError>;
     async fn release_lock(&self, key: &str, holder: &str) -> Result<(), ControlError>;
 }
 
@@ -133,12 +128,7 @@ impl ControlPlane for LocalControlPlane {
         }
     }
 
-    async fn renew_lock(
-        &self,
-        key: &str,
-        holder: &str,
-        ttl_ms: u64,
-    ) -> Result<bool, ControlError> {
+    async fn renew_lock(&self, key: &str, holder: &str, ttl_ms: u64) -> Result<bool, ControlError> {
         match self.sm.apply(&Cmd::RenewLock {
             key: key.to_string(),
             holder: holder.to_string(),

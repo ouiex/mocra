@@ -1,23 +1,20 @@
 #![allow(unused)]
-use super::{
-    assembler::ModuleAssembler, factory::TaskFactory, task::Task,
-    module::Module,
-};
 #[cfg(feature = "store")]
 use super::repository::{MetadataStore, TaskRepository};
-use std::sync::Arc;
-use tokio::sync::RwLock;
-use dashmap::DashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
-use crate::common::model::{Request, Response};
+use super::{assembler::ModuleAssembler, factory::TaskFactory, module::Module, task::Task};
+use crate::cacheable::{CacheAble, CacheService};
+use crate::common::interface::ModuleTrait;
 use crate::common::model::config::Config;
-use crate::common::model::message::{TaskErrorEvent, TaskParserEvent, TaskEvent};
+use crate::common::model::login_info::LoginInfo;
+use crate::common::model::message::{TaskErrorEvent, TaskEvent, TaskParserEvent};
+use crate::common::model::{Request, Response};
 use crate::common::state::DbHandle;
 use crate::errors::Result;
-use crate::cacheable::{CacheAble,CacheService};
-use crate::common::interface::ModuleTrait;
-use crate::common::model::login_info::LoginInfo;
+use dashmap::DashMap;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
+use tokio::sync::RwLock;
 
 pub struct TaskManager {
     factory: TaskFactory,
@@ -57,7 +54,6 @@ impl TaskManager {
             module_assembler,
         }
     }
-    
 
     /// Registers one module implementation.
     pub async fn add_module(&self, work: Arc<dyn ModuleTrait>) {
@@ -128,7 +124,10 @@ impl TaskManager {
     }
 
     /// Loads resolved module and optional login info for parser flow.
-    pub async fn load_module_with_response(&self, response: &Response) -> Result<(Arc<Module>, Option<LoginInfo>)> {
+    pub async fn load_module_with_response(
+        &self,
+        response: &Response,
+    ) -> Result<(Arc<Module>, Option<LoginInfo>)> {
         self.factory.load_module_with_response(response).await
     }
 
@@ -136,11 +135,10 @@ impl TaskManager {
     pub async fn clear_factory_cache(&self) {
         self.factory.clear_cache().await;
     }
-    
+
     /// Returns all registered module implementations.
     pub async fn get_all_modules(&self) -> Vec<Arc<dyn ModuleTrait>> {
         let assembler = self.module_assembler.read().await;
         assembler.get_all_modules()
     }
-
 }

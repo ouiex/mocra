@@ -1,8 +1,8 @@
+use crate::queue::Identifiable;
+use log::{debug, info};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use tokio::sync::{broadcast, mpsc, watch, Mutex, Semaphore};
-use log::{info, debug};
-use crate::queue::Identifiable;
+use tokio::sync::{Mutex, Semaphore, broadcast, mpsc, watch};
 use tracing::Instrument;
 
 /// Generic concurrent runner for queue-driven processors.
@@ -42,27 +42,29 @@ impl ProcessorRunner {
     /// - Pulls one item, then greedily drains a small batch.
     /// - Uses a semaphore permit per spawned task to cap parallelism.
     /// - Reacts to pause/shutdown signals between receives and dispatch.
-    pub async fn run<T, F, Fut>(
-        mut self,
-        receiver: Arc<Mutex<mpsc::Receiver<T>>>,
-        execute_fn: F,
-    ) where
+    pub async fn run<T, F, Fut>(mut self, receiver: Arc<Mutex<mpsc::Receiver<T>>>, execute_fn: F)
+    where
         T: Identifiable + Send + 'static,
         F: Fn(T) -> Fut + Send + Sync + 'static + Clone,
         Fut: std::future::Future<Output = ()> + Send,
     {
-        info!("Starting {} processor with concurrency {}", self.name, self.concurrency);
-        
+        info!(
+            "Starting {} processor with concurrency {}",
+            self.name, self.concurrency
+        );
+
         let semaphore = Arc::new(Semaphore::new(self.concurrency));
         let metric_label = self.name.to_lowercase();
         let mut rx = receiver.lock().await;
-        
+
         let mut loop_count: u64 = 0;
 
         loop {
             // Honor pause signal before attempting to receive.
             if *self.pause_rx.borrow() {
-                if self.pause_rx.changed().await.is_err() { break; }
+                if self.pause_rx.changed().await.is_err() {
+                    break;
+                }
                 continue;
             }
 
@@ -168,7 +170,7 @@ impl ProcessorRunner {
                 }
             }
         }
-        
+
         info!("{} processor loop ended", self.name);
     }
 }
@@ -178,7 +180,7 @@ mod tests {
     use super::*;
     use crate::queue::QueuedItem;
     use std::sync::Mutex as StdMutex;
-    use tokio::time::{timeout, Duration};
+    use tokio::time::{Duration, timeout};
 
     #[derive(Clone)]
     struct TestItem {
@@ -201,7 +203,13 @@ mod tests {
         let (shutdown_tx, shutdown_rx) = broadcast::channel(1);
         let (pause_tx, pause_rx) = watch::channel(false);
 
-        let runner = ProcessorRunner::new("Test", shutdown_rx, pause_rx, 2, Arc::new(AtomicUsize::new(0)));
+        let runner = ProcessorRunner::new(
+            "Test",
+            shutdown_rx,
+            pause_rx,
+            2,
+            Arc::new(AtomicUsize::new(0)),
+        );
 
         let handle = tokio::spawn(async move {
             runner
@@ -230,7 +238,10 @@ mod tests {
         let nack_marker_clone = nack_marker.clone();
 
         let ok_item = QueuedItem::with_ack(
-            TestItem { id: "ok".to_string(), should_fail: false },
+            TestItem {
+                id: "ok".to_string(),
+                should_fail: false,
+            },
             move || {
                 let ack_marker_clone = ack_marker_clone.clone();
                 Box::pin(async move {
@@ -249,10 +260,11 @@ mod tests {
 
         let nack_marker_clone_err = nack_marker.clone();
         let err_item = QueuedItem::with_ack(
-            TestItem { id: "bad".to_string(), should_fail: true },
-            move || {
-                Box::pin(async move { Ok(()) })
+            TestItem {
+                id: "bad".to_string(),
+                should_fail: true,
             },
+            move || Box::pin(async move { Ok(()) }),
             move |_reason| {
                 let nack_marker_clone = nack_marker_clone_err.clone();
                 Box::pin(async move {

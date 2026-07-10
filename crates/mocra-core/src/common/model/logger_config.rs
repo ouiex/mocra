@@ -1,5 +1,5 @@
-use serde::{Deserialize, Serialize};
 use super::config::{KafkaConfig, RedisConfig};
+use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(tag = "type", rename_all = "snake_case")]

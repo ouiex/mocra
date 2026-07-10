@@ -1,6 +1,6 @@
-use serde::{Deserialize, Serialize};
 use crate::common::policy::PolicyConfig;
 use mocra_proxy::ProxyConfig;
+use serde::{Deserialize, Serialize};
 use std::fmt;
 
 /// API Configuration
@@ -60,7 +60,10 @@ impl fmt::Debug for RedisConfig {
             .field("redis_port", &self.redis_port)
             .field("redis_db", &self.redis_db)
             .field("redis_username", &self.redis_username)
-            .field("redis_password", &self.redis_password.as_ref().map(|_| "***REDACTED***"))
+            .field(
+                "redis_password",
+                &self.redis_password.as_ref().map(|_| "***REDACTED***"),
+            )
             .field("pool_size", &self.pool_size)
             .field("shards", &self.shards)
             .field("tls", &self.tls)
@@ -228,7 +231,10 @@ impl fmt::Debug for KafkaConfig {
         f.debug_struct("KafkaConfig")
             .field("brokers", &self.brokers)
             .field("username", &self.username)
-            .field("password", &self.password.as_ref().map(|_| "***REDACTED***"))
+            .field(
+                "password",
+                &self.password.as_ref().map(|_| "***REDACTED***"),
+            )
             .field("tls", &self.tls)
             .finish()
     }
@@ -252,7 +258,10 @@ impl fmt::Debug for NatsConfig {
         f.debug_struct("NatsConfig")
             .field("url", &self.url)
             .field("username", &self.username)
-            .field("password", &self.password.as_ref().map(|_| "***REDACTED***"))
+            .field(
+                "password",
+                &self.password.as_ref().map(|_| "***REDACTED***"),
+            )
             .field("token", &self.token.as_ref().map(|_| "***REDACTED***"))
             .finish()
     }
@@ -396,10 +405,13 @@ mod tests {
             minid_time = 0
             capacity = 1000
         "#;
-        
+
         let config: Config = toml::from_str(toml_str).unwrap();
         assert_eq!(config.name, "test_app");
-        assert_eq!(config.db.url.as_deref(), Some("postgres://user:password@localhost:5432/db"));
+        assert_eq!(
+            config.db.url.as_deref(),
+            Some("postgres://user:password@localhost:5432/db")
+        );
         assert_eq!(config.crawler.request_max_retries, 3);
         assert!(config.proxy.is_none());
     }

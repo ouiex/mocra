@@ -1,9 +1,9 @@
 #[cfg(feature = "store")]
-use sea_orm::{Database, DatabaseConnection};
+use dashmap::DashMap;
 #[cfg(feature = "store")]
 use once_cell::sync::Lazy;
 #[cfg(feature = "store")]
-use dashmap::DashMap;
+use sea_orm::{Database, DatabaseConnection};
 
 // Global cache for connection pools
 #[cfg(feature = "store")]
@@ -70,15 +70,16 @@ pub async fn db_connection(
     if let Some(s) = schema {
         db_options.set_schema_search_path(s);
     }
-    db_options.max_connections(pool_size.unwrap_or(10))
+    db_options
+        .max_connections(pool_size.unwrap_or(10))
         .sqlx_logging(true)
         .sqlx_logging_level(log::LevelFilter::Trace);
 
-    match Database::connect(db_options).await{
+    match Database::connect(db_options).await {
         Ok(db) => {
             CONNECTION_POOLS.insert(key, db.clone());
             Some(db)
-        },
+        }
         Err(e) => {
             log::error!("Failed to connect to database: {}", e);
             None

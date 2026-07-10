@@ -65,7 +65,10 @@ async fn main() -> Result<()> {
         .spider(
             Demo,
             on_item(|page: Page| async move {
-                println!("[item] {} -> {} ({} bytes)", page.url, page.status, page.bytes);
+                println!(
+                    "[item] {} -> {} ({} bytes)",
+                    page.url, page.status, page.bytes
+                );
             }),
         )
         .dashboard(port)

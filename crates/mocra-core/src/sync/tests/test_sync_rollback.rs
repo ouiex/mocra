@@ -1,12 +1,12 @@
-use crate::sync::{CoordinationBackend, SyncAble, SyncService};
 use crate::sync::distributed::SyncOptions;
+use crate::sync::{CoordinationBackend, SyncAble, SyncService};
 use async_trait::async_trait;
 use rmp_serde as rmps;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
-use tokio::time::{sleep, Duration};
+use tokio::time::{Duration, sleep};
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 struct TestState {
@@ -126,7 +126,10 @@ async fn test_sync_disallow_rollback_ignores_older_version() {
         value: TestState { value: 1 },
     };
     let older_bytes = rmps::to_vec(&older).expect("encode older");
-    backend.publish(&stream_topic, &older_bytes).await.expect("publish older");
+    backend
+        .publish(&stream_topic, &older_bytes)
+        .await
+        .expect("publish older");
 
     sleep(Duration::from_millis(200)).await;
     assert_eq!(sync.get(), Some(TestState { value: 2 }));

@@ -1,10 +1,10 @@
-use std::sync::RwLock;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tokio::time::sleep;
-use sysinfo::System;
-use log::{info, debug};
+use log::{debug, info};
 use once_cell::sync::Lazy;
 use serde::Serialize;
+use std::sync::RwLock;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use sysinfo::System;
+use tokio::time::sleep;
 
 /// 主机资源快照(供 dashboard `GET /observability/system` 消费)。
 #[derive(Debug, Clone, Serialize)]
@@ -93,15 +93,33 @@ impl SystemMonitor {
 
             crate::common::metrics::set_component_health("system_monitor", true);
             crate::common::metrics::observe_resource("cpu_usage_percent", snap.cpu_usage_percent);
-            crate::common::metrics::observe_resource("memory_used_bytes", snap.memory_used_bytes as f64);
-            crate::common::metrics::observe_resource("memory_total_bytes", snap.memory_total_bytes as f64);
-            crate::common::metrics::observe_resource("memory_usage_percent", snap.memory_usage_percent);
-            crate::common::metrics::observe_resource("swap_used_bytes", snap.swap_used_bytes as f64);
-            crate::common::metrics::observe_resource("swap_total_bytes", snap.swap_total_bytes as f64);
+            crate::common::metrics::observe_resource(
+                "memory_used_bytes",
+                snap.memory_used_bytes as f64,
+            );
+            crate::common::metrics::observe_resource(
+                "memory_total_bytes",
+                snap.memory_total_bytes as f64,
+            );
+            crate::common::metrics::observe_resource(
+                "memory_usage_percent",
+                snap.memory_usage_percent,
+            );
+            crate::common::metrics::observe_resource(
+                "swap_used_bytes",
+                snap.swap_used_bytes as f64,
+            );
+            crate::common::metrics::observe_resource(
+                "swap_total_bytes",
+                snap.swap_total_bytes as f64,
+            );
 
             debug!(
                 "System Metrics: CPU: {:.2}%, Mem: {:.2}% ({}/{})",
-                snap.cpu_usage_percent, snap.memory_usage_percent, snap.memory_used_bytes, snap.memory_total_bytes
+                snap.cpu_usage_percent,
+                snap.memory_usage_percent,
+                snap.memory_used_bytes,
+                snap.memory_total_bytes
             );
 
             store_snapshot(snap);

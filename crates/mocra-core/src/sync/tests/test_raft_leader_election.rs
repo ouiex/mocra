@@ -57,7 +57,10 @@ async fn raft_backend_pubsub_across_nodes() {
         .iter()
         .filter(|&&b| b)
         .count();
-    assert_eq!(leaders, 1, "exactly one node must report is_leader (seed-dedup basis)");
+    assert_eq!(
+        leaders, 1,
+        "exactly one node must report is_leader (seed-dedup basis)"
+    );
 
     // 节点 2 订阅;节点 1 发布(写经转发到 leader,复制到节点 2 本地 redb)。
     let mut rx = be2.subscribe("evt").await.unwrap();

@@ -9,7 +9,11 @@ impl Engine {
         };
 
         let log_rx = event_bus.subscribe("*".to_string()).await;
-        crate::engine::events::handlers::console_handler::ConsoleLogHandler::start(log_rx, "INFO".to_string()).await;
+        crate::engine::events::handlers::console_handler::ConsoleLogHandler::start(
+            log_rx,
+            "INFO".to_string(),
+        )
+        .await;
 
         let config = self.state.config.read().await;
         if let Some(redis_config) = &config.cookie {
@@ -23,11 +27,8 @@ impl Engine {
                 redis_config.tls.unwrap_or(false),
             ) {
                 let redis_rx = event_bus.subscribe("*".to_string()).await;
-                let redis_handler = RedisEventHandler::new(
-                    Arc::new(pool),
-                    config.name.clone(),
-                    3600,
-                );
+                let redis_handler =
+                    RedisEventHandler::new(Arc::new(pool), config.name.clone(), 3600);
                 redis_handler.start(redis_rx).await;
 
                 info!(
@@ -72,7 +73,9 @@ impl Engine {
                 self.start_api(api.port).await;
                 info!("API server started on host:  http://127.0.0.1:{}", api.port);
                 if api.api_key.is_none() {
-                    warn!("No API Key configured; API requests will be rejected. Set 'api.api_key' in config to enable access.");
+                    warn!(
+                        "No API Key configured; API requests will be rejected. Set 'api.api_key' in config to enable access."
+                    );
                 }
             }
         }

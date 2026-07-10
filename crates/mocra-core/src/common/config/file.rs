@@ -1,10 +1,10 @@
-use async_trait::async_trait;
-use crate::common::model::config::Config;
 use super::ConfigProvider;
-use tokio::sync::watch;
+use crate::common::model::config::Config;
+use async_trait::async_trait;
+use log::{error, info};
 use std::path::PathBuf;
 use std::time::Duration;
-use log::{error, info};
+use tokio::sync::watch;
 
 /// File-based configuration provider.
 ///
@@ -43,19 +43,20 @@ impl ConfigProvider for FileConfigProvider {
                 tokio::time::sleep(Duration::from_secs(5)).await;
                 if let Ok(metadata) = std::fs::metadata(&path)
                     && let Ok(modified) = metadata.modified()
-                        && last_modified != Some(modified) {
-                            last_modified = Some(modified);
-                            info!("Config file changed, reloading...");
-                            match Config::load(path.to_str().unwrap_or_default()) {
-                                Ok(config) => {
-                                    if let Err(e) = tx.send(config) {
-                                        error!("Failed to send config update: {}", e);
-                                        break;
-                                    }
-                                }
-                                Err(e) => error!("Failed to reload config: {}", e),
+                    && last_modified != Some(modified)
+                {
+                    last_modified = Some(modified);
+                    info!("Config file changed, reloading...");
+                    match Config::load(path.to_str().unwrap_or_default()) {
+                        Ok(config) => {
+                            if let Err(e) = tx.send(config) {
+                                error!("Failed to send config update: {}", e);
+                                break;
                             }
                         }
+                        Err(e) => error!("Failed to reload config: {}", e),
+                    }
+                }
             }
         });
 
@@ -105,7 +106,7 @@ mod tests {
             compression_threshold = 1024
         "#;
         write!(file, "{}", config_content).unwrap();
-        
+
         let provider = FileConfigProvider::new(file.path().to_str().unwrap());
         let config = provider.load_config().await;
         assert!(config.is_ok(), "Config load failed: {:?}", config.err());

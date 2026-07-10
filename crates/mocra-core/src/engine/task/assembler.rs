@@ -4,7 +4,9 @@ use crate::common::model::ModuleConfig;
 #[cfg(feature = "store")]
 use crate::common::model::entity::*;
 #[cfg(feature = "store")]
-use crate::common::model::entity::{RelModuleDataMiddlewareModel, RelModuleDownloadMiddlewareModel};
+use crate::common::model::entity::{
+    RelModuleDataMiddlewareModel, RelModuleDownloadMiddlewareModel,
+};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -191,21 +193,24 @@ impl ModuleAssembler {
         self.modules
             .retain(|_, w| w.origin.as_deref().map(|p| p != origin).unwrap_or(true));
     }
-    pub fn module_names(&self) -> Vec<String> { self.modules.keys().cloned().collect() }
+    pub fn module_names(&self) -> Vec<String> {
+        self.modules.keys().cloned().collect()
+    }
     pub fn set_origin(&mut self, names: &[String], origin: &Path) {
         for n in names {
-            if let Some(item) = self.modules.get_mut(n) { item.origin = Some(origin.to_path_buf()); }
+            if let Some(item) = self.modules.get_mut(n) {
+                item.origin = Some(origin.to_path_buf());
+            }
         }
     }
     /// Returns a module by name.
     pub fn get_module(&self, name: &str) -> Option<Arc<dyn ModuleTrait>> {
         self.modules.get(name).map(|x| x.module.clone())
     }
-    
+
     pub fn get_all_modules(&self) -> Vec<Arc<dyn ModuleTrait>> {
         self.modules.values().map(|x| x.module.clone()).collect()
     }
-
 }
 
 impl Default for ModuleAssembler {

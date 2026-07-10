@@ -1,5 +1,5 @@
-pub mod config;
 pub mod chain_key;
+pub mod config;
 pub mod context;
 pub mod cookies;
 pub mod cron_config;
@@ -8,8 +8,8 @@ pub mod download_config;
 #[cfg(feature = "store")]
 pub use mocra_store::entity;
 pub mod headers;
-pub mod login_info;
 pub mod logger_config;
+pub mod login_info;
 pub mod message;
 pub mod meta;
 pub mod model_config;
@@ -25,7 +25,7 @@ pub use cookies::Cookies;
 pub use cron_config::{CronConfig, CronInterval};
 pub use headers::Headers;
 pub use model_config::ModuleConfig;
-pub use priority::{Priority, Prioritizable};
+pub use priority::{Prioritizable, Priority};
 pub use request::Request;
 pub use response::Response;
 pub use scope::{AccountInfo, PlatformInfo};

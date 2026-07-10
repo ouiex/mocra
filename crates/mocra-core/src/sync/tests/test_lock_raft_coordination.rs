@@ -28,22 +28,28 @@ async fn lock_manager_routes_through_raft_coordination() {
         DistributedLockManager::new_with_coordination(None, Some(backend.clone()), "cluster");
 
     // A 抢到锁;B 抢同名锁应失败(强一致互斥,非进程内)。
-    assert!(node_a
-        .acquire_lock("job", 30, Duration::from_millis(200))
-        .await
-        .unwrap());
-    assert!(!node_b
-        .acquire_lock("job", 30, Duration::from_millis(200))
-        .await
-        .unwrap());
+    assert!(
+        node_a
+            .acquire_lock("job", 30, Duration::from_millis(200))
+            .await
+            .unwrap()
+    );
+    assert!(
+        !node_b
+            .acquire_lock("job", 30, Duration::from_millis(200))
+            .await
+            .unwrap()
+    );
     assert!(node_a.is_lock_valid("job").await.unwrap());
 
     // A 提前释放(不等 TTL),B 随即可抢到。
     assert!(node_a.release_lock("job").await.unwrap());
-    assert!(node_b
-        .acquire_lock("job", 30, Duration::from_millis(500))
-        .await
-        .unwrap());
+    assert!(
+        node_b
+            .acquire_lock("job", 30, Duration::from_millis(500))
+            .await
+            .unwrap()
+    );
     assert!(node_b.is_lock_valid("job").await.unwrap());
     assert!(!node_a.is_lock_valid("job").await.unwrap());
 }

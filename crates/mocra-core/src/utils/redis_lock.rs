@@ -1,6 +1,9 @@
 #![allow(unused)]
 use dashmap::DashMap;
-use deadpool_redis::{Config, Runtime,redis::{AsyncCommands,Script}};
+use deadpool_redis::{
+    Config, Runtime,
+    redis::{AsyncCommands, Script},
+};
 use log::trace;
 use std::collections::HashMap;
 use std::future::Future;
@@ -200,7 +203,7 @@ impl AdvancedDistributedLock {
 
                     match pool.get().await {
                         Ok(mut conn) => {
-                            let result: Result<i32, _> =  deadpool_redis::redis::Script::new(script)
+                            let result: Result<i32, _> = deadpool_redis::redis::Script::new(script)
                                 .key(&key)
                                 .arg(&value)
                                 .arg(ttl)
@@ -268,7 +271,7 @@ impl AdvancedDistributedLock {
         "#;
 
             let mut conn = pool.get().await?;
-            let result: i32 =  deadpool_redis::redis::Script::new(script)
+            let result: i32 = deadpool_redis::redis::Script::new(script)
                 .key(&self.lock_info.key)
                 .arg(&self.lock_info.value)
                 .invoke_async(&mut *conn)
@@ -456,7 +459,11 @@ impl DistributedLockManager {
             Some(self.local_locks.clone()),
             full_lock_name,
             ttl_seconds,
-            if self.redis_pool.is_some() { Duration::from_millis(50) } else { Duration::from_millis(1) },
+            if self.redis_pool.is_some() {
+                Duration::from_millis(50)
+            } else {
+                Duration::from_millis(1)
+            },
             max_wait,
         )
         .await?
@@ -484,12 +491,8 @@ impl DistributedLockManager {
         loop {
             match backend.acquire_lock(&full, value.as_bytes(), ttl_ms).await {
                 Ok(true) => {
-                    let handle = spawn_coord_renewal(
-                        backend.clone(),
-                        full.clone(),
-                        value.clone(),
-                        ttl_ms,
-                    );
+                    let handle =
+                        spawn_coord_renewal(backend.clone(), full.clone(), value.clone(), ttl_ms);
                     self.coord_locks.insert(
                         lock_name.to_string(),
                         CoordinationLock {
@@ -574,7 +577,11 @@ impl DistributedLockManager {
         // (parking_lot RwLock blocks the OS thread).
         let snapshot = self.locks.get(lock_name).map(|l| {
             let lock = l.value();
-            (lock.pool.clone(), lock.local_map.clone(), lock.lock_info.clone())
+            (
+                lock.pool.clone(),
+                lock.local_map.clone(),
+                lock.lock_info.clone(),
+            )
         });
         // guard dropped here
         if let Some((pool, local_map, lock_info)) = snapshot {
@@ -601,7 +608,6 @@ impl DistributedLockManager {
         self.redis_pool.as_ref().map(|p| p.as_ref())
     }
 }
-
 
 // DistributedLockManager is Send + Sync via its fields (Arc<Pool>, Arc<RwLock<...>>)
 // Rely on compiler to enforce/derive thread-safety without unsafe impls.

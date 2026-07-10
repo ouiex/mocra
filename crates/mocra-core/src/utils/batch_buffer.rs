@@ -1,18 +1,23 @@
+use std::future::Future;
+use std::pin::Pin;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::time::interval;
-use std::future::Future;
-use std::pin::Pin;
 
 pub struct BatchBuffer<T> {
     sender: mpsc::Sender<T>,
 }
 
-impl<T> BatchBuffer<T> 
-where 
+impl<T> BatchBuffer<T>
+where
     T: Send + 'static,
 {
-    pub fn new<F, Fut>(capacity: usize, batch_size: usize, timeout: Duration, flush_callback: F) -> Self
+    pub fn new<F, Fut>(
+        capacity: usize,
+        batch_size: usize,
+        timeout: Duration,
+        flush_callback: F,
+    ) -> Self
     where
         F: Fn(Vec<T>) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = ()> + Send + 'static,
@@ -82,7 +87,7 @@ mod tests {
                 async move {
                     received.lock().unwrap().extend(items);
                 }
-            }
+            },
         );
 
         buffer.add(1).await.unwrap();
@@ -103,20 +108,15 @@ mod tests {
         let received = Arc::new(Mutex::new(Vec::new()));
         let received_clone = received.clone();
 
-        let buffer = BatchBuffer::new(
-            10,
-            10,
-            Duration::from_millis(200),
-            move |items| {
-                let received = received_clone.clone();
-                async move {
-                    received.lock().unwrap().extend(items);
-                }
+        let buffer = BatchBuffer::new(10, 10, Duration::from_millis(200), move |items| {
+            let received = received_clone.clone();
+            async move {
+                received.lock().unwrap().extend(items);
             }
-        );
+        });
 
         buffer.add(1).await.unwrap();
-        
+
         sleep(Duration::from_millis(300)).await;
 
         {

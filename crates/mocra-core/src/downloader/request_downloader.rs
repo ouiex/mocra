@@ -1,27 +1,27 @@
+use crate::cacheable::{CacheAble, CacheService};
+use crate::common::model::cookies::CookieItem;
+use crate::common::model::download_config::DownloadConfig;
+use crate::common::model::headers::HeaderItem;
+use crate::common::model::{Cookies, Headers, Request, Response};
 use crate::downloader::Downloader;
 use crate::errors::{DownloadError, RequestError, Result};
+use crate::utils::distributed_rate_limit::DistributedSlidingWindowRateLimiter;
+use crate::utils::redis_lock::DistributedLockManager;
+use dashmap::DashMap;
 use futures::StreamExt;
 use log::{info, warn};
+use rand::Rng;
 use reqwest::Client;
 use reqwest::Method;
 use reqwest::Proxy;
 use reqwest::header::HeaderMap;
 use semver::Version;
-use std::str::FromStr;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
-use std::time::{Duration, UNIX_EPOCH, Instant};
-use url::Url;
-use crate::utils::distributed_rate_limit::DistributedSlidingWindowRateLimiter;
-use crate::utils::redis_lock::DistributedLockManager;
-use crate::cacheable::{CacheService,CacheAble};
-use crate::common::model::{Cookies, Headers, Request, Response};
-use crate::common::model::cookies::CookieItem;
-use crate::common::model::download_config::DownloadConfig;
-use crate::common::model::headers::HeaderItem;
-use dashmap::DashMap;
-use rand::Rng;
 use serde::{Deserialize, Serialize};
+use std::str::FromStr;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant, UNIX_EPOCH};
+use url::Url;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct SessionState {
@@ -88,10 +88,10 @@ impl RequestDownloader {
         let default_client = Client::builder()
             .pool_idle_timeout(Duration::from_secs(90))
             // Increase pool size to allow high concurrency
-            // Default reqwest is usually unlimited? No, check docs. 
-            // pool_max_idle_per_host default is 32. 
+            // Default reqwest is usually unlimited? No, check docs.
+            // pool_max_idle_per_host default is 32.
             // If we hit one host, we need this much higher.
-            .pool_max_idle_per_host(pool_size) 
+            .pool_max_idle_per_host(pool_size)
             .tcp_keepalive(Duration::from_secs(60))
             .tcp_nodelay(true)
             .connect_timeout(Duration::from_secs(10))
@@ -240,10 +240,8 @@ impl RequestDownloader {
         if let Some(cache_headers) = &request.cache_headers
             && !cache_headers.is_empty()
         {
-            let cache_headers_set: std::collections::HashSet<String> = cache_headers
-                .iter()
-                .map(|h| h.to_lowercase())
-                .collect();
+            let cache_headers_set: std::collections::HashSet<String> =
+                cache_headers.iter().map(|h| h.to_lowercase()).collect();
 
             for (name, value) in &response.headers {
                 if !cache_headers_set.contains(&name.to_lowercase()) {
@@ -277,7 +275,10 @@ impl RequestDownloader {
         }
 
         session_state.version = session_state.version.saturating_add(1);
-        if let Err(err) = session_state.send_persistent(session_key, &self.cache_service).await {
+        if let Err(err) = session_state
+            .send_persistent(session_key, &self.cache_service)
+            .await
+        {
             warn!(
                 "Failed to cache session state: session={} account={} platform={} url={} error={:?}",
                 session_key, request.account, request.platform, request.url, err
@@ -325,7 +326,10 @@ impl RequestDownloader {
         let content_length = response.content_length();
         if let Some(len) = content_length {
             if len > self.max_response_size as u64 {
-                warn!("Response size {} exceeds limit {}, aborting download for {}", len, self.max_response_size, request.url);
+                warn!(
+                    "Response size {} exceeds limit {}, aborting download for {}",
+                    len, self.max_response_size, request.url
+                );
                 return Err(DownloadError::DownloadFailed("Response too large".into()).into());
             }
         }
@@ -342,9 +346,13 @@ impl RequestDownloader {
             let mut buf = Vec::new();
             let mut stream = response.bytes_stream();
             while let Some(item) = stream.next().await {
-                let chunk = item.map_err(|e: reqwest::Error| DownloadError::DownloadFailed(e.into()))?;
+                let chunk =
+                    item.map_err(|e: reqwest::Error| DownloadError::DownloadFailed(e.into()))?;
                 if buf.len() + chunk.len() > limit {
-                    warn!("Response size exceeds limit {}, aborting download for {}", limit, url_for_log);
+                    warn!(
+                        "Response size exceeds limit {}, aborting download for {}",
+                        limit, url_for_log
+                    );
                     return Err(DownloadError::DownloadFailed("Response too large".into()).into());
                 }
                 buf.extend_from_slice(&chunk);
@@ -353,7 +361,11 @@ impl RequestDownloader {
         })
         .await
         .map_err(|_| {
-            warn!("Body read timed out after {}s for {}", body_timeout.as_secs(), url_for_log);
+            warn!(
+                "Body read timed out after {}s for {}",
+                body_timeout.as_secs(),
+                url_for_log
+            );
             crate::errors::Error::from(DownloadError::DownloadFailed(
                 format!("body read timed out after {}s", body_timeout.as_secs()).into(),
             ))
@@ -390,8 +402,9 @@ impl RequestDownloader {
                 entry.1 = Instant::now();
                 return Ok(entry.0.clone());
             }
-            
-            let reqwest_proxy = Proxy::all(proxy_url).map_err(|e| DownloadError::ClientError(e.into()))?;
+
+            let reqwest_proxy =
+                Proxy::all(proxy_url).map_err(|e| DownloadError::ClientError(e.into()))?;
             let client = Client::builder()
                 .proxy(reqwest_proxy)
                 .pool_idle_timeout(Duration::from_secs(90))
@@ -402,10 +415,11 @@ impl RequestDownloader {
                 .http2_keep_alive_interval(Some(Duration::from_secs(30)))
                 .build()
                 .map_err(|e| DownloadError::ClientError(e.into()))?;
-            
+
             // Limit cache size to prevent OOM with high-cardinality dynamic proxies
             if self.proxy_clients.len() < 1000 {
-                self.proxy_clients.insert(proxy_url.clone(), (client.clone(), Instant::now()));
+                self.proxy_clients
+                    .insert(proxy_url.clone(), (client.clone(), Instant::now()));
             }
             Ok(client)
         } else {
@@ -413,16 +427,23 @@ impl RequestDownloader {
         }
     }
 
-    async fn do_download(&self, request: Request, pre_calculated_hash: Option<String>) -> Result<Response> {
+    async fn do_download(
+        &self,
+        request: Request,
+        pre_calculated_hash: Option<String>,
+    ) -> Result<Response> {
         let _request_id = request.id;
         let session_enabled = self.is_session_enabled(&request);
         if let Some(seconds) = request.time_sleep_secs {
             tokio::time::sleep(Duration::from_secs(seconds)).await;
         }
         let rate_limit_enabled = self.enable_rate_limit.load(Ordering::Relaxed);
-        info!("[do_download] enable_rate_limit={} request_id={}", rate_limit_enabled, request.id);
+        info!(
+            "[do_download] enable_rate_limit={} request_id={}",
+            rate_limit_enabled, request.id
+        );
         if rate_limit_enabled {
-             // Use module_id as default limit_id if not specified
+            // Use module_id as default limit_id if not specified
             let limit_id = if request.limit_id.is_empty() {
                 request.module_id()
             } else {
@@ -440,7 +461,8 @@ impl RequestDownloader {
         let proxy_url = request.proxy.as_ref().map(|p| p.to_string());
         let client = self.get_client(proxy_url.as_ref()).await?;
 
-        let method = Method::from_str(&request.method).map_err(|e| RequestError::InvalidMethod(e.into()))?;
+        let method =
+            Method::from_str(&request.method).map_err(|e| RequestError::InvalidMethod(e.into()))?;
         let url = match &request.params {
             Some(params) => Url::parse_with_params(&request.url, params)
                 .map_err(|e| RequestError::InvalidUrl(e.to_string()))?,
@@ -456,11 +478,11 @@ impl RequestDownloader {
         };
 
         let mut request_builder = client.request(method, url);
-        
+
         // Set Headers
         let headers: HeaderMap = HeaderMap::from(&request.headers);
         request_builder = request_builder.headers(headers);
-        
+
         // Set Cookies manually (filtered by target URL domain/path rules)
         if let Some(cookie_str) = cookie_header {
             request_builder = request_builder.header(reqwest::header::COOKIE, cookie_str);
@@ -481,16 +503,20 @@ impl RequestDownloader {
         if let Some(json) = request.json.take() {
             request_builder = request_builder.json(&json);
         }
-        
+
         let start = std::time::Instant::now();
-        let result = request_builder
-            .send()
-            .await;
+        let result = request_builder.send().await;
 
         let response = match result {
             Ok(res) => res,
             Err(e) => {
-                crate::common::metrics::inc_error("engine", "downloader", "network", "send_failed", 1);
+                crate::common::metrics::inc_error(
+                    "engine",
+                    "downloader",
+                    "network",
+                    "send_failed",
+                    1,
+                );
                 // Circuit Breaker for Network Errors (Timeout, Connection Refused)
                 if self.enable_rate_limit.load(Ordering::Relaxed) {
                     let limit_id = if request.limit_id.is_empty() {
@@ -498,12 +524,18 @@ impl RequestDownloader {
                     } else {
                         request.limit_id.clone()
                     };
-                    
+
                     if e.is_connect() || e.is_timeout() {
-                         // Use a shorter suspension for network errors (10s) compared to 429s (60s)
-                         // This prevents a single proxy timeout from stalling the crawler for too long
-                         warn!("Circuit Breaker triggered for {} due to network error: {}. Suspending for 10s.", limit_id, e);
-                         self.limit.suspend(&limit_id, Duration::from_secs(10)).await.ok();
+                        // Use a shorter suspension for network errors (10s) compared to 429s (60s)
+                        // This prevents a single proxy timeout from stalling the crawler for too long
+                        warn!(
+                            "Circuit Breaker triggered for {} due to network error: {}. Suspending for 10s.",
+                            limit_id, e
+                        );
+                        self.limit
+                            .suspend(&limit_id, Duration::from_secs(10))
+                            .await
+                            .ok();
                     }
                 }
                 return Err(DownloadError::DownloadFailed(e.into()).into());
@@ -516,22 +548,40 @@ impl RequestDownloader {
             } else {
                 request.limit_id.clone()
             };
-            
+
             let status = response.status();
             if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-                warn!("Circuit Breaker triggered for {}, suspending for 60s", limit_id);
-                self.limit.suspend(&limit_id, Duration::from_secs(60)).await.ok();
+                warn!(
+                    "Circuit Breaker triggered for {}, suspending for 60s",
+                    limit_id
+                );
+                self.limit
+                    .suspend(&limit_id, Duration::from_secs(60))
+                    .await
+                    .ok();
             } else if status == reqwest::StatusCode::SERVICE_UNAVAILABLE {
                 warn!("Backpressure triggered for {}, decreasing limit", limit_id);
                 self.limit.decrease_limit(&limit_id, 0.5).await.ok();
             } else if status.is_success() && rand::rng().random_bool(0.1) {
-                 self.limit.try_restore_limit(&limit_id, 1.1).await.ok();
+                self.limit.try_restore_limit(&limit_id, 1.1).await.ok();
             }
         }
-            
+
         let duration = start.elapsed().as_secs_f64();
-        crate::common::metrics::observe_latency("engine", "downloader", "http_request", "success", duration);
-        crate::common::metrics::inc_throughput("engine", "downloader", "http_request", "success", 1);
+        crate::common::metrics::observe_latency(
+            "engine",
+            "downloader",
+            "http_request",
+            "success",
+            duration,
+        );
+        crate::common::metrics::inc_throughput(
+            "engine",
+            "downloader",
+            "http_request",
+            "success",
+            1,
+        );
 
         let session_info = if session_enabled {
             Some((
@@ -544,12 +594,19 @@ impl RequestDownloader {
             None
         };
 
-        let response_processed = self.process_response(request, response, pre_calculated_hash.clone()).await?;
+        let response_processed = self
+            .process_response(request, response, pre_calculated_hash.clone())
+            .await?;
 
         if let Some((session_key, module_id, request_for_cache, existing_session)) = session_info {
-            self
-                .save_session_state(&session_key, module_id, &request_for_cache, &response_processed, existing_session)
-                .await;
+            self.save_session_state(
+                &session_key,
+                module_id,
+                &request_for_cache,
+                &response_processed,
+                existing_session,
+            )
+            .await;
         }
 
         Ok(response_processed)
@@ -562,20 +619,31 @@ impl RequestDownloader {
 impl Downloader for RequestDownloader {
     async fn set_config(&self, id: &str, config: DownloadConfig) {
         if config.enable_session {
-             // Cache clearing logic if needed
+            // Cache clearing logic if needed
         }
         if self.enable_session.load(Ordering::Relaxed) != config.enable_session {
-            self.enable_session.store(config.enable_session, Ordering::Relaxed);
+            self.enable_session
+                .store(config.enable_session, Ordering::Relaxed);
         }
         if self.enable_locker.load(Ordering::Relaxed) != config.enable_locker {
-            self.enable_locker.store(config.enable_locker, Ordering::Relaxed);
+            self.enable_locker
+                .store(config.enable_locker, Ordering::Relaxed);
         }
-        info!("[set_config] id={} config.enable_rate_limit={} current={}", 
-            id, config.enable_rate_limit, self.enable_rate_limit.load(Ordering::Relaxed));
+        info!(
+            "[set_config] id={} config.enable_rate_limit={} current={}",
+            id,
+            config.enable_rate_limit,
+            self.enable_rate_limit.load(Ordering::Relaxed)
+        );
         if self.enable_rate_limit.load(Ordering::Relaxed) != config.enable_rate_limit {
-            info!("[set_config] changing enable_rate_limit from {} to {} for id={}", 
-                self.enable_rate_limit.load(Ordering::Relaxed), config.enable_rate_limit, id);
-            self.enable_rate_limit.store(config.enable_rate_limit, Ordering::Relaxed);
+            info!(
+                "[set_config] changing enable_rate_limit from {} to {} for id={}",
+                self.enable_rate_limit.load(Ordering::Relaxed),
+                config.enable_rate_limit,
+                id
+            );
+            self.enable_rate_limit
+                .store(config.enable_rate_limit, Ordering::Relaxed);
         }
         self.limit.set_limit(id, config.rate_limit).await.ok();
     }
@@ -600,52 +668,67 @@ impl Downloader for RequestDownloader {
             None
         };
         if let Some(hash) = request_hash.as_ref()
-            && let Ok(Some(response)) = Response::sync(hash, &self.cache_service).await {
-                info!("Cache hit: request_id={} account={} platform={} url={}", request.id, request.account, request.platform, request.url);
-                if session_enabled {
-                    let session_key = self.session_scope_key(&request);
-                    let module_id = request.module_id();
-                    // Response cache hit: load existing session first so we merge rather than overwrite.
-                    let existing_session = match SessionState::sync(&session_key, &self.cache_service).await {
-                        Ok(v) => v,
-                        Err(err) => {
-                            warn!("Session load failed (cache hit path): session={} account={} platform={} url={} error={:?}",
-                                session_key, request.account, request.platform, request.url, err);
-                            None
-                        }
-                    };
-                    self
-                        .save_session_state(&session_key, module_id, &request, &response, existing_session)
-                        .await;
-                }
-                return Ok(Response {
-                    id: request.id,
-                    platform: request.platform.clone(),
-                    account: request.account.clone(),
-                    module: request.module.clone(),
-                    status_code: response.status_code,
-                    cookies: Cookies {
-                        cookies: response.cookies.cookies,
-                    },
-                    content: response.content,
-                    storage_path: response.storage_path,
-                    headers: response.headers,
-                    task_retry_times: request.task_retry_times,
-                    metadata: request.meta.clone(),
-                    download_middleware: request.download_middleware.clone(),
-                    data_middleware: request.data_middleware.clone(),
-                    task_finished: request.task_finished,
-                    context: request.context.clone(),
-                    run_id: request.run_id,
-                    prefix_request: request.id,
-                    request_hash: request_hash.clone(),
-                    priority: request.priority,
-                });
+            && let Ok(Some(response)) = Response::sync(hash, &self.cache_service).await
+        {
+            info!(
+                "Cache hit: request_id={} account={} platform={} url={}",
+                request.id, request.account, request.platform, request.url
+            );
+            if session_enabled {
+                let session_key = self.session_scope_key(&request);
+                let module_id = request.module_id();
+                // Response cache hit: load existing session first so we merge rather than overwrite.
+                let existing_session = match SessionState::sync(&session_key, &self.cache_service)
+                    .await
+                {
+                    Ok(v) => v,
+                    Err(err) => {
+                        warn!(
+                            "Session load failed (cache hit path): session={} account={} platform={} url={} error={:?}",
+                            session_key, request.account, request.platform, request.url, err
+                        );
+                        None
+                    }
+                };
+                self.save_session_state(
+                    &session_key,
+                    module_id,
+                    &request,
+                    &response,
+                    existing_session,
+                )
+                .await;
             }
-        
+            return Ok(Response {
+                id: request.id,
+                platform: request.platform.clone(),
+                account: request.account.clone(),
+                module: request.module.clone(),
+                status_code: response.status_code,
+                cookies: Cookies {
+                    cookies: response.cookies.cookies,
+                },
+                content: response.content,
+                storage_path: response.storage_path,
+                headers: response.headers,
+                task_retry_times: request.task_retry_times,
+                metadata: request.meta.clone(),
+                download_middleware: request.download_middleware.clone(),
+                data_middleware: request.data_middleware.clone(),
+                task_finished: request.task_finished,
+                context: request.context.clone(),
+                run_id: request.run_id,
+                prefix_request: request.id,
+                request_hash: request_hash.clone(),
+                priority: request.priority,
+            });
+        }
+
         // Determine if locking is enabled: prefer request-level config, fallback to global config
-        let locker_enabled = request.enable_locker.unwrap_or(self.enable_locker.load(Ordering::Relaxed));
-        
+        let locker_enabled = request
+            .enable_locker
+            .unwrap_or(self.enable_locker.load(Ordering::Relaxed));
+
         if locker_enabled {
             // Use module_id + run_id as lock key to serialize requests within the same run execution
             // Reduced timeout to minimize blocking on high concurrency
@@ -667,7 +750,10 @@ impl Downloader for RequestDownloader {
                     // Lock acquisition failed (timeout/contention), proceed without lock to avoid starvation
                     warn!(
                         "Failed to acquire download lock: task_id={} account={} platform={} url={}, proceeding without lock",
-                        request.task_id(), request.account, request.platform, request.url
+                        request.task_id(),
+                        request.account,
+                        request.platform,
+                        request.url
                     );
                     self.do_download(request, request_hash.clone()).await
                 }
@@ -688,18 +774,24 @@ impl Downloader for RequestDownloader {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
     use crate::utils::distributed_rate_limit::RateLimitConfig;
+    use std::sync::Arc;
     use uuid::Uuid;
 
     #[tokio::test]
     async fn test_downloader_creation() {
         let lock_manager = Arc::new(DistributedLockManager::new(None, "test"));
         let config = RateLimitConfig::new(10.0);
-        let limiter = Arc::new(DistributedSlidingWindowRateLimiter::new(None, lock_manager.clone(), "test", config));
+        let limiter = Arc::new(DistributedSlidingWindowRateLimiter::new(
+            None,
+            lock_manager.clone(),
+            "test",
+            config,
+        ));
         let cache_service = Arc::new(CacheService::new(None, "test".to_string(), None, None));
 
-        let downloader = RequestDownloader::new(limiter, lock_manager, cache_service, 200, 1024*1024*10);
+        let downloader =
+            RequestDownloader::new(limiter, lock_manager, cache_service, 200, 1024 * 1024 * 10);
         assert_eq!(downloader.name(), "request_downloader");
     }
 
@@ -707,15 +799,26 @@ mod tests {
     async fn test_downloader_rate_limit_execution() {
         let lock_manager = Arc::new(DistributedLockManager::new(None, "test_exec"));
         let config = RateLimitConfig::new(10.0); // 10 req/s = 100ms interval
-        let limiter = Arc::new(DistributedSlidingWindowRateLimiter::new(None, lock_manager.clone(), "test_exec", config));
+        let limiter = Arc::new(DistributedSlidingWindowRateLimiter::new(
+            None,
+            lock_manager.clone(),
+            "test_exec",
+            config,
+        ));
         let cache_service = Arc::new(CacheService::new(None, "test".to_string(), None, None));
-        
-        let downloader = RequestDownloader::new(limiter.clone(), lock_manager, cache_service, 200, 1024*1024*10);
+
+        let downloader = RequestDownloader::new(
+            limiter.clone(),
+            lock_manager,
+            cache_service,
+            200,
+            1024 * 1024 * 10,
+        );
         downloader.enable_rate_limit.store(true, Ordering::Relaxed);
 
         // Set a strict limit: 1 req per second
         downloader.set_limit("test_exec", 1.0).await;
-        
+
         // Mock request
         let mut request = Request::new("http://example.com", "GET");
         request.id = Uuid::new_v4();
@@ -723,9 +826,9 @@ mod tests {
 
         // First request - should consume token
         limiter.record("test_exec").await.unwrap();
-        
+
         // Verify next request would be delayed
-        // (We can't easily run do_download without a real network or mocking client, 
+        // (We can't easily run do_download without a real network or mocking client,
         // so we check the limiter state which RequestDownloader uses)
         let delay = limiter.verify("test_exec").await.unwrap();
         assert!(delay.is_some());

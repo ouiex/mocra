@@ -7,17 +7,17 @@
 //!
 //! 控制面流量小(成员 / 锁 / 配置 / 心跳),HTTP/msgpack 足够且自包含(无需 protobuf codegen)。
 
+use axum::Router;
 use axum::body::Bytes;
 use axum::extract::State;
 use axum::routing::post;
-use axum::Router;
+use openraft::BasicNode;
 use openraft::error::{InstallSnapshotError, NetworkError, RPCError, RaftError, RemoteError};
 use openraft::network::{RPCOption, RaftNetwork, RaftNetworkFactory};
 use openraft::raft::{
     AppendEntriesRequest, AppendEntriesResponse, InstallSnapshotRequest, InstallSnapshotResponse,
     VoteRequest, VoteResponse,
 };
-use openraft::BasicNode;
 use serde::{Deserialize, Serialize};
 
 use crate::cmd::{Cmd, CmdResult};
@@ -168,7 +168,10 @@ impl RaftNetwork<TypeConfig> for HttpConnection {
         _option: RPCOption,
     ) -> Result<AppendEntriesResponse<NodeId>, RPCError<NodeId, Node, RaftError<NodeId>>> {
         let body = rmp_serde::to_vec(&req).map_err(|e| RPCError::Network(NetworkError::new(&e)))?;
-        let bytes = self.post("/raft/append", body).await.map_err(RPCError::Network)?;
+        let bytes = self
+            .post("/raft/append", body)
+            .await
+            .map_err(RPCError::Network)?;
         let res: Result<AppendEntriesResponse<NodeId>, RaftError<NodeId>> =
             rmp_serde::from_slice(&bytes).map_err(|e| RPCError::Network(NetworkError::new(&e)))?;
         res.map_err(|e| RPCError::RemoteError(RemoteError::new(self.target, e)))
@@ -180,7 +183,10 @@ impl RaftNetwork<TypeConfig> for HttpConnection {
         _option: RPCOption,
     ) -> Result<VoteResponse<NodeId>, RPCError<NodeId, Node, RaftError<NodeId>>> {
         let body = rmp_serde::to_vec(&req).map_err(|e| RPCError::Network(NetworkError::new(&e)))?;
-        let bytes = self.post("/raft/vote", body).await.map_err(RPCError::Network)?;
+        let bytes = self
+            .post("/raft/vote", body)
+            .await
+            .map_err(RPCError::Network)?;
         let res: Result<VoteResponse<NodeId>, RaftError<NodeId>> =
             rmp_serde::from_slice(&bytes).map_err(|e| RPCError::Network(NetworkError::new(&e)))?;
         res.map_err(|e| RPCError::RemoteError(RemoteError::new(self.target, e)))

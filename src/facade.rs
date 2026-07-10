@@ -176,10 +176,7 @@ where
     F: Fn(Item) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = ()> + Send + 'static,
 {
-    ClosureSink {
-        f,
-        _p: PhantomData,
-    }
+    ClosureSink { f, _p: PhantomData }
 }
 
 /// 把每条 Item 送进一个 tokio channel 的 [`DataSink`]。
@@ -827,13 +824,9 @@ mod cluster_config_tests {
         );
 
         // 无种子 + 省略 data_dir → 自举 + 默认目录。
-        let boot = ClusterConfig::from_vars(
-            Some("1".into()),
-            Some("127.0.0.1:7001".into()),
-            None,
-            None,
-        )
-        .unwrap();
+        let boot =
+            ClusterConfig::from_vars(Some("1".into()), Some("127.0.0.1:7001".into()), None, None)
+                .unwrap();
         assert!(boot.seeds.is_empty());
         assert_eq!(boot.data_dir, "./mocra-data/node-1");
 

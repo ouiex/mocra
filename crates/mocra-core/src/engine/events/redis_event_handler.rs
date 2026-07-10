@@ -1,13 +1,13 @@
 use super::EventEnvelope;
 // use super::event_bus::EventHandler;
 // use async_trait::async_trait;
+use deadpool_redis::redis;
 use log::{error, warn};
 use serde_json::json;
 use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::timeout;
-use deadpool_redis::redis;
 
 /// Persists runtime events to Redis for downstream monitoring consumers.
 pub struct RedisEventHandler {
@@ -104,8 +104,6 @@ impl RedisEventHandler {
         Ok(())
     }
 
-
-
     /// Serializes an event envelope into a compact JSON payload.
     fn serialize_event(&self, event: &EventEnvelope) -> String {
         json!({
@@ -148,38 +146,38 @@ impl RedisEventHandler {
         let handler = Arc::new(self);
         tokio::spawn(async move {
             while let Some(event) = rx.recv().await {
-                    let event_type = event.event_key();
-                    let timestamp = event.timestamp_ms;
+                let event_type = event.event_key();
+                let timestamp = event.timestamp_ms;
 
-                    let event_data = handler.serialize_event(&event);
-                    let key = handler.generate_key(&event_type);
-                    let ts_key = handler.generate_timeseries_key(&event_type);
-                    let score = timestamp as f64;
-                    let member = &event_data;
+                let event_data = handler.serialize_event(&event);
+                let key = handler.generate_key(&event_type);
+                let ts_key = handler.generate_timeseries_key(&event_type);
+                let score = timestamp as f64;
+                let member = &event_data;
 
-                    // clone handler for the closure? no, closure captures handler (Arc)
-                    let h_clone = handler.clone();
-                    
-                    let operation = || async {
-                        let mut conn = h_clone.redis_pool
-                            .get()
-                            .await
-                            .map_err(|e| format!("Redis connection failed: {e}"))?;
+                // clone handler for the closure? no, closure captures handler (Arc)
+                let h_clone = handler.clone();
 
-                        let mut pipe = redis::pipe();
-                        pipe.rpush(&key, &event_data)
-                            .zadd(&ts_key, member, score);
+                let operation = || async {
+                    let mut conn = h_clone
+                        .redis_pool
+                        .get()
+                        .await
+                        .map_err(|e| format!("Redis connection failed: {e}"))?;
 
-                        let _: () = timeout(Duration::from_secs(5), async {
-                            pipe.query_async(&mut conn).await
-                        })
-                        .await??;
-                        Ok(())
-                    };
+                    let mut pipe = redis::pipe();
+                    pipe.rpush(&key, &event_data).zadd(&ts_key, member, score);
 
-                    if let Err(e) = handler.retry_operation(operation).await {
-                        error!("Failed to save event to Redis (pipeline): {}", e);
-                    }
+                    let _: () = timeout(Duration::from_secs(5), async {
+                        pipe.query_async(&mut conn).await
+                    })
+                    .await??;
+                    Ok(())
+                };
+
+                if let Err(e) = handler.retry_operation(operation).await {
+                    error!("Failed to save event to Redis (pipeline): {}", e);
+                }
             }
         });
     }

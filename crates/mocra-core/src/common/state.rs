@@ -3,33 +3,37 @@ use crate::utils::connector::create_redis_pool;
 #[cfg(feature = "store")]
 use crate::utils::connector::db_connection;
 
-use crate::common::model::config::{Config, RedisConfig};
 use crate::common::config::ConfigProvider;
 use crate::common::config::file::FileConfigProvider;
+use crate::common::model::config::{Config, RedisConfig};
 
-use crate::common::status_tracker::{ErrorTrackerConfig, StatusTracker};
 use crate::cacheable::CacheService;
-use log::{info, error};
-use std::sync::Arc;
-use std::time;
-use tokio::sync::RwLock;
+use crate::common::status_tracker::{ErrorTrackerConfig, StatusTracker};
 use crate::utils::distributed_rate_limit::{DistributedSlidingWindowRateLimiter, RateLimitConfig};
 use crate::utils::redis_lock::DistributedLockManager;
 use deadpool_redis::Pool;
+use log::{error, info};
+use std::sync::Arc;
+use std::time;
 use thiserror::Error;
+use tokio::sync::RwLock;
 
 #[derive(Debug, Error)]
 pub enum StateInitError {
     #[error("load config failed: {0}")]
     LoadConfig(String),
-    #[error("database connection failed (url={url:?}, schema={schema:?}, pool_size={pool_size:?}, tls={tls:?})")]
+    #[error(
+        "database connection failed (url={url:?}, schema={schema:?}, pool_size={pool_size:?}, tls={tls:?})"
+    )]
     DatabaseConnect {
         url: Option<String>,
         schema: Option<String>,
         pool_size: Option<u32>,
         tls: Option<bool>,
     },
-    #[error("redis pool creation failed ({name}): host={host}, port={port}, db={db}, tls={tls}, pool_size={pool_size:?}")]
+    #[error(
+        "redis pool creation failed ({name}): host={host}, port={port}, db={db}, tls={tls}, pool_size={pool_size:?}"
+    )]
     RedisPoolCreate {
         name: &'static str,
         host: String,
@@ -147,9 +151,13 @@ impl State {
         let single_node_mode = config.is_single_node_mode();
         info!(
             "Runtime mode initialized: {}",
-            if single_node_mode { "single_node" } else { "distributed" }
+            if single_node_mode {
+                "single_node"
+            } else {
+                "distributed"
+            }
         );
-        
+
         let watcher_res = provider.watch().await;
 
         #[cfg(feature = "store")]
@@ -176,7 +184,9 @@ impl State {
         #[cfg(not(feature = "store"))]
         let db: DbHandle = {
             if config.db.url.is_some() {
-                info!("db.url is set but the `store` feature is disabled; ignoring (standalone mode)");
+                info!(
+                    "db.url is set but the `store` feature is disabled; ignoring (standalone mode)"
+                );
             }
             None
         };
@@ -225,17 +235,19 @@ impl State {
 
         let api_limiter = if let Some(api) = &config.api {
             if let Some(limit) = api.rate_limit {
-                Some(Arc::new(DistributedSlidingWindowRateLimiter::new_with_coordination(
-                    limit_pool.clone(),
-                    locker.clone(),
-                    coordination.clone(),
-                    &format!("{}:api", config.name),
-                    RateLimitConfig {
-                        max_requests_per_second: limit as f32,
-                        window_size_millis: 1000,
-                        base_max_requests_per_second: Some(limit as f32),
-                    },
-                )))
+                Some(Arc::new(
+                    DistributedSlidingWindowRateLimiter::new_with_coordination(
+                        limit_pool.clone(),
+                        locker.clone(),
+                        coordination.clone(),
+                        &format!("{}:api", config.name),
+                        RateLimitConfig {
+                            max_requests_per_second: limit as f32,
+                            window_size_millis: 1000,
+                            base_max_requests_per_second: Some(limit as f32),
+                        },
+                    ),
+                ))
             } else {
                 None
             }
@@ -247,7 +259,7 @@ impl State {
         let enable_l1 = config.cache.enable_l1.unwrap_or(false);
         let l1_ttl_secs = config.cache.l1_ttl_secs.unwrap_or(30);
         let l1_max_entries = config.cache.l1_max_entries.unwrap_or(10000);
-        
+
         let cache_service = if let Some(pool) = cache_pool.clone() {
             Arc::new(CacheService::new_with_l1_config(
                 Some(pool),
@@ -270,7 +282,7 @@ impl State {
             ))
         };
 
-        let cookie_service = cookie_pool.map(|pool|
+        let cookie_service = cookie_pool.map(|pool| {
             Arc::new(CacheService::new_with_l1_config(
                 Some(pool),
                 format!("{}:cookie", config.name),
@@ -280,7 +292,7 @@ impl State {
                 l1_ttl_secs,
                 l1_max_entries,
             ))
-        );
+        });
         info!("Redis connection pool created successfully");
 
         // Initialize error tracking subsystem.
@@ -303,7 +315,7 @@ impl State {
         ));
 
         let config_arc = Arc::new(RwLock::new(config));
-        
+
         // Spawn configuration watcher
         if let Ok(mut rx) = watcher_res {
             let config_clone = config_arc.clone();
@@ -318,15 +330,19 @@ impl State {
                         *w = new_config.clone();
                     }
                     // Propagate rate limit updates without requiring a restart.
-                    let _ = limiter.set_all_limit(new_config.download_config.rate_limit).await;
-                    if let (Some(api), Some(api_limiter)) = (new_config.api.as_ref(), api_limiter.as_ref())
-                        && let Some(limit) = api.rate_limit {
-                            let _ = api_limiter.set_all_limit(limit as f32).await;
-                        }
+                    let _ = limiter
+                        .set_all_limit(new_config.download_config.rate_limit)
+                        .await;
+                    if let (Some(api), Some(api_limiter)) =
+                        (new_config.api.as_ref(), api_limiter.as_ref())
+                        && let Some(limit) = api.rate_limit
+                    {
+                        let _ = api_limiter.set_all_limit(limit as f32).await;
+                    }
                 }
             });
         } else if let Err(e) = watcher_res {
-              error!("Failed to start config watcher: {}", e);
+            error!("Failed to start config watcher: {}", e);
         }
 
         Ok(State {

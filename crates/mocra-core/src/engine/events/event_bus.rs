@@ -1,9 +1,9 @@
 use super::EventEnvelope;
-use std::sync::Arc;
-use tokio::sync::mpsc;
-use tokio::sync::RwLock;
-use log::{error, info, warn};
 use dashmap::DashMap;
+use log::{error, info, warn};
+use std::sync::Arc;
+use tokio::sync::RwLock;
+use tokio::sync::mpsc;
 
 /// In-process event bus for fan-out delivery to typed subscribers.
 pub struct EventBus {
@@ -16,7 +16,7 @@ pub struct EventBus {
 impl EventBus {
     pub fn new(capacity: usize, _concurrency: usize) -> Self {
         let (sender, receiver) = mpsc::channel(capacity);
-        
+
         Self {
             subscribers: Arc::new(DashMap::new()),
             sender,
@@ -30,10 +30,7 @@ impl EventBus {
     /// the matching topic.
     pub async fn subscribe(&self, event_type: String) -> mpsc::Receiver<EventEnvelope> {
         let (tx, rx) = mpsc::channel(1000);
-        self.subscribers
-            .entry(event_type)
-            .or_default()
-            .push(tx);
+        self.subscribers.entry(event_type).or_default().push(tx);
         rx
     }
 
@@ -41,12 +38,13 @@ impl EventBus {
     ///
     /// When the queue is full, the event is intentionally dropped to avoid
     /// propagating backpressure into critical producer paths.
-    pub async fn publish(&self, event: EventEnvelope) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    pub async fn publish(
+        &self,
+        event: EventEnvelope,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         match self.sender.try_send(event) {
             Ok(_) => Ok(()),
-            Err(mpsc::error::TrySendError::Full(_)) => {
-                Ok(())
-            },
+            Err(mpsc::error::TrySendError::Full(_)) => Ok(()),
             Err(e) => {
                 error!("EventBus channel closed: {}", e);
                 Err(Box::new(e))
@@ -65,7 +63,7 @@ impl EventBus {
 
         if let Some(mut receiver) = receiver {
             let subscribers = Arc::clone(&self.subscribers);
-            
+
             std::thread::Builder::new()
                 .name("event-bus-worker".to_string())
                 .spawn(move || {
@@ -79,7 +77,7 @@ impl EventBus {
                         info!("EventBus dedicated runtime started");
                         while let Some(event) = receiver.recv().await {
                             let event_type = event.event_key();
-                            
+
                             let broadcast_to = |senders: Vec<mpsc::Sender<EventEnvelope>>| {
                                 for tx in senders {
                                     let event_clone = event.clone();
@@ -94,7 +92,7 @@ impl EventBus {
                             if let Some(s) = subscribers.get(&event_type).map(|v| v.clone()) {
                                 broadcast_to(s);
                             }
-                            
+
                             if let Some(universal) = subscribers.get("*").map(|v| v.clone()) {
                                 broadcast_to(universal);
                             }
@@ -105,13 +103,12 @@ impl EventBus {
                 .expect("Failed to spawn event bus thread");
             true
         } else {
-             warn!("EventBus.start() called but already running — ignoring duplicate start");
-             false
+            warn!("EventBus.start() called but already running — ignoring duplicate start");
+            false
         }
     }
 
-    pub fn stop(&self) {
-    }
+    pub fn stop(&self) {}
 }
 
 impl Default for EventBus {
@@ -146,9 +143,11 @@ mod tests {
             .expect("should receive event within timeout")
             .expect("receiver should yield one event");
 
-        assert_eq!(received.event_key(), "engine.parser_task_produced.completed");
+        assert_eq!(
+            received.event_key(),
+            "engine.parser_task_produced.completed"
+        );
         assert_eq!(received.event_type, EventType::ParserTaskProduced);
         assert_eq!(received.phase, EventPhase::Completed);
     }
 }
-

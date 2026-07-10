@@ -1,9 +1,7 @@
 use std::sync::Arc;
 
 use crate::common::interface::ModuleTrait;
-use crate::common::model::module_dag::{
-    ModuleDagDefinition, ModuleDagEdgeDef, ModuleDagNodeDef,
-};
+use crate::common::model::module_dag::{ModuleDagDefinition, ModuleDagEdgeDef, ModuleDagNodeDef};
 
 /// Builds a [`ModuleDagDefinition`] from a module's `dag_definition()` / `add_step()` hooks,
 /// ready to feed into [`ModuleDagProcessor::init_from_definition`](crate::engine::task::module_dag_processor::ModuleDagProcessor::init_from_definition).
@@ -88,8 +86,8 @@ mod tests {
     use crate::common::interface::{ModuleNodeTrait, ModuleTrait, SyncBoxStream, ToSyncBoxStream};
     use crate::common::model::login_info::LoginInfo;
     use crate::common::model::message::TaskOutputEvent;
-    use crate::common::model::{ModuleConfig, Request, Response};
     use crate::common::model::module_dag::{ModuleDagDefinition, ModuleDagNodeDef};
+    use crate::common::model::{ModuleConfig, Request, Response};
     use crate::errors::Result;
 
     struct DummyNode;

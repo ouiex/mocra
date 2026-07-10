@@ -59,9 +59,10 @@ pub fn get_local_ips() -> Result<Vec<IpAddr>, Box<dyn std::error::Error>> {
     // Method 1: infer local IP by connecting to an external address.
     if let Ok(socket) = UdpSocket::bind("0.0.0.0:0")
         && socket.connect("8.8.8.8:80").is_ok()
-            && let Ok(addr) = socket.local_addr() {
-                ips.push(addr.ip());
-            }
+        && let Ok(addr) = socket.local_addr()
+    {
+        ips.push(addr.ip());
+    }
 
     // Method 2: collect network interface addresses via system commands.
     let system_ips = get_network_interfaces()?;
@@ -92,12 +93,13 @@ pub async fn get_public_ip() -> Result<IpAddr, Box<dyn std::error::Error>> {
 
     for service in services {
         if let Ok(response) = client.get(service).send().await
-            && let Ok(ip_str) = response.text().await {
-                let ip_str = ip_str.trim();
-                if let Ok(ip) = ip_str.parse::<IpAddr>() {
-                    return Ok(ip);
-                }
+            && let Ok(ip_str) = response.text().await
+        {
+            let ip_str = ip_str.trim();
+            if let Ok(ip) = ip_str.parse::<IpAddr>() {
+                return Ok(ip);
             }
+        }
     }
 
     Err("Failed to get public IP from all services".into())
@@ -209,9 +211,10 @@ fn parse_ifconfig_output(output: &str) -> Result<Vec<IpAddr>, Box<dyn std::error
             let parts: Vec<&str> = line.split_whitespace().collect();
             if parts.len() >= 2
                 && let Ok(ip) = parts[1].parse::<IpAddr>()
-                    && !ip.is_loopback() {
-                        ips.push(ip);
-                    }
+                && !ip.is_loopback()
+            {
+                ips.push(ip);
+            }
         }
     }
 
@@ -256,9 +259,10 @@ fn parse_ipconfig_output(output: &str) -> Result<Vec<IpAddr>, Box<dyn std::error
             if parts.len() >= 2 {
                 let ip_str = parts[1].trim();
                 if let Ok(ip) = ip_str.parse::<IpAddr>()
-                    && !ip.is_loopback() {
-                        ips.push(ip);
-                    }
+                    && !ip.is_loopback()
+                {
+                    ips.push(ip);
+                }
             }
         }
     }

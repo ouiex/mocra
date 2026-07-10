@@ -1,11 +1,11 @@
 use crate::common::interface::StoreTrait;
-use crate::common::interface::storage::{Offloadable, BlobStorage};
-use std::sync::Arc;
-use async_trait::async_trait;
+use crate::common::interface::storage::{BlobStorage, Offloadable};
 use crate::common::model::data::DataEvent;
 use crate::common::model::{ExecutionMark, Response};
+use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::sync::Arc;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Copy)]
@@ -332,12 +332,7 @@ impl From<&Response> for TaskParserEvent {
     fn from(value: &Response) -> Self {
         // Forward task metadata from the response so downstream nodes receive
         // the same params that were used to generate the request.
-        let metadata = value
-            .metadata
-            .task
-            .as_object()
-            .cloned()
-            .unwrap_or_default();
+        let metadata = value.metadata.task.as_object().cloned().unwrap_or_default();
 
         TaskParserEvent {
             id: Uuid::now_v7(),
@@ -361,12 +356,7 @@ impl From<&Response> for TaskErrorEvent {
     fn from(value: &Response) -> Self {
         // Forward only the task metadata slot as a flat map, consistent with
         // TaskParserEvent so downstream generate() receives the same shape.
-        let metadata = value
-            .metadata
-            .task
-            .as_object()
-            .cloned()
-            .unwrap_or_default();
+        let metadata = value.metadata.task.as_object().cloned().unwrap_or_default();
 
         TaskErrorEvent {
             id: Uuid::now_v7(),
@@ -442,7 +432,7 @@ mod tests {
         assert_eq!(TopicType::Task.suffix(), "task");
         assert_eq!(TopicType::Request.suffix(), "request");
         assert_eq!(TopicType::Response.suffix(), "response");
-        
+
         let name = TopicType::Task.get_name("test_mod");
         assert_eq!(name, "crawler-test_mod-task");
     }
@@ -452,7 +442,7 @@ mod tests {
         let id = Uuid::now_v7();
         let run_id = Uuid::now_v7();
         let prefix_req = Uuid::now_v7();
-        
+
         let task = TaskParserEvent {
             id,
             account_task: TaskEvent {
@@ -472,7 +462,7 @@ mod tests {
         let ctx = ExecutionMark::default().with_step_idx(5);
         let task = task.with_context(ctx.clone());
         assert_eq!(task.context.step_idx, Some(5));
-        
+
         let task = task.stay_current_step();
         assert!(task.context.stay_current_step);
 
@@ -483,7 +473,7 @@ mod tests {
         let task = task.add_meta("foo", "bar");
         assert_eq!(task.metadata["foo"], "bar");
     }
-    
+
     #[test]
     fn test_response_conversion() {
         let run_id = Uuid::now_v7();
@@ -515,7 +505,7 @@ mod tests {
         assert_eq!(parser_task.account_task.platform, "plat");
         assert_eq!(parser_task.run_id, run_id);
         assert_eq!(parser_task.prefix_request, prefix_request);
-        
+
         let error_task: TaskErrorEvent = (&response).into();
         assert_eq!(error_task.account_task.account, "acc");
         assert_eq!(error_task.run_id, run_id);

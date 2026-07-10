@@ -1,10 +1,10 @@
 #![allow(unused)]
+use serde::{Deserialize, Serialize};
 use std::error::Error as StdError;
 use std::fmt;
 use std::num::ParseIntError;
 use std::str::ParseBoolError;
 use thiserror::Error;
-use serde::{Deserialize, Serialize};
 // ProxyError 已抽到独立 crate mocra-proxy;主 crate 经下方 `From` 在边界纳入自身 Error。
 use mocra_proxy::ProxyError;
 /// 通用错误详情类型
@@ -382,7 +382,6 @@ pub enum ServiceError {
     #[error("authentication failed")]
     AuthenticationFailed,
 }
-
 
 #[derive(Debug, Error)]
 pub enum CookieError {

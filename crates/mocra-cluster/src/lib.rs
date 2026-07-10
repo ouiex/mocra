@@ -25,7 +25,7 @@ pub mod state_machine;
 pub use cmd::{Cmd, CmdResult, Lock};
 pub use control::{ControlError, ControlPlane, LocalControlPlane};
 pub use partition::{
-    owner_of_partition, owns_key, partition_of, partitions_owned_by, DEFAULT_PARTITIONS,
+    DEFAULT_PARTITIONS, owner_of_partition, owns_key, partition_of, partitions_owned_by,
 };
 pub use raft::{MocraRaft, Node, NodeId, TypeConfig};
 pub use raft_http::JoinRequest;

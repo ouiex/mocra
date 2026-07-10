@@ -1,11 +1,11 @@
 use std::collections::HashMap;
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
     Arc,
+    atomic::{AtomicBool, Ordering},
 };
 
 use async_trait::async_trait;
-use deadpool_redis::redis::{from_redis_value, FromRedisValue, Value as RedisValue};
+use deadpool_redis::redis::{FromRedisValue, Value as RedisValue, from_redis_value};
 use metrics::{counter, histogram};
 use serde::{Deserialize, Serialize};
 use tokio::time::{Duration, Instant};
@@ -251,10 +251,13 @@ impl DagNodeDispatcher for RedisRemoteDispatcher {
                         let _ = self.cache.del(&cancel_key).await;
                         let _ = self.cache.del(&request_map_key).await;
 
-                        let raw_resp = String::from_utf8(raw_resp)
-                            .map_err(|e| Self::cache_err(node_id, "decode remote response utf8", e))?;
-                        let resp: WireDispatchResponse = serde_json::from_str(&raw_resp)
-                            .map_err(|e| Self::cache_err(node_id, "deserialize remote response", e))?;
+                        let raw_resp = String::from_utf8(raw_resp).map_err(|e| {
+                            Self::cache_err(node_id, "decode remote response utf8", e)
+                        })?;
+                        let resp: WireDispatchResponse =
+                            serde_json::from_str(&raw_resp).map_err(|e| {
+                                Self::cache_err(node_id, "deserialize remote response", e)
+                            })?;
 
                         if resp.ok {
                             let payload_bytes = resp.payload_envelope.ok_or_else(|| {
@@ -308,11 +311,8 @@ impl DagNodeDispatcher for RedisRemoteDispatcher {
                     }
 
                     tokio::time::sleep(Duration::from_millis(current_poll_ms)).await;
-                    current_poll_ms = Self::next_poll_delay_ms(
-                        current_poll_ms,
-                        base_poll_ms,
-                        max_poll_ms,
-                    );
+                    current_poll_ms =
+                        Self::next_poll_delay_ms(current_poll_ms, base_poll_ms, max_poll_ms);
                 }
             }
         }
@@ -499,7 +499,9 @@ impl RedisDagWorker {
             .set(
                 &alive_key,
                 b"1",
-                Some(Duration::from_secs(Self::ms_to_ttl_secs(self.heartbeat_ttl_ms))),
+                Some(Duration::from_secs(Self::ms_to_ttl_secs(
+                    self.heartbeat_ttl_ms,
+                ))),
             )
             .await;
         counter!(
@@ -618,7 +620,9 @@ impl RedisDagWorker {
                 last_reclaim = Instant::now();
             }
 
-            let raw_job = self.pop_move_to_processing(&queue_key, &processing_key).await;
+            let raw_job = self
+                .pop_move_to_processing(&queue_key, &processing_key)
+                .await;
             let Some(raw_job) = raw_job else {
                 tokio::time::sleep(Duration::from_millis(self.idle_sleep_ms)).await;
                 continue;
@@ -652,7 +656,8 @@ impl RedisDagWorker {
                 continue;
             }
 
-            let canceled_before_execute = self.cache.get(&cancel_key).await.ok().flatten().is_some();
+            let canceled_before_execute =
+                self.cache.get(&cancel_key).await.ok().flatten().is_some();
             if canceled_before_execute {
                 counter!(
                     "mocra_dag_remote_worker_cancel_total",
@@ -667,7 +672,8 @@ impl RedisDagWorker {
             }
 
             let delivery_attempt = self.cache.incr(&delivery_count_key, 1).await.unwrap_or(1);
-            self.expire_key(&delivery_count_key, self.delivery_ttl_secs).await;
+            self.expire_key(&delivery_count_key, self.delivery_ttl_secs)
+                .await;
 
             if delivery_attempt as usize > self.max_delivery_attempts {
                 let response = WireDispatchResponse {
@@ -773,7 +779,10 @@ impl RedisDagWorker {
             return WireDispatchResponse {
                 ok: false,
                 payload_envelope: None,
-                error: Some(format!("remote worker handler missing for node {}", request.node_id)),
+                error: Some(format!(
+                    "remote worker handler missing for node {}",
+                    request.node_id
+                )),
             };
         };
 
@@ -784,7 +793,7 @@ impl RedisDagWorker {
                     ok: false,
                     payload_envelope: None,
                     error: Some(e.to_string()),
-                }
+                };
             }
         };
 
@@ -803,12 +812,13 @@ impl RedisDagWorker {
                             payload_envelope: None,
                             error: Some(e.to_string()),
                         },
-                    }
+                    };
                 }
                 Err(e) => {
                     last_error = Some(e.to_string());
                     if retry < self.handler_max_retries {
-                        tokio::time::sleep(Duration::from_millis(self.handler_retry_backoff_ms)).await;
+                        tokio::time::sleep(Duration::from_millis(self.handler_retry_backoff_ms))
+                            .await;
                         continue;
                     }
                 }

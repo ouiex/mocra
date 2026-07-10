@@ -159,8 +159,14 @@ async fn redis_and_single_node_set_get_behave_consistently() {
         .await
         .expect("redis set should succeed");
 
-    let local_value = local_cache.get(&key).await.expect("local get should succeed");
-    let redis_value = redis_cache.get(&key).await.expect("redis get should succeed");
+    let local_value = local_cache
+        .get(&key)
+        .await
+        .expect("local get should succeed");
+    let redis_value = redis_cache
+        .get(&key)
+        .await
+        .expect("redis get should succeed");
     assert_eq!(local_value, redis_value);
 
     local_cache

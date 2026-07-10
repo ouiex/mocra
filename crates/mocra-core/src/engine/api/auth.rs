@@ -1,10 +1,10 @@
+use crate::engine::api::state::ApiState;
 use axum::{
     extract::{Request, State},
-    http::{StatusCode, HeaderMap},
+    http::{HeaderMap, StatusCode},
     middleware::Next,
     response::Response,
 };
-use crate::engine::api::state::ApiState;
 
 /// API Authentication Middleware
 ///
@@ -19,7 +19,7 @@ pub async fn auth_middleware(
 ) -> Result<Response, StatusCode> {
     // Get config from state (read lock)
     let config = state.state.config.read().await;
-    
+
     let api_config = config.api.as_ref().ok_or(StatusCode::FORBIDDEN)?;
     let configured_key = api_config.api_key.as_ref().ok_or(StatusCode::FORBIDDEN)?;
 
@@ -28,17 +28,15 @@ pub async fn auth_middleware(
         .get("Authorization")
         .and_then(|h| h.to_str().ok())
         .and_then(|s| s.strip_prefix("Bearer "));
-        
-    let api_key_header = headers
-        .get("x-api-key")
-        .and_then(|h| h.to_str().ok());
+
+    let api_key_header = headers.get("x-api-key").and_then(|h| h.to_str().ok());
 
     match (auth_header, api_key_header) {
         (Some(token), _) if token == configured_key => {}
         (_, Some(key)) if key == configured_key => {}
         _ => return Err(StatusCode::UNAUTHORIZED),
     }
-    
+
     // If no API key configured, or key matched, proceed
     Ok(next.run(request).await)
 }

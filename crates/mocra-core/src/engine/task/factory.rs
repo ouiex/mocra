@@ -1,19 +1,16 @@
-use super::{
-    assembler::ModuleAssembler,
-    task::Task,
-};
 #[cfg(feature = "store")]
 use super::assembler::ConfigAssembler;
 #[cfg(feature = "store")]
 use super::repository::MetadataStore;
+use super::{assembler::ModuleAssembler, task::Task};
 use crate::errors::{ModuleError::ModuleNotFound, Result};
 
-use crate::common::model::login_info::LoginInfo;
-use crate::common::model::message::{TaskErrorEvent, TaskParserEvent, TaskEvent};
-use crate::common::model::{ModuleConfig, Response};
-use crate::common::model::scope::{AccountInfo, PlatformInfo};
-use crate::common::model::config::Config;
 use crate::cacheable::{CacheAble, CacheService};
+use crate::common::model::config::Config;
+use crate::common::model::login_info::LoginInfo;
+use crate::common::model::message::{TaskErrorEvent, TaskEvent, TaskParserEvent};
+use crate::common::model::scope::{AccountInfo, PlatformInfo};
+use crate::common::model::{ModuleConfig, Response};
 use crate::engine::task::module::Module;
 use crate::engine::task::module_dag_processor::ModuleDagProcessor;
 use dashmap::DashMap;
@@ -141,14 +138,14 @@ impl TaskFactory {
 
     /// Loads login info from cookie cache service if configured.
     pub async fn login_info(&self, id: &str) -> Option<LoginInfo> {
-        if let Some(sync) = self.cookie_service.as_ref(){
+        if let Some(sync) = self.cookie_service.as_ref() {
             let result = LoginInfo::sync(id, sync).await;
             match result {
                 Ok(None) => {
                     let key = <LoginInfo as CacheAble>::cache_id(id, sync);
                     log::warn!("cookie not found in redis: key={}", key);
                 }
-                Ok(Some(info))=>{
+                Ok(Some(info)) => {
                     return Some(info);
                 }
                 Err(err) => {
@@ -156,26 +153,29 @@ impl TaskFactory {
                 }
             }
         }
-        log::warn!("cookie service not configured; skip login_info lookup for id={}", id);
+        log::warn!(
+            "cookie service not configured; skip login_info lookup for id={}",
+            id
+        );
         None
-
     }
     /// Creates task from TaskModel and optionally filters requested modules.
     pub async fn create_task_from_model(&self, task_model: &TaskEvent) -> Result<Task> {
         let mut task = (*self
             .create_task_with_modules(&task_model.platform, &task_model.account, task_model.run_id)
-            .await?).clone();
+            .await?)
+            .clone();
         task.run_id = task_model.run_id;
         task.modules.iter_mut().for_each(|m| {
             m.run_id = task_model.run_id;
         });
         if let Some(names) = &task_model.module
-            && !names.is_empty() {
-                let want: std::collections::HashSet<&str> =
-                    names.iter().map(|s| s.as_str()).collect();
-                task.modules
-                    .retain(|m| want.contains(m.module.name().as_str()));
-            }
+            && !names.is_empty()
+        {
+            let want: std::collections::HashSet<&str> = names.iter().map(|s| s.as_str()).collect();
+            task.modules
+                .retain(|m| want.contains(m.module.name().as_str()));
+        }
         Ok(task)
     }
 
@@ -266,7 +266,7 @@ impl TaskFactory {
             let task = Arc::new(task);
             // Cache empty-module task as well.
             self.put_task_aliases(task.clone()).await;
-            return Ok(task)
+            return Ok(task);
         }
 
         // Batch-load middleware relations.
@@ -336,8 +336,8 @@ impl TaskFactory {
             let rel_module_account = match rel_module_account_map.get(&module.id) {
                 Some(r) => r.clone(),
                 None => {
-                     log::warn!("Missing account relation for module {}", module.id);
-                     continue;
+                    log::warn!("Missing account relation for module {}", module.id);
+                    continue;
                 }
             };
 
@@ -416,7 +416,7 @@ impl TaskFactory {
                     format!("{}-{}-{}", account.name, platform.name, module.name),
                     self.cache_service.clone(),
                     run_id,
-                    cache_ttl
+                    cache_ttl,
                 ),
                 run_id,
                 prefix_request: Default::default(),
@@ -444,7 +444,11 @@ impl TaskFactory {
         let task = Arc::new(task);
         // Cache task by account-platform key.
         self.put_task_aliases(task.clone()).await;
-        log::debug!("create_task_with_modules: loaded from DB for {}, took {:?}", cache_key, start.elapsed());
+        log::debug!(
+            "create_task_with_modules: loaded from DB for {}, took {:?}",
+            cache_key,
+            start.elapsed()
+        );
         Ok(task)
     }
 
@@ -487,7 +491,7 @@ impl TaskFactory {
                     "{}-{}-{:?} not found with error: {}",
                     task_model.platform, task_model.account, task_model.module, e
                 )
-                    .into(),
+                .into(),
             ))?,
         }
     }
@@ -514,10 +518,7 @@ impl TaskFactory {
             // Prefer explicit context from parser_model if provided
             module.pending_ctx = Some(parser_model.context.clone());
             // Try to refresh module config from cache storage.
-            if let Ok(Some(config)) =
-                ModuleConfig::sync(&module.id(), &self.cache_service).await
-            {
-
+            if let Ok(Some(config)) = ModuleConfig::sync(&module.id(), &self.cache_service).await {
                 module.config = Arc::new(config);
             }
         }
@@ -587,9 +588,18 @@ impl TaskFactory {
             })
     }
 
-    pub async fn load_module_with_response(&self, response: &Response) -> Result<(Arc<Module>, Option<LoginInfo>)> {
-        let task = self.create_task_with_modules(&response.platform, &response.account, response.run_id).await?;
-        if let Some(module) = task.modules.iter().find(|m| m.module.name() == response.module) {
+    pub async fn load_module_with_response(
+        &self,
+        response: &Response,
+    ) -> Result<(Arc<Module>, Option<LoginInfo>)> {
+        let task = self
+            .create_task_with_modules(&response.platform, &response.account, response.run_id)
+            .await?;
+        if let Some(module) = task
+            .modules
+            .iter()
+            .find(|m| m.module.name() == response.module)
+        {
             let mut module = module.clone();
             // The factory cache may have returned a task built for a different run.
             // Patch run_id from the response (source of truth) so that execute_parse
@@ -597,7 +607,10 @@ impl TaskFactory {
             module.run_id = response.run_id;
             Ok((Arc::new(module), task.login_info.clone()))
         } else {
-            Err(ModuleNotFound(format!("Module {} not found in task", response.module).into()).into())
+            Err(
+                ModuleNotFound(format!("Module {} not found in task", response.module).into())
+                    .into(),
+            )
         }
     }
 

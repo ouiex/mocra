@@ -1,5 +1,5 @@
-use async_trait::async_trait;
 use crate::errors::Result;
+use async_trait::async_trait;
 use std::sync::Arc;
 
 #[async_trait]
@@ -34,7 +34,7 @@ impl BlobStorage for FileSystemBlobStorage {
     async fn put(&self, key: &str, data: &[u8]) -> Result<String> {
         let path = self.root_path.join(key);
         if let Some(parent) = path.parent() {
-             tokio::fs::create_dir_all(parent).await?;
+            tokio::fs::create_dir_all(parent).await?;
         }
         tokio::fs::write(&path, data).await?;
         Ok(path.to_string_lossy().to_string())

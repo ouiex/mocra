@@ -15,10 +15,7 @@ pub struct DagChainBuilder<'a> {
 }
 
 impl<'a> DagChainBuilder<'a> {
-    pub fn add_chain_node(
-        mut self,
-        current_node: Arc<dyn DagNodeTrait>,
-    ) -> Result<Self, DagError> {
+    pub fn add_chain_node(mut self, current_node: Arc<dyn DagNodeTrait>) -> Result<Self, DagError> {
         let next = self
             .dag
             .add_node(Some(&[self.last.clone()]), current_node)?;
@@ -230,8 +227,7 @@ impl Dag {
 
         self.connect(&node_id, Self::CONTROL_END_NODE)?;
 
-        self
-            .nodes
+        self.nodes
             .get(&node_id)
             .cloned()
             .map(Arc::new)
@@ -255,9 +251,10 @@ impl Dag {
         }
 
         if let Some(node) = self.nodes.get_mut(&to)
-            && !node.predecessors.iter().any(|p| p == &from) {
-                node.predecessors.push(from);
-            }
+            && !node.predecessors.iter().any(|p| p == &from)
+        {
+            node.predecessors.push(from);
+        }
 
         Ok(())
     }
@@ -326,11 +323,8 @@ impl Dag {
             return Err(DagError::EmptyGraph);
         }
 
-        let mut indegree: HashMap<String, usize> = self
-            .nodes
-            .keys()
-            .map(|n| (n.clone(), 0usize))
-            .collect();
+        let mut indegree: HashMap<String, usize> =
+            self.nodes.keys().map(|n| (n.clone(), 0usize)).collect();
 
         for tos in self.edges.values() {
             for to in tos {
@@ -342,7 +336,13 @@ impl Dag {
 
         let mut queue: BinaryHeap<Reverse<String>> = indegree
             .iter()
-            .filter_map(|(n, deg)| if *deg == 0 { Some(Reverse(n.clone())) } else { None })
+            .filter_map(|(n, deg)| {
+                if *deg == 0 {
+                    Some(Reverse(n.clone()))
+                } else {
+                    None
+                }
+            })
             .collect();
 
         let mut ordered = Vec::with_capacity(self.nodes.len());

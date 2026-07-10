@@ -11,10 +11,12 @@
 //! - Multi-branch support: when a node has N successors and parser returns one unrouted task,
 //!   it is fanned out to all N successors automatically.
 
+use crate::cacheable::{CacheAble, CacheService};
 use crate::common::interface::module::{ModuleNodeTrait, SyncBoxStream};
 use crate::common::model::chain_key;
 use crate::common::model::login_info::LoginInfo;
 use crate::common::model::message::{TaskErrorEvent, TaskEvent, TaskOutputEvent, TaskParserEvent};
+use crate::common::model::module_dag::ModuleDagDefinition;
 use crate::common::model::{ExecutionMark, ModuleConfig, Request, Response};
 use crate::errors::Result;
 use futures::StreamExt;
@@ -23,13 +25,11 @@ use log::{debug, info, warn};
 use serde::{Deserialize, Serialize};
 use serde_json::Map;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock;
 use uuid::Uuid;
-use crate::cacheable::{CacheAble, CacheService};
-use crate::common::model::module_dag::ModuleDagDefinition;
 
 // ── Distributed gate types ──────────────────────────────────────────────────
 
@@ -92,7 +92,8 @@ impl ModuleDagProcessor {
 
     /// Populates nodes and topology from a compiled DAG definition.
     pub async fn init_from_definition(&self, definition: &ModuleDagDefinition) {
-        let mut nodes: tokio::sync::RwLockWriteGuard<IndexMap<String, Arc<dyn ModuleNodeTrait>>> = self.nodes.write().await;
+        let mut nodes: tokio::sync::RwLockWriteGuard<IndexMap<String, Arc<dyn ModuleNodeTrait>>> =
+            self.nodes.write().await;
         let mut successors = self.successors.write().await;
         let mut entry_nodes = self.entry_nodes.write().await;
 
@@ -117,11 +118,8 @@ impl ModuleDagProcessor {
         if !definition.entry_nodes.is_empty() {
             *entry_nodes = definition.entry_nodes.clone();
         } else {
-            let all_targets: std::collections::HashSet<&str> = definition
-                .edges
-                .iter()
-                .map(|e| e.to.as_str())
-                .collect();
+            let all_targets: std::collections::HashSet<&str> =
+                definition.edges.iter().map(|e| e.to.as_str()).collect();
             *entry_nodes = definition
                 .nodes
                 .iter()
@@ -142,7 +140,8 @@ impl ModuleDagProcessor {
 
     /// Total registered nodes (used for legacy compatibility checks).
     pub async fn get_total_nodes(&self) -> usize {
-        let nodes: tokio::sync::RwLockReadGuard<IndexMap<String, Arc<dyn ModuleNodeTrait>>> = self.nodes.read().await;
+        let nodes: tokio::sync::RwLockReadGuard<IndexMap<String, Arc<dyn ModuleNodeTrait>>> =
+            self.nodes.read().await;
         nodes.len()
     }
 
@@ -163,7 +162,9 @@ impl ModuleDagProcessor {
             }
             // Backward compat: step_idx → positional lookup.
             if let Some(idx) = mark.step_idx {
-                let nodes: tokio::sync::RwLockReadGuard<IndexMap<String, Arc<dyn ModuleNodeTrait>>> = self.nodes.read().await;
+                let nodes: tokio::sync::RwLockReadGuard<
+                    IndexMap<String, Arc<dyn ModuleNodeTrait>>,
+                > = self.nodes.read().await;
                 if let Some((id, _)) = nodes.get_index(idx as usize) {
                     return Some(id.clone());
                 }
@@ -175,7 +176,8 @@ impl ModuleDagProcessor {
     }
 
     async fn get_node(&self, node_id: &str) -> Option<Arc<dyn ModuleNodeTrait>> {
-        let nodes: tokio::sync::RwLockReadGuard<IndexMap<String, Arc<dyn ModuleNodeTrait>>> = self.nodes.read().await;
+        let nodes: tokio::sync::RwLockReadGuard<IndexMap<String, Arc<dyn ModuleNodeTrait>>> =
+            self.nodes.read().await;
         nodes.get(node_id).cloned()
     }
 
@@ -185,8 +187,17 @@ impl ModuleDagProcessor {
     }
 
     async fn try_mark_node_advanced_once(&self, node_id: &str, successor_id: &str) -> Result<bool> {
-        let key = chain_key::dag_node_advance_gate_key(self.run_id, &self.module_id, node_id, successor_id);
-        if DagNodeAdvanceGate::sync(&key, &self.cache).await.map_err(Into::<crate::errors::Error>::into)?.is_some() {
+        let key = chain_key::dag_node_advance_gate_key(
+            self.run_id,
+            &self.module_id,
+            node_id,
+            successor_id,
+        );
+        if DagNodeAdvanceGate::sync(&key, &self.cache)
+            .await
+            .map_err(Into::<crate::errors::Error>::into)?
+            .is_some()
+        {
             return Ok(false);
         }
         let gate = DagNodeAdvanceGate(true);
@@ -207,10 +218,7 @@ impl ModuleDagProcessor {
         // The gate-key cleanup below deletes all gate keys; if the stop signal
         // were to expire (e.g. TTL=60s), queued error tasks could re-win the
         // already-deleted gate and restart the entire DAG fan-out.
-        signal
-            .send_persistent(&key, &self.cache)
-            .await
-            .ok();
+        signal.send_persistent(&key, &self.cache).await.ok();
 
         // Clean up all advance gate keys for this run.
         // Successors are already in memory — enumerate every edge and delete its gate key
@@ -220,12 +228,7 @@ impl ModuleDagProcessor {
             succ.iter()
                 .flat_map(|(from, tos)| {
                     tos.iter().map(move |to| {
-                        chain_key::dag_node_advance_gate_key(
-                            self.run_id,
-                            &self.module_id,
-                            from,
-                            to,
-                        )
+                        chain_key::dag_node_advance_gate_key(self.run_id, &self.module_id, from, to)
                     })
                 })
                 .collect()
@@ -265,7 +268,10 @@ impl ModuleDagProcessor {
             run_id
         );
         if let Err(e) = self.cache.del(&session_key).await {
-            warn!("Failed to delete session state: module={} run={} error={:?}", self.module_id, run_id, e);
+            warn!(
+                "Failed to delete session state: module={} run={} error={:?}",
+                self.module_id, run_id, e
+            );
         }
     }
 
@@ -296,11 +302,7 @@ impl ModuleDagProcessor {
     }
 
     /// Returns true when a `TaskParserEvent` targets this processor's module.
-    fn is_task_for_current_module(
-        &self,
-        ctx: &ExecutionMark,
-        task_modules: &[String],
-    ) -> bool {
+    fn is_task_for_current_module(&self, ctx: &ExecutionMark, task_modules: &[String]) -> bool {
         if let Some(ref mid) = ctx.module_id {
             if !mid.is_empty() {
                 return mid == &self.module_id;
@@ -343,7 +345,10 @@ impl ModuleDagProcessor {
         }
 
         let Some(node_id) = self.resolve_node_id(&ctx).await else {
-            debug!("[dag] module={} run={} execute_generate: no nodes registered", self.module_id, self.run_id);
+            debug!(
+                "[dag] module={} run={} execute_generate: no nodes registered",
+                self.module_id, self.run_id
+            );
             return Ok(Box::pin(futures::stream::empty()));
         };
 
@@ -353,7 +358,10 @@ impl ModuleDagProcessor {
         );
 
         let Some(node) = self.get_node(&node_id).await else {
-            warn!("[dag] module={} run={} execute_generate: node '{}' not found", self.module_id, self.run_id, node_id);
+            warn!(
+                "[dag] module={} run={} execute_generate: node '{}' not found",
+                self.module_id, self.run_id, node_id
+            );
             return Ok(Box::pin(futures::stream::empty()));
         };
 
@@ -472,7 +480,10 @@ impl ModuleDagProcessor {
 
         let Some(node) = self.get_node(&node_id).await else {
             // Unreachable: node existence was verified during resolution above.
-            warn!("[dag] module={} run={} execute_parse: node '{}' not found (guard)", self.module_id, self.run_id, node_id);
+            warn!(
+                "[dag] module={} run={} execute_parse: node '{}' not found (guard)",
+                self.module_id, self.run_id, node_id
+            );
             return Ok(TaskOutputEvent::default());
         };
 
@@ -486,18 +497,16 @@ impl ModuleDagProcessor {
 
                 if !data.parser_task.is_empty() {
                     // ── Route explicit parser tasks ──────────────────────────────
-                    let mut routed: Vec<TaskParserEvent> = Vec::with_capacity(data.parser_task.len());
+                    let mut routed: Vec<TaskParserEvent> =
+                        Vec::with_capacity(data.parser_task.len());
 
                     for mut task in data.parser_task.drain(..) {
                         task.prefix_request = response.prefix_request;
 
-                        let task_modules = task
-                            .account_task
-                            .module
-                            .clone()
-                            .unwrap_or_default();
+                        let task_modules = task.account_task.module.clone().unwrap_or_default();
 
-                        let same_module = self.is_task_for_current_module(&task.context, &task_modules);
+                        let same_module =
+                            self.is_task_for_current_module(&task.context, &task_modules);
 
                         if same_module {
                             let mut next_ctx = task.context.clone();
@@ -585,11 +594,21 @@ impl ModuleDagProcessor {
                 // if the DAG is rebuilt and the UUID changes.
                 warn!(
                     "[dag] module={} run={} execute_parse: parser error at node='{}' account={} platform={} request_id={} error={}",
-                    self.module_id, self.run_id, node_id,
-                    response.account, response.platform, response.id, e
+                    self.module_id,
+                    self.run_id,
+                    node_id,
+                    response.account,
+                    response.platform,
+                    response.id,
+                    e
                 );
                 let step_idx_u32 = node_idx as u32;
-                let meta = response.metadata.task.as_object().cloned().unwrap_or_default();
+                let meta = response
+                    .metadata
+                    .task
+                    .as_object()
+                    .cloned()
+                    .unwrap_or_default();
                 let error_task = TaskErrorEvent {
                     id: response.id,
                     account_task: TaskEvent {
@@ -624,9 +643,11 @@ impl ModuleDagProcessor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::model::module_dag::{ModuleDagDefinition, ModuleDagEdgeDef, ModuleDagNodeDef};
     use crate::common::interface::{SyncBoxStream, ToSyncBoxStream};
     use crate::common::model::message::TaskOutputEvent;
+    use crate::common::model::module_dag::{
+        ModuleDagDefinition, ModuleDagEdgeDef, ModuleDagNodeDef,
+    };
     use crate::common::model::{ModuleConfig, Request, Response};
     use crate::errors::Result as CResult;
     use async_trait::async_trait;
@@ -666,7 +687,9 @@ mod tests {
             .iter()
             .map(|id| ModuleDagNodeDef {
                 node_id: id.clone(),
-                node: Arc::new(DummyNode { name: Box::leak(id.clone().into_boxed_str()) }),
+                node: Arc::new(DummyNode {
+                    name: Box::leak(id.clone().into_boxed_str()),
+                }),
                 placement_override: None,
                 policy_override: None,
                 tags: vec![],
@@ -752,8 +775,8 @@ mod tests {
 
     // ── Metadata propagation tests ──────────────────────────────────────
 
-    use std::sync::Mutex as StdMutex;
     use crate::common::model::meta::MetaData;
+    use std::sync::Mutex as StdMutex;
 
     /// Node that captures the params it receives in generate() and returns
     /// a configurable parser output.
@@ -795,7 +818,10 @@ mod tests {
         }
     }
 
-    fn make_response(node_id: &str, task_meta: serde_json::Map<String, serde_json::Value>) -> Response {
+    fn make_response(
+        node_id: &str,
+        task_meta: serde_json::Map<String, serde_json::Value>,
+    ) -> Response {
         Response {
             id: Uuid::now_v7(),
             platform: "pf".to_string(),
@@ -839,10 +865,25 @@ mod tests {
 
         let def = ModuleDagDefinition {
             nodes: vec![
-                ModuleDagNodeDef { node_id: "node_a".into(), node: node_a.clone(), placement_override: None, policy_override: None, tags: vec![] },
-                ModuleDagNodeDef { node_id: "node_b".into(), node: node_b.clone(), placement_override: None, policy_override: None, tags: vec![] },
+                ModuleDagNodeDef {
+                    node_id: "node_a".into(),
+                    node: node_a.clone(),
+                    placement_override: None,
+                    policy_override: None,
+                    tags: vec![],
+                },
+                ModuleDagNodeDef {
+                    node_id: "node_b".into(),
+                    node: node_b.clone(),
+                    placement_override: None,
+                    policy_override: None,
+                    tags: vec![],
+                },
             ],
-            edges: vec![ModuleDagEdgeDef { from: "node_a".into(), to: "node_b".into() }],
+            edges: vec![ModuleDagEdgeDef {
+                from: "node_a".into(),
+                to: "node_b".into(),
+            }],
             entry_nodes: vec!["node_a".into()],
             default_policy: None,
             metadata: Default::default(),
@@ -858,22 +899,34 @@ mod tests {
         assert_eq!(result.parser_task.len(), 1);
         let routed = &result.parser_task[0];
         assert_eq!(routed.context.node_id.as_deref(), Some("node_b"));
-        assert_eq!(routed.metadata.get("user_id").and_then(|v| v.as_str()), Some("abc"));
-        assert_eq!(routed.metadata.get("page").and_then(|v| v.as_i64()), Some(42));
+        assert_eq!(
+            routed.metadata.get("user_id").and_then(|v| v.as_str()),
+            Some("abc")
+        );
+        assert_eq!(
+            routed.metadata.get("page").and_then(|v| v.as_i64()),
+            Some(42)
+        );
 
         // Now feed metadata into execute_generate to verify it reaches node_b
         let ctx = Some(routed.context.clone());
-        let _ = proc.execute_generate(
-            Arc::new(ModuleConfig::default()),
-            routed.metadata.clone(),
-            None,
-            ctx,
-            None,
-        ).await.unwrap();
+        let _ = proc
+            .execute_generate(
+                Arc::new(ModuleConfig::default()),
+                routed.metadata.clone(),
+                None,
+                ctx,
+                None,
+            )
+            .await
+            .unwrap();
 
         let captured = node_b.captured();
         assert_eq!(captured.len(), 1);
-        assert_eq!(captured[0].get("user_id").and_then(|v| v.as_str()), Some("abc"));
+        assert_eq!(
+            captured[0].get("user_id").and_then(|v| v.as_str()),
+            Some("abc")
+        );
         assert_eq!(captured[0].get("page").and_then(|v| v.as_i64()), Some(42));
     }
 
@@ -887,10 +940,25 @@ mod tests {
 
         let def = ModuleDagDefinition {
             nodes: vec![
-                ModuleDagNodeDef { node_id: "node_a".into(), node: node_a.clone(), placement_override: None, policy_override: None, tags: vec![] },
-                ModuleDagNodeDef { node_id: "node_b".into(), node: node_b.clone(), placement_override: None, policy_override: None, tags: vec![] },
+                ModuleDagNodeDef {
+                    node_id: "node_a".into(),
+                    node: node_a.clone(),
+                    placement_override: None,
+                    policy_override: None,
+                    tags: vec![],
+                },
+                ModuleDagNodeDef {
+                    node_id: "node_b".into(),
+                    node: node_b.clone(),
+                    placement_override: None,
+                    policy_override: None,
+                    tags: vec![],
+                },
             ],
-            edges: vec![ModuleDagEdgeDef { from: "node_a".into(), to: "node_b".into() }],
+            edges: vec![ModuleDagEdgeDef {
+                from: "node_a".into(),
+                to: "node_b".into(),
+            }],
             entry_nodes: vec!["node_a".into()],
             default_policy: None,
             metadata: Default::default(),
@@ -911,23 +979,32 @@ mod tests {
         let synthesized = &result.parser_task[0];
         assert_eq!(synthesized.context.node_id.as_deref(), Some("node_b"));
         assert_eq!(
-            synthesized.metadata.get("session_id").and_then(|v| v.as_str()),
+            synthesized
+                .metadata
+                .get("session_id")
+                .and_then(|v| v.as_str()),
             Some("s1"),
             "advance-gate synthesized task should carry response.metadata.task"
         );
 
         // Verify it reaches node_b's generate
-        let _ = proc.execute_generate(
-            Arc::new(ModuleConfig::default()),
-            synthesized.metadata.clone(),
-            None,
-            Some(synthesized.context.clone()),
-            None,
-        ).await.unwrap();
+        let _ = proc
+            .execute_generate(
+                Arc::new(ModuleConfig::default()),
+                synthesized.metadata.clone(),
+                None,
+                Some(synthesized.context.clone()),
+                None,
+            )
+            .await
+            .unwrap();
 
         let captured = node_b.captured();
         assert_eq!(captured.len(), 1);
-        assert_eq!(captured[0].get("session_id").and_then(|v| v.as_str()), Some("s1"));
+        assert_eq!(
+            captured[0].get("session_id").and_then(|v| v.as_str()),
+            Some("s1")
+        );
     }
 
     /// Fan-out: metadata should be replicated to each successor.
@@ -944,13 +1021,37 @@ mod tests {
 
         let def = ModuleDagDefinition {
             nodes: vec![
-                ModuleDagNodeDef { node_id: "node_a".into(), node: node_a.clone(), placement_override: None, policy_override: None, tags: vec![] },
-                ModuleDagNodeDef { node_id: "node_b".into(), node: node_b.clone(), placement_override: None, policy_override: None, tags: vec![] },
-                ModuleDagNodeDef { node_id: "node_c".into(), node: node_c.clone(), placement_override: None, policy_override: None, tags: vec![] },
+                ModuleDagNodeDef {
+                    node_id: "node_a".into(),
+                    node: node_a.clone(),
+                    placement_override: None,
+                    policy_override: None,
+                    tags: vec![],
+                },
+                ModuleDagNodeDef {
+                    node_id: "node_b".into(),
+                    node: node_b.clone(),
+                    placement_override: None,
+                    policy_override: None,
+                    tags: vec![],
+                },
+                ModuleDagNodeDef {
+                    node_id: "node_c".into(),
+                    node: node_c.clone(),
+                    placement_override: None,
+                    policy_override: None,
+                    tags: vec![],
+                },
             ],
             edges: vec![
-                ModuleDagEdgeDef { from: "node_a".into(), to: "node_b".into() },
-                ModuleDagEdgeDef { from: "node_a".into(), to: "node_c".into() },
+                ModuleDagEdgeDef {
+                    from: "node_a".into(),
+                    to: "node_b".into(),
+                },
+                ModuleDagEdgeDef {
+                    from: "node_a".into(),
+                    to: "node_c".into(),
+                },
             ],
             entry_nodes: vec!["node_a".into()],
             default_policy: None,
@@ -966,9 +1067,14 @@ mod tests {
         // Fan-out should produce 2 tasks, each with the same metadata
         assert_eq!(result.parser_task.len(), 2);
         for task in &result.parser_task {
-            assert_eq!(task.metadata.get("key").and_then(|v| v.as_str()), Some("shared_value"));
+            assert_eq!(
+                task.metadata.get("key").and_then(|v| v.as_str()),
+                Some("shared_value")
+            );
         }
-        let mut targets: Vec<_> = result.parser_task.iter()
+        let mut targets: Vec<_> = result
+            .parser_task
+            .iter()
             .map(|t| t.context.node_id.clone().unwrap())
             .collect();
         targets.sort();

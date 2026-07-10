@@ -6,10 +6,15 @@ impl Engine {
         info!("Starting node registry heartbeat");
         let registry = self.node_registry.clone();
         let mut shutdown = self.shutdown_tx.subscribe();
-        let mut interval = tokio::time::interval(Duration::from_secs(Self::NODE_HEARTBEAT_INTERVAL_SECS));
+        let mut interval =
+            tokio::time::interval(Duration::from_secs(Self::NODE_HEARTBEAT_INTERVAL_SECS));
 
-        let hostname = std::env::var("COMPUTERNAME").or(std::env::var("HOSTNAME")).unwrap_or("unknown".to_string());
-        let ip = get_primary_local_ip().map(|ip| ip.to_string()).unwrap_or_else(|_| "127.0.0.1".to_string());
+        let hostname = std::env::var("COMPUTERNAME")
+            .or(std::env::var("HOSTNAME"))
+            .unwrap_or("unknown".to_string());
+        let ip = get_primary_local_ip()
+            .map(|ip| ip.to_string())
+            .unwrap_or_else(|_| "127.0.0.1".to_string());
 
         loop {
             tokio::select! {
@@ -33,8 +38,7 @@ impl Engine {
         receiver: Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<T>>>,
         concurrency: usize,
         execute_fn: F,
-    )
-    where
+    ) where
         T: Identifiable + Send + 'static,
         F: Fn(T) -> Fut + Send + Sync + 'static + Clone,
         Fut: Future<Output = ()> + Send,
@@ -51,7 +55,10 @@ impl Engine {
     }
 
     /// Starts task ingestion workers (`TaskModel` / unified ingress path).
-    pub(super) async fn start_task_processor(&self, unified_task_ingress: Arc<UnifiedTaskIngressChain>) {
+    pub(super) async fn start_task_processor(
+        &self,
+        unified_task_ingress: Arc<UnifiedTaskIngressChain>,
+    ) {
         let concurrency = self
             .state
             .config
@@ -79,7 +86,9 @@ impl Engine {
                         .execute(UnifiedTaskInput::Task(task), ProcessorContext::default())
                         .await;
                     match result {
-                        crate::common::processors::processor::ProcessorResult::Success(mut stream) => {
+                        crate::common::processors::processor::ProcessorResult::Success(
+                            mut stream,
+                        ) => {
                             while stream.next().await.is_some() {}
                             if let Some(comp) = &queue_manager.compensator {
                                 let _ = comp.remove_task("task", &id).await;
@@ -90,7 +99,9 @@ impl Engine {
                                 }
                             }
                         }
-                        crate::common::processors::processor::ProcessorResult::RetryableFailure(retry_policy) => {
+                        crate::common::processors::processor::ProcessorResult::RetryableFailure(
+                            retry_policy,
+                        ) => {
                             Self::handle_policy_retry(
                                 &policy_resolver,
                                 &queue_manager,
@@ -103,7 +114,9 @@ impl Engine {
                             )
                             .await;
                         }
-                        crate::common::processors::processor::ProcessorResult::FatalFailure(err) => {
+                        crate::common::processors::processor::ProcessorResult::FatalFailure(
+                            err,
+                        ) => {
                             Self::handle_policy_failure(
                                 &policy_resolver,
                                 &queue_manager,
@@ -234,7 +247,10 @@ impl Engine {
     }
 
     /// Starts parser-task workers that continue chain progression after parser outcomes.
-    pub(super) async fn start_parser_model_processor(&self, unified_task_ingress: Arc<UnifiedTaskIngressChain>) {
+    pub(super) async fn start_parser_model_processor(
+        &self,
+        unified_task_ingress: Arc<UnifiedTaskIngressChain>,
+    ) {
         let concurrency = {
             let cfg = self.state.config.read().await;
             cfg.crawler
@@ -658,7 +674,10 @@ impl Engine {
         .await;
     }
 
-    pub(super) async fn start_error_processor(&self, unified_task_ingress: Arc<UnifiedTaskIngressChain>) {
+    pub(super) async fn start_error_processor(
+        &self,
+        unified_task_ingress: Arc<UnifiedTaskIngressChain>,
+    ) {
         let concurrency = {
             let cfg = self.state.config.read().await;
             cfg.crawler
@@ -684,10 +703,15 @@ impl Engine {
                     let task_for_dlq = task.clone();
                     let id = task.get_id();
                     let result = ingress
-                        .execute(UnifiedTaskInput::ErrorTask(task), ProcessorContext::default())
+                        .execute(
+                            UnifiedTaskInput::ErrorTask(task),
+                            ProcessorContext::default(),
+                        )
                         .await;
                     match result {
-                        crate::common::processors::processor::ProcessorResult::Success(mut stream) => {
+                        crate::common::processors::processor::ProcessorResult::Success(
+                            mut stream,
+                        ) => {
                             while stream.next().await.is_some() {}
                             if let Some(comp) = &queue_manager.compensator {
                                 let _ = comp.remove_task("error_task", &id).await;
@@ -698,7 +722,9 @@ impl Engine {
                                 }
                             }
                         }
-                        crate::common::processors::processor::ProcessorResult::RetryableFailure(retry_policy) => {
+                        crate::common::processors::processor::ProcessorResult::RetryableFailure(
+                            retry_policy,
+                        ) => {
                             Self::handle_policy_retry(
                                 &policy_resolver,
                                 &queue_manager,
@@ -711,7 +737,9 @@ impl Engine {
                             )
                             .await;
                         }
-                        crate::common::processors::processor::ProcessorResult::FatalFailure(err) => {
+                        crate::common::processors::processor::ProcessorResult::FatalFailure(
+                            err,
+                        ) => {
                             Self::handle_policy_failure(
                                 &policy_resolver,
                                 &queue_manager,
@@ -778,7 +806,9 @@ impl Engine {
                                 }
                             }
                         }
-                        crate::common::processors::processor::ProcessorResult::RetryableFailure(retry_policy) => {
+                        crate::common::processors::processor::ProcessorResult::RetryableFailure(
+                            retry_policy,
+                        ) => {
                             Self::handle_policy_retry(
                                 &policy_resolver,
                                 &queue_manager,
@@ -791,7 +821,9 @@ impl Engine {
                             )
                             .await;
                         }
-                        crate::common::processors::processor::ProcessorResult::FatalFailure(err) => {
+                        crate::common::processors::processor::ProcessorResult::FatalFailure(
+                            err,
+                        ) => {
                             Self::handle_policy_failure(
                                 &policy_resolver,
                                 &queue_manager,
