@@ -40,7 +40,7 @@ rustdoc-args = ["--cfg", "docsrs"]
 [dependencies]
 # 运行时:全部引擎/管线逻辑都在 mocra-core;host 仅是薄门面(facade + prelude + 各层 shim)。
 # 因此这里只保留门面/bin 直接用到的依赖 + 特性门控的可选依赖 —— 其余(axum、redis、
-# tracing、polars……)都是 mocra-core 的传递依赖,host 不再直接声明。
+# tracing 等)都是 mocra-core 的传递依赖,host 不再直接声明。
 mocra-core = { path = "crates/mocra-core" }
 mocra-proxy = { path = "crates/mocra-proxy" }
 # 门面(src/facade.rs、src/prelude.rs、src/lib.rs、src/bin/)直接用到的依赖。
@@ -56,6 +56,11 @@ mimalloc = { version = "0.1", default-features = false, optional = true }
 mocra-cluster = { path = "crates/mocra-cluster", optional = true } # cluster-embedded:门面 ClusterConfig
 v8 = { version = "145", optional = true }                          # js-v8:内嵌 JS 运行时
 tempfile = { version = "3", optional = true }                      # js-v8:worker 临时文件
+# polars 三件套:host prelude 在 `polars` / `excel` 特性下再导出 `::polars::*`(供下游用 DataFrame
+# 相关类型时版本对齐),故 host 需要直接(可选)依赖它们 —— 仅在这些特性开启时才编译。
+polars = { version = "0.52.0", features = ["json", "lazy", "serde", "csv", "timezones", "strings", "ipc", "dtype-decimal"], optional = true }
+polars-lazy = { version = "0.52.0", features = ["pivot"], optional = true }
+polars-ops = { version = "0.52.0", features = ["pivot"], optional = true }
 
 [dev-dependencies]
 # 仅测试 / 示例用,不进入下游用户的依赖树。
@@ -77,10 +82,10 @@ mimalloc = ["dep:mimalloc"]
 js-v8 = ["dep:v8", "dep:tempfile"]
 # 以下特性只是把开关“转发”给 mocra-core —— 对应运行时代码都在那里,host 无需再直接依赖
 # sea-orm / rdkafka / async-nats / polars / calamine / tower-http。
-# 数据帧支持(polars):解锁 `DataFrameStore` / `polars_utils` 等表格能力。
-polars = ["mocra-core/polars"]
-# Excel 解析(calamine → DataFrame),mocra-core 侧隐含开启 polars。
-excel = ["mocra-core/excel"]
+# 数据帧支持(polars):解锁 `DataFrameStore` / `polars_utils`,并在 prelude 再导出 `::polars::*`。
+polars = ["dep:polars", "dep:polars-lazy", "dep:polars-ops", "mocra-core/polars"]
+# Excel 解析(calamine → DataFrame),隐含开启 polars(含 host 的 polars 再导出)。
+excel = ["polars", "mocra-core/excel"]
 # 数据面 Kafka 队列后端(默认关闭 —— 避免 rdkafka 的 cmake/C++ 构建负担)。
 queue-kafka = ["mocra-core/queue-kafka"]
 # 数据面 NATS(JetStream)队列后端 —— 轻量、无需 Redis,适合内嵌集群的数据面。
