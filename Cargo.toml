@@ -131,7 +131,7 @@ queue-nats = ["dep:async-nats", "mocra-core/queue-nats"]
 store = ["dep:sea-orm", "dep:mocra-store", "mocra-core/store"]
 # 内嵌 redb+Raft 控制面。开启后 `RaftCoordinationBackend` 实现 `CoordinationBackend`,
 # 可用自组网的 Raft 集群替换 Redis 协调(锁 / 选举 / KV)。
-cluster-embedded = ["dep:mocra-cluster"]
+cluster-embedded = ["dep:mocra-cluster", "mocra-core/cluster-embedded"]
 # 后台管理 dashboard:开启后 engine 暴露 admin + 可观测 HTTP API(任务 / 集群 / 指标监控)。
 dashboard = ["dep:tower-http", "mocra-core/dashboard"]
 

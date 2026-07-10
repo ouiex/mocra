@@ -60,6 +60,8 @@ serde_path_to_error = "0.1"
 crc32fast = "1.5.0"
 rdkafka = { version = "0.39", features = ["cmake-build"], optional = true }
 async-nats = { version = "0.38", optional = true }
+# sync(协调集成:Redis / Kafka / 内嵌 Raft 后端)
+mocra-cluster = { path = "../mocra-cluster", optional = true }
 # store(sea-orm 连接器 / 事务) — 默认关闭
 sea-orm = { version = "1", features = ["postgres-array", "runtime-tokio-native-tls", "sqlx-postgres", "sqlx-sqlite"], optional = true }
 # excel(calamine → DataFrame) — 默认关闭,隐含 polars
@@ -81,3 +83,5 @@ dashboard = []
 # Data-plane MQ backends (default is in-memory / redis).
 queue-kafka = ["dep:rdkafka"]
 queue-nats = ["dep:async-nats"]
+# Embedded redb + Raft control plane (RaftCoordinationBackend).
+cluster-embedded = ["dep:mocra-cluster"]

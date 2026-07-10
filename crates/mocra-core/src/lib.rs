@@ -32,3 +32,9 @@ pub mod downloader;
 
 #[path = "queue/lib.rs"]
 pub mod queue;
+
+#[path = "sync/lib.rs"]
+pub mod sync;
+
+#[path = "schedule/lib.rs"]
+pub mod schedule;
