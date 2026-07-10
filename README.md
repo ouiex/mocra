@@ -24,6 +24,8 @@ mocra is a Rust framework for building scalable data collection pipelines. It mo
 - **Auto-scaling runtime** — single-node (in-memory) or distributed (Redis/Kafka) with zero code changes
 - **Bounded concurrency** — semaphore-controlled worker pools with pause/resume/shutdown
 - **Middleware pipeline** — download, data transformation, and storage middleware with weight-based ordering
+- **Pluggable downloaders** — the default is reqwest; swap it wholesale (`.default_downloader()`) or register per-module downloaders (`.downloader()`) for browser rendering, proxy rotation, or custom retry
+- **Admin dashboard** — enable the `dashboard` feature for a read-only observability HTTP API **and** a built-in single-file web UI (metrics / logs / tasks / performance) — no frontend build required
 - **Built-in control plane** — HTTP API for health, metrics, pause/resume, task injection, and DLQ inspection
 - **Prometheus metrics** — unified `mocra_*` metric families for throughput, latency, errors, and backlog
 - **Cron scheduling** — periodic task execution with cron expressions
@@ -111,6 +113,40 @@ The **control plane** (leader election, distributed locks, membership, partition
 
 > **Advanced (multi-stage DAG)**: for multi-node pipelines with login, pagination, and custom middleware, implement `ModuleTrait` / `ModuleNodeTrait` directly (enable the `store` feature for the account × platform × module model). See [Module Development](docs/module-development.md).
 
+### Admin dashboard
+
+Enable the `dashboard` feature and call `.dashboard(port)` — the engine hosts a read-only observability API **and** a built-in single-file web UI. Open the port in a browser to see **metrics / logs / tasks / performance**; no frontend build, and no endpoint to type in (the page targets its own engine):
+
+```toml
+mocra = { version = "0.2", features = ["dashboard"] }
+```
+
+```rust
+Mocra::builder()
+    .spider(MySpider, on_item(|x: Item| async move { /* ... */ }))
+    .dashboard(8080)   // GET / → web UI;  /metrics,  /observability/{engine,cluster,system,logs}
+    .run().await?;
+```
+
+```bash
+cargo run --example dashboard --features dashboard   # then open http://127.0.0.1:8080
+```
+
+The read-only endpoints (`/`, `/metrics`, `/health`, `/observability/*`) are CORS-enabled and need no API key, so a standalone frontend can consume them cross-origin; write endpoints (`/control/*`, `/start_work`) stay authenticated.
+
+### Custom downloaders
+
+The default downloader is reqwest. Implement the `Downloader` trait to swap it for browser rendering, proxy rotation, or a custom retry policy — either globally or per module:
+
+```rust
+Mocra::builder()
+    .spider(MySpider, on_item(|x: Item| async move { /* ... */ }))
+    .default_downloader(BrowserDownloader::new())  // replace reqwest globally
+    // .downloader(MyDownloader::new())            // or register by name; routed when a
+    //                                             // module's config.downloader == name()
+    .run().await?;
+```
+
 ## Architecture
 
 ```
@@ -132,11 +168,12 @@ Each stage is decoupled by a message queue. Queues are local Tokio channels in s
 
 ### Workspace crates
 
-mocra is a Cargo workspace; the reusable subsystems ship as standalone crates with a single, acyclic dependency direction (`mocra → {mocra-cluster, mocra-dag, mocra-proxy, mocra-store}` — the subsystem crates never depend back on `mocra`):
+mocra is a Cargo workspace. The entire runtime lives in `mocra-core`; the `mocra` crate you depend on is a **thin facade** over it (12 direct dependencies). Reusable subsystems ship as standalone crates with a single, acyclic dependency direction (`mocra → mocra-core → {mocra-cluster, mocra-dag, mocra-proxy, mocra-store}` — the inner crates never depend back):
 
 | Crate | What it is |
 |---|---|
-| [`mocra`](.) | Facade: `Spider` trait, `Mocra` builder, prelude, engine — the only crate most users import. |
+| [`mocra`](.) | **Thin facade** — `Spider` trait, `Mocra` builder, prelude, default sinks. The only crate most users import. |
+| [`mocra-core`](crates/mocra-core) | The full runtime: domain models, downloader, queue, sync, scheduler, engine + observability/admin API. |
 | [`mocra-cluster`](crates/mocra-cluster) | Embedded control plane: Raft + redb (election, fenced locks, membership, partition ownership) — no external coordinator. |
 | [`mocra-dag`](crates/mocra-dag) | Generic distributed DAG execution engine (zero crawler coupling). |
 | [`mocra-proxy`](crates/mocra-proxy) | Configuration-driven proxy pool / manager (standalone). |
@@ -178,7 +215,7 @@ start ─┤               ├── merge
 | | Single-Node | Embedded cluster (`cluster-embedded`) |
 |---|---|---|
 | **Control plane** | In-process | Embedded **redb + Raft** (elections / locks / membership / partition ownership) — **no Redis** |
-| **Queues (data plane)** | Tokio mpsc (in-memory) | Pluggable MQ: Kafka / Redis Streams / in-memory |
+| **Queues (data plane)** | Tokio mpsc (in-memory) | Pluggable MQ: Kafka / NATS JetStream / Redis Streams / in-memory |
 | **Locks / election** | Local | Raft-consensus (fencing tokens) |
 | **Workers** | 1 process | N nodes, same binary; register any node to any known node |
 | **Work distribution** | — | Cron by `hash(account)` ownership + MQ consumer affinity |
@@ -193,7 +230,7 @@ Mocra::builder()
     .run().await?;
 ```
 
-A Redis-backed control plane remains available as a transitional option (`cluster-redis`); the data plane can still use Redis Streams or Kafka independently.
+A Redis-backed control plane is also available without the embedded cluster: provide Redis in your TOML config (`from_toml`) and coordination (locks / election) routes through Redis instead of Raft. The data plane (message queue) is selected independently — Kafka (`queue-kafka`), NATS JetStream (`queue-nats`), Redis Streams, or in-memory.
 
 ## Documentation
 
@@ -213,9 +250,10 @@ A Redis-backed control plane remains available as a transitional option (`cluste
 Runnable examples in [`examples/`](examples/):
 
 - [`examples/spider_quickstart.rs`](examples/spider_quickstart.rs) — minimal `Spider` (no DB / no Redis)
+- [`examples/dashboard.rs`](examples/dashboard.rs) — built-in observability dashboard (`--features dashboard`)
 - [`examples/cluster_quickstart.rs`](examples/cluster_quickstart.rs) — self-organizing embedded cluster (`--features cluster-embedded`)
 
-Advanced `ModuleTrait` / DAG usage: [`simple/module_node_trait_dag.rs`](simple/module_node_trait_dag.rs).
+Advanced `ModuleTrait` / DAG usage: see [Module Development](docs/module-development.md) and the [DAG Guide](docs/dag-guide.md).
 
 ## Monitoring
 
