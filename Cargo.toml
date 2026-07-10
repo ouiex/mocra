@@ -25,6 +25,7 @@ exclude = [
 	"tests/logs/**",
 	"docker-compose.kafka.yml",
 	"scripts/**",
+	"benchmarks/**",
 	".github/**",
 	".idea/**",
 	"*.log",

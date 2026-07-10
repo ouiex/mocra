@@ -1,0 +1,5 @@
+# scrapy-redis benchmark deps. Install into a venv:
+#   python3 -m venv venv && venv/bin/pip install -r requirements.txt
+scrapy>=2.17
+scrapy-redis>=0.9
+redis>=5

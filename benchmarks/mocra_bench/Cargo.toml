@@ -1,0 +1,18 @@
+[package]
+name = "mocra_bench"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+mocra = { path = "../.." }
+async-trait = "0.1"
+tokio = { version = "1", features = ["full"] }
+scraper = "0.20"
+
+[profile.release]
+opt-level = 3
+
+# Standalone workspace: keep this benchmark crate out of the main mocra workspace so it never
+# affects `cargo build/clippy/fmt` (and CI) at the repo root.
+[workspace]

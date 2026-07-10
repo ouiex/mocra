@@ -1,0 +1,7 @@
+# Build outputs / local env — not committed.
+venv/
+mocra_bench/target/
+mock
+loadtest
+__pycache__/
+*.log
