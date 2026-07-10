@@ -1,56 +1,68 @@
-# DAG Execution Guide
+# DAG Execution Guide (Advanced)
 
-mocra compiles every module into a Directed Acyclic Graph (DAG). This guide explains how DAGs are defined, compiled, and executed.
+> Most users should start with the [facade quickstart](getting-started.md) — single-node, no DB/Redis. This guide covers the advanced ModuleTrait/DAG path for multi-stage, multi-node, or DB-driven pipelines.
+
+A `ModuleTrait` module runs as a Directed Acyclic Graph (DAG) of `ModuleNodeTrait` nodes. This
+guide explains how the graph is defined, assembled, and executed. For the traits themselves see
+[Module Development](module-development.md).
 
 ## Overview
 
 ```
-Definition ──▶ Compilation ──▶ Execution
-(user code)     (init time)     (queue-driven, runtime)
+Definition ──▶ build_definition ──▶ ModuleDagProcessor
+(your code)     (per run, at init)   (queue-driven execution)
 ```
 
-- **Definition** — you declare nodes and edges via `ModuleTrait`
-- **Compilation** — the engine builds a `Dag` at module registration
-- **Execution** — the `ModuleDagProcessor` routes messages between nodes through the queue pipeline
+- **Definition** — you declare nodes and edges via `ModuleTrait::dag_definition()` /
+  `add_step()`.
+- **Assembly** — `ModuleDagOrchestrator::build_definition` turns those hooks into one
+  `ModuleDagDefinition` when a run starts (not precompiled at registration).
+- **Execution** — the queue-backed `ModuleDagProcessor` builds the successor / entry-node
+  topology and routes messages between nodes by `ExecutionMark.node_id`.
 
 ## Defining a DAG
 
 ### Option 1: Linear Chain (add_step)
 
-Return an ordered vector of nodes. The engine automatically wires them as a chain:
+Return an ordered vector of nodes; they are wired as a chain and the first is the entry node:
 
 ```rust
 async fn add_step(&self) -> Vec<Arc<dyn ModuleNodeTrait>> {
     vec![Arc::new(NodeA), Arc::new(NodeB), Arc::new(NodeC)]
 }
-// Result: step_0(NodeA) → step_1(NodeB) → step_2(NodeC)
+// Result: NodeA → NodeB → NodeC
 ```
+
+Each node's id comes from its `stable_node_key()` (or a generated UUID when that is empty).
 
 ### Option 2: Custom Graph (dag_definition)
 
-For non-linear topologies, return a `ModuleDagDefinition`:
+For non-linear topologies, return a `ModuleDagDefinition`. The builder collects nodes from the
+edges you declare and derives the entry nodes (any node with no incoming edge) automatically:
 
 ```rust
+use mocra::common::model::module_dag::{ModuleDagDefinition, ModuleDagNodeDef};
+
 async fn dag_definition(&self) -> Option<ModuleDagDefinition> {
-    Some(ModuleDagDefinition {
-        nodes: vec![
-            ModuleDagNodeDef { node_id: "fetch".into(), node: Arc::new(FetchNode), .. },
-            ModuleDagNodeDef { node_id: "parse_a".into(), node: Arc::new(ParseA), .. },
-            ModuleDagNodeDef { node_id: "parse_b".into(), node: Arc::new(ParseB), .. },
-            ModuleDagNodeDef { node_id: "save".into(), node: Arc::new(SaveNode), .. },
-        ],
-        edges: vec![
-            ModuleDagEdgeDef { from: "fetch".into(), to: "parse_a".into() },
-            ModuleDagEdgeDef { from: "fetch".into(), to: "parse_b".into() },
-            ModuleDagEdgeDef { from: "parse_a".into(), to: "save".into() },
-            ModuleDagEdgeDef { from: "parse_b".into(), to: "save".into() },
-        ],
-        entry_nodes: vec!["fetch".into()],
-        default_policy: None,
-        metadata: Default::default(),
-    })
+    let fetch   = ModuleDagNodeDef::new(Arc::new(FetchNode)).with_id("fetch");
+    let parse_a = ModuleDagNodeDef::new(Arc::new(ParseA)).with_id("parse_a");
+    let parse_b = ModuleDagNodeDef::new(Arc::new(ParseB)).with_id("parse_b");
+    let save    = ModuleDagNodeDef::new(Arc::new(SaveNode)).with_id("save");
+
+    Some(
+        ModuleDagDefinition::builder()
+            .edge(&fetch, &parse_a)
+            .edge(&fetch, &parse_b)
+            .edge(&parse_a, &save)
+            .edge(&parse_b, &save)
+            .build(),
+    )
 }
 ```
+
+Prefer the builder. If you construct the struct literally instead, note that `ModuleDagNodeDef`
+implements `Clone` but **not** `Default` — build each node with `ModuleDagNodeDef::new(node)`
+(not `..Default::default()`), and set all `ModuleDagDefinition` fields explicitly.
 
 ### ModuleDagNodeDef fields
 
@@ -58,48 +70,77 @@ async fn dag_definition(&self) -> Option<ModuleDagDefinition> {
 |---|---|---|
 | `node_id` | `String` | Unique identifier within the module |
 | `node` | `Arc<dyn ModuleNodeTrait>` | The node implementation |
-| `placement_override` | `Option<PlacementConstraint>` | Node placement hint for distributed mode |
-| `policy_override` | `Option<NodePolicy>` | Custom retry/timeout policy |
+| `placement_override` | `Option<NodePlacement>` | Node placement hint for distributed mode (from `mocra_dag`) |
+| `policy_override` | `Option<DagNodeExecutionPolicy>` | Per-node retry / timeout / circuit-breaker policy (from `mocra_dag`) |
 | `tags` | `Vec<String>` | Metadata tags |
+
+Constructors: `ModuleDagNodeDef::new(node)` derives `node_id` from the node's
+`stable_node_key()` (or a UUID); `.with_id("..")` overrides it explicitly (use this when you need
+two instances of the same node type in one DAG).
 
 ### ModuleDagEdgeDef fields
 
 | Field | Type | Description |
 |---|---|---|
-| `from` | `String` | Source node ID |
-| `to` | `String` | Target node ID |
+| `from` | `String` | Source node id |
+| `to` | `String` | Target node id |
+
+`ModuleDagEdgeDef::new(&from_node, &to_node)` builds one from two node defs.
+
+### ModuleDagDefinition fields
+
+| Field | Type | Description |
+|---|---|---|
+| `nodes` | `Vec<ModuleDagNodeDef>` | All nodes |
+| `edges` | `Vec<ModuleDagEdgeDef>` | Directed edges |
+| `entry_nodes` | `Vec<String>` | Node ids with no predecessor (where a run starts) |
+| `default_policy` | `Option<DagNodeExecutionPolicy>` | Policy applied to every node unless overridden |
+| `metadata` | `HashMap<String, String>` | Free-form metadata |
+
+Helpers: `ModuleDagDefinition::builder()` (fluent, entry nodes auto-derived) and
+`ModuleDagDefinition::from_linear_steps(steps)` (the linear-chain form).
 
 ## DAG assembly
 
-The module's DAG is assembled lazily when a task runs — it is **not** precompiled at
-registration. For each run the engine:
+The module's DAG is assembled **lazily when a run starts** — it is *not* precompiled at
+registration. `ModuleDagOrchestrator::build_definition(module)`:
 
-1. Calls `module.add_step()` and `module.dag_definition()`.
-2. Namespaces any `add_step()` nodes as `legacy_step_0`, `legacy_step_1`, … .
-3. Merges both into one `ModuleDagDefinition` (when both are present).
-4. Feeds it to the queue-backed `ModuleDagProcessor`, which builds the successor /
-   entry-node topology used to route execution by `ExecutionMark.node_id`.
+1. Calls `module.dag_definition()` and `module.add_step()`.
+2. Builds a linear-compat definition from `add_step()` via `from_linear_steps`.
+3. Merges both when both are present — the linear nodes are namespaced with a `legacy_` prefix to
+   avoid id collisions with the custom graph.
+4. Hands the merged `ModuleDagDefinition` to `ModuleDagProcessor::init_from_definition`, which
+   builds the successor adjacency list and entry-node set used to route execution.
 
 ## Execution Model
 
-The DAG is executed through the **queue pipeline**, not in-memory. Each node runs as a standard pipeline iteration:
+The DAG runs through the **queue pipeline**, not in-memory. Each node runs as a standard pipeline
+iteration:
 
 ```
-TaskEvent (with node_id) → generate() → [Request Queue] → download → [Response Queue] → parser() → route
+TaskEvent (node_id) → generate() → [Request Q] → download → [Response Q] → parser() → route
 ```
+
+Routing is by `ExecutionMark.node_id` carried on each Request/Response; when it is unset (a fresh
+task), the entry nodes run.
 
 ### Static Topology, Dynamic Execution
 
-- **Topology is static**: the graph structure is fixed at init time; you cannot add/remove edges at runtime.
-- **Execution count is dynamic**: each node runs as many times as there are incoming messages.
+- **Topology is static** — the graph is fixed at init; you cannot add/remove edges at runtime.
+- **Execution count is dynamic** — each node runs once per incoming message.
 
 ### How Routing Works
 
 After `parser()` returns a `TaskOutputEvent`:
 
-1. **If `parser_task` is non-empty** — each `TaskParserEvent` is routed independently to the successor node(s). If the current node has N successors, each task is **cloned** for each successor (fan-out).
+1. **`parser_task` is non-empty** — each `TaskParserEvent` is routed to the successor node(s). If
+   the parser did not target a specific node and the current node has N successors, the task is
+   **cloned** to each successor (fan-out). A task marked `stay_current_step()` re-enters the
+   **current** node instead of advancing. A task on a **leaf** node (no successors) is discarded.
 
-2. **If `parser_task` is empty** — the `DagNodeAdvanceGate` (a Redis SETNX one-shot gate) ensures the DAG advances to the next node exactly **once**, regardless of how many responses completed for the current node.
+2. **`parser_task` is empty** — for each successor, a one-shot **advance gate** synthesizes a
+   single placeholder task, so the DAG advances to that successor exactly once regardless of how
+   many responses completed for the current node.
 
 ### Fan-Out Example
 
@@ -109,49 +150,65 @@ start ──┤               ├── merge
         └── branch_b ──┘
 ```
 
-When `start` completes:
-- If `start.parser()` returns 3 `TaskParserEvent` items, each is cloned for `branch_a` and `branch_b`.
-- Result: `branch_a` receives 3 tasks, `branch_b` receives 3 tasks.
+When `start` completes and `start.parser()` returns 3 unrouted `TaskParserEvent`s, each is cloned
+for `branch_a` and `branch_b` — so `branch_a` receives 3 tasks and `branch_b` receives 3 tasks.
 
 ### Fan-In / Merge
 
-When multiple parents feed into a single node (like `merge` above):
+When multiple parents feed one node (`merge` above):
+
 - Each parent independently routes tasks to `merge`.
 - `merge` fires once per incoming task from **either** parent.
-- There is no built-in barrier or join — the merge node runs for every incoming message.
+- There is no built-in barrier or join — the merge node runs for every incoming message, so
+  design it to be called an arbitrary number of times.
 
 ## Advance Gate
 
-The advance gate prevents duplicate advancement for nodes that produce empty `parser_task`:
+The advance gate prevents duplicate advancement when a node produces an empty `parser_task` but
+has successors:
 
-- Uses `Redis SETNX` (set-if-not-exists) with key: `{config.name}:dag_advance:{module}:{node_id}:{task_key}`
-- First response to complete wins — triggers advance to successor(s)
-- Subsequent completions are no-ops
+- A one-shot gate per `(run, module, node, successor)`, stored in the shared cache (Redis in
+  distributed mode, in-memory single-node) under key
+  `dag:gate:advance:{run_id}:{module_id}:{node_id}:{successor_id}`.
+- The first response to win the gate synthesizes the placeholder task to that successor;
+  subsequent completions are no-ops.
 
-This is critical for nodes that produce N requests but only need to advance once (e.g., a "fetch all pages" node where completion of any page triggers the next stage).
+This matters for nodes that emit N requests but only need to advance once (e.g. a "fetch all
+pages" node where any page completing should trigger the next stage).
 
 ## Fallback Gate
 
-For non-entry nodes, if `generate()` fails:
+For a **non-entry** node whose `generate()` fails:
 
-- `DagNodeFallbackGate` (Redis one-shot gate) fires
-- Loads the previous `Request` from cache key `{config.name}:prefix_request:{...}`
-- Re-injects the cached request to retry the node
+- A one-shot fallback gate per `(run, module, node, prefix_request)` fires — key
+  `dag:gate:fallback:{run_id}:{module_id}:{node_id}:{prefix_request}`.
+- It traces the predecessor request via `prefix_request` (requests are persisted by
+  `request.id`) and re-injects it once; the index-based fallback uses `response.context.step_idx`
+  so retries route correctly even if a UUID is stale.
 
-This provides automatic retry for transient failures without user code.
+This gives automatic retry for transient failures without user code, while the one-shot gate
+prevents infinite fallback loops.
 
 ## Stop Signal
 
-When the final node in a DAG branch completes (no successors), the `ModuleDagProcessor` emits a **stop signal** through a dedicated stop channel. The engine uses this to detect task completion.
+A node's `parser()` can end the module by returning `TaskOutputEvent` with `with_stop(true)`.
+The processor records a distributed `DagStopSignal` in the shared cache under key
+`dag:exec:stop:{run_id}:{module_id}`; subsequent iterations check it and halt the run.
 
 ## Best Practices
 
-1. **Keep nodes focused** — each node should do one thing (fetch a list, parse details, save data).
-2. **Use metadata for state** — pass state between nodes via `TaskParserEvent::add_meta()`, not via shared mutable state.
-3. **Design for N:1 fan-in** — merge nodes should handle being called an arbitrary number of times.
-4. **Use `parser_task` for explicit routing** — when you need precise control over what the next node receives.
-5. **Return empty `parser_task` for implicit advance** — when you just need the DAG to move forward once.
+1. **Keep nodes focused** — each node should do one thing (fetch a list, parse details, save
+   data).
+2. **Use metadata for state** — pass state between nodes via `TaskParserEvent::add_meta()`, not
+   shared mutable state.
+3. **Design for N:1 fan-in** — merge nodes should handle being called an arbitrary number of
+   times.
+4. **Give nodes a `stable_node_key()`** — stable ids keep error-retry routing correct across DAG
+   rebuilds.
+5. **Use `parser_task` for explicit routing**; return an empty `parser_task` when you just need
+   the DAG to advance once.
 
-## Complete Example
+## Running
 
-See [`simple/module_node_trait_dag.rs`](../simple/module_node_trait_dag.rs) for a full working example with fan-out and merge.
+Register the module on the `Engine` and start it — see
+[Module Development → Registration and Running](module-development.md#registration-and-running).

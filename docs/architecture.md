@@ -1,201 +1,171 @@
 # Architecture
 
-This document describes the internal architecture of mocra.
+This document describes how mocra is put together: the workspace layout, the queue-driven
+pipeline, where the high-level facade sits relative to the lower-level engine, and how the same
+code scales from a single process to a distributed cluster.
+
+> **中文版：** [docs/zh/architecture.md](zh/architecture.md)
 
 ## Overview
 
-mocra is a **distributed, event-driven crawling and data collection framework** for Rust. It models data collection as a pipeline of queue-driven stages with DAG-based module orchestration.
+mocra models data collection as a set of **queue-driven processing stages** orchestrated by a
+**DAG execution engine**. Each stage is decoupled from the next by a message queue, so the same
+pipeline runs unchanged whether the queues are in-process Tokio channels (single-node) or a
+distributed message broker (Redis Streams / Kafka / NATS JetStream). Scaling out is a
+configuration/builder concern, not a rewrite.
+
+## Workspace layout
+
+mocra is a Cargo workspace. The entire runtime lives in `mocra-core`; the `mocra` crate you
+depend on is a **thin facade** over it. Reusable subsystems ship as standalone crates with a
+single, **acyclic** dependency direction — the facade depends on the core, the core depends on the
+subsystem crates, and the subsystem crates never depend back:
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                          Engine                             │
-│                                                             │
-│  ┌──────────┐   ┌──────────┐   ┌──────────┐   ┌─────────┐ │
-│  │  Task     │──▶│ Request  │──▶│ Response │──▶│ Parser  │ │
-│  │  Queue    │   │ Queue    │   │ Queue    │   │ Queue   │ │
-│  └──────────┘   └──────────┘   └──────────┘   └────┬────┘ │
-│       ▲                                             │      │
-│       │         ┌──────────┐                        │      │
-│       └─────────│ Parser   │◀───────────────────────┘      │
-│                 │ Task Q   │                               │
-│                 └──────────┘                               │
-│                 ┌──────────┐                               │
-│                 │ Error    │◀── (on failure)                │
-│                 │ Task Q   │                               │
-│                 └──────────┘                               │
-└─────────────────────────────────────────────────────────────┘
+mocra  ──▶  mocra-core  ──▶  { mocra-cluster, mocra-dag, mocra-proxy, mocra-store }
+(facade)     (runtime)              (reusable subsystems, no back-edges)
 ```
 
-## Core Components
+| Crate | What it is |
+|---|---|
+| [`mocra`](..) | **Thin facade** — the `Spider` trait, the `Mocra` builder, the prelude, and default data sinks. The only crate most users import. |
+| [`mocra-core`](../crates/mocra-core) | The full runtime: domain models, downloader, queue, coordination (`sync`), scheduler, engine, and the observability/admin HTTP API. |
+| [`mocra-cluster`](../crates/mocra-cluster) | Embedded control plane: Raft + redb — leader election, fenced distributed locks, membership, and partition ownership, with **no external coordinator**. |
+| [`mocra-dag`](../crates/mocra-dag) | Generic distributed DAG execution engine, with zero crawler coupling. |
+| [`mocra-proxy`](../crates/mocra-proxy) | Configuration-driven proxy pool / manager (standalone). |
+| [`mocra-store`](../crates/mocra-store) | Multi-tenant sea-orm entity models (account × platform × module), behind the `store` feature. |
 
-### State
+`mocra-core` pulls in `mocra-proxy` and `mocra-dag` unconditionally, and `mocra-store` /
+`mocra-cluster` only when the `store` / `cluster-embedded` features are enabled. Because the
+subsystem crates have no dependency back on the core, each can be understood, tested, and reused on
+its own.
 
-`State` is the **runtime composition root**. It loads TOML configuration and initializes all shared services:
+## The facade and the engine
 
-- **Database** connection (PostgreSQL / SQLite via SeaORM)
-- **CacheService** (in-memory or Redis-backed)
-- **DistributedLockManager** for concurrency control
-- **QueueManager** for message routing
-- **StatusTracker** for error threshold management
-- **ProxyPool** for proxy rotation
+There are two ways into the runtime, and they compile down to the same engine:
 
-Runtime mode is **auto-detected** — no manual switch:
-- `cache.redis` configured → **distributed mode**
-- `cache.redis` absent → **single-node mode**
+- **The `Spider` facade** — the 80% path. Implement one [`Spider`](../src/facade.rs) (a `name`, a
+  `start` that seeds URLs, and a `parse` that emits typed items), register it with
+  `Mocra::builder().spider(spider, sink)`, and call `.run()`. Typed items reach your code through a
+  [`DataSink`](../src/facade.rs) — a closure via `on_item(...)`, a channel via `ChannelSink::new(tx)`,
+  or your own `impl DataSink`. Everything you need is re-exported from `mocra::prelude`.
 
-### Engine
+- **The lower-level engine** — `ModuleTrait` / `ModuleNodeTrait` in `mocra-core`. This is the
+  advanced path for multi-node pipelines with login, pagination, custom middleware, and hand-built
+  DAGs. Enable the `store` feature for the account × platform × module model.
 
-`Engine` is the main orchestrator. It wires together:
+Internally, a `Spider` is adapted into a **single-node module** and compiled into the very same
+engine the advanced path uses: `Spider::start` becomes the node's `generate()` (seed requests) and
+`Spider::parse` becomes its `parser()` (emit items + follow-up requests). Choosing the facade costs
+nothing at runtime — it is a thinner surface over identical machinery.
 
-- **TaskManager** — module registry, task creation, DAG compilation
-- **QueueManager** — queue subscriptions and publishing
-- **ProcessorRunner** — bounded-concurrency worker loops
-- **CronScheduler** — cron-based periodic task scheduling
-- **DownloaderManager** — HTTP/WebSocket client pool
-- **MiddlewareManager** — download, data, and storage middleware chains
-- **API server** — Axum-based control plane
-- **Metrics** — Prometheus exporter
+See [Module Development](module-development.md) for the lower-level traits and the
+[DAG Guide](dag-guide.md) for multi-node graphs.
 
-### Processing Pipeline
+## Queue-driven pipeline
 
-The pipeline is fully queue-driven. Each stage is decoupled by a message queue:
+The pipeline is fully queue-driven. A task fans out into requests, requests are downloaded into
+responses, responses are parsed into items and follow-up tasks — each stage handed to the next
+through a queue:
 
 ```
-TaskEvent ──▶ [Task Queue]
-                  │
-                  ▼
-            Module.generate()  ──▶  Stream<Request>
-                                        │
-                                        ▼
-                                  [Request Queue]
-                                        │
-                                        ▼
-                              Downloader.download()  ──▶  Response
-                                                            │
-                                                            ▼
-                                                      [Response Queue]
-                                                            │
-                                                            ▼
-                                                    Module.parser()  ──▶  TaskOutputEvent
-                                                                              │
-                                              ┌───────────────┬───────────────┤
-                                              ▼               ▼               ▼
-                                        [Data Store]    [Parser Task Q]   [Error Task Q]
-                                                            │               │
-                                                            ▼               ▼
-                                                      (next node)    (retry / DLQ)
+┌─────────────────────────────────────────────────────────┐
+│                         Engine                          │
+│                                                         │
+│  TaskEvent ──▶ generate() ──▶ download() ──▶ parser()  │
+│      │              │              │              │      │
+│  [Task Q]     [Request Q]   [Response Q]   [Parser Q]  │
+│                                                  │      │
+│                              ┌────────────┬──────┘      │
+│                              ▼            ▼             │
+│                         [Data Store]  [Next Node]       │
+│                                       [Error Q → DLQ]  │
+└─────────────────────────────────────────────────────────┘
 ```
 
-**Stage details:**
-
-| Stage | Input | Output | Description |
+| Stage | Input | Output | What happens |
 |---|---|---|---|
-| **Task** | `TaskEvent` | `Request` stream | Resolves module, calls `generate()` on the current DAG node |
-| **Download** | `Request` | `Response` | HTTP/WebSocket fetch with proxy, rate-limit, session sync |
-| **Parse** | `Response` | `TaskOutputEvent` | Calls `parser()`, routes results to data store, next tasks, or error queue |
-| **Error** | `TaskErrorEvent` | Retry or terminate | Threshold-based retry with backoff, module/task termination |
+| **Task** | `TaskEvent` | `Request` stream | Resolves the module/DAG node and calls `generate()` to produce seed (or follow-up) requests |
+| **Download** | `Request` | `Response` | Fetches via the active downloader (reqwest by default, or a custom one), with proxy, rate-limit, and session support |
+| **Parse** | `Response` | `TaskOutputEvent` | Calls `parser()`; routes emitted items to the sink/data store, follow-up tasks to the next node, and failures to the error queue |
+| **Error** | error event | retry or terminate | Threshold-based retry with backoff; exhausted work lands in the dead-letter queue (DLQ) |
 
-### ProcessorRunner
+The key property: **each stage is decoupled by a message queue.** Queues are local Tokio channels
+in single-node mode, or Redis Streams / Kafka / NATS JetStream in distributed mode — **same code,
+zero changes.** Only the queue backend behind the boundary changes.
 
-Each pipeline stage runs as a `ProcessorRunner` — a worker loop with:
+## Single-node vs distributed
 
-- **Bounded concurrency** via semaphore
-- **Pause/resume** support (via `watch` channel)
-- **Graceful shutdown** (via `broadcast` channel)
-- **Batch receive** for throughput (up to 100 items per iteration)
+Two things scale independently: the **control plane** (who leads, who holds a lock, who owns which
+partition) and the **data plane** (the message queue that carries tasks between stages).
 
-### QueueManager
-
-`QueueManager` bridges local Tokio channels to optional remote backends:
-
-| Backend | When | Description |
+| | Single-node | Embedded cluster (`cluster-embedded`) |
 |---|---|---|
-| **Local (Tokio mpsc)** | Always | In-process channels for single-node |
-| **Redis Streams** | `channel_config.redis` set | Distributed queue with consumer groups, sharding, claim recovery |
-| **Kafka** | `channel_config.kafka` set | Kafka topics with consumer groups |
+| **Control plane** | In-process | Embedded **redb + Raft** — elections / fenced locks / membership / partition ownership, with **no Redis** |
+| **Data plane (queues)** | Tokio mpsc (in-memory) | Pluggable MQ: Kafka / NATS JetStream / Redis Streams / in-memory |
+| **Locks / election** | Local | Raft consensus (fencing tokens) |
+| **Workers** | 1 process | N nodes, same binary; register any node to any known node |
+| **Work distribution** | — | Cron by `hash(account)` ownership + MQ consumer affinity |
+| **Code changes** | None (facade default) | Add `.cluster(ClusterConfig::…)` |
 
-Features:
-- **Per-priority topics** — separate channels for different priorities
-- **DLQ / NACK** — configurable retry count and backoff before dead-letter
-- **Compression** — zstd compression above configurable threshold
-- **Blob offload** — large payloads offloaded to local blob storage
-- **Codec** — MsgPack (default) or JSON for remote queue encoding
+Three concrete topologies:
 
-### Module System
+- **Single-node (facade default).** No `.cluster(...)`, no `.from_toml(...)`: the builder uses an
+  in-memory, no-infra configuration. The engine auto-seeds each spider and stops when idle — ideal
+  for one-shot scrapes and development. No database, no Redis.
 
-Modules are the user-facing abstraction. A module defines **what to crawl** and **how to parse**:
+- **Embedded distributed control plane.** Enable `cluster-embedded` and add
+  `.cluster(ClusterConfig::bootstrap(...))` on the first node, `.cluster(ClusterConfig::join(...))`
+  on the rest. Coordination (election, locks, membership, partition ownership) runs on an embedded
+  **redb + Raft** — **no external Redis**. Any node registers to any known node to form the network.
+
+- **Redis-backed distributed control plane.** Without the embedded cluster, provide Redis in your
+  TOML config via `.from_toml(cfg)` with a `[cache.redis]` section; coordination (locks / election)
+  routes through Redis instead of Raft.
+
+In every distributed case the **data-plane queue is selected independently** of the control plane —
+in-memory, Redis Streams, Kafka (`queue-kafka`), or NATS JetStream (`queue-nats`). With a
+distributed MQ, tasks fan out across nodes with account affinity (`hash(account)`); with the
+in-memory queue, work stays on the seeding node.
+
+See the [Deployment Guide](deployment.md) for the exact steps and commands for each topology.
+
+## DAG orchestration
+
+Every module is compiled into a DAG. A `Spider` compiles to a single node; the lower-level path can
+declare linear chains (`add_step()`) or custom fan-out/fan-in graphs (`dag_definition()`):
 
 ```
-ModuleTrait                          ModuleNodeTrait
-┌───────────────────┐                ┌───────────────────┐
-│ name()            │                │ generate()        │
-│ version()         │                │   → Stream<Req>   │
-│ should_login()    │                │                   │
-│ add_step()        │──── returns ──▶│ parser()          │
-│ dag_definition()  │   Vec<Node>    │   → TaskOutput    │
-│ pre_process()     │                │                   │
-│ post_process()    │                │ retryable()       │
-│ cron()            │                └───────────────────┘
-└───────────────────┘
+       ┌── branch_a ──┐
+start ─┤               ├── merge
+       └── branch_b ──┘
 ```
 
-Each `ModuleNodeTrait` represents a DAG node with two operations:
-- **`generate()`** — produces a stream of HTTP requests
-- **`parser()`** — processes the response and returns data + next tasks
+The DAG **topology is static** (fixed at init); the **execution count per node is dynamic**, driven
+by how many parse events flow through the queues. See the [DAG Guide](dag-guide.md) for definition,
+routing, and advance/fallback gates.
 
-### DAG Execution
+## Observability and admin
 
-Every module is compiled into a DAG at registration time:
+Enable the `dashboard` feature and call `.dashboard(port)` to have the engine host a **read-only
+observability HTTP API** plus a **built-in single-file web UI** (no frontend build required):
 
-- **`add_step()`** returns a linear chain: `step_0 → step_1 → step_2`
-- **`dag_definition()`** returns a custom graph with fan-out/fan-in
-- If both are present, they are **merged** (linear nodes get `legacy_` prefix)
+- `GET /` — the built-in dashboard page (metrics / logs / tasks / performance)
+- `GET /metrics` — Prometheus metrics (unified `mocra_*` families)
+- `GET /health` — health check
+- `GET /observability/{engine,cluster,system,logs}` — queue/engine snapshot, Raft cluster status
+  (`null` when standalone), host CPU/memory/swap, and recent structured logs
 
-The DAG topology is **static** (fixed at init). Execution count per node is **dynamic** — driven by how many `TaskParserEvent`s flow through the queue.
+The read-only endpoints (`/`, `/metrics`, `/health`, `/observability/*`) are CORS-enabled and need
+no API key, so a standalone frontend can consume them cross-origin; write endpoints (`/control/*`,
+`/start_work`) stay authenticated. See the [API Reference](api-reference.md) for the full route
+table and the [Deployment Guide](deployment.md#monitoring) for the Prometheus/Grafana stack.
 
-See [DAG Execution](dag-guide.md) for details.
+## Related guides
 
-### Middleware Pipeline
-
-Three middleware layers, each sorted by `weight()` (lower = earlier):
-
-| Layer | Trait | Hook Points |
-|---|---|---|
-| **Download** | `DownloadMiddleware` | `before_request()`, `after_response()` |
-| **Data** | `DataMiddleware` | `handle_data()` |
-| **Storage** | `DataStoreMiddleware` | `before_store()`, `store_data()`, `after_store()` |
-
-Middleware instances are shared as `Arc<Mutex<Box<dyn ...>>>`.
-
-See [Middleware](middleware-guide.md) for details.
-
-### Error Handling
-
-Errors are handled at three levels:
-
-| Level | Mechanism | Description |
-|---|---|---|
-| **Generate failure** | One-shot cache fallback | Non-entry nodes fall back to the previous request via Redis-cached `prefix_request` |
-| **Parser failure** | `TaskErrorEvent` + error queue | Emits error with `stay_current_step: true` for same-node retry |
-| **Threshold exceeded** | `StatusTracker` | Tracks error counts per request/module/task; decides retry, skip, or terminate |
-
-### Cron Scheduling
-
-Modules can declare a cron schedule via `ModuleTrait::cron()`. The `CronScheduler`:
-- Evaluates cron expressions on a configurable refresh interval
-- Fires with misfire tolerance
-- Injects `TaskEvent` into the task queue on trigger
-
-### Control Plane API
-
-Built-in Axum HTTP server (configured via `[api]`):
-
-| Route | Method | Auth | Description |
-|---|---|---|---|
-| `/health` | GET | No | Health check |
-| `/metrics` | GET | Rate-limited | Prometheus metrics |
-| `/start_work` | POST | API key | Inject a manual task |
-| `/nodes` | GET | API key | List active cluster nodes |
-| `/dlq` | GET | API key | Inspect dead letter queue |
-| `/control/pause` | POST | API key | Pause global engine |
-| `/control/resume` | POST | API key | Resume global engine |
+- [Getting Started](getting-started.md) — installation and first spider
+- [Module Development](module-development.md) — `ModuleTrait` / `ModuleNodeTrait`, the advanced path
+- [DAG Guide](dag-guide.md) — fan-out/fan-in, routing, advance gates
+- [Middleware](middleware-guide.md) — download, data, and storage middleware
+- [Configuration](configuration.md) — full TOML reference
+- [Deployment](deployment.md) — single-node, embedded cluster, Redis-backed, monitoring
