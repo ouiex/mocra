@@ -42,8 +42,8 @@ rustdoc-args = ["--cfg", "docsrs"]
 # 运行时:全部引擎/管线逻辑都在 mocra-core;host 仅是薄门面(facade + prelude + 各层 shim)。
 # 因此这里只保留门面/bin 直接用到的依赖 + 特性门控的可选依赖 —— 其余(axum、redis、
 # tracing 等)都是 mocra-core 的传递依赖,host 不再直接声明。
-mocra-core = { path = "crates/mocra-core" }
-mocra-proxy = { path = "crates/mocra-proxy" }
+mocra-core = { path = "crates/mocra-core", version = "0.4.0" }
+mocra-proxy = { path = "crates/mocra-proxy", version = "0.4.0" }
 # 门面(src/facade.rs、src/prelude.rs、src/lib.rs、src/bin/)直接用到的依赖。
 async-trait = "0.1"
 tokio = { version = "1", features = ["full"] }
@@ -54,7 +54,7 @@ uuid = { version = "1", features = ["serde", "v7", "zerocopy", "v4"] }
 # 全局分配器(默认特性 `mimalloc` 开启)。
 mimalloc = { version = "0.1", default-features = false, optional = true }
 # 特性门控的可选依赖。
-mocra-cluster = { path = "crates/mocra-cluster", optional = true } # cluster-embedded:门面 ClusterConfig
+mocra-cluster = { path = "crates/mocra-cluster", version = "0.4.0", optional = true } # cluster-embedded:门面 ClusterConfig
 v8 = { version = "145", optional = true }                          # js-v8:内嵌 JS 运行时
 tempfile = { version = "3", optional = true }                      # js-v8:worker 临时文件
 # polars 三件套:host prelude 在 `polars` / `excel` 特性下再导出 `::polars::*`(供下游用 DataFrame

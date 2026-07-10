@@ -1,9 +1,9 @@
 [package]
 name = "mocra-core"
-version = "0.1.0"
+version = "0.4.0"
 edition = "2024"
 rust-version = "1.85"
-description = "Core shared types for the mocra crawler framework (errors first; the shared runtime is being extracted here incrementally)."
+description = "The mocra crawler framework runtime: errors, cache, utilities, domain models, downloader, data-plane queue, coordination, scheduler and engine."
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/ouiex/mocra"
 homepage = "https://github.com/ouiex/mocra"
@@ -17,9 +17,9 @@ thiserror = "2"
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 deadpool-redis = { version = "0.22", features = ["json", "script", "serde", "streams"] }
-mocra-proxy = { path = "../mocra-proxy" }
-mocra-dag = { path = "../mocra-dag" }
-mocra-store = { path = "../mocra-store", optional = true }
+mocra-proxy = { path = "../mocra-proxy", version = "0.4.0" }
+mocra-dag = { path = "../mocra-dag", version = "0.4.0" }
+mocra-store = { path = "../mocra-store", version = "0.4.0", optional = true }
 polars = { version = "0.52.0", features = ["json", "lazy", "serde", "csv", "timezones", "strings", "ipc", "dtype-decimal"], optional = true }
 # cacheable(缓存服务:redis / 本地 / 两级后端)
 async-trait = "0.1"
@@ -61,7 +61,7 @@ crc32fast = "1.5.0"
 rdkafka = { version = "0.39", features = ["cmake-build"], optional = true }
 async-nats = { version = "0.38", optional = true }
 # sync(协调集成:Redis / Kafka / 内嵌 Raft 后端)
-mocra-cluster = { path = "../mocra-cluster", optional = true }
+mocra-cluster = { path = "../mocra-cluster", version = "0.4.0", optional = true }
 # engine(采集管线 / processor / 调度 / 监控);axum 仅用于 dashboard 的可观测 HTTP API,门控之。
 axum = { version = "0.8", features = ["json"], optional = true }
 bloomfilter = "3"
