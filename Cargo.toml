@@ -31,10 +31,10 @@ exclude = [
 	"*.log",
 ]
 
-# docs.rs 用全特性构建,确保被特性门控的条目(如 cluster-embedded 的 API、
-# dashboard 可观测类型)在文档站可见,且 intra-doc 链接可解析。
+# docs.rs 构建的特性集:覆盖所有值得上文档的特性,但**排除** js-v8(内嵌 C++ v8 构建)与
+# queue-kafka(rdkafka 需 librdkafka 的 C 构建)—— 这两个在 docs.rs 上易构建失败,且公开表面很小。
 [package.metadata.docs.rs]
-all-features = true
+features = ["store", "dashboard", "cluster-embedded", "queue-nats", "polars", "excel"]
 rustdoc-args = ["--cfg", "docsrs"]
 
 
