@@ -64,6 +64,8 @@ pub mod downloader {
     pub use crate::downloader::Downloader;
     pub use crate::downloader::DownloaderManager;
     pub use crate::downloader::WebSocketDownloader;
+    /// Needed to implement [`Downloader::set_config`] in a custom downloader.
+    pub use crate::common::model::download_config::DownloadConfig;
 }
 pub mod engine {
     pub use crate::engine::engine::Engine;
