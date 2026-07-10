@@ -1,10 +1,10 @@
-//! `mocra-core` — shared runtime types for the [mocra](https://github.com/ouiex/mocra)
-//! crawler framework.
+//! `mocra-core` — the [mocra](https://github.com/ouiex/mocra) crawler framework's runtime.
 //!
-//! Currently this crate hosts the framework's errors, cache service, utilities and shared
-//! domain models / runtime state ([`errors`] / [`cacheable`] / [`utils`] / [`common`]); the
-//! rest of the shared runtime (the pipeline) is being migrated here incrementally so the host
-//! `mocra` crate can become a thin facade over reusable, independently-compilable crates.
+//! This crate holds the **entire runtime**: errors, cache service, utilities, shared domain
+//! models and runtime state, the downloader, the data-plane queue, coordination / sync, the
+//! scheduler, and the crawling engine + observability API ([`errors`] / [`cacheable`] /
+//! [`utils`] / [`common`] / [`downloader`] / [`queue`] / [`sync`] / [`schedule`] / [`engine`]).
+//! The host `mocra` crate is a thin facade over it.
 
 // 结构性 clippy lint —— 现有设计取舍(参数数、类型复杂度、模块同名、error/枚举变体尺寸),
 // 非 bug;与主 crate 保持一致的统一豁免(这些模块原在主 crate,依赖同样的豁免)。

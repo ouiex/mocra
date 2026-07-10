@@ -62,8 +62,8 @@ rdkafka = { version = "0.39", features = ["cmake-build"], optional = true }
 async-nats = { version = "0.38", optional = true }
 # sync(协调集成:Redis / Kafka / 内嵌 Raft 后端)
 mocra-cluster = { path = "../mocra-cluster", optional = true }
-# engine(采集管线 / processor / 调度 / 监控 / 可观测 API)
-axum = { version = "0.8", features = ["json"] }
+# engine(采集管线 / processor / 调度 / 监控);axum 仅用于 dashboard 的可观测 HTTP API,门控之。
+axum = { version = "0.8", features = ["json"], optional = true }
 bloomfilter = "3"
 metrics-exporter-prometheus = "0.18"
 sysinfo = "0.38"
@@ -85,7 +85,7 @@ store = ["dep:sea-orm", "dep:mocra-store"]
 # Excel parsing (calamine → DataFrame); implies polars.
 excel = ["dep:calamine", "polars"]
 # Observability dashboard: admin/observability HTTP API (tower-http CORS) + log ring buffer.
-dashboard = ["dep:tower-http"]
+dashboard = ["dep:tower-http", "dep:axum"]
 # Data-plane MQ backends (default is in-memory / redis).
 queue-kafka = ["dep:rdkafka"]
 queue-nats = ["dep:async-nats"]
