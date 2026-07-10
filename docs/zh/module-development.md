@@ -140,13 +140,13 @@ pub trait ModuleTrait: Send + Sync {
     }
 
     /// 模块启动前的预处理（可选）。
-    async fn pre_process(&self, _state: Arc<State>) {}
+    async fn pre_process(&self, _config: Option<Arc<ModuleConfig>>) -> Result<()> { Ok(()) }
 
     /// 模块完成后的后处理（可选）。
-    async fn post_process(&self, _state: Arc<State>) {}
+    async fn post_process(&self, _config: Option<Arc<ModuleConfig>>) -> Result<()> { Ok(()) }
 
-    /// Cron 调度表达式（可选）。
-    fn cron(&self) -> Option<String> { None }
+    /// Cron 调度（可选）。
+    fn cron(&self) -> Option<CronConfig> { None }
 }
 ```
 
@@ -231,14 +231,14 @@ start ─┤                 ├── merge
 ```rust
 #[tokio::main]
 async fn main() {
-    let state = Arc::new(State::new("config.toml").await);
-    let engine = Engine::new(state, None).await;
+    let state = Arc::new(State::try_new("config.toml").await.expect("init state"));
+    let engine = Engine::new(state, None).await.expect("init engine");
 
     // 注册模块
     engine.register_module(MyModule::default_arc()).await;
 
     // 运行引擎（阻塞直到关闭）
-    engine.run().await;
+    engine.start().await;
 }
 ```
 
@@ -255,8 +255,8 @@ fn should_login(&self) -> bool { true }
 返回 cron 表达式以周期性运行模块：
 
 ```rust
-fn cron(&self) -> Option<String> {
-    Some("0 */30 * * * *".into()) // 每 30 分钟
+fn cron(&self) -> Option<CronConfig> {
+    Some(CronConfig::new("0 */30 * * * *")) // 每 30 分钟
 }
 ```
 

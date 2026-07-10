@@ -1,17 +1,6 @@
-pub mod batch_buffer;
-pub mod connector;
-pub mod date_utils;
-pub mod device_info;
-pub mod distributed_rate_limit;
-pub mod encrypt;
-pub mod excel_dataframe;
-pub mod logger;
-pub mod storage;
-pub mod polars_utils;
-pub mod rate_limit;
-pub mod redis_lock;
-pub mod string_case;
-pub mod to_numeric;
-pub mod txn;
-pub mod type_convert;
-pub mod priority;
+//! 工具库已抽为独立 crate [`mocra_core`] 的 `utils` 模块。
+//!
+//! 此模块保留为 re-export shim,使既有 `crate::utils::*` 引用继续有效(零改动迁移);
+//! 新代码可直接 `use mocra_core::utils::...`。
+
+pub use mocra_core::utils::*;

@@ -1,0 +1,17 @@
+[package]
+name = "mocra-store"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Multi-tenant sea-orm entity models for the mocra crawler framework (account × platform × module + middleware/relations)."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/ouiex/mocra"
+homepage = "https://github.com/ouiex/mocra"
+documentation = "https://docs.rs/mocra-store"
+readme = "README.md"
+keywords = ["sea-orm", "entity", "orm", "database"]
+categories = ["database"]
+
+[dependencies]
+sea-orm = { version = "1", default-features = false, features = ["macros", "with-json", "with-chrono", "with-uuid", "postgres-array"] }
+serde = { version = "1", features = ["derive"] }

@@ -1,36 +1,6 @@
-pub mod request_downloader;
-use crate::common::model::download_config::DownloadConfig;
-use crate::common::model::{Request, Response};
-use crate::errors::Result;
-use semver::Version;
-pub mod downloader_manager;
-pub mod websocket_downloader;
-pub use websocket_downloader::WebSocketDownloader;
+//! 下载器子系统已抽为独立 crate [`mocra_core`] 的 `downloader` 模块。
+//!
+//! 此模块保留为 re-export shim,使既有 `crate::downloader::*` 引用继续有效(零改动迁移);
+//! 新代码可直接 `use mocra_core::downloader::...`。
 
-pub use downloader_manager::DownloaderManager;
-#[async_trait::async_trait]
-pub trait Downloader: dyn_clone::DynClone + Send + Sync + 'static {
-    /// Sets downloader configuration.
-    async fn set_config(&self, id: &str, config: DownloadConfig);
-    /// Sets rate limit.
-    async fn set_limit(&self, id: &str, limit: f32);
-    /// Downloader name.
-    fn name(&self) -> String;
-
-    /// Downloader version.
-    fn version(&self) -> Version;
-
-    /// Executes download task.
-    async fn download(&self, request: Request) -> Result<Response>;
-
-    /// Health check.
-    async fn health_check(&self) -> Result<()>;
-    async fn close(&self) -> Result<()> {
-        // Default implementation; concrete implementations may override.
-        Ok(())
-    }
-}
-
-// Enables clone support for trait objects (based on implementor `Clone`) used by
-// `Box<dyn Downloader>`.
-dyn_clone::clone_trait_object!(Downloader);
+pub use mocra_core::downloader::*;

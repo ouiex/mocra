@@ -1,0 +1,466 @@
+use crate::common::interface::StoreTrait;
+use crate::common::model::Response;
+use crate::common::model::meta::MetaData;
+#[cfg(feature = "polars")]
+use polars::io::SerWriter;
+#[cfg(feature = "polars")]
+use polars::io::ipc::IpcWriter;
+#[cfg(feature = "polars")]
+use polars::prelude::*;
+use std::fmt::Debug;
+use uuid::Uuid;
+/// Storage context carrying task/module identity.
+#[derive(Clone, Debug, Default)]
+pub struct StoreContext {
+    /// Unique request identifier.
+    pub request_id: Uuid,
+    /// Platform identifier.
+    pub platform: String,
+    /// Account identifier.
+    pub account: String,
+    /// Module identifier.
+    pub module: String,
+    /// Metadata.
+    pub meta: MetaData,
+    /// Data middleware list.
+    pub data_middleware: Vec<String>,
+}
+impl StoreContext {
+    /// Builds task identifier (`account-platform`).
+    pub fn task_id(&self) -> String {
+        format!("{}-{}", self.account, self.platform)
+    }
+    /// Builds module identifier (`account-platform-module`).
+    pub fn module_id(&self) -> String {
+        format!("{}-{}-{}", self.account, self.platform, self.module)
+    }
+}
+
+/// File storage structure for binary file content.
+#[derive(Clone, Debug, Default)]
+pub struct FileStore {
+    /// Context information.
+    pub ctx: StoreContext,
+    /// File name.
+    pub file_name: String,
+    /// File path.
+    pub file_path: String,
+    /// File content.
+    pub content: Vec<u8>,
+}
+
+impl StoreTrait for FileStore {
+    fn build(&self) -> DataEvent {
+        // Preserve all metadata by cloning the current FileStore into the enum variant.
+        DataEvent {
+            request_id: self.ctx.request_id,
+            platform: self.ctx.platform.clone(),
+            account: self.ctx.account.clone(),
+            module: self.ctx.module.clone(),
+            meta: self.ctx.meta.clone(),
+            data: DataType::File(self.clone()),
+            data_middleware: self.ctx.data_middleware.clone(),
+        }
+    }
+}
+
+impl From<FileStore> for DataEvent {
+    fn from(value: FileStore) -> Self {
+        let ctx_clone = value.ctx.clone();
+        DataEvent {
+            request_id: ctx_clone.request_id,
+            platform: ctx_clone.platform.clone(),
+            account: ctx_clone.account.clone(),
+            module: ctx_clone.module.clone(),
+            meta: ctx_clone.meta.clone(),
+            data: DataType::File(
+                FileStore::default()
+                    .with_ctx(ctx_clone.clone())
+                    .with_content(value.content)
+                    .with_name(value.file_name)
+                    .with_path(value.file_path),
+            ),
+            data_middleware: ctx_clone.data_middleware.clone(),
+        }
+    }
+}
+impl From<DataEvent> for FileStore {
+    fn from(value: DataEvent) -> Self {
+        match value.data {
+            DataType::File(f) => f,
+            _ => FileStore::default(),
+        }
+    }
+}
+
+impl FileStore {
+    /// Sets file content.
+    pub fn with_content(mut self, content: Vec<u8>) -> Self {
+        self.content = content;
+        self
+    }
+    /// Sets context information.
+    pub fn with_ctx(mut self, ctx: StoreContext) -> Self {
+        self.ctx = ctx;
+        self
+    }
+    /// Sets file name.
+    pub fn with_name(mut self, file_name: impl AsRef<str>) -> Self {
+        self.file_name = file_name.as_ref().to_string();
+        self
+    }
+    /// Sets file path.
+    pub fn with_path(mut self, file_path: impl AsRef<str>) -> Self {
+        self.file_path = file_path.as_ref().to_string();
+        self
+    }
+    /// Sets file name (alias).
+    pub fn with_file_name(self, file_name: impl AsRef<str>) -> Self {
+        self.with_name(file_name)
+    }
+    /// Sets file path (alias).
+    pub fn with_file_path(self, file_path: impl AsRef<str>) -> Self {
+        self.with_path(file_path)
+    }
+}
+
+#[cfg(feature = "polars")]
+#[derive(Clone, Debug)]
+pub enum DataframeStoreData {
+    Bytes(Vec<u8>),
+    DataFrame(DataFrame),
+}
+
+/// DataFrame storage structure for tabular data.
+#[cfg(feature = "polars")]
+#[derive(Clone, Debug)]
+pub struct DataFrameStore {
+    /// Context information.
+    ctx: StoreContext,
+    /// Serialized DataFrame payload (IPC format).
+    pub data: DataframeStoreData,
+    /// Database schema.
+    pub schema: String,
+    /// Database table name.
+    pub table: String,
+}
+#[cfg(feature = "polars")]
+impl Default for DataFrameStore {
+    fn default() -> Self {
+        Self {
+            ctx: StoreContext::default(),
+            data: DataframeStoreData::Bytes(vec![]),
+            schema: String::new(),
+            table: String::new(),
+        }
+    }
+}
+
+#[cfg(feature = "polars")]
+impl StoreTrait for DataFrameStore {
+    fn build(&self) -> DataEvent {
+        // Clone to preserve full metadata.
+        DataEvent {
+            request_id: self.ctx.request_id,
+            platform: self.ctx.platform.clone(),
+            account: self.ctx.account.clone(),
+            module: self.ctx.module.clone(),
+            meta: self.ctx.meta.clone(),
+            data: DataType::DataFrame(self.clone()),
+            data_middleware: self.ctx.data_middleware.clone(),
+        }
+    }
+}
+#[cfg(feature = "polars")]
+impl From<DataFrameStore> for DataEvent {
+    fn from(value: DataFrameStore) -> Self {
+        DataEvent {
+            request_id: value.ctx.request_id,
+            platform: value.ctx.platform.clone(),
+            account: value.ctx.account.clone(),
+            module: value.ctx.module.clone(),
+            meta: value.ctx.meta.clone(),
+            data_middleware: value.ctx.data_middleware.clone(),
+            data: DataType::DataFrame(value),
+        }
+    }
+}
+
+#[cfg(feature = "polars")]
+impl DataFrameStore {
+    /// Sets DataFrame data and serializes to IPC format.
+    pub fn with_data(mut self, data: DataFrame) -> Self {
+        let mut buffer = Vec::new();
+        let mut df = data;
+        let mut writer = IpcWriter::new(&mut buffer); // default options
+        writer.finish(&mut df).expect("serialize DataFrame to IPC");
+        self.data = DataframeStoreData::Bytes(buffer);
+        self
+    }
+    /// Sets schema.
+    pub fn with_schema(mut self, schema: impl AsRef<str>) -> Self {
+        self.schema = schema.as_ref().to_string();
+        self
+    }
+    /// Sets table name.
+    pub fn with_table(mut self, table: impl AsRef<str>) -> Self {
+        self.table = table.as_ref().to_string();
+        self
+    }
+    pub fn get_data(&self) -> Option<DataFrame> {
+        match &self.data {
+            DataframeStoreData::Bytes(bytes) => {
+                let cursor = std::io::Cursor::new(bytes);
+                let reader = polars::io::ipc::IpcReader::new(cursor);
+                reader.finish().ok()
+            }
+            DataframeStoreData::DataFrame(df) => Some(df.clone()),
+        }
+    }
+}
+
+/// Data type enum.
+// 变体刻意不装箱(`File`/`DataFrame` 直接内联),以便下游用 `DataType::File(f)` 直接
+// 解构;`Empty` 为轻量默认。装箱会改动公共 API,故此处豁免大小差异 lint。
+#[allow(clippy::large_enum_variant)]
+#[derive(Debug, Clone, Default)]
+pub enum DataType {
+    /// 空载荷:默认变体(尚未填充具体数据),无需任何可选依赖。
+    #[default]
+    Empty,
+    /// Structured tabular data(需 `polars` 特性)。
+    #[cfg(feature = "polars")]
+    DataFrame(DataFrameStore),
+    /// File data.
+    File(FileStore),
+}
+
+/// Generic data transfer object wrapping metadata and concrete payload.
+#[derive(Debug, Clone)]
+pub struct DataEvent {
+    /// Unique request identifier.
+    pub request_id: Uuid,
+    /// Platform identifier.
+    pub platform: String,
+    /// Account identifier.
+    pub account: String,
+    /// Module identifier.
+    pub module: String,
+    /// Metadata.
+    pub meta: MetaData,
+    /// Payload.
+    pub data: DataType,
+    /// Data middleware to execute.
+    pub data_middleware: Vec<String>,
+}
+
+impl Default for DataEvent {
+    fn default() -> Self {
+        Self {
+            request_id: Default::default(),
+            platform: "".to_string(),
+            account: "".to_string(),
+            module: "".to_string(),
+            meta: Default::default(),
+            data: DataType::Empty,
+            data_middleware: vec![],
+        }
+    }
+}
+impl DataEvent {
+    /// Builds `Data` from `Response`.
+    pub fn from(response: &Response) -> Self {
+        DataEvent {
+            request_id: response.id,
+            platform: response.platform.clone(),
+            account: response.account.clone(),
+            module: response.module.clone(),
+            meta: response.metadata.clone(),
+            data: DataType::Empty,
+            data_middleware: response.data_middleware.clone(),
+        }
+    }
+    /// Sets middleware list.
+    pub fn with_middlewares(mut self, middleware: Vec<String>) -> Self {
+        self.data_middleware = middleware;
+        self
+    }
+    /// Adds one middleware item.
+    pub fn with_middleware(mut self, middleware: impl AsRef<str>) -> Self {
+        self.data_middleware.push(middleware.as_ref().into());
+        self
+    }
+    /// Returns task ID (`account-platform`).
+    pub fn task_id(&self) -> String {
+        format!("{}-{}", self.account, self.platform)
+    }
+    /// Returns module ID (`account-platform-module`).
+    pub fn module_id(&self) -> String {
+        format!("{}-{}-{}", self.account, self.platform, self.module)
+    }
+    /// Converts into `DataFrameStore`(需 `polars` 特性)。
+    #[cfg(feature = "polars")]
+    pub fn with_df(self, data: DataFrame) -> DataFrameStore {
+        DataFrameStore::default().with_data(data)
+    }
+    /// Converts into `FileStore`.
+    pub fn with_file(self, data: Vec<u8>) -> FileStore {
+        // Transfer CrawlData context into a FileStore builder preserving metadata.
+        FileStore {
+            ctx: StoreContext {
+                request_id: self.request_id,
+                platform: self.platform,
+                account: self.account,
+                module: self.module,
+                meta: self.meta,
+                data_middleware: self.data_middleware,
+            },
+            file_name: String::new(),
+            file_path: String::new(),
+            content: data,
+        }
+    }
+    /// Returns payload size (bytes or rows).
+    pub fn size(&self) -> usize {
+        match &self.data {
+            DataType::Empty => 0,
+            #[cfg(feature = "polars")]
+            DataType::DataFrame(df_store) => match &df_store.data {
+                DataframeStoreData::Bytes(bytes) => bytes.len(),
+                DataframeStoreData::DataFrame(df) => df.height() * df.width(), // rough estimate: rows * columns
+            },
+            DataType::File(file_store) => file_store.content.len(),
+        }
+    }
+}
+#[cfg(feature = "polars")]
+impl From<(DataFrame, &Response)> for DataEvent {
+    fn from(value: (DataFrame, &Response)) -> Self {
+        let (data, response) = value;
+        DataEvent {
+            request_id: response.id,
+            platform: response.platform.clone(),
+            account: response.account.clone(),
+            module: response.module.clone(),
+            meta: response.metadata.clone(),
+            data: DataType::DataFrame(DataFrameStore::default().with_data(data)),
+            data_middleware: response.data_middleware.clone(),
+        }
+    }
+}
+impl StoreTrait for DataEvent {
+    fn build(&self) -> DataEvent {
+        self.clone()
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde::{Deserialize, Serialize};
+
+    #[test]
+    fn test_file_store_builder() {
+        let store = FileStore::default()
+            .with_name("test.txt")
+            .with_path("/tmp/test.txt")
+            .with_content(vec![1, 2, 3]);
+
+        assert_eq!(store.file_name, "test.txt");
+        assert_eq!(store.file_path, "/tmp/test.txt");
+        assert_eq!(store.content, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn test_serde_examples() {
+        #[derive(Serialize, Deserialize, Debug)]
+        struct Item {
+            key: String,
+            value: serde_json::Value,
+        }
+
+        // Method 1: define only required fields; serde ignores unknown fields.
+        #[derive(Serialize, Deserialize, Debug)]
+        struct RespPartial {
+            data: Vec<Item>,
+            // `is_success` is not defined and will be ignored.
+        }
+
+        // Method 2: use `Option` for optional fields.
+        #[derive(Serialize, Deserialize, Debug)]
+        struct RespWithOptional {
+            data: Vec<Item>,
+            is_success: Option<bool>, // Optional field.
+            #[serde(default)] // Use default when field is missing.
+            extra_field: String,
+        }
+
+        // Test JSON with additional fields.
+        let complex_json = r#"
+        {
+            "data": [
+                {"key": "name", "value": "Alice"},
+                {"key": "age", "value": "30"},
+                {"key": "city", "value": "New York"}
+            ],
+            "is_success": true,
+            "timestamp": "2023-01-01T00:00:00Z",
+            "metadata": {
+                "total_count": 100,
+                "page": 1,
+                "limit": 10
+            },
+            "debug_info": "some debug data",
+            "version": "1.0.0"
+        }"#;
+
+        // Method 1: parse only required fields.
+        let resp_partial: RespPartial = serde_json::from_str(complex_json).unwrap();
+        assert_eq!(resp_partial.data.len(), 3);
+
+        // Method 2: handle optional fields via `Option`.
+        let resp_optional: RespWithOptional = serde_json::from_str(complex_json).unwrap();
+        assert_eq!(resp_optional.is_success, Some(true));
+        assert_eq!(resp_optional.extra_field, "");
+
+        // Method 4: dynamic parsing with `serde_json::Value`.
+        let value: serde_json::Value = serde_json::from_str(complex_json).unwrap();
+        if let Some(data) = value.get("data") {
+            let items: Vec<Item> = serde_json::from_value(data.clone()).unwrap();
+            assert_eq!(items.len(), 3);
+        }
+
+        // Extract specific fields.
+        let is_success = value
+            .get("is_success")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let version = value
+            .get("version")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
+
+        assert!(is_success);
+        assert_eq!(version, "1.0.0");
+    }
+
+    #[cfg(feature = "polars")]
+    #[test]
+    fn test_polars_dataframe() {
+        use chrono::NaiveDate;
+        let df: DataFrame = df!(
+            "name" => ["Alice Archer", "Ben Brown", "Chloe Cooper", "Daniel Donovan"],
+            "birthdate" => [
+                NaiveDate::from_ymd_opt(1997, 1, 10).unwrap(),
+                NaiveDate::from_ymd_opt(1985, 2, 15).unwrap(),
+                NaiveDate::from_ymd_opt(1983, 3, 22).unwrap(),
+                NaiveDate::from_ymd_opt(1981, 4, 30).unwrap(),
+            ],
+            "weight" => [57.9, 72.5, 53.6, 83.1],  // (kg)
+            "height" => [1.56, 1.77, 1.65, 1.75],  // (m)
+        )
+        .unwrap();
+
+        assert_eq!(df.height(), 4);
+        assert_eq!(df.width(), 4);
+    }
+}

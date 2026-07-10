@@ -1,0 +1,124 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  check:
+    name: build · test · clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      # rdkafka (queue-kafka feature) needs cmake; harmless when the feature is off.
+      - name: Install system deps
+        run: sudo apt-get update && sudo apt-get install -y cmake
+
+      - name: Build (default features)
+        run: cargo build --lib
+
+      - name: Test (default features)
+        run: cargo test --lib
+
+      # Compile-check the public-API doc examples (crate root quick-start etc.).
+      - name: Doc-tests
+        run: cargo test --doc
+
+      - name: Test embedded cluster crate
+        run: cargo test -p mocra-cluster
+
+      - name: Test proxy crate
+        run: cargo test -p mocra-proxy
+
+      - name: Test dag crate
+        run: cargo test --lib dag_tests
+
+      - name: Build store crate
+        run: cargo build -p mocra-store
+
+      - name: Test (cluster-embedded)
+        run: cargo test --lib --features cluster-embedded
+
+      - name: Test (store / DB)
+        run: cargo test --lib --features store
+
+      - name: Test (dashboard)
+        run: |
+          cargo test --lib --features dashboard
+          cargo build --example dashboard --features dashboard
+
+      # polars/excel are heavy; compile-check to catch feature-gating regressions.
+      - name: Check (polars + excel)
+        run: cargo check --lib --features polars,excel
+
+      - name: Check (queue-nats)
+        run: cargo check --lib --features queue-nats
+
+      # Real NATS (JetStream) for the queue-nats integration tests.
+      # Service containers can't pass the `-js` flag, so run the server directly.
+      - name: Start NATS (JetStream)
+        run: |
+          docker run -d --name nats -p 4222:4222 nats:2.10-alpine -js
+          for i in $(seq 1 30); do
+            (echo > /dev/tcp/127.0.0.1/4222) >/dev/null 2>&1 && { echo "nats ready"; break; }
+            sleep 0.5
+          done
+
+      - name: Test (queue-nats integration, real NATS)
+        run: cargo test --lib --features queue-nats -- --ignored nats_
+
+      - name: Build examples
+        run: cargo build --examples --features cluster-embedded
+
+      - name: Clippy (default, deny warnings)
+        run: cargo clippy --lib -- -D warnings
+
+      # Gate every optional feature build too — the slim-default + optional-features
+      # design means feature-gated code is otherwise never `-D warnings`-checked.
+      - name: Clippy (feature matrix, deny warnings)
+        run: |
+          cargo clippy --lib --features store -- -D warnings
+          cargo clippy --lib --features dashboard -- -D warnings
+          cargo clippy --lib --features cluster-embedded -- -D warnings
+          cargo clippy --lib --features queue-nats -- -D warnings
+          cargo clippy --lib --features queue-kafka -- -D warnings
+          cargo clippy --lib --features polars,excel -- -D warnings
+
+      - name: Clippy (mocra-cluster, deny warnings)
+        run: cargo clippy -p mocra-cluster -- -D warnings
+
+      - name: Clippy (mocra-proxy, deny warnings)
+        run: cargo clippy -p mocra-proxy -- -D warnings
+
+      - name: Clippy (mocra-dag, deny warnings)
+        run: cargo clippy -p mocra-dag -- -D warnings
+
+      - name: Clippy (mocra-store, deny warnings)
+        run: cargo clippy -p mocra-store -- -D warnings
+
+      - name: Test + Clippy (mocra-core, deny warnings)
+        run: |
+          cargo test -p mocra-core
+          cargo clippy -p mocra-core -- -D warnings
+          cargo clippy -p mocra-core --features store -- -D warnings
+          cargo clippy -p mocra-core --features polars,excel -- -D warnings
+          cargo clippy -p mocra-core --features dashboard -- -D warnings
+
+      - name: Docs (workspace crates, deny warnings)
+        run: cargo doc --no-deps -p mocra-cluster -p mocra-proxy -p mocra-dag -p mocra-store -p mocra-core
+        env:
+          RUSTDOCFLAGS: "-D warnings"

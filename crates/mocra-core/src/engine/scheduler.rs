@@ -1,0 +1,705 @@
+use crate::engine::task::TaskManager;
+use chrono::{DateTime, TimeZone, Utc};
+#[cfg(feature = "store")]
+use crate::common::model::entity::{
+    account, module, platform, rel_account_platform, rel_module_account, rel_module_platform,
+};
+use crate::common::model::message::TaskEvent;
+use crate::common::model::CronConfig;
+use crate::common::state::State;
+use cron::Schedule;
+use log::{error, info, warn};
+use crate::queue::{QueuedItem, QueueManager};
+#[cfg(feature = "store")]
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect, JoinType, RelationTrait};
+#[cfg(feature = "store")]
+use sea_orm::prelude::Expr;
+use dashmap::DashMap;
+use std::collections::{HashSet, hash_map::DefaultHasher};
+use std::hash::{Hash, Hasher};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use tokio::time::{Duration, sleep};
+use std::time::{SystemTime, UNIX_EPOCH};
+use futures::StreamExt;
+
+use crate::sync::LeaderElector;
+use tokio::sync::broadcast;
+use metrics::{counter, histogram};
+
+struct ActiveCronJobGuard<'a> {
+    counter: &'a AtomicU64,
+}
+
+impl<'a> ActiveCronJobGuard<'a> {
+    fn new(counter: &'a AtomicU64) -> Self {
+        counter.fetch_add(1, Ordering::Relaxed);
+        Self { counter }
+    }
+}
+
+impl Drop for ActiveCronJobGuard<'_> {
+    fn drop(&mut self) {
+        self.counter.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+/// Distributed cron scheduler for module-level task triggers.
+///
+/// Responsibilities:
+/// - Periodically refresh enabled `(module, account, platform)` contexts.
+/// - Cache parsed schedules for low-latency tick matching.
+/// - Trigger queue tasks distributed across the cluster:
+///   - **多节点 Raft 集群**:每个节点只调度**归属自己的分区**(账号 rendezvous 分配,
+///     跨节点互斥),无 leader 瓶颈 —— cron 负载随节点数水平扩展。
+///   - **单机 / Redis 协调**:仅 leader 节点调度全部 context(维持既有语义)。
+/// - Recover short scheduler pauses with configurable misfire catch-up.
+pub struct CronScheduler {
+    task_manager: Arc<TaskManager>,
+    state: Arc<State>,
+    queue_manager: Arc<QueueManager>,
+    // Key: module_name, value: (parsed schedule, enabled contexts).
+    schedule_cache: DashMap<String, (Arc<Schedule>, Arc<Vec<(String, String)>>)>,
+    // Key: module_name, value: cached cron config.
+    cron_config_cache: DashMap<String, Option<CronConfig>>,
+    // Key: module_name, value: hash of contexts already executed for right_now.
+    right_now_context_hash: DashMap<String, u64>,
+    shutdown_rx: broadcast::Receiver<()>,
+    last_version: AtomicU64,
+    last_module_hash: AtomicU64,
+    last_refresh_at_ms: AtomicU64,
+    active_context_jobs: AtomicU64,
+    leader_elector: Arc<LeaderElector>,
+}
+
+impl CronScheduler {
+    /// Creates a new scheduler with empty in-memory caches.
+    pub async fn new(
+        task_manager: Arc<TaskManager>,
+        state: Arc<State>,
+        queue_manager: Arc<QueueManager>,
+        shutdown_rx: broadcast::Receiver<()>,
+        leader_elector: Arc<LeaderElector>,
+    ) -> Self {
+        Self {
+            task_manager,
+            state,
+            queue_manager,
+            schedule_cache: DashMap::new(),
+            cron_config_cache: DashMap::new(),
+            right_now_context_hash: DashMap::new(),
+            shutdown_rx,
+            last_version: AtomicU64::new(0),
+            last_module_hash: AtomicU64::new(0),
+            last_refresh_at_ms: AtomicU64::new(0),
+            active_context_jobs: AtomicU64::new(0),
+            leader_elector,
+        }
+    }
+
+    /// Returns whether context-processing jobs are still running.
+    pub fn has_running_tasks(&self) -> bool {
+        self.active_context_jobs.load(Ordering::Relaxed) > 0
+    }
+
+    async fn get_misfire_tolerance(&self) -> i64 {
+        let config = self.state.config.read().await;
+        config.scheduler
+            .as_ref()
+            .and_then(|s| s.misfire_tolerance_secs)
+            .unwrap_or(300)
+    }
+
+    /// Starts background loops for cache refresh and tick processing.
+    pub fn start(self: Arc<Self>) {
+        // Spawn Refresh Loop
+        let this = self.clone();
+        tokio::spawn(async move {
+            this.refresh_loop().await;
+        });
+
+        // Spawn Main Loop
+        tokio::spawn(async move {
+            self.run().await;
+        });
+    }
+
+    async fn refresh_loop(&self) {
+        info!("CronScheduler refresh loop started");
+        let mut shutdown = self.shutdown_rx.resubscribe();
+        loop {
+            self.refresh_cache().await;
+            // Refresh at configured interval to pick up config and context changes.
+            let refresh_interval_secs = self
+                .state
+                .config
+                .read()
+                .await
+                .scheduler
+                .as_ref()
+                .and_then(|s| s.refresh_interval_secs)
+                .unwrap_or(60);
+            tokio::select! {
+                _ = shutdown.recv() => {
+                    info!("CronScheduler refresh loop received shutdown signal");
+                    break;
+                }
+                _ = sleep(Duration::from_secs(refresh_interval_secs)) => {}
+            }
+        }
+    }
+
+    async fn refresh_cache(&self) {
+        // Use distributed versioning to avoid unnecessary DB scans.
+        let namespace = self.state.cache_service.namespace();
+        let redis_version_key = if namespace.is_empty() {
+            "scheduler:config_version".to_string()
+        } else {
+            format!("{namespace}:scheduler:config_version")
+        };
+        let remote_version_bytes = self
+            .state
+            .cache_service
+            .get(&redis_version_key)
+            .await
+            .ok()
+            .flatten();
+        let remote_version: u64 = if let Some(bytes) = remote_version_bytes {
+            String::from_utf8(bytes).ok().and_then(|s| s.parse().ok()).unwrap_or(0)
+        } else {
+            0
+        };
+
+        let local_version = self.last_version.load(Ordering::Relaxed);
+        let modules = self.task_manager.get_all_modules().await;
+        let module_signatures: Vec<(String, i32)> = modules
+            .iter()
+            .map(|m| (m.name(), m.version()))
+            .collect();
+        let module_names: Vec<String> = module_signatures
+            .iter()
+            .map(|(name, _)| name.clone())
+            .collect();
+        let module_hash = Self::hash_module_signatures(&module_signatures);
+        let local_module_hash = self.last_module_hash.load(Ordering::Relaxed);
+
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        let last_refresh_at_ms = self.last_refresh_at_ms.load(Ordering::Relaxed);
+        let max_staleness_secs = self
+            .state
+            .config
+            .read()
+            .await
+            .scheduler
+            .as_ref()
+            .and_then(|s| s.max_staleness_secs)
+            .unwrap_or(120);
+        let staleness_exceeded = Self::staleness_exceeded(now_ms, last_refresh_at_ms, max_staleness_secs);
+
+           // Skip refresh when both remote version and module signatures are unchanged.
+        if !staleness_exceeded && remote_version > 0 && remote_version == local_version && module_hash == local_module_hash {
+             return; 
+        }
+        if module_hash != local_module_hash {
+            self.cron_config_cache.clear();
+        }
+        let module_set: HashSet<String> = module_names.iter().cloned().collect();
+
+        let start = std::time::Instant::now();
+        match self.fetch_all_enabled_contexts().await {
+            Ok(contexts) => {
+                let fetch_duration = start.elapsed();
+                
+                let context_count = contexts.len();
+                
+                // Group enabled contexts by module.
+                let mut context_map: std::collections::HashMap<String, Vec<(String, String)>> = std::collections::HashMap::new();
+                for (m, a, p) in contexts {
+                    context_map.entry(m).or_default().push((a, p));
+                }
+
+                for (module, name) in modules.into_iter().zip(module_names.iter()) {
+                    let cron_config = if let Some(entry) = self.cron_config_cache.get(name) {
+                        entry.value().clone()
+                    } else {
+                        let config = module.cron();
+                        self.cron_config_cache.insert(name.clone(), config.clone());
+                        config
+                    };
+                    // Keep only modules with enabled cron configuration.
+                    if let Some(cron_config) = cron_config {
+                         if !cron_config.enable {
+                              self.schedule_cache.remove(name);
+                              self.right_now_context_hash.remove(name);
+                              continue;
+                          }
+                          let contexts = context_map.remove(name).unwrap_or_default();
+                          if cron_config.right_now || cron_config.run_now_and_schedule {
+                               if contexts.is_empty() {
+                                    self.schedule_cache.remove(name);
+                                    self.right_now_context_hash.remove(name);
+                                    continue;
+                                }
+
+                                let context_hash = Self::hash_contexts(&contexts);
+                                let last_hash = self.right_now_context_hash.get(name).map(|entry| *entry.value());
+                                if last_hash != Some(context_hash) {
+                                    self.right_now_context_hash.insert(name.clone(), context_hash);
+                                    let now = Utc::now();
+                                    self.process_module_contexts(name, &contexts, now).await;
+                                }
+                                if cron_config.right_now {
+                                    self.schedule_cache.remove(name);
+                                    continue;
+                                }
+                            }
+                          if !contexts.is_empty() {
+                               let schedule = Arc::new(cron_config.schedule.clone());
+                               self.schedule_cache.insert(name.clone(), (schedule, Arc::new(contexts)));
+                          } else {
+                                // No active contexts; remove stale cache entry.
+                                self.schedule_cache.remove(name);
+                          }
+                    } else {
+                        // Module has no cron configuration.
+                        self.schedule_cache.remove(name);
+                    }
+                }
+
+                let stale_keys: Vec<String> = self
+                    .schedule_cache
+                    .iter()
+                    .filter_map(|entry| {
+                        if module_set.contains(entry.key()) {
+                            None
+                        } else {
+                            Some(entry.key().clone())
+                        }
+                    })
+                    .collect();
+                for key in stale_keys {
+                    self.schedule_cache.remove(&key);
+                }
+                Self::remove_stale_keys(&self.cron_config_cache, &module_set);
+                Self::remove_stale_keys(&self.right_now_context_hash, &module_set);
+                
+                // Persist refresh markers only after a successful pass.
+                if remote_version > 0 {
+                    self.last_version.store(remote_version, Ordering::Relaxed);
+                }
+                self.last_module_hash.store(module_hash, Ordering::Relaxed);
+                self.last_refresh_at_ms.store(now_ms, Ordering::Relaxed);
+
+                let process_duration = start.elapsed() - fetch_duration;
+                info!(
+                    "CronScheduler cache refreshed in {:?}. Fetch: {:?}, Process: {:?}. Total contexts: {}. Active scheduled modules: {}", 
+                    start.elapsed(), fetch_duration, process_duration, context_count, self.schedule_cache.len()
+                );
+            },
+            Err(e) => {
+                error!("Failed to refresh cron contexts: {}", e);
+            }
+        }
+    }
+
+    fn hash_module_signatures(signatures: &[(String, i32)]) -> u64 {
+        let mut sorted = signatures.to_vec();
+        sorted.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+        let mut hasher = DefaultHasher::new();
+        for (name, version) in sorted {
+            name.hash(&mut hasher);
+            version.hash(&mut hasher);
+        }
+        hasher.finish()
+    }
+
+    fn hash_contexts(contexts: &[(String, String)]) -> u64 {
+        let mut sorted: Vec<(String, String)> = contexts.to_vec();
+        sorted.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+        let mut hasher = DefaultHasher::new();
+        for (account, platform) in sorted {
+            account.hash(&mut hasher);
+            platform.hash(&mut hasher);
+        }
+        hasher.finish()
+    }
+
+    /// Remove entries from a DashMap whose keys are not in the allowed set.
+    fn remove_stale_keys<V>(map: &DashMap<String, V>, allowed: &HashSet<String>) {
+        let stale: Vec<String> = map
+            .iter()
+            .filter_map(|entry| {
+                if allowed.contains(entry.key()) {
+                    None
+                } else {
+                    Some(entry.key().clone())
+                }
+            })
+            .collect();
+        for key in stale {
+            map.remove(&key);
+        }
+    }
+
+    /// 纯决策(便于单测):给定协调后端的成员数与本地 leader 状态,返回
+    /// `(是否分区集群, 本 tick 是否应调度)`。
+    ///
+    /// - 成员数 > 1 → 分区集群:所有节点都调度(各管自己的分区),与 leader 无关。
+    /// - 否则(单机 / 单节点 / Redis 协调不感知成员)→ 仅 leader 调度全部 context。
+    fn scheduling_decision(cluster_size: Option<usize>, is_leader: bool) -> (bool, bool) {
+        let partitioned = cluster_size.map(|n| n > 1).unwrap_or(false);
+        (partitioned, partitioned || is_leader)
+    }
+
+    /// 是否为「按分区分摊」的多节点集群(内嵌 Raft 且成员数 > 1)。
+    fn is_partitioned_cluster(&self) -> bool {
+        Self::scheduling_decision(
+            self.state.coordination.as_ref().map(|c| c.cluster_size()),
+            false,
+        )
+        .0
+    }
+
+    /// 本节点这一 tick 是否应执行调度。
+    fn scheduling_active(&self) -> bool {
+        Self::scheduling_decision(
+            self.state.coordination.as_ref().map(|c| c.cluster_size()),
+            self.leader_elector.is_leader(),
+        )
+        .1
+    }
+
+    /// Main loop that evaluates one scheduler tick per second.
+    async fn run(self: Arc<Self>) {
+        // Start leader election loop.
+        {
+            let elector = self.leader_elector.clone();
+            tokio::spawn(async move {
+                elector.start().await;
+            });
+        }
+
+        info!("CronScheduler started (Leader Election Mode)");
+        let mut last_tick: Option<DateTime<Utc>> = None;
+
+        loop {
+            let now = Utc::now();
+            let current_second_ts = now.timestamp();
+
+            if let Some(current_second) = Utc.timestamp_opt(current_second_ts, 0).single() {
+                // 分区集群:所有节点都调度(各管自己的分区);单机/Redis:仅 leader。
+                if self.scheduling_active() {
+                    // Handle temporary pauses by optionally replaying missed ticks.
+                    if let Some(last_run) = last_tick {
+                        let diff = current_second.signed_duration_since(last_run).num_seconds();
+                        
+                        if diff > 1 {
+                            let misfire_tolerance = self.get_misfire_tolerance().await;
+                            if diff <= misfire_tolerance {
+                                 info!("Detected missed ticks. Catching up from {} to {}", last_run, current_second);
+                                 let mut cursor = last_run + chrono::Duration::seconds(1);
+                                 while cursor <= current_second {
+                                     self.clone().process_tick(cursor).await;
+                                     cursor += chrono::Duration::seconds(1);
+                                 }
+                                 last_tick = Some(current_second);
+                               } else {
+                                 warn!("Missed ticks gap ({}) exceeds tolerance ({}). Skipping catch-up, setting last_tick to now.", diff, misfire_tolerance);
+                                 last_tick = Some(current_second);
+                                 self.clone().process_tick(current_second).await;
+                            }
+                        } else if diff > 0 {
+                             last_tick = Some(current_second);
+                             self.clone().process_tick(current_second).await;
+                        }
+                    } else {
+                         last_tick = Some(current_second);
+                         self.clone().process_tick(current_second).await;
+                    }
+                } else {
+                         // Keep cursor roughly in sync while follower nodes are idle.
+                     last_tick = Some(current_second);
+                }
+            }
+
+            // Sleep until the start of the next second
+            let now = Utc::now();
+            let next_second = now.timestamp() + 1;
+            let sleep_secs = (next_second - now.timestamp()).max(0) as u64;
+            let sleep_duration = std::time::Duration::from_secs(sleep_secs);
+            
+            let mut shutdown = self.shutdown_rx.resubscribe();
+            tokio::select! {
+                _ = shutdown.recv() => {
+                    info!("CronScheduler main loop received shutdown signal");
+                    break;
+                }
+                _ = sleep(sleep_duration + Duration::from_millis(10)) => {}
+            }
+        }
+    }
+
+    async fn process_tick(self: Arc<Self>, current_tick: DateTime<Utc>) {
+        // Gather matches for this tick from the schedule cache.
+        let mut tasks = Vec::new();
+        
+        for r in self.schedule_cache.iter() {
+            let (module_name, (schedule, contexts)) = r.pair();
+            
+            if Self::is_schedule_match(schedule, current_tick) {
+                tasks.push((module_name.clone(), contexts.clone()));
+            }
+        }
+
+        // Process matching modules asynchronously.
+        let start = std::time::Instant::now();
+        let mut total_triggered = 0;
+        
+        for (module_name, contexts) in tasks {
+            let this = self.clone();
+            total_triggered += contexts.len();
+            tokio::spawn(async move {
+                 this.process_module_contexts(&module_name, &contexts, current_tick).await;
+            });
+        }
+        
+        let duration = start.elapsed().as_secs_f64();
+        histogram!("mocra_scheduler_tick_duration_seconds").record(duration);
+        if total_triggered > 0 {
+            info!("Scheduler tick processed {} potential tasks in {:.4}s", total_triggered, duration);
+        }
+    }
+
+    async fn process_module_contexts(&self, module_name: &str, contexts: &[(String, String)], current_tick: DateTime<Utc>) {
+        let _active_guard = ActiveCronJobGuard::new(&self.active_context_jobs);
+        // Process context batches concurrently and lock each `(module, account, platform, tick)`.
+        let concurrency = self.state.config.read().await.scheduler
+            .as_ref()
+            .and_then(|s| s.concurrency)
+            .unwrap_or(100);
+
+        let timestamp = current_tick.timestamp();
+        let namespace_prefix = {
+            let ns = self.state.cache_service.namespace();
+            if ns.is_empty() {
+                None
+            } else {
+                Some(ns.to_string())
+            }
+        };
+        let namespace_prefix = Arc::new(namespace_prefix);
+        let batch_size = 500;
+
+        // 分区集群:仅处理归属本节点的账号(rendezvous 分配跨节点互斥);
+        // 单机 / Redis:`partitioned = false`,不过滤(维持既有全量语义)。
+        let partitioned = self.is_partitioned_cluster();
+        let coordination = self.state.coordination.clone();
+
+        futures::stream::iter(contexts.chunks(batch_size))
+            .for_each_concurrent(Some(concurrency.div_ceil(batch_size)), |batch| {
+                let namespace_prefix = Arc::clone(&namespace_prefix);
+                let coordination = coordination.clone();
+                async move {
+                let mut keys = Vec::with_capacity(batch.len());
+                // Keep references to map lock results to original contexts.
+                let mut batch_items = Vec::with_capacity(batch.len());
+
+                for (account, platform) in batch {
+                    // 归属过滤:非本节点分区的账号交给其归属节点处理。
+                    if partitioned
+                        && let Some(c) = coordination.as_ref()
+                        && !c.owns_partition_key(account)
+                    {
+                        continue;
+                    }
+                    let key = if let Some(prefix) = namespace_prefix.as_ref() {
+                        format!("{prefix}:cron:{}:{}:{}:{}", module_name, account, platform, timestamp)
+                    } else {
+                        format!("cron:{}:{}:{}:{}", module_name, account, platform, timestamp)
+                    };
+                    keys.push(key);
+                    batch_items.push((account, platform));
+                }
+
+                let key_refs: Vec<&str> = keys.iter().map(|s| s.as_str()).collect();
+
+                let lock_start = std::time::Instant::now();
+                // Lock TTL: 10 minutes.
+                match self
+                    .state
+                    .cache_service
+                    .set_nx_batch(&key_refs, b"1", Some(Duration::from_secs(600)))
+                    .await
+                {
+                    Ok(results) => {
+                        let lock_duration = lock_start.elapsed().as_secs_f64();
+                        histogram!("mocra_scheduler_lock_acquisition_seconds").record(lock_duration);
+                        for (success, (account, platform)) in results.into_iter().zip(batch_items.iter()) {
+                            if success {
+                                info!(
+                                    "Triggering cron task for module: {} [{}@{}] at {}",
+                                    module_name, account, platform, current_tick
+                                );
+                                
+                                self.trigger_single_task(module_name, account, platform).await;
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        error!("Failed to acquire batch locks for cron task: {}", e);
+                    }
+                }
+            }
+            })
+            .await;
+    }
+    
+    fn is_schedule_match(schedule: &Schedule, target: DateTime<Utc>) -> bool {
+        // Match when the next occurrence after `target - 1s` equals `target`.
+        let check_time = target - chrono::Duration::seconds(1);
+        if let Some(next) = schedule.after(&check_time).next() {
+            return next == target;
+        }
+        false
+    }
+
+    async fn trigger_single_task(&self, module_name: &str, account: &str, platform: &str) {
+        counter!("mocra_scheduled_tasks_total", "module" => module_name.to_string()).increment(1);
+        let task = TaskEvent {
+            account: account.to_string(),
+            platform: platform.to_string(),
+            module: Some(vec![module_name.to_string()]),
+            run_id: uuid::Uuid::now_v7(),
+            priority: crate::common::model::Priority::Normal,
+        };
+        
+        let sender = self.queue_manager.get_task_push_channel();
+        match sender.try_send(QueuedItem::new(task.clone())) {
+            Ok(()) => {}
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                counter!("mocra_scheduler_task_drops_total", "module" => module_name.to_string(), "reason" => "channel_full").increment(1);
+                warn!(
+                    "Task queue full, blocking send for module {} [{}@{}]",
+                    module_name, account, platform
+                );
+                if let Err(e) = sender.send(QueuedItem::new(task)).await {
+                    counter!("mocra_scheduler_task_drops_total", "module" => module_name.to_string(), "reason" => "send_failed").increment(1);
+                    error!("Failed to push cron task to queue for module {} [{}@{}]: {}", module_name, account, platform, e);
+                }
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                counter!("mocra_scheduler_task_drops_total", "module" => module_name.to_string(), "reason" => "channel_closed").increment(1);
+                error!("Task queue channel closed for module {} [{}@{}]", module_name, account, platform);
+            }
+        }
+    }
+
+    async fn fetch_all_enabled_contexts(
+        &self,
+    ) -> Result<Vec<(String, String, String)>, String> {
+        #[cfg(not(feature = "store"))]
+        let results: Vec<(String, String, String)> = Vec::new();
+        #[cfg(feature = "store")]
+        let results: Vec<(String, String, String)> = {
+        // 无 DB(standalone)模式:没有可调度的 DB 上下文。
+        let Some(db) = self.state.db.as_ref() else {
+            return Ok(Vec::new());
+        };
+        // Single query for all enabled scheduling contexts.
+        module::Entity::find()
+            .join(JoinType::InnerJoin, module::Relation::RelModuleAccount.def())
+            .join(JoinType::InnerJoin, rel_module_account::Relation::Account.def())
+            .join(JoinType::InnerJoin, account::Relation::RelAccountPlatform.def())
+            .join(JoinType::InnerJoin, rel_account_platform::Relation::Platform.def())
+            .join(JoinType::InnerJoin, platform::Relation::RelModulePlatform.def())
+            .filter(
+                Expr::col((rel_module_platform::Entity, rel_module_platform::Column::ModuleId))
+                    .eq(Expr::col((module::Entity, module::Column::Id)))
+            )
+            .filter(rel_module_account::Column::Enabled.eq(true))
+            .filter(rel_account_platform::Column::Enabled.eq(true))
+            .filter(rel_module_platform::Column::Enabled.eq(true))
+            .filter(module::Column::Enabled.eq(true))
+            .select_only()
+            .column(module::Column::Name)
+            .column(account::Column::Name)
+            .column(platform::Column::Name)
+            .into_tuple()
+            .all(&**db)
+            .await
+            .map_err(|e| e.to_string())?
+        };
+
+        Ok(results)
+    }
+
+    fn staleness_exceeded(now_ms: u64, last_refresh_at_ms: u64, max_staleness_secs: u64) -> bool {
+        if last_refresh_at_ms == 0 {
+            return false;
+        }
+        now_ms.saturating_sub(last_refresh_at_ms) > max_staleness_secs.saturating_mul(1000)
+    }
+}
+
+#[cfg(test)]
+mod staleness_tests {
+    use super::CronScheduler;
+
+    #[test]
+    fn test_staleness_exceeded() {
+        let now_ms = 10_000;
+        assert!(!CronScheduler::staleness_exceeded(now_ms, 0, 120));
+        assert!(!CronScheduler::staleness_exceeded(now_ms, 9_500, 1));
+        assert!(CronScheduler::staleness_exceeded(now_ms, 8_000, 1));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::str::FromStr;
+    use chrono::TimeZone;
+
+    #[test]
+    fn scheduling_decision_partitions_multi_node_else_leader_gated() {
+        // 无协调后端(单机):仅 leader 调度。
+        assert_eq!(CronScheduler::scheduling_decision(None, true), (false, true));
+        assert_eq!(CronScheduler::scheduling_decision(None, false), (false, false));
+        // 单节点集群(size=1):仍走 leader 门(自己就是 leader)。
+        assert_eq!(CronScheduler::scheduling_decision(Some(1), true), (false, true));
+        assert_eq!(CronScheduler::scheduling_decision(Some(1), false), (false, false));
+        // 多节点集群:所有节点都调度(各管自己的分区),与 leader 状态无关。
+        assert_eq!(CronScheduler::scheduling_decision(Some(3), false), (true, true));
+        assert_eq!(CronScheduler::scheduling_decision(Some(3), true), (true, true));
+    }
+
+    #[test]
+    fn test_is_schedule_match() {
+        // Every minute
+        let schedule = Schedule::from_str("* * * * * *").unwrap();
+        
+        let target = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+        assert!(CronScheduler::is_schedule_match(&schedule, target));
+
+        // 1 second later (should not match as cron is per second resolution in this crate usually, but logic checks exact match)
+        // logic: target - 1s. next after that. should be target.
+        // If target is 00:00:01. target-1 = 00:00:00. next after 00:00:00 is 00:00:01. Match.
+        let target_sec = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 1).unwrap();
+        assert!(CronScheduler::is_schedule_match(&schedule, target_sec));
+    }
+
+    #[test]
+    fn test_specific_schedule_match() {
+        // At 05 minutes past the hour
+        let schedule = Schedule::from_str("0 5 * * * *").unwrap();
+        
+        let match_time = Utc.with_ymd_and_hms(2024, 1, 1, 10, 5, 0).unwrap();
+        assert!(CronScheduler::is_schedule_match(&schedule, match_time));
+
+        let no_match_time = Utc.with_ymd_and_hms(2024, 1, 1, 10, 6, 0).unwrap();
+        assert!(!CronScheduler::is_schedule_match(&schedule, no_match_time));
+    }
+}
