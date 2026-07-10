@@ -29,3 +29,6 @@ pub mod common;
 
 #[path = "downloader/lib.rs"]
 pub mod downloader;
+
+#[path = "queue/lib.rs"]
+pub mod queue;

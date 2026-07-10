@@ -113,7 +113,8 @@ js-v8    = ["dep:v8"]
   - **`common`**(域模型 / 接口 / State / 配置 / processor 链 / 状态追踪 等,最大最核心):环已提前打断,依赖(cacheable/utils/errors 在 mocra-core;proxy/dag/store 是 crate)就绪,仅两处 `crate::proxy` 改直连 `mocra_proxy`;整树迁入 mocra-core,新增 cron/futures/indexmap/reqwest_cookie_store/url/toml/redis 依赖 + `store` 特性接上 `mocra-store`(实体再导出);mocra-core 补齐与主 crate 一致的结构性 clippy 豁免。mocra-core 各特性 clippy 净、98 测试 + doctest;host 各特性全绿、106 测试。
   - 至此**基础层(errors/cacheable/utils/common)全部在 mocra-core**。
   - **`downloader`**(HTTP / WebSocket 下载器):仅依赖基础层(cacheable/common/utils/errors,均已在 mocra-core),无 `crate::proxy`、无特性门控 —— **零代码改动**整树迁入;新增 futures-util/rand/semver/tokio-tungstenite/dyn-clone 依赖,并把 mocra-core 的 reqwest 特性补齐到与主 crate 一致(form/cookies/socks/… 使其可独立编译)。mocra-core clippy 净、100 测试;host 各特性全绿、104 测试。
-  - 只剩 `engine`(14183 行,管线核心;牵连数据面 `queue`、协调 `sync`)。
+  - **`queue`**(数据面 MQ:内存/redis + kafka/nats 后端):仅依赖基础层 + rdkafka(queue-kafka)/async-nats(queue-nats),无孤儿 impl —— **零代码改动**整树迁入;mocra-core 新增 `queue-kafka`/`queue-nats` 两个转发特性 + rmp-serde/serde_path_to_error/crc32fast/rdkafka/async-nats 依赖。mocra-core 各特性 clippy 净、112 测试;host 各特性(含 queue-kafka/nats)全绿、92 测试。
+  - 只剩 `engine`(14183 行,管线核心)+ 协调 `sync`(依赖 mocra_cluster)+ `schedule`(mocra-dag shim + host adapter)。
 - [x] 抽 `mocra-dag` / `mocra-proxy`(现成干净)为独立 crate。**两者均已抽出、独立编译(不反依赖主 crate)、clippy `-D warnings` 净、CI 纳入**:
   - [`crates/mocra-proxy`](../../crates/mocra-proxy):自带 `ProxyError` / `Result`,`src/proxy` 转 shim `pub use mocra_proxy::*` + `impl From<mocra_proxy::ProxyError> for Error` 边界转换;9 个精简依赖。
   - [`crates/mocra-dag`](../../crates/mocra-dag):通用分布式 DAG 引擎,**运行时依赖 trait 化** —— `DagStore`(get/set/del/incr/eval_lua)抽象 `CacheService`、`DagEventSink` 抽象 `SyncService`,`crate::common::metrics` 内联;宿主 `src/schedule` 转 shim + adapter(`impl DagStore for CacheService`、`SyncAble for DagNodeSyncState`);**54 个测试留主 crate 用真实 `CacheService` 驱动、全绿**。

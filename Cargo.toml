@@ -123,9 +123,9 @@ polars = ["dep:polars", "dep:polars-lazy", "dep:polars-ops", "mocra-core/polars"
 # Excel 解析(calamine → DataFrame),隐含开启 polars。
 excel = ["dep:calamine", "polars", "mocra-core/excel"]
 # 数据面 Kafka 队列后端(默认关闭 —— 避免 rdkafka 的 cmake/C++ 构建负担)。
-queue-kafka = ["dep:rdkafka"]
+queue-kafka = ["dep:rdkafka", "mocra-core/queue-kafka"]
 # 数据面 NATS(JetStream)队列后端 —— 轻量、无需 Redis,适合内嵌集群的数据面。
-queue-nats = ["dep:async-nats"]
+queue-nats = ["dep:async-nats", "mocra-core/queue-nats"]
 # 数据库 / 多租户元数据存储(sea-orm)。默认关闭 —— 无 DB standalone 模式不需要;
 # 开启后解锁 account × platform × module 的 DB 驱动任务模型。
 store = ["dep:sea-orm", "dep:mocra-store", "mocra-core/store"]
