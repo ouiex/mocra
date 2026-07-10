@@ -146,6 +146,10 @@ Mocra::builder()
     .run().await?;
 ```
 
+Building a `Response` inside `download` means copying the correlation fields (`id`, `run_id`,
+`module`, `context`, …) from the incoming `Request` — see the runnable
+`examples/custom_downloader.rs` in the mocra repo for the full, compiling pattern.
+
 ## 8. Embedded cluster (`--features cluster-embedded`, no Redis)
 
 ```rust

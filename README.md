@@ -250,6 +250,7 @@ A Redis-backed control plane is also available without the embedded cluster: pro
 Runnable examples in [`examples/`](examples/):
 
 - [`examples/spider_quickstart.rs`](examples/spider_quickstart.rs) — minimal `Spider` (no DB / no Redis)
+- [`examples/custom_downloader.rs`](examples/custom_downloader.rs) — implement the `Downloader` trait and inject it with `.default_downloader()` (offline, deterministic)
 - [`examples/dashboard.rs`](examples/dashboard.rs) — built-in observability dashboard (`--features dashboard`)
 - [`examples/cluster_quickstart.rs`](examples/cluster_quickstart.rs) — self-organizing embedded cluster (`--features cluster-embedded`)
 

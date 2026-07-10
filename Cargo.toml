@@ -104,6 +104,11 @@ path = "src/lib.rs"
 name = "spider_quickstart"
 path = "examples/spider_quickstart.rs"
 
+# 自定义下载器(实现 Downloader trait,替换/扩展默认 reqwest)。
+[[example]]
+name = "custom_downloader"
+path = "examples/custom_downloader.rs"
+
 # 内嵌集群示例:需 cluster-embedded(用到 `ClusterConfig`)。
 [[example]]
 name = "cluster_quickstart"
