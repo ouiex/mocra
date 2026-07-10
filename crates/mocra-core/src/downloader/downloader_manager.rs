@@ -17,7 +17,9 @@ pub struct DownloaderManager {
     pub app_config: Arc<RwLock<Config>>,
     /// 分布式锁管理器(用于取 Redis 连接池)。
     pub locker: Arc<DistributedLockManager>,
-    pub default_downloader: Box<dyn Downloader>,
+    /// 默认下载器(缺省 reqwest);可经 [`set_default_downloader`](Self::set_default_downloader)
+    /// 在启动前替换(如换成浏览器渲染 / 代理轮换 / 自定义重试的下载器)。
+    pub default_downloader: RwLock<Box<dyn Downloader>>,
     // Registered downloader factories.
     pub downloader: Arc<DashMap<String, Box<dyn Downloader>>>,
     // Task downloader configuration.
@@ -51,13 +53,13 @@ impl DownloaderManager {
         DownloaderManager {
             app_config,
             locker: locker.clone(),
-            default_downloader: Box::new(RequestDownloader::new(
+            default_downloader: RwLock::new(Box::new(RequestDownloader::new(
                 Arc::clone(&limiter),
                 Arc::clone(&locker),
                 Arc::clone(&cache_service),
                 pool_size,
                 max_response_size,
-            )),
+            ))),
             // Downloader factory list.
             downloader: Arc::new(DashMap::new()),
             // Task downloader configuration.
@@ -71,9 +73,16 @@ impl DownloaderManager {
 
     /// Register a custom downloader implementation.
     ///
-    /// The downloader will be available to use by its `name()`.
+    /// The downloader is selected for a module/request when its `DownloadConfig.downloader`
+    /// name matches this downloader's [`name()`](Downloader::name).
     pub async fn register(&self, downloader: Box<dyn Downloader>) {
         self.downloader.insert(downloader.name(), downloader);
+    }
+
+    /// Replaces the default downloader (used when a request's `config.downloader` does not
+    /// match any registered downloader). Set this before the engine starts.
+    pub async fn set_default_downloader(&self, downloader: Box<dyn Downloader>) {
+        *self.default_downloader.write().await = downloader;
     }
 
     /// Set rate limit for a specific limit_id dynamically.
@@ -268,12 +277,10 @@ impl DownloaderManager {
               return d;
         }
 
-        let new_downloader = {
-            if let Some(registered) = self.downloader.get(&config.downloader) {
-                dyn_clone::clone_box(registered.value().as_ref())
-            } else {
-                dyn_clone::clone_box(self.default_downloader.as_ref())
-            }
+        let new_downloader = if let Some(registered) = self.downloader.get(&config.downloader) {
+            dyn_clone::clone_box(registered.value().as_ref())
+        } else {
+            dyn_clone::clone_box(self.default_downloader.read().await.as_ref())
         };
 
         // Ensure the configuration is up to date.

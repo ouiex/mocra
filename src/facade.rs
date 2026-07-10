@@ -486,6 +486,10 @@ async fn start_embedded_cluster(
 pub struct MocraBuilder {
     config_path: Option<String>,
     modules: Vec<Arc<dyn ModuleTrait>>,
+    /// 用户注册的具名下载器(按 `config.downloader` 名字路由)。
+    downloaders: Vec<Box<dyn crate::downloader::Downloader>>,
+    /// 替换全局默认下载器(缺省 reqwest)。
+    default_downloader: Option<Box<dyn crate::downloader::Downloader>>,
     #[cfg(feature = "cluster-embedded")]
     cluster: Option<ClusterConfig>,
     #[cfg(feature = "dashboard")]
@@ -521,6 +525,29 @@ impl MocraBuilder {
             sink,
         });
         self.modules.push(module);
+        self
+    }
+
+    /// 注册一个自定义下载器(实现 [`Downloader`](crate::downloader::Downloader) trait)。
+    ///
+    /// 模块把 `DownloadConfig.downloader` 设为该下载器的 `name()` 即可路由到它;
+    /// 未匹配时仍用默认下载器。可注册多个。适合按模块选择不同下载策略。
+    ///
+    /// ```ignore
+    /// Mocra::builder()
+    ///     .spider(MySpider, on_item(|_| async {}))
+    ///     .downloader(MyDownloader::new())   // 模块 config.downloader = "<其 name()>" 时启用
+    ///     .run().await?;
+    /// ```
+    pub fn downloader<D: crate::downloader::Downloader>(mut self, downloader: D) -> Self {
+        self.downloaders.push(Box::new(downloader));
+        self
+    }
+
+    /// 替换**全局默认**下载器(缺省是 reqwest)。当请求的 `config.downloader` 未匹配任何
+    /// 已注册下载器时走它 —— 适合整体换掉 reqwest(如浏览器渲染 / 代理轮换 / 自定义重试)。
+    pub fn default_downloader<D: crate::downloader::Downloader>(mut self, downloader: D) -> Self {
+        self.default_downloader = Some(Box::new(downloader));
         self
     }
 
@@ -631,6 +658,17 @@ impl MocraBuilder {
         // 集群下「种子只注入一次」:仅 leader 注入,避免每节点重复注入 → N× 重复抓取。
         let should_seed = coordination.as_ref().map(|c| c.is_leader()).unwrap_or(true);
         let engine = Engine::new(state, None).await?;
+
+        // 用户自定义下载器 / 替换默认下载器(在引擎启动前接线;chains 与 manager 共享同一 Arc)。
+        for downloader in self.downloaders {
+            engine.downloader_manager.register(downloader).await;
+        }
+        if let Some(default_downloader) = self.default_downloader {
+            engine
+                .downloader_manager
+                .set_default_downloader(default_downloader)
+                .await;
+        }
 
         let spider_names: Vec<String> = self.modules.iter().map(|m| m.name()).collect();
         for module in self.modules {
@@ -911,5 +949,101 @@ mod dashboard_tests {
         );
 
         server.abort();
+    }
+}
+
+#[cfg(test)]
+mod downloader_tests {
+    use super::{ChannelSink, Ctx, Mocra, Seeds, Spider};
+    use async_trait::async_trait;
+    use semver::Version;
+
+    use crate::common::model::download_config::DownloadConfig;
+    use crate::common::model::{Cookies, Request, Response};
+    use crate::downloader::Downloader;
+    use crate::errors::Result;
+
+    /// 自定义下载器:忽略网络,返回固定响应 —— 用于证明它被管线真正调用(而非 reqwest)。
+    #[derive(Clone)]
+    struct FakeDownloader;
+
+    #[async_trait]
+    impl Downloader for FakeDownloader {
+        async fn set_config(&self, _id: &str, _config: DownloadConfig) {}
+        async fn set_limit(&self, _id: &str, _limit: f32) {}
+        fn name(&self) -> String {
+            "fake_downloader".to_string()
+        }
+        fn version(&self) -> Version {
+            Version::new(1, 0, 0)
+        }
+        async fn download(&self, request: Request) -> Result<Response> {
+            Ok(Response {
+                id: request.id,
+                platform: request.platform,
+                account: request.account,
+                module: request.module,
+                status_code: 299,
+                cookies: Cookies { cookies: vec![] },
+                content: b"FAKE_DOWNLOADER_BODY".to_vec(),
+                storage_path: None,
+                headers: vec![],
+                task_retry_times: request.task_retry_times,
+                metadata: request.meta,
+                download_middleware: request.download_middleware,
+                data_middleware: request.data_middleware,
+                task_finished: request.task_finished,
+                context: request.context,
+                run_id: request.run_id,
+                prefix_request: request.prefix_request,
+                request_hash: None,
+                priority: request.priority,
+            })
+        }
+        async fn health_check(&self) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    struct ProbeSpider;
+
+    #[async_trait]
+    impl Spider for ProbeSpider {
+        type Item = u16;
+        fn name(&self) -> &str {
+            "downloader_probe"
+        }
+        async fn start(&self, s: &mut Seeds) {
+            // 故意用不可解析的域名:若走真实 reqwest 会失败;走 fake 才能拿到固定响应体。
+            s.get("https://this-host-does-not-resolve.invalid/x");
+        }
+        async fn parse(&self, res: Response, cx: &mut Ctx<Self::Item>) -> Result<()> {
+            if res.text_lossy().contains("FAKE_DOWNLOADER_BODY") {
+                cx.emit(res.status_code);
+            }
+            Ok(())
+        }
+    }
+
+    /// 端到端:`Mocra::builder().default_downloader(..)` 注入的自定义下载器真的被管线使用。
+    #[tokio::test]
+    async fn custom_default_downloader_serves_requests() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<u16>(4);
+        let server = tokio::spawn(async move {
+            let _ = Mocra::builder()
+                .spider(ProbeSpider, ChannelSink::new(tx))
+                .default_downloader(FakeDownloader)
+                .run()
+                .await;
+        });
+
+        let got = tokio::time::timeout(std::time::Duration::from_secs(10), rx.recv()).await;
+        server.abort();
+
+        assert_eq!(
+            got.ok().flatten(),
+            Some(299),
+            "自定义默认下载器应已服务该请求(状态 299 + fake body);若为 None 说明仍走了 reqwest"
+        );
     }
 }
