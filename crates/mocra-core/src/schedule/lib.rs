@@ -2,7 +2,8 @@
 //!
 //! 此模块保留为 re-export shim(顶层 + `dag` 子模块,兼容既有 `crate::schedule::*`
 //! 与 `crate::schedule::dag::*` 路径),并在此提供宿主 adapter:把主 crate 的
-//! [`CacheService`] / [`SyncService`] 适配为 dag 的 [`DagStore`] / [`DagEventSink`]。
+//! [`CacheService`](crate::cacheable::CacheService) / [`SyncService`] 适配为 dag 的
+//! [`DagStore`] / [`DagEventSink`]。
 
 pub use mocra_dag::*;
 
