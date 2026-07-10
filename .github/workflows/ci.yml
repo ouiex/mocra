@@ -1,9 +1,12 @@
 name: CI
 
+# 仅在推送 tag 时运行 CI(不再对每次 push main / PR 触发)。
+# 想只跑版本 tag,把 '*' 改成 'v*'(如 v0.2.16);想加手动触发,取消 workflow_dispatch 注释。
 on:
   push:
-    branches: [main]
-  pull_request:
+    tags:
+      - '*'
+  # workflow_dispatch:   # 取消注释即可在 Actions 页手动 “Run workflow”
 
 env:
   CARGO_TERM_COLOR: always
