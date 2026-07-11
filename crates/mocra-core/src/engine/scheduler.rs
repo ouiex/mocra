@@ -52,7 +52,7 @@ impl Drop for ActiveCronJobGuard<'_> {
 /// - Trigger queue tasks distributed across the cluster:
 ///   - **多节点 Raft 集群**:每个节点只调度**归属自己的分区**(账号 rendezvous 分配,
 ///     跨节点互斥),无 leader 瓶颈 —— cron 负载随节点数水平扩展。
-///   - **单机 / Redis 协调**:仅 leader 节点调度全部 context(维持既有语义)。
+///   - **单机 / 集群协调**:仅 leader 节点调度全部 context(维持既有语义)。
 /// - Recover short scheduler pauses with configurable misfire catch-up.
 pub struct CronScheduler {
     task_manager: Arc<TaskManager>,
@@ -153,7 +153,7 @@ impl CronScheduler {
     async fn refresh_cache(&self) {
         // Use distributed versioning to avoid unnecessary DB scans.
         let namespace = self.state.cache_service.namespace();
-        let redis_version_key = if namespace.is_empty() {
+        let version_key = if namespace.is_empty() {
             "scheduler:config_version".to_string()
         } else {
             format!("{namespace}:scheduler:config_version")
@@ -161,7 +161,7 @@ impl CronScheduler {
         let remote_version_bytes = self
             .state
             .cache_service
-            .get(&redis_version_key)
+            .get(&version_key)
             .await
             .ok()
             .flatten();
@@ -365,7 +365,7 @@ impl CronScheduler {
     /// `(是否分区集群, 本 tick 是否应调度)`。
     ///
     /// - 成员数 > 1 → 分区集群:所有节点都调度(各管自己的分区),与 leader 无关。
-    /// - 否则(单机 / 单节点 / Redis 协调不感知成员)→ 仅 leader 调度全部 context。
+    /// - 否则(单机 / 单节点 / 集群协调不感知成员)→ 仅 leader 调度全部 context。
     fn scheduling_decision(cluster_size: Option<usize>, is_leader: bool) -> (bool, bool) {
         let partitioned = cluster_size.map(|n| n > 1).unwrap_or(false);
         (partitioned, partitioned || is_leader)
@@ -407,7 +407,7 @@ impl CronScheduler {
             let current_second_ts = now.timestamp();
 
             if let Some(current_second) = Utc.timestamp_opt(current_second_ts, 0).single() {
-                // 分区集群:所有节点都调度(各管自己的分区);单机/Redis:仅 leader。
+                // 分区集群:所有节点都调度(各管自己的分区);单机/集群:仅 leader。
                 if self.scheduling_active() {
                     // Handle temporary pauses by optionally replaying missed ticks.
                     if let Some(last_run) = last_tick {
@@ -531,7 +531,7 @@ impl CronScheduler {
         let batch_size = 500;
 
         // 分区集群:仅处理归属本节点的账号(rendezvous 分配跨节点互斥);
-        // 单机 / Redis:`partitioned = false`,不过滤(维持既有全量语义)。
+        // 单机 / 集群:`partitioned = false`,不过滤(维持既有全量语义)。
         let partitioned = self.is_partitioned_cluster();
         let coordination = self.state.coordination.clone();
 

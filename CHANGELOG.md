@@ -12,12 +12,12 @@ Cargo workspace. No backward compatibility with `0.2.x` internals.
 ### Added
 
 - **Simple facade API** — implement a `Spider`, run with `Mocra::builder().spider(s, on_item(..)).run()`;
-  typed output via `DataSink` / `on_item`. Runs with **no DB and no Redis** on a single node.
+  typed output via `DataSink` / `on_item`. Runs with **no DB** on a single node.
 - **Embedded cluster (`cluster-embedded`)** — a self-organizing **Raft + redb** control plane
   ([`mocra-cluster`]): strongly-consistent leader election, distributed locks with monotonic
   **fencing tokens**, KV/CAS, membership + `/cluster/join`, dynamic scale up/down, leader
   failover, snapshot/log compaction, crash recovery, and **partition ownership** (rendezvous
-  hashing + Raft-fenced leases). No external coordinator (ZooKeeper / etcd / Redis) required.
+  hashing + Raft-fenced leases). No external coordinator (ZooKeeper / etcd) required.
   Any node accepts writes (auto-forwarded to the leader). Facade: `.cluster(ClusterConfig)`.
 - **NATS (JetStream) data-plane backend** (`queue-nats`) — persistent, at-least-once queue with
   ack + nack retry/DLQ, integration-tested against a real server.
@@ -48,7 +48,7 @@ Cargo workspace. No backward compatibility with `0.2.x` internals.
   re-declaring `sea-orm` / `rdkafka` / `async-nats` / `polars` / `calamine` / `tower-http`).
 - **Default dependencies slimmed** — `sea-orm`, `rdkafka`, `polars`, `calamine` moved behind
   feature flags (`store`, `queue-kafka`, `polars`, `excel`); default build no longer compiles them.
-- Rate limiting shares the global limit by live cluster member count when clustered (no Redis).
+- Rate limiting shares the global limit by live cluster member count when clustered.
 - Distributed locks route through the coordination backend (Raft) when clustered.
 
 ### Removed

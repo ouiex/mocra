@@ -1,7 +1,7 @@
 use super::*;
 
 impl Engine {
-    /// Registers optional event consumers (console + Redis) and binds subscriptions.
+    /// Registers optional event consumers (console log) and binds subscriptions.
     async fn setup_event_handlers(&self) {
         let Some(event_bus) = &self.event_bus else {
             info!("EventBus disabled; skipping event handlers");
@@ -15,57 +15,18 @@ impl Engine {
         )
         .await;
 
-        let config = self.state.config.read().await;
-        if let Some(redis_config) = &config.cookie {
-            if let Some(pool) = create_redis_pool(
-                &redis_config.redis_host,
-                redis_config.redis_port,
-                redis_config.redis_db,
-                &redis_config.redis_username,
-                &redis_config.redis_password,
-                redis_config.pool_size,
-                redis_config.tls.unwrap_or(false),
-            ) {
-                let redis_rx = event_bus.subscribe("*".to_string()).await;
-                let redis_handler =
-                    RedisEventHandler::new(Arc::new(pool), config.name.clone(), 3600);
-                redis_handler.start(redis_rx).await;
-
-                info!(
-                    "Redis event handler registered successfully (TLS: {})",
-                    redis_config.tls.unwrap_or(false)
-                );
-            } else {
-                info!("Redis pool creation failed");
-            }
-        } else {
-            info!("Redis not configured, skipping Redis event handler");
-        }
-
         info!("Event handlers registered successfully");
     }
 
     /// Starts the full engine runtime.
     ///
     /// Startup phases:
-    /// 1. Optional Lua preload for distributed mode.
-    /// 2. Optional API startup.
-    /// 3. Event bus initialization.
-    /// 4. Background services (cleaners/monitor/idle-stop watcher).
-    /// 5. Chain construction and processor loops.
+    /// 1. Optional API startup.
+    /// 2. Event bus initialization.
+    /// 3. Background services (cleaners/monitor/idle-stop watcher).
+    /// 4. Chain construction and processor loops.
     pub async fn start(&self) {
         info!("Starting Schedule with event-driven architecture");
-        let use_distributed_lua = {
-            let config = self.state.config.read().await;
-            !config.is_single_node_mode()
-        };
-        if use_distributed_lua {
-            self.lua_registry
-                .preload(self.state.cache_service.as_ref())
-                .await;
-        } else {
-            info!("Single-node mode detected, skipping Lua script preload");
-        }
         #[cfg(feature = "dashboard")]
         {
             let api_config = self.state.config.read().await.api.clone();
@@ -194,11 +155,6 @@ impl Engine {
                 self.queue_manager.clone(),
                 self.event_bus.clone(),
                 self.state.pipeline_ctx(),
-                if use_distributed_lua {
-                    Some(self.lua_registry.clone())
-                } else {
-                    None
-                },
             )
             .await,
         );

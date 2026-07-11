@@ -9,12 +9,12 @@ use mocra::engine::engine::Engine;
 
 async fn build_engine_with_logger(enable_logger: bool) -> Engine {
     let config_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("config.toml");
-    let state = Arc::new(State::new(config_path.to_str().unwrap()).await);
+    let state = Arc::new(State::try_new(config_path.to_str().unwrap()).await.expect("state init"));
     println!("Config loaded from {}", config_path.display());
 
     let _logging_enabled = enable_logger;
 
-    let engine: Engine = Engine::new(Arc::clone(&state), None).await;
+    let engine: Engine = Engine::new(Arc::clone(&state), None).await.expect("engine init");
     for middleware in middleware::register_data_middlewares(){
         engine.register_data_middleware(middleware).await;
     }
@@ -51,124 +51,20 @@ mod tests {
     use axum::http::{HeaderMap, StatusCode};
     use axum::routing::get;
     use axum::Router;
-    use mocra::cacheable::{CacheAble, CacheService};
+    use mocra::cacheable::CacheService;
     use mocra::common::model::config::Config;
     use mocra::common::model::download_config::DownloadConfig;
-    use mocra::common::model::cookies::CookieItem;
-    use mocra::common::model::{Cookies, Headers, Request};
+    use mocra::common::model::Request;
     use mocra::downloader::request_downloader::RequestDownloader;
     use mocra::downloader::Downloader;
     use mocra::utils::distributed_rate_limit::{DistributedSlidingWindowRateLimiter, RateLimitConfig};
-    use mocra::utils::redis_lock::DistributedLockManager;
-    use mocra::utils::connector::create_redis_pool;
-    use serde::{Deserialize, Serialize};
+    use mocra::utils::lock::DistributedLockManager;
     use std::net::SocketAddr;
     use std::path::Path;
-    use std::env;
     use std::sync::Arc;
     use std::time::Duration;
     use tokio::sync::oneshot;
     use uuid::Uuid;
-
-    #[derive(Debug, Clone, Serialize, Deserialize)]
-    struct SessionState {
-        session_id: String,
-        module_id: String,
-        headers: Headers,
-        cookies: Cookies,
-        version: u64,
-    }
-
-    impl CacheAble for SessionState {
-        fn field() -> impl AsRef<str> {
-            "session_state"
-        }
-    }
-
-    fn redis_pool_from_env() -> Option<deadpool_redis::Pool> {
-        let host = env::var("REDIS_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
-        let port = env::var("REDIS_PORT")
-            .ok()
-            .and_then(|s| s.parse::<u16>().ok())
-            .unwrap_or(6379);
-        let db = env::var("REDIS_DB")
-            .ok()
-            .and_then(|s| s.parse::<u16>().ok())
-            .unwrap_or(0);
-
-        create_redis_pool(&host, port, db, &None, &None, Some(8), false)
-    }
-
-    #[tokio::test]
-    async fn session_state_can_serialize_and_roundtrip_via_redis() {
-        let Some(pool_a) = redis_pool_from_env() else {
-            eprintln!("skip session redis roundtrip test: redis is unavailable");
-            return;
-        };
-        let Some(pool_b) = redis_pool_from_env() else {
-            eprintln!("skip session redis roundtrip test: second redis pool unavailable");
-            return;
-        };
-
-        let cache_a = CacheService::new(
-            Some(pool_a),
-            "tests-session".to_string(),
-            Some(Duration::from_secs(120)),
-            None,
-        );
-        let cache_b = CacheService::new(
-            Some(pool_b),
-            "tests-session".to_string(),
-            Some(Duration::from_secs(120)),
-            None,
-        );
-
-        let session_key = format!("{}", Uuid::new_v4());
-
-        let headers = Headers::default()
-            .add("user-agent", "mocra-test-agent")
-            .add("x-session-mark", "v1");
-        let cookies = Cookies {
-            cookies: vec![CookieItem {
-                name: "sid".to_string(),
-                value: "abc123".to_string(),
-                domain: "example.com".to_string(),
-                path: "/".to_string(),
-                expires: None,
-                max_age: Some(3600),
-                secure: false,
-                http_only: Some(true),
-            }],
-        };
-
-        let session = SessionState {
-            session_id: session_key.clone(),
-            module_id: "acc-platform-module".to_string(),
-            headers,
-            cookies,
-            version: 1,
-        };
-
-        session
-            .send(&session_key, &cache_a)
-            .await
-            .expect("session send to redis should succeed");
-
-        let fetched = SessionState::sync(&session_key, &cache_b)
-            .await
-            .expect("session sync from redis should succeed")
-            .expect("session should exist in redis");
-
-        assert_eq!(fetched.session_id, session.session_id);
-        assert_eq!(fetched.module_id, session.module_id);
-        assert_eq!(fetched.version, session.version);
-        assert_eq!(fetched.headers.headers.len(), session.headers.headers.len());
-        assert_eq!(fetched.cookies.cookies.len(), session.cookies.cookies.len());
-
-        SessionState::delete(&session_key, &cache_b)
-            .await
-            .expect("session cleanup should succeed");
-    }
 
     async fn login_handler() -> (StatusCode, HeaderMap, &'static str) {
         let mut headers = HeaderMap::new();
@@ -219,31 +115,18 @@ mod tests {
         Config::load(path.to_str().expect("config path to str")).expect("load tests config.toml")
     }
 
-    fn build_cache_service_from_config(config: &Config) -> Option<Arc<CacheService>> {
-        let redis = config.cache.redis.as_ref()?;
-        let pool = create_redis_pool(
-            &redis.redis_host,
-            redis.redis_port,
-            redis.redis_db,
-            &redis.redis_username,
-            &redis.redis_password,
-            redis.pool_size,
-            redis.tls.unwrap_or(false),
-        )?;
-
-        Some(Arc::new(CacheService::new(
-            Some(pool),
+    fn build_cache_service(config: &Config) -> Arc<CacheService> {
+        Arc::new(CacheService::new(
             "tests-session-e2e".to_string(),
             Some(Duration::from_secs(config.cache.ttl)),
             config.cache.compression_threshold,
-        )))
+        ))
     }
 
     fn create_downloader(cache_service: Arc<CacheService>) -> Arc<RequestDownloader> {
-        let locker = Arc::new(DistributedLockManager::new(None, "tests-session-e2e"));
+        let locker = Arc::new(DistributedLockManager::new("tests-session-e2e"));
         let rate_limit_config = RateLimitConfig::new(50.0);
         let limiter = Arc::new(DistributedSlidingWindowRateLimiter::new(
-            None,
             locker.clone(),
             "tests-session-e2e",
             rate_limit_config,
@@ -270,16 +153,7 @@ mod tests {
     #[tokio::test]
     async fn enable_session_full_flow_with_axum_login_and_data() {
         let config = load_test_config();
-        let Some(cache_service) = build_cache_service_from_config(&config) else {
-            eprintln!("skip session e2e test: cache.redis is not configured");
-            return;
-        };
-
-        if cache_service.ping().await.is_err() {
-            eprintln!("skip session e2e test: redis is unavailable");
-            return;
-        }
-
+        let cache_service = build_cache_service(&config);
         let downloader = create_downloader(cache_service);
         let (addr, shutdown_tx) = start_session_test_server().await;
         let base_url = format!("http://{}", addr);

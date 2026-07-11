@@ -21,7 +21,7 @@ mocra is a Rust framework for building scalable data collection pipelines. It mo
 
 - **DAG-based module system** — define linear chains or custom fan-out/fan-in graphs
 - **Queue-driven pipeline** — task → request → download → parse → store, fully decoupled
-- **Auto-scaling runtime** — single-node (in-memory) or distributed (Redis/Kafka) with zero code changes
+- **Auto-scaling runtime** — single-node (in-memory) or distributed (embedded cluster) with zero code changes
 - **Bounded concurrency** — semaphore-controlled worker pools with pause/resume/shutdown
 - **Middleware pipeline** — download, data transformation, and storage middleware with weight-based ordering
 - **Pluggable downloaders** — the default is reqwest; swap it wholesale (`.default_downloader()`) or register per-module downloaders (`.downloader()`) for browser rendering, proxy rotation, or custom retry
@@ -43,7 +43,7 @@ serde = { version = "1", features = ["derive"] }
 tokio = { version = "1", features = ["full"] }
 ```
 
-Implement a `Spider` and run it — **no database, no Redis, three steps** (single-node, in-memory):
+Implement a `Spider` and run it — **no database, three steps** (single-node, in-memory):
 
 ```rust
 use async_trait::async_trait;
@@ -87,7 +87,7 @@ Run it:
 cargo run
 ```
 
-### Distributed cluster (no Redis)
+### Distributed cluster
 
 Enable `cluster-embedded` and start a **self-organizing Raft cluster** — register any node to any known node to form the network:
 
@@ -109,7 +109,7 @@ Mocra::builder()
     .run().await?;
 ```
 
-The **control plane** (leader election, distributed locks, membership, partition ownership) runs on an embedded **redb + Raft** — no external Redis required. The **data plane** keeps pluggable message queues (Kafka / Redis / **NATS JetStream** / in-memory), with task routing by `hash(account)` for consumer affinity.
+The **control plane** (leader election, distributed locks, membership, partition ownership) runs on an embedded **redb + Raft** — no external coordinator required. The **data plane** keeps pluggable message queues (Kafka / **NATS JetStream** / in-memory), with task routing by `hash(account)` for consumer affinity.
 
 > **Advanced (multi-stage DAG)**: for multi-node pipelines with login, pagination, and custom middleware, implement `ModuleTrait` / `ModuleNodeTrait` directly (enable the `store` feature for the account × platform × module model). See [Module Development](docs/module-development.md).
 
@@ -164,7 +164,7 @@ Mocra::builder()
 └─────────────────────────────────────────────────────────┘
 ```
 
-Each stage is decoupled by a message queue. Queues are local Tokio channels in single-node mode, or Redis Streams / Kafka / NATS (JetStream) in distributed mode — **same code, zero changes**.
+Each stage is decoupled by a message queue. Queues are local Tokio channels in single-node mode, or Kafka / NATS (JetStream) in distributed mode — **same code, zero changes**.
 
 ### Workspace crates
 
@@ -214,14 +214,14 @@ start ─┤               ├── merge
 
 | | Single-Node | Embedded cluster (`cluster-embedded`) |
 |---|---|---|
-| **Control plane** | In-process | Embedded **redb + Raft** (elections / locks / membership / partition ownership) — **no Redis** |
-| **Queues (data plane)** | Tokio mpsc (in-memory) | Pluggable MQ: Kafka / NATS JetStream / Redis Streams / in-memory |
+| **Control plane** | In-process | Embedded **redb + Raft** (elections / locks / membership / partition ownership) — **no external coordinator** |
+| **Queues (data plane)** | Tokio mpsc (in-memory) | Pluggable MQ: Kafka / NATS JetStream / in-memory |
 | **Locks / election** | Local | Raft-consensus (fencing tokens) |
 | **Workers** | 1 process | N nodes, same binary; register any node to any known node |
 | **Work distribution** | — | Cron by `hash(account)` ownership + MQ consumer affinity |
 | **Code changes** | None | Add `.cluster(ClusterConfig::…)` |
 
-Enable the embedded cluster (no external Redis required):
+Enable the embedded cluster (no external coordinator required):
 
 ```rust
 Mocra::builder()
@@ -230,11 +230,11 @@ Mocra::builder()
     .run().await?;
 ```
 
-A Redis-backed control plane is also available without the embedded cluster: provide Redis in your TOML config (`from_toml`) and coordination (locks / election) routes through Redis instead of Raft. The data plane (message queue) is selected independently — Kafka (`queue-kafka`), NATS JetStream (`queue-nats`), Redis Streams, or in-memory.
+The data plane (message queue) is selected independently of the control plane — Kafka (`queue-kafka`), NATS JetStream (`queue-nats`), or in-memory.
 
 ## Feature flags
 
-All optional; the default build is single-node with **no DB and no Redis**. Enable with
+All optional; the default build is single-node with **no DB**. Enable with
 `mocra = { version = "0.4", features = ["…"] }`.
 
 | Feature | Unlocks |
@@ -266,7 +266,7 @@ All optional; the default build is single-node with **no DB and no Redis**. Enab
 
 Runnable examples in [`examples/`](examples/):
 
-- [`examples/spider_quickstart.rs`](examples/spider_quickstart.rs) — minimal `Spider` (no DB / no Redis)
+- [`examples/spider_quickstart.rs`](examples/spider_quickstart.rs) — minimal `Spider` (no DB)
 - [`examples/custom_downloader.rs`](examples/custom_downloader.rs) — implement the `Downloader` trait and inject it with `.default_downloader()` (offline, deterministic)
 - [`examples/dashboard.rs`](examples/dashboard.rs) — built-in observability dashboard (`--features dashboard`)
 - [`examples/cluster_quickstart.rs`](examples/cluster_quickstart.rs) — self-organizing embedded cluster (`--features cluster-embedded`)

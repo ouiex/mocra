@@ -79,8 +79,6 @@ pub mod queue {
     pub use crate::queue::Message;
     pub use crate::queue::MqBackend;
     pub use crate::queue::QueueManager;
-    pub use crate::queue::RedisCompensator;
-    pub use crate::queue::RedisQueue;
 }
 pub mod schedule {
     pub use crate::schedule::Dag;
@@ -92,9 +90,6 @@ pub mod sync {
     pub use crate::sync::ClusterStatusView;
     pub use crate::sync::CoordinationBackend;
     pub use crate::sync::DistributedSync;
-    #[cfg(feature = "queue-kafka")]
-    pub use crate::sync::KafkaBackend;
-    pub use crate::sync::RedisBackend;
     pub use crate::sync::SyncAble;
     pub use crate::sync::SyncService;
 }
@@ -103,7 +98,7 @@ pub mod utils {
     pub use crate::utils::distributed_rate_limit::{
         DistributedSlidingWindowRateLimiter, RateLimitConfig,
     };
-    pub use crate::utils::redis_lock::DistributedLockManager;
+    pub use crate::utils::lock::DistributedLockManager;
 }
 pub mod proxy {
     pub use crate::proxy::*;

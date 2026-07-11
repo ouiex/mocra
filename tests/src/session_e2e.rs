@@ -7,9 +7,8 @@ use mocra::common::model::download_config::DownloadConfig;
 use mocra::common::model::Request;
 use mocra::downloader::request_downloader::RequestDownloader;
 use mocra::downloader::Downloader;
-use mocra::utils::connector::create_redis_pool;
 use mocra::utils::distributed_rate_limit::{DistributedSlidingWindowRateLimiter, RateLimitConfig};
-use mocra::utils::redis_lock::DistributedLockManager;
+use mocra::utils::lock::DistributedLockManager;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
@@ -70,31 +69,18 @@ fn load_test_config() -> Config {
     Config::load(path.to_str().expect("config path to str")).expect("load tests config.toml")
 }
 
-fn build_cache_service_from_config(config: &Config) -> Option<Arc<CacheService>> {
-    let redis = config.cache.redis.as_ref()?;
-    let pool = create_redis_pool(
-        &redis.redis_host,
-        redis.redis_port,
-        redis.redis_db,
-        &redis.redis_username,
-        &redis.redis_password,
-        redis.pool_size,
-        redis.tls.unwrap_or(false),
-    )?;
-
-    Some(Arc::new(CacheService::new(
-        Some(pool),
+fn build_cache_service(config: &Config) -> Arc<CacheService> {
+    Arc::new(CacheService::new(
         "tests-session-e2e".to_string(),
         Some(Duration::from_secs(config.cache.ttl)),
         config.cache.compression_threshold,
-    )))
+    ))
 }
 
 fn create_downloader(cache_service: Arc<CacheService>) -> Arc<RequestDownloader> {
-    let locker = Arc::new(DistributedLockManager::new(None, "tests-session-e2e"));
+    let locker = Arc::new(DistributedLockManager::new("tests-session-e2e"));
     let rate_limit_config = RateLimitConfig::new(50.0);
     let limiter = Arc::new(DistributedSlidingWindowRateLimiter::new(
-        None,
         locker.clone(),
         "tests-session-e2e",
         rate_limit_config,
@@ -121,16 +107,7 @@ fn make_request(url: String, run_id: Uuid) -> Request {
 #[tokio::test]
 async fn enable_session_full_flow_with_axum_login_and_data() {
     let config = load_test_config();
-    let Some(cache_service) = build_cache_service_from_config(&config) else {
-        eprintln!("skip session e2e test: cache.redis is not configured");
-        return;
-    };
-
-    if cache_service.ping().await.is_err() {
-        eprintln!("skip session e2e test: redis is unavailable");
-        return;
-    }
-
+    let cache_service = build_cache_service(&config);
     let downloader = create_downloader(cache_service);
     let (addr, shutdown_tx) = start_session_test_server().await;
     let base_url = format!("http://{}", addr);

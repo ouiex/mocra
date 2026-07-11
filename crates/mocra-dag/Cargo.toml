@@ -18,8 +18,6 @@ serde = { version = "1", features = ["derive"] }
 tokio = { version = "1", features = ["sync", "rt", "macros", "time"] }
 futures = "0.3"
 uuid = { version = "1", features = ["serde", "v7", "v4"] }
-deadpool-redis = { version = "0.22", features = ["json", "script"] }
-redis = { version = "0.32", features = ["tokio-comp"] }
 metrics = "0.24"
 serde_json = "1"
 

@@ -2,7 +2,7 @@
 //!
 //! [`CoordinationBackend`] is the trait the engine (leader election, distributed locks,
 //! partition ownership, KV/CAS, pub-sub) talks to; implementations live in `sync`
-//! (Redis, embedded Raft, …). It lives in `utils` — alongside its primary consumers, the
+//! (内嵌 Raft 等). It lives in `utils` — alongside its primary consumers, the
 //! distributed lock manager and rate limiter — so neither `common` nor `utils` has to
 //! depend on `sync`, and `common ↔ utils` stays acyclic. `common::coordination` re-exports
 //! it for backward compatibility.
@@ -12,7 +12,7 @@ use tokio::sync::mpsc;
 /// 集群状态快照(可序列化,供后台管理 / 监控 API 消费)。
 ///
 /// 由 [`CoordinationBackend::cluster_status`] 提供;仅内嵌 Raft 后端有意义,
-/// 单机 / Redis 协调返回 `None`。
+/// 单机模式返回 `None`。
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ClusterStatusView {
     /// 本节点 id。
@@ -45,7 +45,7 @@ pub trait CoordinationBackend: Send + Sync {
     /// 释放锁:仅当仍由 `value` 持有时删除(CAS-del)。
     ///
     /// 默认实现依赖 TTL 自然过期(返回 `Ok(false)`,表示未主动释放);
-    /// 有原生释放语义的后端(Redis / Raft)应覆写以支持提前释放。
+    /// 有原生释放语义的后端(如内嵌 Raft)应覆写以支持提前释放。
     async fn release_lock(&self, key: &str, value: &[u8]) -> Result<bool, String> {
         let _ = (key, value);
         Ok(false)
@@ -53,7 +53,7 @@ pub trait CoordinationBackend: Send + Sync {
 
     /// 集群当前成员数(用于限流按成员分摊等**近似**分布式语义)。
     ///
-    /// 默认 1(单机 / 无法感知成员的后端,如 Redis 协调)。感知成员的后端
+    /// 默认 1(单机 / 无法感知成员的后端)。感知成员的后端
     /// (内嵌 Raft)覆写为真实成员数。
     fn cluster_size(&self) -> usize {
         1
@@ -79,12 +79,12 @@ pub trait CoordinationBackend: Send + Sync {
     }
 
     /// 集群状态快照(节点 / leader / 任期 / 成员数)。仅感知集群的后端返回 `Some`
-    /// (内嵌 Raft);单机 / Redis 协调返回 `None`。供 dashboard / 监控 API 消费。
+    /// (内嵌 Raft);单机模式返回 `None`。供 dashboard / 监控 API 消费。
     fn cluster_status(&self) -> Option<ClusterStatusView> {
         None
     }
 
     /// 优雅关闭本后端(引擎停机时调用):释放持有的资源(如内嵌 Raft 的 redb 句柄
-    /// 与后台任务)。默认无操作(无状态后端如 Redis / Kafka 无需特殊处理)。
+    /// 与后台任务)。默认无操作(无状态后端 无需特殊处理)。
     async fn shutdown(&self) {}
 }

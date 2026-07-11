@@ -11,7 +11,7 @@ code scales from a single process to a distributed cluster.
 mocra models data collection as a set of **queue-driven processing stages** orchestrated by a
 **DAG execution engine**. Each stage is decoupled from the next by a message queue, so the same
 pipeline runs unchanged whether the queues are in-process Tokio channels (single-node) or a
-distributed message broker (Redis Streams / Kafka / NATS JetStream). Scaling out is a
+distributed message broker (Kafka / NATS JetStream). Scaling out is a
 configuration/builder concern, not a rewrite.
 
 ## Workspace layout
@@ -91,7 +91,7 @@ through a queue:
 | **Error** | error event | retry or terminate | Threshold-based retry with backoff; exhausted work lands in the dead-letter queue (DLQ) |
 
 The key property: **each stage is decoupled by a message queue.** Queues are local Tokio channels
-in single-node mode, or Redis Streams / Kafka / NATS JetStream in distributed mode — **same code,
+in single-node mode, or Kafka / NATS JetStream in distributed mode — **same code,
 zero changes.** Only the queue backend behind the boundary changes.
 
 ## Single-node vs distributed
@@ -101,30 +101,26 @@ partition) and the **data plane** (the message queue that carries tasks between 
 
 | | Single-node | Embedded cluster (`cluster-embedded`) |
 |---|---|---|
-| **Control plane** | In-process | Embedded **redb + Raft** — elections / fenced locks / membership / partition ownership, with **no Redis** |
-| **Data plane (queues)** | Tokio mpsc (in-memory) | Pluggable MQ: Kafka / NATS JetStream / Redis Streams / in-memory |
+| **Control plane** | In-process | Embedded **redb + Raft** — elections / fenced locks / membership / partition ownership, with **no external coordinator** |
+| **Data plane (queues)** | Tokio mpsc (in-memory) | Pluggable MQ: Kafka / NATS JetStream / in-memory |
 | **Locks / election** | Local | Raft consensus (fencing tokens) |
 | **Workers** | 1 process | N nodes, same binary; register any node to any known node |
 | **Work distribution** | — | Cron by `hash(account)` ownership + MQ consumer affinity |
 | **Code changes** | None (facade default) | Add `.cluster(ClusterConfig::…)` |
 
-Three concrete topologies:
+Two concrete topologies:
 
 - **Single-node (facade default).** No `.cluster(...)`, no `.from_toml(...)`: the builder uses an
   in-memory, no-infra configuration. The engine auto-seeds each spider and stops when idle — ideal
-  for one-shot scrapes and development. No database, no Redis.
+  for one-shot scrapes and development. No database, no external services.
 
 - **Embedded distributed control plane.** Enable `cluster-embedded` and add
   `.cluster(ClusterConfig::bootstrap(...))` on the first node, `.cluster(ClusterConfig::join(...))`
   on the rest. Coordination (election, locks, membership, partition ownership) runs on an embedded
-  **redb + Raft** — **no external Redis**. Any node registers to any known node to form the network.
-
-- **Redis-backed distributed control plane.** Without the embedded cluster, provide Redis in your
-  TOML config via `.from_toml(cfg)` with a `[cache.redis]` section; coordination (locks / election)
-  routes through Redis instead of Raft.
+  **redb + Raft** — **no external coordinator**. Any node registers to any known node to form the network.
 
 In every distributed case the **data-plane queue is selected independently** of the control plane —
-in-memory, Redis Streams, Kafka (`queue-kafka`), or NATS JetStream (`queue-nats`). With a
+in-memory, Kafka (`queue-kafka`), or NATS JetStream (`queue-nats`). With a
 distributed MQ, tasks fan out across nodes with account affinity (`hash(account)`); with the
 in-memory queue, work stays on the seeding node.
 
@@ -168,4 +164,4 @@ table and the [Deployment Guide](deployment.md#monitoring) for the Prometheus/Gr
 - [DAG Guide](dag-guide.md) — fan-out/fan-in, routing, advance gates
 - [Middleware](middleware-guide.md) — download, data, and storage middleware
 - [Configuration](configuration.md) — full TOML reference
-- [Deployment](deployment.md) — single-node, embedded cluster, Redis-backed, monitoring
+- [Deployment](deployment.md) — single-node, embedded cluster, monitoring

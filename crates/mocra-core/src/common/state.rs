@@ -1,17 +1,15 @@
 // no direct filesystem path usage here
-use crate::utils::connector::create_redis_pool;
 #[cfg(feature = "store")]
 use crate::utils::connector::db_connection;
 
 use crate::common::config::ConfigProvider;
 use crate::common::config::file::FileConfigProvider;
-use crate::common::model::config::{Config, RedisConfig};
+use crate::common::model::config::Config;
 
 use crate::cacheable::CacheService;
 use crate::common::status_tracker::{ErrorTrackerConfig, StatusTracker};
 use crate::utils::distributed_rate_limit::{DistributedSlidingWindowRateLimiter, RateLimitConfig};
-use crate::utils::redis_lock::DistributedLockManager;
-use deadpool_redis::Pool;
+use crate::utils::lock::DistributedLockManager;
 use log::{error, info};
 use std::sync::Arc;
 use std::time;
@@ -31,26 +29,11 @@ pub enum StateInitError {
         pool_size: Option<u32>,
         tls: Option<bool>,
     },
-    #[error(
-        "redis pool creation failed ({name}): host={host}, port={port}, db={db}, tls={tls}, pool_size={pool_size:?}"
-    )]
-    RedisPoolCreate {
-        name: &'static str,
-        host: String,
-        port: u16,
-        db: u16,
-        tls: bool,
-        pool_size: Option<usize>,
-    },
-    #[error("redis ping failed (cache): {0}")]
-    CachePing(String),
-    #[error("redis connection borrow failed (cache): {0}")]
-    CacheConn(String),
 }
 
 /// Global application state shared across the system.
 ///
-/// Contains connections to database, Redis, configuration, and shared services.
+/// Contains connections to database, configuration, and shared services.
 /// DB 句柄:开启 `store` 特性时为真实连接,否则为占位类型(始终 `None`)。
 #[cfg(feature = "store")]
 pub type DbHandle = Option<Arc<sea_orm::DatabaseConnection>>;
@@ -75,45 +58,10 @@ pub struct State {
     pub api_limiter: Option<Arc<DistributedSlidingWindowRateLimiter>>,
     /// Task status and error tracker
     pub status_tracker: Arc<StatusTracker>,
-    /// Underlying Redis pool (exposed for specialized components like LeaderElector)
-    pub redis: Option<Pool>,
-    /// 可选的协调后端(如内嵌 redb+Raft)。设置后,引擎的 `LeaderElector` 等
-    /// 优先走它(替代 Redis 协调)。由 facade 在启动集群时注入(见 `cluster-embedded`)。
+    /// 可选的协调后端(如内嵌 redb+Raft)。设置后,引擎的 `LeaderElector` / 锁 /
+    /// 限流等走它做跨节点强一致协调;未设置即为单机进程内模式。
+    /// 由 facade 在启动集群时注入(见 `cluster-embedded`)。
     pub coordination: Option<Arc<dyn crate::common::coordination::CoordinationBackend>>,
-}
-
-/// 按名构造一个 Redis 连接池:单机模式或无对应配置时返回 `None`,否则建池
-/// (失败时带上主机 / 端口等上下文的 [`StateInitError::RedisPoolCreate`])。
-/// 供 `cache` / `cookie` 等共用,避免重复的建池样板。
-fn build_named_redis_pool(
-    name: &'static str,
-    redis: Option<&RedisConfig>,
-    single_node_mode: bool,
-) -> Result<Option<Pool>, StateInitError> {
-    if single_node_mode {
-        return Ok(None);
-    }
-    let Some(redis) = redis else {
-        return Ok(None);
-    };
-    let pool = create_redis_pool(
-        &redis.redis_host,
-        redis.redis_port,
-        redis.redis_db,
-        &redis.redis_username,
-        &redis.redis_password,
-        redis.pool_size,
-        redis.tls.unwrap_or(false),
-    )
-    .ok_or_else(|| StateInitError::RedisPoolCreate {
-        name,
-        host: redis.redis_host.clone(),
-        port: redis.redis_port,
-        db: redis.redis_db,
-        tls: redis.tls.unwrap_or(false),
-        pool_size: redis.pool_size,
-    })?;
-    Ok(Some(pool))
 }
 
 impl State {
@@ -129,7 +77,7 @@ impl State {
     /// Creates a new State instance from a custom configuration provider,
     /// returning explicit initialization failures.
     ///
-    /// Initializes all connections (DB, Redis) and services (Lock, Limit, Tracker).
+    /// Initializes the DB connection and services (Lock, Limit, Tracker).
     /// Starts a background task to watch for configuration changes.
     pub async fn try_new_with_provider(
         provider: Box<dyn ConfigProvider>,
@@ -138,8 +86,8 @@ impl State {
     }
 
     /// 同 [`try_new_with_provider`](Self::try_new_with_provider),但注入一个可选的
-    /// 协调后端(如内嵌 redb+Raft)。注入后,分布式锁 / 选举等**从构造起**即走该
-    /// 后端(而非无 Redis 时退化的进程内锁),使集群模式下的协调跨节点强一致。
+    /// 协调后端(如内嵌 redb+Raft)。注入后,分布式锁 / 选举 / 限流等**从构造起**即走该
+    /// 后端(而非进程内本地实现),使集群模式下的协调跨节点强一致。
     pub async fn try_new_with_provider_and_coordination(
         provider: Box<dyn ConfigProvider>,
         coordination: Option<Arc<dyn crate::common::coordination::CoordinationBackend>>,
@@ -148,13 +96,14 @@ impl State {
             .load_config()
             .await
             .map_err(|e| StateInitError::LoadConfig(e.to_string()))?;
-        let single_node_mode = config.is_single_node_mode();
+        // 单机 vs 分布式由是否注入协调后端决定。
+        let single_node_mode = coordination.is_none();
         info!(
             "Runtime mode initialized: {}",
             if single_node_mode {
                 "single_node"
             } else {
-                "distributed"
+                "distributed (coordination backend)"
             }
         );
 
@@ -190,39 +139,15 @@ impl State {
             }
             None
         };
-        let cache_pool =
-            build_named_redis_pool("cache", config.cache.redis.as_ref(), single_node_mode)?;
-        {
-            if let Some(pool) = cache_pool.as_ref() {
-                let mut cnn = pool
-                    .get()
-                    .await
-                    .map_err(|e| StateInitError::CacheConn(e.to_string()))?;
-                let _pong: String = deadpool_redis::redis::cmd("PING")
-                    .query_async(&mut *cnn)
-                    .await
-                    .map_err(|e| StateInitError::CachePing(e.to_string()))?;
-            }
-        }
-        info!("cache pool connect successfully");
-        let cookie_pool =
-            build_named_redis_pool("cookie", config.cookie.as_ref(), single_node_mode)?;
-        info!("cookie pool connect successfully");
 
-        // Reuse cache_pool for locker and limiter since they use the same config
-        let locker_pool = cache_pool.clone().map(Arc::new);
-        let limit_pool = cache_pool.clone().map(Arc::new);
-
-        info!("locker and limit pools shared with cache pool");
+        let cache_ttl = time::Duration::from_secs(config.cache.ttl);
 
         let locker = Arc::new(DistributedLockManager::new_with_coordination(
-            locker_pool.clone(),
             coordination.clone(),
             &config.name,
         ));
 
         let limiter = Arc::new(DistributedSlidingWindowRateLimiter::new_with_coordination(
-            limit_pool.clone(),
             locker.clone(),
             coordination.clone(),
             &config.name,
@@ -237,7 +162,6 @@ impl State {
             if let Some(limit) = api.rate_limit {
                 Some(Arc::new(
                     DistributedSlidingWindowRateLimiter::new_with_coordination(
-                        limit_pool.clone(),
                         locker.clone(),
                         coordination.clone(),
                         &format!("{}:api", config.name),
@@ -255,45 +179,15 @@ impl State {
             None
         };
 
-        let cache_ttl = time::Duration::from_secs(config.cache.ttl);
-        let enable_l1 = config.cache.enable_l1.unwrap_or(false);
-        let l1_ttl_secs = config.cache.l1_ttl_secs.unwrap_or(30);
-        let l1_max_entries = config.cache.l1_max_entries.unwrap_or(10000);
+        let cache_service = Arc::new(CacheService::new(
+            format!("{}:cache", config.name),
+            Some(cache_ttl),
+            config.cache.compression_threshold,
+        ));
 
-        let cache_service = if let Some(pool) = cache_pool.clone() {
-            Arc::new(CacheService::new_with_l1_config(
-                Some(pool),
-                format!("{}:cache", config.name),
-                Some(cache_ttl),
-                config.cache.compression_threshold,
-                enable_l1,
-                l1_ttl_secs,
-                l1_max_entries,
-            ))
-        } else {
-            Arc::new(CacheService::new_with_l1_config(
-                None,
-                format!("{}:cache", config.name),
-                Some(cache_ttl),
-                config.cache.compression_threshold,
-                false, // No L1 for local-only mode
-                l1_ttl_secs,
-                l1_max_entries,
-            ))
-        };
-
-        let cookie_service = cookie_pool.map(|pool| {
-            Arc::new(CacheService::new_with_l1_config(
-                Some(pool),
-                format!("{}:cookie", config.name),
-                Some(cache_ttl),
-                config.cache.compression_threshold,
-                enable_l1,
-                l1_ttl_secs,
-                l1_max_entries,
-            ))
-        });
-        info!("Redis connection pool created successfully");
+        // cookie 存储走进程内缓存(单机)。
+        let cookie_service: Option<Arc<CacheService>> = None;
+        info!("Cache service initialized (in-memory)");
 
         // Initialize error tracking subsystem.
         let error_tracker_config = ErrorTrackerConfig {
@@ -354,7 +248,6 @@ impl State {
             limiter,
             api_limiter,
             status_tracker: error_tracker,
-            redis: cache_pool,
             coordination,
         })
     }

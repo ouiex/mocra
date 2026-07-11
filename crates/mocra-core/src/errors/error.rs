@@ -450,7 +450,7 @@ pub enum DownloadError {
 #[derive(Debug, Error)]
 pub enum RateLimitError {
     #[error("{0}")]
-    RedisError(#[source] BoxError),
+    Backend(#[source] BoxError),
     #[error("wait time: {0} seconds")]
     WaitTime(u64),
     #[error("wait time too long: {0} ms")]
@@ -632,8 +632,6 @@ pub enum DynLibError {
 
 #[derive(Error, Debug)]
 pub enum CacheError {
-    #[error("Redis error: {0}")]
-    Redis(#[from] deadpool_redis::redis::RedisError),
     #[error("Pool error: {0}")]
     Pool(String),
     #[error("Serialization error: {0}")]

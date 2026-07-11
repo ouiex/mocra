@@ -32,7 +32,7 @@ never the bottleneck):
 1. **mocra doesn't need multiple processes.** One mocra node (~52k) ≈ three (~54k): a single tokio
    process already saturates all cores. scrapy *must* run 3 processes to escape the GIL and still
    only reaches ~710/s.
-2. mocra's facade **distributed mode (`from_toml` + Redis) does not auto-seed** (seeding is gated on
+2. mocra's facade **distributed mode (`from_toml` + a distributed queue) does not auto-seed** (seeding is gated on
    standalone mode), so the "run N nodes, they share a Redis queue and crawl" model that
    scrapy-redis gives out of the box needs external task injection. Hence mocra's 3 nodes here are
    **partition-parallel** (3 standalone processes over disjoint URL slices), not a shared queue —

@@ -10,7 +10,7 @@ use mocra::downloader::request_downloader::RequestDownloader;
 use mocra::downloader::Downloader;
 use mocra::engine::engine::Engine;
 use mocra::utils::distributed_rate_limit::{DistributedSlidingWindowRateLimiter, RateLimitConfig};
-use mocra::utils::redis_lock::DistributedLockManager;
+use mocra::utils::lock::DistributedLockManager;
 use tokio::signal;
 use tokio::time::sleep;
 use uuid::Uuid;
@@ -28,15 +28,13 @@ fn env_string(name: &str, default: &str) -> String {
 
 fn create_downloader(namespace: &str, cache_ttl_secs: u64) -> Arc<RequestDownloader> {
     let cache_service = Arc::new(CacheService::new(
-        None,
         namespace.to_string(),
         Some(Duration::from_secs(cache_ttl_secs)),
         None,
     ));
 
-    let locker = Arc::new(DistributedLockManager::new(None, namespace));
+    let locker = Arc::new(DistributedLockManager::new(namespace));
     let limiter = Arc::new(DistributedSlidingWindowRateLimiter::new(
-        None,
         locker.clone(),
         namespace,
         RateLimitConfig::new(1000.0),
@@ -92,7 +90,7 @@ async fn main() {
         }
     };
 
-    let engine = Engine::new(Arc::clone(&state), None).await;
+    let engine = Engine::new(Arc::clone(&state), None).await.expect("engine init");
     let api_port = {
         let cfg = state.config.read().await;
         cfg.api.as_ref().map(|a| a.port).unwrap_or(8905)

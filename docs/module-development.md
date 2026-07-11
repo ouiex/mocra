@@ -1,6 +1,6 @@
 # Module Development (Advanced)
 
-> Most users should start with the [facade quickstart](getting-started.md) — single-node, no DB/Redis. This guide covers the advanced ModuleTrait/DAG path for multi-stage, multi-node, or DB-driven pipelines.
+> Most users should start with the [facade quickstart](getting-started.md) — single-node, no DB. This guide covers the advanced ModuleTrait/DAG path for multi-stage, multi-node, or DB-driven pipelines.
 
 The `Spider` facade covers most single-node scrapes. When you need **multiple stages**
 (fan-out / fan-in), **login / session** flows, cursor-based **pagination** across nodes, or a
@@ -358,7 +358,7 @@ use mocra::common::state::State;
 
 #[tokio::main]
 async fn main() {
-    // Advanced modules need a config (DB / Redis / queues) — see Configuration.
+    // Advanced modules need a config (DB / queues) — see Configuration.
     let state = Arc::new(State::try_new("config.toml").await.expect("init state"));
     let engine = Engine::new(state, None).await.expect("init engine");
 
@@ -383,6 +383,6 @@ See [DAG Guide → Advance / Fallback gates](dag-guide.md#advance-gate) for the 
 ## Examples
 
 - Runnable facade example: [`examples/spider_quickstart.rs`](../examples/spider_quickstart.rs)
-  (single node, no DB/Redis) — the one-node case of everything above.
+  (single node, no DB) — the one-node case of everything above.
 - For multi-node graphs, fan-out/fan-in, and the routing model, continue to the
   [DAG Guide](dag-guide.md).

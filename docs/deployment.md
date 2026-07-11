@@ -1,7 +1,7 @@
 # Deployment Guide
 
 This guide covers running mocra in production: a zero-infrastructure single node, an embedded Raft
-cluster (no Redis), a Redis-backed distributed deployment, and monitoring.
+cluster, cross-node data-plane queues, and monitoring.
 
 > **中文版：** [docs/zh/deployment.md](zh/deployment.md)
 
@@ -11,7 +11,7 @@ pieces fit together.
 
 ## Single-node (zero infrastructure)
 
-The default. No database, no Redis, no message broker — the facade builds an in-memory,
+The default. No database, no external services, no message broker — the facade builds an in-memory,
 single-process engine.
 
 ### When to use
@@ -54,10 +54,10 @@ cargo run --release
 - Without `.from_toml`, the builder auto-seeds each spider and **stops when idle** — perfect for
   one-shot runs. A spider that keeps producing tasks keeps running.
 
-No Postgres and no Redis are required. The account × platform × module database model is opt-in via
+No Postgres and no external services are required. The account × platform × module database model is opt-in via
 the `store` feature and the lower-level `ModuleTrait` path — the `Spider` facade does not need it.
 
-## Embedded cluster (`cluster-embedded`, no Redis)
+## Embedded cluster (`cluster-embedded`)
 
 Run a **self-organizing Raft cluster** whose control plane is an embedded **redb + Raft** — leader
 election, fenced distributed locks, membership, and partition ownership with **no external
@@ -125,62 +125,53 @@ Mocra::builder()
 The embedded cluster is only the control plane. The **queue backend is chosen independently**:
 
 - **In-memory** (default) — the in-process queue does not cross nodes, so seeded work stays on the node that produced it.
-- **Kafka / NATS JetStream / Redis Streams** — tasks fan out across nodes, routed by `hash(account)`
+- **Kafka / NATS JetStream** — tasks fan out across nodes, routed by `hash(account)`
   for consumer affinity (same account → same consumer). Enable `queue-kafka` or `queue-nats` and
   configure the backend in your TOML (see [Configuration](configuration.md)).
 
-## Redis-backed distributed control plane
+## Cross-node data plane (Kafka / NATS)
 
-If you already run Redis (or prefer it to the embedded cluster), route coordination through Redis
-instead of Raft by loading a TOML config with `.from_toml(cfg)` and a `[cache.redis]` section:
+The embedded cluster is the control plane; the in-memory queue never leaves the process that
+produced the work. To fan tasks out across nodes, point the **data-plane queue** at a shared
+broker — Kafka (`queue-kafka`) or NATS JetStream (`queue-nats`) — by loading a TOML config with
+`.from_toml(cfg)`. Tasks are routed by `hash(account)` for consumer affinity (same account → same
+consumer):
 
 ```toml
-# config.toml
-[cache]
-ttl = 60
+# config.toml — Kafka as the data-plane queue
+[channel_config.kafka]
+brokers = "kafka-host:9092"
 
-[cache.redis]
-url = "redis://redis-host:6379"
+# or NATS JetStream
+# [channel_config.nats]
+# url = "nats://nats-host:4222"
 ```
 
 ```rust
 Mocra::builder()
     .spider(MySpider, on_item(|_: Item| async move { /* ... */ }))
-    .from_toml("config.toml")   // [cache.redis] present → Redis-backed coordination
+    .from_toml("config.toml")            // data-plane queue (Kafka / NATS)
+    .cluster(ClusterConfig::from_env()?) // control plane (leader election, locks)
     .run().await?;
-```
-
-Run several instances with the **same config**; locks / election route through Redis. As with the
-embedded cluster, the **data-plane queue is selected independently** — Redis Streams, Kafka
-(`queue-kafka`), NATS JetStream (`queue-nats`), or in-memory:
-
-```toml
-# Redis Streams as the data-plane queue
-[channel_config.redis]
-url = "redis://redis-host:6379"
-
-# or Kafka
-[channel_config.kafka]
-brokers = "kafka-host:9092"
 ```
 
 ```bash
 # Same binary, same config.toml, on each node
-cargo run --release
+cargo run --release --features "cluster-embedded queue-kafka"
 ```
 
-See [Configuration](configuration.md) for the full `[cache]` and `[channel_config]` reference.
+See [Configuration](configuration.md) for the full `[channel_config]` reference.
 
 ## Choosing a topology
 
-| | Single-node | Embedded cluster | Redis-backed |
-|---|---|---|---|
-| Feature flag | none | `cluster-embedded` | none (config-driven) |
-| External infra | **none** | **none** | Redis |
-| Coordination | in-process | redb + Raft | Redis |
-| Enable via | facade default | `.cluster(ClusterConfig::…)` | `.from_toml(cfg)` + `[cache.redis]` |
-| Data-plane queue | in-memory | in-memory / Kafka / NATS / Redis | in-memory / Redis / Kafka / NATS |
-| Best for | dev, one-shot, low volume | self-contained clusters | teams already running Redis |
+| | Single-node | Embedded cluster |
+|---|---|---|
+| Feature flag | none | `cluster-embedded` |
+| External infra | **none** | **none** |
+| Coordination | in-process | redb + Raft |
+| Enable via | facade default | `.cluster(ClusterConfig::…)` |
+| Data-plane queue | in-memory | in-memory / Kafka / NATS |
+| Best for | dev, one-shot, low volume | self-contained clusters, cross-node scale |
 
 ## Monitoring
 
@@ -252,11 +243,10 @@ With `.dashboard(...)`, recent logs are also captured into an in-memory ring buf
 
 ## Production checklist
 
-- [ ] Pick a topology: single-node, embedded cluster (`cluster-embedded`), or Redis-backed
-      (`.from_toml` + `[cache.redis]`).
+- [ ] Pick a topology: single-node or embedded cluster (`cluster-embedded`).
 - [ ] For a cluster, give each node a unique `node_id` and its own `data_dir`; seed additional nodes
       through a known address (or `ClusterConfig::from_env()` in containers).
-- [ ] Choose the data-plane queue: in-memory, Redis Streams, Kafka (`queue-kafka`), or NATS
+- [ ] Choose the data-plane queue: in-memory, Kafka (`queue-kafka`), or NATS
       JetStream (`queue-nats`).
 - [ ] Enable `dashboard` and expose `/metrics`; scrape it with Prometheus and chart with Grafana.
 - [ ] Set `RUST_LOG` to an appropriate level.

@@ -1,4 +1,4 @@
-use super::config::{KafkaConfig, RedisConfig};
+use super::config::KafkaConfig;
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -19,7 +19,6 @@ pub enum LogOutputConfig {
         batch_size: Option<usize>,
         compression: Option<String>,
         kafka: Option<KafkaConfig>,
-        redis: Option<RedisConfig>,
     },
 }
 

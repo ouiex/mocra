@@ -143,7 +143,7 @@ impl TaskFactory {
             match result {
                 Ok(None) => {
                     let key = <LoginInfo as CacheAble>::cache_id(id, sync);
-                    log::warn!("cookie not found in redis: key={}", key);
+                    log::warn!("cookie not found in cache: key={}", key);
                 }
                 Ok(Some(info)) => {
                     return Some(info);

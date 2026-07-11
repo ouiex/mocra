@@ -1,25 +1,21 @@
 #![allow(unused)]
+//! 分布式锁管理器。
+//!
+//! 锁有两条路径 ——
+//! - **协调后端**([`CoordinationBackend`],如内嵌 redb+Raft):跨节点强一致,集群模式默认;
+//! - **进程内本地锁**(`DashMap`):无协调后端注入时的单机降级实现。
 use dashmap::DashMap;
-use deadpool_redis::{
-    Config, Runtime,
-    redis::{AsyncCommands, Script},
-};
 use log::trace;
-use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::RwLock;
 use tokio::time::sleep;
-use tracing::error;
 use uuid::Uuid;
 
 use crate::utils::coordination::CoordinationBackend;
 
 #[derive(Debug)]
 pub enum LockError {
-    Redis(deadpool_redis::redis::RedisError),
-    Pool(deadpool_redis::PoolError),
     Timeout,
     InvalidOperation(String),
 }
@@ -27,35 +23,13 @@ pub enum LockError {
 impl std::fmt::Display for LockError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            LockError::Redis(e) => write!(f, "Redis error: {e}"),
-            LockError::Pool(e) => write!(f, "Pool error: {e}"),
             LockError::Timeout => write!(f, "Lock operation timed out"),
             LockError::InvalidOperation(msg) => write!(f, "Invalid operation: {msg}"),
         }
     }
 }
 
-impl std::error::Error for LockError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            LockError::Redis(e) => Some(e),
-            LockError::Pool(e) => Some(e),
-            _ => None,
-        }
-    }
-}
-
-impl From<deadpool_redis::redis::RedisError> for LockError {
-    fn from(error: deadpool_redis::redis::RedisError) -> Self {
-        LockError::Redis(error)
-    }
-}
-
-impl From<deadpool_redis::PoolError> for LockError {
-    fn from(error: deadpool_redis::PoolError) -> Self {
-        LockError::Pool(error)
-    }
-}
+impl std::error::Error for LockError {}
 
 // Simplified lock metadata structure.
 #[derive(Debug, Clone)]
@@ -66,8 +40,8 @@ pub struct LockInfo {
     created_at: Instant,
 }
 
+/// 进程内本地锁句柄(无协调后端注入时的默认实现;自带续租任务)。
 pub struct AdvancedDistributedLock {
-    pool: Option<Arc<deadpool_redis::Pool>>,
     local_map: Option<Arc<DashMap<String, (String, Instant)>>>,
     lock_info: LockInfo,
     renewal_handle: Option<tokio::task::JoinHandle<()>>,
@@ -76,7 +50,6 @@ pub struct AdvancedDistributedLock {
 impl AdvancedDistributedLock {
     /// Tries to acquire a lock with retry support.
     pub async fn acquire_with_retry(
-        pool: Option<Arc<deadpool_redis::Pool>>,
         local_map: Option<Arc<DashMap<String, (String, Instant)>>>,
         lock_key: String,
         ttl_seconds: u64,
@@ -88,7 +61,7 @@ impl AdvancedDistributedLock {
 
         loop {
             let acquired =
-                Self::try_acquire(&pool, &local_map, &lock_key, &unique_value, ttl_seconds).await?;
+                Self::try_acquire(&local_map, &lock_key, &unique_value, ttl_seconds).await?;
 
             if acquired {
                 let lock_info = LockInfo {
@@ -99,7 +72,6 @@ impl AdvancedDistributedLock {
                 };
 
                 let mut lock = Self {
-                    pool: pool.clone(),
                     local_map: local_map.clone(),
                     lock_info,
                     renewal_handle: None,
@@ -119,68 +91,35 @@ impl AdvancedDistributedLock {
     }
 
     async fn try_acquire(
-        pool: &Option<Arc<deadpool_redis::Pool>>,
         local_map: &Option<Arc<DashMap<String, (String, Instant)>>>,
         key: &str,
         value: &str,
         ttl: u64,
     ) -> Result<bool, LockError> {
-        if let Some(pool) = pool {
-            let mut conn = pool.get().await?;
-
-            // Use `SET NX EX` to perform atomic lock acquisition.
-            let script = r#"
-            return redis.call("SET", KEYS[1], ARGV[1], "NX", "EX", ARGV[2])
-        "#;
-
-            let result: Option<String> = deadpool_redis::redis::Script::new(script)
-                .key(key)
-                .arg(value)
-                .arg(ttl)
-                .invoke_async(&mut conn)
-                .await?;
-
-            Ok(result.is_some())
-        } else if let Some(map) = local_map {
+        if let Some(map) = local_map {
             let now = Instant::now();
-            // Optimistic check
-            if let Some(mut entry) = map.get_mut(key) {
-                if entry.1 < now {
-                    // Expired, we can take it
-                    *entry = (value.to_string(), now + Duration::from_secs(ttl));
-                    return Ok(true);
-                }
-                Ok(false)
-            } else {
-                // Not exists, try to insert
-                // DashMap's entry API would be better but let's keep it simple with a double check
-                // Using try_insert if available or just insert if we are sure it's new?
-                // DashMap doesn't have atomic "insert if not exists" that returns success easily without entry API
-                // But we can use entry
-                match map.entry(key.to_string()) {
-                    dashmap::mapref::entry::Entry::Occupied(mut entry) => {
-                        if entry.get().1 < now {
-                            entry.insert((value.to_string(), now + Duration::from_secs(ttl)));
-                            return Ok(true);
-                        }
-                        Ok(false)
-                    }
-                    dashmap::mapref::entry::Entry::Vacant(entry) => {
+            match map.entry(key.to_string()) {
+                dashmap::mapref::entry::Entry::Occupied(mut entry) => {
+                    if entry.get().1 < now {
                         entry.insert((value.to_string(), now + Duration::from_secs(ttl)));
-                        Ok(true)
+                        return Ok(true);
                     }
+                    Ok(false)
+                }
+                dashmap::mapref::entry::Entry::Vacant(entry) => {
+                    entry.insert((value.to_string(), now + Duration::from_secs(ttl)));
+                    Ok(true)
                 }
             }
         } else {
             Err(LockError::InvalidOperation(
-                "No pool or local map provided".to_string(),
+                "No local map provided".to_string(),
             ))
         }
     }
 
     /// Starts the automatic renewal task.
     async fn start_renewal(&mut self) {
-        let pool = self.pool.clone();
         let local_map = self.local_map.clone();
         let key = self.lock_info.key.clone();
         let value = self.lock_info.value.clone();
@@ -192,48 +131,7 @@ impl AdvancedDistributedLock {
             loop {
                 sleep(renewal_interval).await;
 
-                if let Some(pool) = &pool {
-                    let script = r#"
-                    if redis.call("GET", KEYS[1]) == ARGV[1] then
-                        return redis.call("EXPIRE", KEYS[1], ARGV[2])
-                    else
-                        return 0
-                    end
-                "#;
-
-                    match pool.get().await {
-                        Ok(mut conn) => {
-                            let result: Result<i32, _> = deadpool_redis::redis::Script::new(script)
-                                .key(&key)
-                                .arg(&value)
-                                .arg(ttl)
-                                .invoke_async(&mut *conn)
-                                .await;
-
-                            match result {
-                                Ok(1) => {
-                                    trace!("Lock renewed successfully: {key}");
-                                }
-                                Ok(0) => {
-                                    trace!("Lock is no longer valid, stopping renewal: {key}");
-                                    break;
-                                }
-                                Ok(_) => {
-                                    trace!("Renewal returned unexpected value: {key}");
-                                    break;
-                                }
-                                Err(e) => {
-                                    trace!("Renewal failed: {e}");
-                                    break;
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            trace!("Failed to get Redis connection, stopping renewal: {e}");
-                            break;
-                        }
-                    }
-                } else if let Some(map) = &local_map {
+                if let Some(map) = &local_map {
                     if let Some(mut entry) = map.get_mut(&key) {
                         if entry.0 == value {
                             entry.1 = Instant::now() + Duration::from_secs(ttl);
@@ -261,24 +159,7 @@ impl AdvancedDistributedLock {
             handle.abort();
         }
 
-        if let Some(pool) = &self.pool {
-            let script = r#"
-            if redis.call("GET", KEYS[1]) == ARGV[1] then
-                return redis.call("DEL", KEYS[1])
-            else
-                return 0
-            end
-        "#;
-
-            let mut conn = pool.get().await?;
-            let result: i32 = deadpool_redis::redis::Script::new(script)
-                .key(&self.lock_info.key)
-                .arg(&self.lock_info.value)
-                .invoke_async(&mut *conn)
-                .await?;
-
-            Ok(result == 1)
-        } else if let Some(map) = &self.local_map {
+        if let Some(map) = &self.local_map {
             match map.entry(self.lock_info.key.clone()) {
                 dashmap::mapref::entry::Entry::Occupied(entry) => {
                     if entry.get().0 == self.lock_info.value {
@@ -292,18 +173,14 @@ impl AdvancedDistributedLock {
             }
         } else {
             Err(LockError::InvalidOperation(
-                "No pool or local map provided".to_string(),
+                "No local map provided".to_string(),
             ))
         }
     }
 
     /// Checks whether the lock is still valid.
     pub async fn is_valid(&self) -> Result<bool, LockError> {
-        if let Some(pool) = &self.pool {
-            let mut conn = pool.get().await?;
-            let current_value: Option<String> = conn.get(&self.lock_info.key).await?;
-            Ok(current_value.as_ref() == Some(&self.lock_info.value))
-        } else if let Some(map) = &self.local_map {
+        if let Some(map) = &self.local_map {
             if let Some(entry) = map.get(&self.lock_info.key) {
                 Ok(entry.0 == self.lock_info.value && entry.1 > Instant::now())
             } else {
@@ -331,9 +208,10 @@ impl Drop for AdvancedDistributedLock {
         }
     }
 }
+
 /// 由 [`CoordinationBackend`] 支撑的分布式锁句柄。
 ///
-/// 集群(如内嵌 redb+Raft)模式下,锁经共识落库,跨节点强一致 —— 取代无 Redis
+/// 集群(如内嵌 redb+Raft)模式下,锁经共识落库,跨节点强一致 —— 取代无协调后端
 /// 时退化的**进程内**本地锁。自带续租任务;`release` 走 CAS-del(仅持有者可删)。
 pub struct CoordinationLock {
     backend: Arc<dyn CoordinationBackend>,
@@ -390,9 +268,8 @@ fn spawn_coord_renewal(
 }
 
 pub struct DistributedLockManager {
-    redis_pool: Option<Arc<deadpool_redis::Pool>>,
-    /// 可选的协调后端(内嵌 Raft 等);置位后**优先**于 Redis / 本地锁,
-    /// 使无 Redis 集群的锁仍跨节点强一致。
+    /// 可选的协调后端(内嵌 Raft 等);置位后**优先**于进程内本地锁,
+    /// 使集群模式下的锁跨节点强一致。
     coordination: Option<Arc<dyn CoordinationBackend>>,
     locks: Arc<DashMap<String, AdvancedDistributedLock>>,
     coord_locks: Arc<DashMap<String, CoordinationLock>>,
@@ -403,7 +280,6 @@ pub struct DistributedLockManager {
 impl std::fmt::Debug for DistributedLockManager {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DistributedLockManager")
-            .field("has_redis", &self.redis_pool.is_some())
             .field("has_coordination", &self.coordination.is_some())
             .field("prefix", &self.prefix)
             .finish()
@@ -411,18 +287,16 @@ impl std::fmt::Debug for DistributedLockManager {
 }
 
 impl DistributedLockManager {
-    pub fn new(pool: Option<Arc<deadpool_redis::Pool>>, prefix: &str) -> Self {
-        Self::new_with_coordination(pool, None, prefix)
+    pub fn new(prefix: &str) -> Self {
+        Self::new_with_coordination(None, prefix)
     }
 
     /// 带协调后端构造:集群模式下所有锁经 `coordination`(如 Raft)协商。
     pub fn new_with_coordination(
-        pool: Option<Arc<deadpool_redis::Pool>>,
         coordination: Option<Arc<dyn CoordinationBackend>>,
         prefix: &str,
     ) -> Self {
         Self {
-            redis_pool: pool,
             coordination,
             locks: Arc::new(DashMap::new()),
             coord_locks: Arc::new(DashMap::new()),
@@ -445,7 +319,7 @@ impl DistributedLockManager {
         ttl_seconds: u64,
         max_wait: Duration,
     ) -> Result<bool, LockError> {
-        // 集群协调后端优先(Raft 强一致锁),取代无 Redis 时的进程内本地锁。
+        // 集群协调后端优先(Raft 强一致锁),取代无协调后端时的进程内本地锁。
         if let Some(backend) = self.coordination.clone() {
             return self
                 .acquire_lock_via_coordination(backend, lock_name, ttl_seconds, max_wait)
@@ -455,15 +329,10 @@ impl DistributedLockManager {
         let full_lock_name = self.format_key(lock_name);
 
         if let Some(lock) = AdvancedDistributedLock::acquire_with_retry(
-            self.redis_pool.clone(),
             Some(self.local_locks.clone()),
             full_lock_name,
             ttl_seconds,
-            if self.redis_pool.is_some() {
-                Duration::from_millis(50)
-            } else {
-                Duration::from_millis(1)
-            },
+            Duration::from_millis(1),
             max_wait,
         )
         .await?
@@ -575,21 +444,13 @@ impl DistributedLockManager {
         // Extract only what we need for validation, then drop the DashMap guard.
         // Holding a DashMap Ref across .await can deadlock the Tokio runtime
         // (parking_lot RwLock blocks the OS thread).
-        let snapshot = self.locks.get(lock_name).map(|l| {
-            let lock = l.value();
-            (
-                lock.pool.clone(),
-                lock.local_map.clone(),
-                lock.lock_info.clone(),
-            )
-        });
+        let snapshot = self
+            .locks
+            .get(lock_name)
+            .map(|l| (l.local_map.clone(), l.lock_info.clone()));
         // guard dropped here
-        if let Some((pool, local_map, lock_info)) = snapshot {
-            if let Some(pool) = &pool {
-                let mut conn = pool.get().await?;
-                let current_value: Option<String> = conn.get(&lock_info.key).await?;
-                Ok(current_value.as_ref() == Some(&lock_info.value))
-            } else if let Some(map) = &local_map {
+        if let Some((local_map, lock_info)) = snapshot {
+            if let Some(map) = &local_map {
                 if let Some(entry) = map.get(&lock_info.key) {
                     Ok(entry.0 == lock_info.value && entry.1 > Instant::now())
                 } else {
@@ -602,12 +463,7 @@ impl DistributedLockManager {
             Ok(false)
         }
     }
-
-    // Returns the connection pool reference (for external consumers).
-    pub fn get_pool(&self) -> Option<&deadpool_redis::Pool> {
-        self.redis_pool.as_ref().map(|p| p.as_ref())
-    }
 }
 
-// DistributedLockManager is Send + Sync via its fields (Arc<Pool>, Arc<RwLock<...>>)
+// DistributedLockManager is Send + Sync via its fields (Arc<DashMap<...>>).
 // Rely on compiler to enforce/derive thread-safety without unsafe impls.

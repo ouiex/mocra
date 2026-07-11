@@ -6,13 +6,12 @@ use crate::common::policy::PolicyResolver;
 use crate::errors::ErrorKind;
 use crate::queue::batcher::Batcher;
 use crate::queue::channel::Channel;
-use crate::queue::compensation::{Compensator, Identifiable, RedisCompensator};
+use crate::queue::compensation::{Compensator, Identifiable};
 use crate::queue::compression::{compress_payload_owned, decompress_payload};
 #[cfg(feature = "queue-kafka")]
 use crate::queue::kafka::KafkaQueue;
 #[cfg(feature = "queue-nats")]
 use crate::queue::nats::NatsQueue;
-use crate::queue::redis::RedisQueue;
 use crate::queue::{HEADER_ATTEMPT, HEADER_CREATED_AT, MqBackend, NackPolicy, QueuedItem};
 use crate::utils::logger::LogModel;
 use crate::utils::storage::FileSystemBlobStorage;
@@ -118,6 +117,7 @@ impl QueueManager {
     pub fn from_config_with_log_topic(cfg: &Config, log_topic: Option<&str>) -> Arc<Self> {
         set_queue_codec_from_config(cfg);
         let channel_config = &cfg.channel_config;
+        #[allow(unused_variables)] // used by queue-kafka / queue-nats backends
         let namespace = &cfg.name;
 
         let nack_policy = if let Some(policy_cfg) = &cfg.policy
@@ -137,28 +137,7 @@ impl QueueManager {
             }
         };
 
-        let mut queue_manager = if let Some(redis_config) = &channel_config.redis {
-            let batch_size = channel_config.batch_concurrency.unwrap_or(500);
-            match RedisQueue::new(
-                redis_config,
-                channel_config.minid_time,
-                namespace,
-                batch_size,
-                nack_policy,
-            ) {
-                Ok(redis_queue) => {
-                    info!(
-                        "RedisQueue initialized successfully with batch_size: {}",
-                        batch_size
-                    );
-                    QueueManager::new(Some(Arc::new(redis_queue)), channel_config.capacity)
-                }
-                Err(e) => {
-                    error!("RedisQueue init failed, fallback to in-memory queue: {}", e);
-                    QueueManager::new(None, channel_config.capacity)
-                }
-            }
-        } else if let Some(kafka_config) = &channel_config.kafka {
+        let mut queue_manager = if let Some(kafka_config) = &channel_config.kafka {
             #[cfg(feature = "queue-kafka")]
             let qm = match KafkaQueue::new(
                 kafka_config,
@@ -235,21 +214,6 @@ impl QueueManager {
                 let storage = Arc::new(FileSystemBlobStorage::new(path));
                 queue_manager.with_blob_storage(storage);
                 info!("BlobStorage initialized at: {}", path);
-            }
-        }
-
-        // Initialize compensator
-        if let Some(redis_config) = &channel_config.compensator {
-            match RedisCompensator::new(redis_config, namespace) {
-                Ok(compensator) => {
-                    queue_manager.with_compensator(Arc::new(compensator));
-                }
-                Err(e) => {
-                    error!(
-                        "RedisCompensator init failed, continue without compensator: {}",
-                        e
-                    );
-                }
             }
         }
 
@@ -729,7 +693,7 @@ impl QueueManager {
         self.channel.response_sender.clone()
     }
 
-    /// Attempts to send directly to local consumers (bypassing Redis/Kafka).
+    /// Attempts to send directly to local consumers (bypassing the MQ backend).
     /// Optimization: if local consumers exist and the channel is not full, send
     /// directly to avoid serialization and network overhead.
     pub fn try_send_local_response(

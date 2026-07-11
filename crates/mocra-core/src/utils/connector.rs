@@ -9,44 +9,6 @@ use sea_orm::{Database, DatabaseConnection};
 #[cfg(feature = "store")]
 static CONNECTION_POOLS: Lazy<DashMap<String, DatabaseConnection>> = Lazy::new(DashMap::new);
 
-pub fn create_redis_pool(
-    host: &str,
-    port: u16,
-    db: u16,
-    username: &Option<String>,
-    password: &Option<String>,
-    pool_size: Option<usize>,
-    tls: bool,
-) -> Option<deadpool_redis::Pool> {
-    let addr = if tls {
-        deadpool_redis::ConnectionAddr::TcpTls {
-            host: host.to_string(),
-            port,
-            insecure: false, // Enforce certificate validation for industrial grade security
-        }
-    } else {
-        deadpool_redis::ConnectionAddr::Tcp(host.to_string(), port)
-    };
-
-    let cfg = deadpool_redis::Config {
-        connection: Some(deadpool_redis::ConnectionInfo {
-            addr,
-            redis: deadpool_redis::RedisConnectionInfo {
-                db: db as i64,
-                username: username.clone(),
-                password: password.clone(),
-                protocol: deadpool_redis::ProtocolVersion::RESP2,
-            },
-        }),
-        pool: Some(deadpool_redis::PoolConfig {
-            max_size: pool_size.unwrap_or(100),
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
-    cfg.create_pool(Some(deadpool_redis::Runtime::Tokio1)).ok()
-}
-
 #[cfg(feature = "store")]
 pub async fn db_connection(
     url: Option<String>,

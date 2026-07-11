@@ -6,7 +6,7 @@ use crate::common::model::{Cookies, Headers, Request, Response};
 use crate::downloader::Downloader;
 use crate::errors::{DownloadError, RequestError, Result};
 use crate::utils::distributed_rate_limit::DistributedSlidingWindowRateLimiter;
-use crate::utils::redis_lock::DistributedLockManager;
+use crate::utils::lock::DistributedLockManager;
 use dashmap::DashMap;
 use futures::StreamExt;
 use log::{info, warn};
@@ -129,9 +129,9 @@ impl RequestDownloader {
 
     /// Load session state and apply it to the request.
     /// Returns the (modified request, loaded session) so callers can reuse the session
-    /// in `save_session_state` without a second Redis round-trip.
+    /// in `save_session_state` without a second cache round-trip.
     /// On cache read failure the error is logged and degraded to no-session rather than
-    /// propagating, so a transient Redis hiccup does not abort the download.
+    /// propagating, so a transient cache hiccup does not abort the download.
     async fn process_request(&self, request: Request) -> (Request, Option<SessionState>) {
         if !self.is_session_enabled(&request) {
             return (request, None);
@@ -158,7 +158,7 @@ impl RequestDownloader {
         (modified_request, session_state)
     }
 
-    // Pass the already-loaded session from `process_request` to avoid a second Redis round-trip.
+    // Pass the already-loaded session from `process_request` to avoid a second cache round-trip.
     // `None` means the session did not exist before this request (fresh start).
     async fn save_session_state(
         &self,
@@ -268,7 +268,7 @@ impl RequestDownloader {
             }
         }
 
-        // For a brand-new session with no collected state, skip the Redis write entirely.
+        // For a brand-new session with no collected state, skip the cache write entirely.
         // For an existing session, only write back when something actually changed.
         if !dirty {
             return;
@@ -451,7 +451,7 @@ impl RequestDownloader {
             };
 
             // Reserve a rate-limit time slot and wait. Each concurrent download
-            // gets a unique slot — one Redis call, no polling, no thundering herd.
+            // gets a unique slot — one cache call, no polling, no thundering herd.
             self.limit.wait_for_permit(&limit_id).await?;
         }
 
@@ -780,15 +780,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_downloader_creation() {
-        let lock_manager = Arc::new(DistributedLockManager::new(None, "test"));
+        let lock_manager = Arc::new(DistributedLockManager::new("test"));
         let config = RateLimitConfig::new(10.0);
         let limiter = Arc::new(DistributedSlidingWindowRateLimiter::new(
-            None,
             lock_manager.clone(),
             "test",
             config,
         ));
-        let cache_service = Arc::new(CacheService::new(None, "test".to_string(), None, None));
+        let cache_service = Arc::new(CacheService::new("test".to_string(), None, None));
 
         let downloader =
             RequestDownloader::new(limiter, lock_manager, cache_service, 200, 1024 * 1024 * 10);
@@ -797,15 +796,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_downloader_rate_limit_execution() {
-        let lock_manager = Arc::new(DistributedLockManager::new(None, "test_exec"));
+        let lock_manager = Arc::new(DistributedLockManager::new("test_exec"));
         let config = RateLimitConfig::new(10.0); // 10 req/s = 100ms interval
         let limiter = Arc::new(DistributedSlidingWindowRateLimiter::new(
-            None,
             lock_manager.clone(),
             "test_exec",
             config,
         ));
-        let cache_service = Arc::new(CacheService::new(None, "test".to_string(), None, None));
+        let cache_service = Arc::new(CacheService::new("test".to_string(), None, None));
 
         let downloader = RequestDownloader::new(
             limiter.clone(),

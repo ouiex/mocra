@@ -1,6 +1,6 @@
 //! `CoordinationBackend` over the embedded redb+Raft control plane(重构 Phase 3)。
 //!
-//! 用自组网的 Raft 集群替换 Redis 协调:
+//! 用自组网的 Raft 集群做协调:
 //! - **锁 / 选举**(`LeaderElector` 走 acquire/renew_lock)/ **KV** / **CAS** —— Raft 强一致。
 //! - **pub/sub**(`SyncService` 用)—— 用 Raft KV 的「每 topic 单调 seq append + 轮询」实现,
 //!   跨节点正确且持久(仅依赖 get/cas/set)。控制面流量小,轮询间隔足够。

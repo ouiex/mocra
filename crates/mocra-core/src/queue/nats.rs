@@ -1,7 +1,7 @@
 //! NATS(JetStream)数据面队列后端(`queue-nats` 特性)。
 //!
 //! 用 JetStream 提供**持久化 + explicit ack + nack 重投/DLQ**,语义对齐 Kafka 后端;
-//! 比 Kafka 轻得多(单二进制、无 ZooKeeper/cmake),适合内嵌 Raft 集群的数据面 —— 无需 Redis。
+//! 比 Kafka 轻得多(单二进制、无 ZooKeeper/cmake),适合内嵌 Raft 集群的数据面。
 //!
 //! - 一个 stream(`{ns}_stream`,subjects `{ns}.>`)承载所有 topic;
 //! - 每个 topic 一个 **durable pull consumer**(同名 durable = 竞争消费 / 负载均衡);

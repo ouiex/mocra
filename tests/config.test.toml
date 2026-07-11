@@ -24,23 +24,9 @@ wss_timeout = 60
 [cache]
 ttl = 60
 
-[cache.redis]
-redis_host = "127.0.0.1"
-redis_port = 6379
-redis_db = 0
-pool_size = 200
-
 [sync]
 allow_rollback = true
 envelope_enabled = false
-
-[channel_config.redis]
-redis_host = "127.0.0.1"
-redis_port = 6379
-redis_db = 0
-pool_size = 300
-shards = 16
-listener_count = 16
 
 [crawler]
 request_max_retries = 1

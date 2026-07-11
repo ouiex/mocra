@@ -350,7 +350,7 @@ mod tests {
             locker_ttl: 0,
             processor: ModuleDagProcessor::new(
                 "acc-pf-login_required_test".to_string(),
-                Arc::new(CacheService::new(None, "test".to_string(), None, None)),
+                Arc::new(CacheService::new("test".to_string(), None, None)),
                 Uuid::now_v7(),
                 60,
             ),

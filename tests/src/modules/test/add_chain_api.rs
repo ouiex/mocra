@@ -1,9 +1,9 @@
 use async_trait::async_trait;
 use mocra::common::interface::{ModuleNodeTrait, ModuleTrait, StoreTrait, SyncBoxStream, ToSyncBoxStream};
 use mocra::common::model::cron_config::CronConfig;
-use mocra::common::model::data::Data;
+use mocra::common::model::data::DataEvent;
 use mocra::common::model::login_info::LoginInfo;
-use mocra::common::model::message::{ParserData, ParserTaskModel};
+use mocra::common::model::message::{TaskOutputEvent, TaskParserEvent};
 use mocra::common::model::request::RequestMethod;
 use mocra::common::model::{Headers, ModuleConfig, Request, Response};
 use mocra::errors::{Error, ErrorKind, Result};
@@ -108,7 +108,7 @@ impl ModuleNodeTrait for AddChainNode {
         &self,
         response: Response,
         _config: Option<Arc<ModuleConfig>>,
-    ) -> Result<ParserData> {
+    ) -> Result<TaskOutputEvent> {
         if should_random_fail("parser", self.step_idx) {
             return Err(new_stage_error(
                 "parser",
@@ -134,20 +134,20 @@ impl ModuleNodeTrait for AddChainNode {
                 "last_node_value": self.value
             }))
             .map_err(|e| Error::new(ErrorKind::Parser, Some(e)))?;
-            let data = Data::from(&response)
+            let data = DataEvent::from(&response)
                 .with_middleware("object_store")
                 .with_file(payload)
                 .with_name("add_chain_result.json")
                 .with_path("./data/add_chain")
                 .build();
-            return Ok(ParserData::default().with_data(vec![data]));
+            return Ok(TaskOutputEvent::default().with_data(vec![data]));
         }
 
-        let task = ParserTaskModel::from(&response)
+        let task = TaskParserEvent::from(&response)
             .add_meta(META_SUM_KEY, sum)
             .add_meta(META_STEP_KEY, self.step_idx + 1);
 
-        Ok(ParserData::default().with_task(task))
+        Ok(TaskOutputEvent::default().with_task(task))
     }
 }
 

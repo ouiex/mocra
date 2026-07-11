@@ -5,9 +5,8 @@ use crate::common::model::download_config::DownloadConfig;
 use crate::downloader::request_downloader::RequestDownloader;
 use crate::downloader::{Downloader, WebSocketDownloader};
 use crate::utils::distributed_rate_limit::DistributedSlidingWindowRateLimiter;
-use crate::utils::redis_lock::DistributedLockManager;
+use crate::utils::lock::DistributedLockManager;
 use dashmap::DashMap;
-use deadpool_redis::redis::Script;
 use std::sync::Arc;
 use std::time::SystemTime;
 use tokio::sync::RwLock;
@@ -15,7 +14,7 @@ use tokio::sync::RwLock;
 pub struct DownloaderManager {
     /// 应用配置(命名空间名等);此前吃整个 `Arc<State>`,现窄化为具体依赖(重构 Phase 2)。
     pub app_config: Arc<RwLock<Config>>,
-    /// 分布式锁管理器(用于取 Redis 连接池)。
+    /// 分布式锁管理器(协调后端 / 进程内本地锁)。
     pub locker: Arc<DistributedLockManager>,
     /// 默认下载器(缺省 reqwest);可经 [`set_default_downloader`](Self::set_default_downloader)
     /// 在启动前替换(如换成浏览器渲染 / 代理轮换 / 自定义重试的下载器)。
@@ -27,7 +26,7 @@ pub struct DownloaderManager {
     // Task downloader instances.
     pub task_downloader: Arc<DashMap<String, Box<dyn Downloader>>>,
     pub wss_downloader: Arc<WebSocketDownloader>,
-    // Records the last expiration update timestamp to reduce Redis write frequency.
+    // Records the last expiration update timestamp to throttle expiry index writes.
     pub expire_update_cache: Arc<DashMap<String, u64>>,
 }
 
@@ -121,43 +120,16 @@ impl DownloaderManager {
         let current_time = Self::current_timestamp();
         let max_score = current_time.saturating_sub(downloader_expire_time);
 
-        let config_name = self.app_config.read().await.name.clone();
-        let key = format!("{}:downloader_expire", config_name);
-
-        // Lua script to get and remove expired keys
-        let script = Script::new(
-            r#"
-            local key = KEYS[1]
-            local max_score = ARGV[1]
-            local expired = redis.call('ZRANGEBYSCORE', key, '-inf', max_score)
-            if #expired > 0 then
-                redis.call('ZREM', key, unpack(expired))
-            end
-            return expired
-        "#,
-        );
-
+        // 本地按最近使用时间淘汰过期下载器(进程内 `expire_update_cache` 作索引)。
         let mut expired_keys: Vec<String> = Vec::new();
-
-        // Execute Lua script
-        let pool = self.locker.get_pool();
-        if let Some(pool) = pool
-            && let Ok(mut conn) = pool.get().await
-        {
-            let result: Result<Vec<String>, _> = script
-                .key(&key)
-                .arg(max_score)
-                .invoke_async(&mut conn)
-                .await;
-
-            if let Ok(keys) = result {
-                expired_keys = keys;
+        for entry in self.expire_update_cache.iter() {
+            if *entry.value() < max_score {
+                expired_keys.push(entry.key().clone());
             }
         }
-
-        // Remove expired keys from local map
         for key in &expired_keys {
             self.task_downloader.remove(key);
+            self.expire_update_cache.remove(key);
         }
 
         // Check health status.
@@ -170,16 +142,7 @@ impl DownloaderManager {
         for (key, downloader) in check_list {
             if downloader.health_check().await.is_err() {
                 self.task_downloader.remove(&key);
-                if let Some(pool) = pool
-                    && let Ok(mut conn) = pool.get().await
-                {
-                    let _: () = deadpool_redis::redis::cmd("ZREM")
-                        .arg(&key)
-                        .arg(&key)
-                        .query_async(&mut conn)
-                        .await
-                        .unwrap_or(());
-                }
+                self.expire_update_cache.remove(&key);
             }
         }
     }
@@ -220,30 +183,9 @@ impl DownloaderManager {
         };
 
         if should_update {
-            // Optimistically update cache to prevent spamming the spawn
+            // Record last-use time (drives local expiry in cleanup_expired_downloader).
             self.expire_update_cache
                 .insert(module_id.clone(), current_time);
-
-            // Update expiration time (Redis ZSET).
-            let config_name = self.app_config.read().await.name.clone();
-            let key = format!("{}:downloader_expire", config_name);
-            let pool = self.locker.get_pool().cloned();
-            let module_id_clone = module_id.clone();
-            let current_time_clone = current_time;
-
-            tokio::spawn(async move {
-                if let Some(pool) = pool
-                    && let Ok(mut conn) = pool.get().await
-                {
-                    let _: () = deadpool_redis::redis::cmd("ZADD")
-                        .arg(&key)
-                        .arg(current_time_clone)
-                        .arg(&module_id_clone)
-                        .query_async(&mut conn)
-                        .await
-                        .unwrap_or(());
-                }
-            });
         }
 
         // Get or insert configuration.

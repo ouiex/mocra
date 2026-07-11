@@ -3,7 +3,7 @@
 Embedded control plane for the [mocra](https://github.com/ouiex/mocra) distributed crawler
 framework: a self-organizing **Raft + redb** cluster providing strongly-consistent leader
 election, distributed locks (with fencing tokens), KV/CAS, membership, and partition
-ownership — **no external coordinator (ZooKeeper / etcd / Redis) required**.
+ownership — **no external coordinator (ZooKeeper / etcd) required**.
 
 ## Features
 

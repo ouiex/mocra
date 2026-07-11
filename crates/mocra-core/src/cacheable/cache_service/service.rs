@@ -1,10 +1,6 @@
 use super::backend::CacheBackend;
 use super::local_backend::LocalBackend;
-use super::redis_backend::RedisBackend;
-use super::two_level_backend::TwoLevelCacheBackend;
 use crate::errors::CacheError;
-use deadpool_redis::Pool;
-use deadpool_redis::redis::Value as RedisValue;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -16,52 +12,18 @@ pub struct CacheService {
 }
 
 impl CacheService {
+    /// 构造一个进程内(本地内存)缓存服务。
+    ///
+    /// 缓存后端始终是进程内的 [`LocalBackend`]。
+    /// `compression_threshold` 参数保留以兼容既有调用方,但本地后端不做压缩。
     pub fn new(
-        pool: Option<Pool>,
         namespace: String,
         default_ttl: Option<Duration>,
         compression_threshold: Option<usize>,
     ) -> Self {
-        Self::new_with_l1_config(
-            pool,
-            namespace,
-            default_ttl,
-            compression_threshold,
-            false,
-            30,
-            10000,
-        )
-    }
-
-    pub fn new_with_l1_config(
-        pool: Option<Pool>,
-        namespace: String,
-        default_ttl: Option<Duration>,
-        compression_threshold: Option<usize>,
-        enable_l1: bool,
-        l1_ttl_secs: u64,
-        l1_max_entries: usize,
-    ) -> Self {
-        let threshold = compression_threshold.unwrap_or(1024);
-
-        let backend: Arc<dyn CacheBackend> = match pool {
-            Some(p) => {
-                if enable_l1 {
-                    Arc::new(TwoLevelCacheBackend::new(
-                        p,
-                        threshold,
-                        l1_ttl_secs,
-                        l1_max_entries,
-                    ))
-                } else {
-                    Arc::new(RedisBackend::new(p, threshold))
-                }
-            }
-            None => Arc::new(LocalBackend::new()),
-        };
-
+        let _ = compression_threshold;
         CacheService {
-            backend,
+            backend: Arc::new(LocalBackend::new()),
             namespace,
             default_ttl,
             serialize_blocking_threshold: 64 * 1024,
@@ -150,28 +112,6 @@ impl CacheService {
 
     pub async fn ping(&self) -> Result<(), CacheError> {
         self.backend.ping().await
-    }
-
-    pub async fn script_load(&self, script: &str) -> Result<String, CacheError> {
-        self.backend.script_load(script).await
-    }
-
-    pub async fn evalsha(
-        &self,
-        sha: &str,
-        keys: &[&str],
-        args: &[&str],
-    ) -> Result<RedisValue, CacheError> {
-        self.backend.evalsha(sha, keys, args).await
-    }
-
-    pub async fn eval_lua(
-        &self,
-        script: &str,
-        keys: &[&str],
-        args: &[&str],
-    ) -> Result<RedisValue, CacheError> {
-        self.backend.eval_lua(script, keys, args).await
     }
 
     pub fn default_ttl(&self) -> Option<Duration> {

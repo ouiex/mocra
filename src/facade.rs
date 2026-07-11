@@ -553,7 +553,7 @@ impl MocraBuilder {
     /// - `seeds` 为空 → 本节点自举一个新集群(首个核心,方案 A)。
     /// - `seeds` 非空 → 向种子节点 join(作 learner)。
     ///
-    /// 开启后,引擎的选举 / 锁走 Raft 集群而非 Redis,无需外部 Redis。
+    /// 开启后,引擎的选举 / 锁走 Raft 集群,无需外部协调器。
     #[cfg(feature = "cluster-embedded")]
     pub fn cluster(mut self, cluster: ClusterConfig) -> Self {
         self.cluster = Some(cluster);
@@ -584,7 +584,7 @@ impl MocraBuilder {
 
     /// 构建 State + Engine,注册所有 spider,启动引擎(阻塞至关闭)。
     ///
-    /// - 提供了 [`from_toml`](MocraBuilder::from_toml) → 用该 config(可含 DB / Redis)。
+    /// - 提供了 [`from_toml`](MocraBuilder::from_toml) → 用该 config(可含 DB)。
     /// - 未提供 → **无 DB / 单机** 默认配置,并为每个 spider 自动注入一个种子任务。
     /// - 提供了 [`cluster`](MocraBuilder::cluster) → 起内嵌 Raft 控制面,协调走 Raft。
     pub async fn run(self) -> Result<()> {
@@ -597,7 +597,7 @@ impl MocraBuilder {
         };
 
         // 先于 State 起集群:控制面就绪后把协调后端交给 State,使分布式锁 / 选举
-        // 从构造起即走 Raft(而非无 Redis 时退化的进程内锁)。
+        // 从构造起即走 Raft(而非退化的进程内锁)。
         let coordination: Option<Arc<dyn crate::sync::CoordinationBackend>> = {
             #[cfg(feature = "cluster-embedded")]
             {
@@ -674,7 +674,7 @@ impl MocraBuilder {
 
         // 单机 / 集群 leader:为每个 spider 注入一个种子任务(否则引擎空转)。
         // 集群 follower 跳过,避免 N× 重复注入。种子的跨节点分发取决于数据面 MQ:
-        // 配了分布式 MQ(Kafka/NATS/Redis)则扇出到各节点;默认内存队列则留在 leader。
+        // 配了分布式 MQ(Kafka/NATS)则扇出到各节点;默认内存队列则留在 leader。
         if standalone && should_seed {
             let task_tx = engine.queue_manager.get_task_push_channel();
             for name in spider_names {
@@ -701,7 +701,7 @@ impl MocraBuilder {
     }
 }
 
-/// 无 DB / 单机的程序化默认配置(无 redis、内存队列)。
+/// 无 DB / 单机的程序化默认配置(内存队列)。
 fn default_standalone_config(name: &str) -> Config {
     Config {
         name: name.to_string(),
@@ -725,7 +725,6 @@ fn default_standalone_config(name: &str) -> Config {
         },
         cache: CacheConfig {
             ttl: 60,
-            redis: None,
             compression_threshold: None,
             enable_l1: None,
             l1_ttl_secs: None,
@@ -748,13 +747,10 @@ fn default_standalone_config(name: &str) -> Config {
         },
         scheduler: None,
         sync: None,
-        cookie: None,
         channel_config: ChannelConfig {
             blob_storage: None,
-            redis: None,
             kafka: None,
             nats: None,
-            compensator: None,
             minid_time: 12,
             capacity: 10000,
             queue_codec: None,

@@ -1,6 +1,6 @@
 // #![allow(unused)]
 use crate::downloader::DownloaderManager;
-use crate::engine::events::{EventBus, RedisEventHandler};
+use crate::engine::events::EventBus;
 use crate::engine::monitor::SystemMonitor;
 use crate::engine::zombie;
 use crate::queue::Identifiable;
@@ -24,16 +24,13 @@ use crate::common::interface::{
     DataMiddlewareHandle, DataStoreMiddlewareHandle, DownloadMiddlewareHandle, MiddlewareManager,
     ModuleTrait,
 };
-use crate::common::model::chain_key;
 use crate::common::model::message::UnifiedTaskInput;
 use crate::common::processors::processor::{ProcessorContext, RetryPolicy};
 use crate::common::registry::NodeRegistry;
-use crate::engine::lua::LuaScriptRegistry;
 use crate::engine::runner::ProcessorRunner;
 use crate::engine::scheduler::CronScheduler;
 use crate::engine::task::TaskManager;
-use crate::sync::{LeaderElector, RedisBackend};
-use crate::utils::connector::create_redis_pool;
+use crate::sync::LeaderElector;
 use crate::utils::logger as app_logger;
 use crate::utils::logger::{
     LogOutputConfig as AppLogOutputConfig, LogSender as AppLogSender,
@@ -43,7 +40,7 @@ use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use mocra_proxy::ProxyManager;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 use tokio::sync::{broadcast, watch};
 use uuid::Uuid;
 
@@ -64,8 +61,8 @@ mod tests;
 /// 5. `ErrorProcessor`: Handles errors and retries (via `ErrorChain`).
 ///
 /// # Distributed Coordination
-/// - **Queues**: Redis/Kafka are used for passing messages between processors, enabling horizontal scaling.
-/// - **Locking**: Optional distributed locking (Redis-based) ensures serial execution for state-sensitive tasks.
+/// - **Queues**: Kafka/NATS are used for passing messages between processors, enabling horizontal scaling.
+/// - **Locking**: Optional distributed locking (embedded Raft) ensures serial execution for state-sensitive tasks.
 /// - **Rate Limiting**: Distributed sliding window rate limiter protects target sites and manages concurrency.
 /// - **Cron**: `CronScheduler` handles distributed timing tasks with de-duplication.
 pub struct Engine {
@@ -93,8 +90,6 @@ pub struct Engine {
     pub node_registry: Arc<NodeRegistry>,
     /// Distributed cron scheduler.
     pub cron_scheduler: Arc<CronScheduler>,
-    /// Lua script registry used for atomic distributed coordination paths.
-    pub lua_registry: Arc<LuaScriptRegistry>,
     /// Shared counter tracking in-flight tasks across all processors.
     pub inflight_counter: Arc<std::sync::atomic::AtomicUsize>,
 }
@@ -577,19 +572,13 @@ impl Engine {
             Duration::from_secs(Self::NODE_HEARTBEAT_TTL_SECS),
         ));
 
-        let redis_pool = state.redis.clone();
         let leader_elector = if let Some(backend) = state.coordination.clone() {
-            // 内嵌 redb+Raft 等协调后端优先(替代 Redis 协调)。
-            let (elector, _) =
-                LeaderElector::new(Some(backend), format!("{}:leader:cron", namespace), 5000);
-            elector
-        } else if let Some(pool) = redis_pool {
-            let backend = Arc::new(RedisBackend::new(pool));
+            // 内嵌 redb+Raft 等协调后端(集群):跨节点选主。
             let (elector, _) =
                 LeaderElector::new(Some(backend), format!("{}:leader:cron", namespace), 5000);
             elector
         } else {
-            // Single node mode or no redis - always leader
+            // Single node mode - always leader
             let (elector, _) = LeaderElector::new(None, "".to_string(), 5000);
             elector
         };
@@ -605,8 +594,6 @@ impl Engine {
             .await,
         );
 
-        let lua_registry = Arc::new(LuaScriptRegistry::new_default());
-
         Ok(Self {
             queue_manager,
             downloader_manager: Arc::new(downloader_manager),
@@ -620,7 +607,6 @@ impl Engine {
             prometheus_handle,
             node_registry,
             cron_scheduler,
-            lua_registry,
             inflight_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         })
     }

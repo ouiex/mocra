@@ -9,7 +9,7 @@
 /// - Thresholds can lead to `Skip` (request) or `Terminate` (module/task).
 use crate::cacheable::{CacheAble, CacheService};
 use crate::errors::{CacheError, Error, Result};
-use crate::utils::redis_lock::DistributedLockManager;
+use crate::utils::lock::DistributedLockManager;
 use log::warn;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -282,9 +282,9 @@ impl StatusTracker {
         let request_key = format!("request:{}:download", request_id);
 
         // [OPTIMIZATION]
-        // If the request succeeded, we don't need to load stats from Redis just to update an in-memory object we throw away.
+        // If the request succeeded, we don't need to load stats from the cache just to update an in-memory object we throw away.
         // We only need to clear any cached error state for this request.
-        // If there were errors in Redis, they will expire naturally (TTL).
+        // If there were errors in the cache, they will expire naturally (TTL).
 
         if self.cache.contains_key(&request_key) {
             self.cache.remove(&request_key);
@@ -371,7 +371,7 @@ impl StatusTracker {
     pub async fn record_parse_success(&self, request_id: &str) -> Result<()> {
         let request_key = format!("request:{}:parse", request_id);
 
-        // [OPTIMIZATION] Skip loading stats from Redis. Just clear local cache.
+        // [OPTIMIZATION] Skip loading stats from the cache. Just clear local cache.
         if self.cache.contains_key(&request_key) {
             self.cache.remove(&request_key);
         }
@@ -526,7 +526,7 @@ impl StatusTracker {
                 Ok(stats)
             }
             Ok(None) => {
-                // [OPTIMIZATION] Cache default (empty) stats to prevent Redis penetration for non-existent keys
+                // [OPTIMIZATION] Cache default (empty) stats to prevent cache penetration for non-existent keys
                 // This is critical for "is_terminated" checks which query random/empty keys frequently
                 let stats = ErrorStats::default();
                 self.cache.insert(
@@ -645,7 +645,7 @@ impl StatusTracker {
         let _ = self.cache_service.incr(&consecutive_key, 1).await;
 
         // SKIP UPDATING BIG JSON.
-        // We sacrifice "errors_by_category" visibility in Redis for speed.
+        // We sacrifice "errors_by_category" visibility in the cache for speed.
 
         Ok(total)
     }
@@ -684,7 +684,7 @@ impl StatusTracker {
     async fn get_error_count(&self, key: &str) -> Result<usize> {
         let count_key = format!("{}:total_errors", key);
         if let Some(val) = self.cache_service.get(&count_key).await? {
-            // Redis returns string for INCR
+            // the cache backend may return a string for INCR
             let s = String::from_utf8(val).unwrap_or_default();
             let count = s.parse::<usize>().unwrap_or(0);
             return Ok(count);

@@ -4,7 +4,7 @@
 //! 分布式部署时由 `RaftControlPlane` 替换 —— 命令先经 Raft 复制到多数派再 apply(后续增量)。
 //!
 //! 该 trait 的形状对应主 crate 的 `CoordinationBackend`;两者的适配在 `mocra` 侧完成,
-//! 从而用内嵌控制面替换原 Redis 协调。
+//! 从而用内嵌控制面做协调。
 
 use std::path::Path;
 use std::sync::Arc;

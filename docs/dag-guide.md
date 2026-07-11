@@ -1,6 +1,6 @@
 # DAG Execution Guide (Advanced)
 
-> Most users should start with the [facade quickstart](getting-started.md) — single-node, no DB/Redis. This guide covers the advanced ModuleTrait/DAG path for multi-stage, multi-node, or DB-driven pipelines.
+> Most users should start with the [facade quickstart](getting-started.md) — single-node, no DB. This guide covers the advanced ModuleTrait/DAG path for multi-stage, multi-node, or DB-driven pipelines.
 
 A `ModuleTrait` module runs as a Directed Acyclic Graph (DAG) of `ModuleNodeTrait` nodes. This
 guide explains how the graph is defined, assembled, and executed. For the traits themselves see
@@ -167,8 +167,8 @@ When multiple parents feed one node (`merge` above):
 The advance gate prevents duplicate advancement when a node produces an empty `parser_task` but
 has successors:
 
-- A one-shot gate per `(run, module, node, successor)`, stored in the shared cache (Redis in
-  distributed mode, in-memory single-node) under key
+- A one-shot gate per `(run, module, node, successor)`, stored in the shared cache (in-memory
+  single-node; the embedded Raft KV in distributed mode) under key
   `dag:gate:advance:{run_id}:{module_id}:{node_id}:{successor_id}`.
 - The first response to win the gate synthesizes the placeholder task to that successor;
   subsequent completions are no-ops.

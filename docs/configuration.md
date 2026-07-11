@@ -1,6 +1,6 @@
 # Configuration Reference
 
-> The single-node facade needs no config — `Mocra::builder().spider(..).run()` runs with no DB/Redis. This reference is for the advanced path loaded via `.from_toml("config.toml")` (DB-backed tasks, Redis coordination, the dashboard API, etc.).
+> The single-node facade needs no config — `Mocra::builder().spider(..).run()` runs with no DB and no external services. This reference is for the advanced path loaded via `.from_toml("config.toml")` (DB-backed tasks, distributed coordination, the dashboard API, etc.).
 
 > For architecture, pipeline internals, and distributed deployment, see [docs/README.md](README.md).
 
@@ -10,10 +10,10 @@ Configuration uses TOML. Every key below is verified against the config structs 
 
 ## When do you need a config file?
 
-You usually don't. The facade builds a no-DB, no-Redis, in-memory single-node config for you:
+You usually don't. The facade builds a no-DB, in-memory single-node config for you:
 
 ```rust
-// No TOML, no database, no Redis — runs in-memory.
+// No TOML, no database, no external services — runs in-memory.
 Mocra::builder()
     .spider(MySpider, on_item(|item| async move { /* ... */ }))
     .run()
@@ -21,7 +21,7 @@ Mocra::builder()
 ```
 
 Add `mocra = "0.4"` to `Cargo.toml`. Reach for a TOML file only when you need the **advanced /
-distributed** path — a database-backed task model, Redis (or Kafka/NATS) coordination and queues,
+distributed** path — a database-backed task model, Kafka/NATS data-plane queues,
 the dashboard/observability HTTP API, cron scheduling, proxy pools, or custom error policies. Load
 it with:
 
@@ -35,16 +35,18 @@ Mocra::builder()
 
 ## Single-node vs. distributed
 
-The runtime mode is **inferred from config** — there is no `RuntimeMode` switch. The rule
-(`Config::is_single_node_mode()` in `crates/mocra-core/src/common/model/config.rs`):
+The runtime mode is **determined at runtime**, not by any config field — `Config::is_single_node_mode()`
+no longer exists. Distribution is decided by whether an embedded coordination backend is active.
 
-- **`[cache.redis]` is set → distributed.** Coordination (locks, leader election, shared cache)
-  routes through Redis; the Redis-backed atomic-script paths are enabled.
-- **`[cache.redis]` is absent → single-node.** In-process coordination and in-memory queues; the
-  distributed Redis paths are skipped.
+- **Single-node (the default).** In-process coordination (locks, leader election), an in-memory
+  cache, and in-memory queues. No external services.
+- **Distributed.** Enable the `cluster-embedded` Cargo feature and start an embedded cluster with
+  `.cluster(…)` on the builder. This brings up an embedded **Raft + redb** control plane —
+  cross-node leader election, distributed locks, and a KV store — injected at runtime. Distribution
+  is active whenever this coordination backend is running.
 
-(An embedded Raft control plane is a separate, code-driven alternative to Redis coordination —
-enable the `cluster-embedded` feature and call `.cluster(ClusterConfig::…)`. See the README.)
+(In the observability API, `single_node` means no coordination backend is active and `clustered`
+means one is.)
 
 ## Feature flags
 
@@ -57,9 +59,7 @@ Config keys are inert unless the runtime code they drive is compiled in. Enable 
 | `dashboard` | The admin/observability HTTP API + web UI enabled by `[api]` (or `.dashboard(port)`). |
 | `queue-kafka` | Kafka data-plane queue (`channel_config.kafka`, `sync.kafka`, Kafka log output). |
 | `queue-nats` | NATS JetStream data-plane queue (`channel_config.nats`). |
-| `cluster-embedded` | Embedded Raft + redb control plane (`.cluster(…)`), an alternative to Redis coordination. |
-
-Redis Streams queues and Redis coordination need **no** feature flag.
+| `cluster-embedded` | Embedded Raft + redb control plane (`.cluster(…)`) — the distributed coordination backend: cross-node leader election, distributed locks, and a KV store. |
 
 ## Minimal valid config
 
@@ -99,7 +99,7 @@ minid_time = 0
 capacity = 1000
 ```
 
-Because there is no `[cache.redis]`, this config runs in **single-node** mode.
+With no `.cluster(…)` coordination backend, this config runs in **single-node** mode.
 
 ## Config precedence
 
@@ -115,7 +115,7 @@ Typical layered fields: `enable_session`, `enable_locker`, `enable_rate_limit`, 
 ## Unit conventions
 
 - **Seconds:** `*_secs`, `timeout`, `wss_timeout`, `downloader_expire`, `cache_ttl`, `ttl`
-- **Milliseconds:** `claim_*` (Redis Stream reclaim), `*_ms`
+- **Milliseconds:** `*_ms`
 - **Bytes:** `compression_threshold`, `max_response_size`
 
 ---
@@ -129,12 +129,11 @@ Typical layered fields: `enable_session`, `enable_locker`, `enable_rate_limit`, 
 | `name` | yes | string | Instance name / namespace; prefixes cache and distributed keys. |
 | `db` | yes | table | Database config (may be empty; see `[db]`). |
 | `download_config` | yes | table | Downloader and request settings. |
-| `cache` | yes | table | Cache settings (and Redis, which selects distributed mode). |
+| `cache` | yes | table | In-memory cache settings. |
 | `crawler` | yes | table | Crawler runtime behavior and concurrency. |
 | `channel_config` | yes | table | Queue / message-channel settings. |
 | `scheduler` | no | table | Cron scheduler settings. |
 | `sync` | no | table | Distributed state-sync settings. |
-| `cookie` | no | table | Redis config for cookie/login-state storage. |
 | `proxy` | no | table | Inline proxy-pool config. |
 | `api` | no | table | Built-in HTTP API / dashboard (requires `dashboard`). |
 | `event_bus` | no | table | Event-bus capacity and concurrency. |
@@ -170,10 +169,10 @@ is used.** The DB-backed task model (`account × platform × module`) requires t
 
 #### `enable_session` behavior
 
-When `enable_session = true`, the downloader syncs a distributed session:
+When `enable_session = true`, the downloader persists session state through the cache:
 
 - **Object:** `SessionState` — fields `session_id`, `module_id`, `headers`, `cookies`, `version`.
-- **Storage:** Redis (via `CacheService`) — so this is effectively a distributed-mode feature.
+- **Storage:** the in-process `CacheService` (a local in-memory store).
 - **Scope:** `module_id + run_id`, so different run batches of a module don't pollute each other.
 - **Read (before send):** pull `SessionState` and merge its `headers`/`cookies` into the request;
   the request's own `headers`/`cookies` win — the session only fills gaps.
@@ -183,20 +182,16 @@ When `enable_session = true`, the downloader syncs a distributed session:
   in before storing.
 
 Enable it for tasks that need login/session continuity; leave it off for stateless scraping to save
-Redis round-trips.
+cache round-trips.
 
 ### [cache]
 
-Setting `[cache.redis]` switches the runtime into **distributed** mode.
+An in-process, in-memory cache (`CacheService` backed by a local store).
 
 | Key | Required | Type | Description |
 | --- | --- | --- | --- |
 | `ttl` | yes | integer | Default cache TTL (seconds). |
-| `redis` | no | table | Redis backend (see [RedisConfig](#redisconfig-shared)). Presence → distributed mode. |
 | `compression_threshold` | no | integer | Compress cached payloads larger than this (bytes). |
-| `enable_l1` | no | boolean | Enable a local L1 cache layer to reduce Redis reads (default false). |
-| `l1_ttl_secs` | no | integer | L1 cache TTL (seconds, default 30); too small lowers hit rate. |
-| `l1_max_entries` | no | integer | Max L1 entries before eviction (default 10000). |
 
 ### [crawler]
 
@@ -212,7 +207,6 @@ Setting `[cache.redis]` switches the runtime into **distributed** mode.
 | `parser_concurrency` | no | integer | Concurrency for the parser task processor. |
 | `error_task_concurrency` | no | integer | Concurrency for the error task processor. |
 | `backpressure_retry_delay_ms` | no | integer | Retry delay (ms) when queue backpressure (full/closed) occurs; omitted → default retry policy. |
-| `dedup_ttl_secs` | no | integer | Request-deduplication TTL (seconds, default 3600). |
 | `idle_stop_secs` | no | integer | Auto-stop the engine after this many idle seconds; `0`/omitted disables. Stops only when local queues are empty and the cron scheduler has no running tasks. |
 
 ### [scheduler]
@@ -233,10 +227,8 @@ Cron scheduling. All fields optional.
 | `minid_time` | yes | integer | MinID/snowflake base time for ordered IDs. |
 | `capacity` | yes | integer | Local in-memory queue capacity; too small causes backpressure. |
 | `blob_storage` | no | table | Spill large payloads to disk (see below). |
-| `redis` | no | table | Redis Streams queue backend (see [RedisConfig](#redisconfig-shared)). |
 | `kafka` | no | table | Kafka queue backend (see [KafkaConfig](#kafkaconfig-shared)). Requires `queue-kafka`. |
 | `nats` | no | table | NATS JetStream queue backend (see [NatsConfig](#natsconfig-shared)). Requires `queue-nats`. |
-| `compensator` | no | table | Redis config for the compensator (retry / dead-letter) (see [RedisConfig](#redisconfig-shared)). |
 | `queue_codec` | no | string | Remote-queue codec: `json` or `msgpack` (must match producers/consumers). |
 | `batch_concurrency` | no | integer | Max concurrency for batch flushing to remote queues (default 10). |
 | `compression_threshold` | no | integer | Compress queue payloads larger than this (bytes). |
@@ -255,22 +247,9 @@ Distributed state synchronization. All fields optional.
 
 | Key | Required | Type | Description |
 | --- | --- | --- | --- |
-| `redis` | no | table | Redis config for sync (see [RedisConfig](#redisconfig-shared)). |
 | `kafka` | no | table | Kafka config for sync (see [KafkaConfig](#kafkaconfig-shared)). Requires `queue-kafka`. |
 | `allow_rollback` | no | boolean | Allow rollback to older values (default true). |
 | `envelope_enabled` | no | boolean | Enable versioned envelope for sync payloads (default false). |
-
-### [cookie]
-
-A [RedisConfig](#redisconfig-shared) used to read per-account login-state cookies. Without it,
-cookies cannot be fetched from Redis. Key format in Redis:
-
-```
-{namespace}:cookie:login_info:{account}-{platform}
-```
-
-e.g. `crawler_local:cookie:login_info:benchmark-test`. The `{account}-{platform}` portion matches
-`Task::id()`.
 
 ### [api]
 
@@ -323,14 +302,13 @@ Each output is tagged by `type`: `console`, `file`, or `mq`.
 
 | Key | Required | Type | Description |
 | --- | --- | --- | --- |
-| `backend` | yes | string | `kafka` or `redis`. |
+| `backend` | yes | string | `kafka`. |
 | `topic` | yes | string | Topic name. |
 | `format` | no | string | `json` only. |
 | `buffer` | no | integer | Buffer size (default 10000). |
 | `batch_size` | no | integer | Batch size (reserved). |
 | `compression` | no | string | Compression algorithm (reserved). |
 | `kafka` | no | table | Kafka config when `backend = "kafka"` (see [KafkaConfig](#kafkaconfig-shared)). |
-| `redis` | no | table | Redis config when `backend = "redis"` (see [RedisConfig](#redisconfig-shared)). |
 
 #### logger.prometheus
 
@@ -472,26 +450,6 @@ internally to `http`/`https` proxy channels.
 
 ## Shared types
 
-### RedisConfig (shared)
-
-Used by `cache.redis`, `channel_config.redis`, `channel_config.compensator`, `cookie`, `sync.redis`,
-and `logger.outputs[].redis`.
-
-| Key | Required | Type | Description |
-| --- | --- | --- | --- |
-| `redis_host` | yes | string | Redis host. |
-| `redis_port` | yes | integer | Redis port. |
-| `redis_db` | yes | integer | Redis DB index. |
-| `redis_username` | no | string | Redis username. |
-| `redis_password` | no | string | Redis password. |
-| `pool_size` | no | integer | Connection pool size. |
-| `shards` | no | integer | Stream shard count (queues); affects parallelism and throughput. |
-| `tls` | no | boolean | Enable TLS. |
-| `claim_min_idle` | no | integer | Idle ms after which stuck messages are claimed (default 600000). |
-| `claim_count` | no | integer | Messages claimed per run (default 10). |
-| `claim_interval` | no | integer | Interval (ms) between claim scans (default 60000). |
-| `listener_count` | no | integer | Inbound listener tasks for sharded multiplexing (default 4). |
-
 ### KafkaConfig (shared)
 
 **Feature: `queue-kafka`.** Used by `channel_config.kafka`, `sync.kafka`, and
@@ -519,8 +477,9 @@ and `logger.outputs[].redis`.
 
 ## Example: distributed config
 
-A production-shaped config: PostgreSQL task store, Redis coordination + queue, dashboard API, and
-multi-sink logging. The `[cache.redis]` block is what makes this **distributed**.
+A production-shaped config: PostgreSQL task store, Kafka data-plane queue, dashboard API, and
+multi-sink logging. Cross-node coordination (leader election, locks) is enabled separately in code
+with the `cluster-embedded` feature and `.cluster(…)` — see [deployment](deployment.md).
 
 ```toml
 name = "crawler"
@@ -548,12 +507,6 @@ max_response_size = 10485760
 [cache]
 ttl = 300
 
-[cache.redis]               # presence → distributed mode
-redis_host = "127.0.0.1"
-redis_port = 6379
-redis_db = 0
-pool_size = 100
-
 [crawler]
 request_max_retries = 2
 task_max_errors = 50
@@ -561,7 +514,6 @@ module_max_errors = 10
 module_locker_ttl = 5
 task_concurrency = 200
 publish_concurrency = 200
-dedup_ttl_secs = 3600
 idle_stop_secs = 0
 
 [sync]
@@ -575,13 +527,8 @@ queue_codec = "msgpack"
 compression_threshold = 1024
 batch_concurrency = 500
 
-[channel_config.redis]
-redis_host = "127.0.0.1"
-redis_port = 6379
-redis_db = 0
-pool_size = 200
-shards = 8
-listener_count = 8
+[channel_config.kafka]      # requires the `queue-kafka` feature
+brokers = "127.0.0.1:9092"
 
 [event_bus]
 capacity = 200000

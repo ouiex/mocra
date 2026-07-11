@@ -42,7 +42,7 @@ rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]
 # 运行时:全部引擎/管线逻辑都在 mocra-core;host 仅是薄门面(facade + prelude + 各层 shim)。
-# 因此这里只保留门面/bin 直接用到的依赖 + 特性门控的可选依赖 —— 其余(axum、redis、
+# 因此这里只保留门面/bin 直接用到的依赖 + 特性门控的可选依赖 —— 其余(axum、
 # tracing 等)都是 mocra-core 的传递依赖,host 不再直接声明。
 mocra-core = { path = "crates/mocra-core", version = "0.4.0" }
 mocra-proxy = { path = "crates/mocra-proxy", version = "0.4.0" }
@@ -91,7 +91,7 @@ polars = ["dep:polars", "dep:polars-lazy", "dep:polars-ops", "mocra-core/polars"
 excel = ["polars", "mocra-core/excel"]
 # 数据面 Kafka 队列后端(默认关闭 —— 避免 rdkafka 的 cmake/C++ 构建负担)。
 queue-kafka = ["mocra-core/queue-kafka"]
-# 数据面 NATS(JetStream)队列后端 —— 轻量、无需 Redis,适合内嵌集群的数据面。
+# 数据面 NATS(JetStream)队列后端 —— 轻量,适合内嵌集群的数据面。
 queue-nats = ["mocra-core/queue-nats"]
 # 数据库 / 多租户元数据存储(sea-orm)。默认关闭 —— 无 DB standalone 模式不需要;
 # 开启后解锁 account × platform × module 的 DB 驱动任务模型。
@@ -99,7 +99,7 @@ store = ["mocra-core/store"]
 # 后台管理 dashboard:开启后 engine 暴露 admin + 可观测 HTTP API(任务 / 集群 / 指标监控)。
 dashboard = ["mocra-core/dashboard"]
 # 内嵌 redb+Raft 控制面。开启后 `RaftCoordinationBackend` 实现 `CoordinationBackend`,
-# 可用自组网的 Raft 集群替换 Redis 协调(锁 / 选举 / KV)。门面用到 `ClusterConfig`,
+# 可用自组网的 Raft 集群做协调(锁 / 选举 / KV)。门面用到 `ClusterConfig`,
 # 故 host 侧仍需 `dep:mocra-cluster`。
 cluster-embedded = ["dep:mocra-cluster", "mocra-core/cluster-embedded"]
 
@@ -107,7 +107,7 @@ cluster-embedded = ["dep:mocra-cluster", "mocra-core/cluster-embedded"]
 name = "mocra"
 path = "src/lib.rs"
 
-# 门面快速上手(无 DB / 无 Redis 单机)。
+# 门面快速上手(无 DB 单机)。
 [[example]]
 name = "spider_quickstart"
 path = "examples/spider_quickstart.rs"

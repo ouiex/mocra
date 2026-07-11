@@ -5,7 +5,7 @@ edition = "2024"
 publish = false
 
 [dependencies]
-mocra = { path = "..", default-features = false }
+mocra = { path = "..", default-features = false, features = ["store", "polars", "dashboard"] }
 mimalloc = { version = "0.1", default-features = false }
 wiremock = "0.6"
 tokio = { version = "1", features = ["full"] }
@@ -13,7 +13,6 @@ axum = { version = "0.8", features = ["http1"] }
 async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-deadpool-redis = { version = "0.22", features = ["json", "script", "serde", "streams"] }
 chrono = { version = "0.4", features = ["serde"] }
 tracing = "0.1"
 log = "0.4"
@@ -55,5 +54,4 @@ path = "src/dag_module_trait_e2e.rs"
 name = "httpbin_prometheus_benchmark"
 path = "src/httpbin_prometheus_benchmark.rs"
 
-
-
+[workspace]

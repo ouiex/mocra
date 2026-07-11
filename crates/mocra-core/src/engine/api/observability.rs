@@ -57,7 +57,7 @@ pub async fn engine_stats(State(state): State<ApiState>) -> Json<EngineStats> {
     let cfg = state.state.config.read().await;
     Json(EngineStats {
         namespace: cfg.name.clone(),
-        single_node: cfg.is_single_node_mode(),
+        single_node: state.state.coordination.is_none(),
         clustered: state.state.coordination.is_some(),
         pending: PendingBreakdown {
             task,

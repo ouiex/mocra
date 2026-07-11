@@ -8,7 +8,7 @@ use mocra::prelude::*;
 use mocra::prelude::common::ToSyncBoxStream;
 use mocra::common::state::State;
 use mocra::prelude::engine::Engine;
-use mocra::engine::task::module_dag_compiler::{ModuleDagDefinition, ModuleDagNodeDef};
+use mocra::common::model::module_dag::{ModuleDagDefinition, ModuleDagNodeDef};
 
 // ---------------------------------------------------------------------------
 // DAG topology (7 nodes, 7 edges):

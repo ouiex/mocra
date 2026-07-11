@@ -29,8 +29,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
 use crate::engine::chain::backpressure::{BackpressureSendState, send_with_backpressure};
-use crate::engine::deduplication::Deduplicator;
-use crate::engine::lua::LuaScriptRegistry;
 
 /// High-level action produced by threshold checks in ingress chains.
 #[derive(Debug, Clone)]
@@ -118,20 +116,16 @@ pub trait ThresholdDecisionService: Send + Sync {
     async fn error_task_decide(&self, input: &TaskErrorEvent) -> ChainDecision;
 }
 
-/// Default threshold decision service backed by `StatusTracker` and optional Lua atomics.
+/// Default threshold decision service backed by `StatusTracker`.
 #[derive(Clone)]
 pub struct StatusTrackerThresholdDecisionService {
     state: Arc<PipelineContext>,
-    lua_registry: Option<Arc<LuaScriptRegistry>>,
 }
 
 impl StatusTrackerThresholdDecisionService {
-    /// Creates a service with fallback-safe behavior when Lua is unavailable.
-    pub fn new(state: Arc<PipelineContext>, lua_registry: Option<Arc<LuaScriptRegistry>>) -> Self {
-        Self {
-            state,
-            lua_registry,
-        }
+    /// Creates a threshold decision service backed by `StatusTracker`.
+    pub fn new(state: Arc<PipelineContext>) -> Self {
+        Self { state }
     }
 }
 
@@ -167,204 +161,6 @@ impl ThresholdDecisionService for StatusTrackerThresholdDecisionService {
             input.run_id,
         );
 
-        if let (Some(lua_registry), Some(modules)) =
-            (&self.lua_registry, input.account_task.module.as_ref())
-            && let Some(module_name) = modules.first()
-        {
-            let module_id = chain_key::module_runtime_id(
-                &input.account_task.account,
-                &input.account_task.platform,
-                module_name,
-            );
-            let module_counter_key = chain_key::module_threshold_key(&task_id, &module_id);
-            let task_counter_key = chain_key::task_threshold_key(&task_id);
-
-            let cfg = self.state.config.read().await;
-            let module_threshold = cfg.crawler.module_max_errors.to_string();
-            let task_threshold = cfg.crawler.task_max_errors.to_string();
-            let retry_after_ms = "1000".to_string();
-            let ttl_secs = cfg.cache.ttl.to_string();
-            drop(cfg);
-
-            let now_ms = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis()
-                .to_string();
-
-            let keys = [module_counter_key.as_str(), task_counter_key.as_str()];
-            let args = [
-                module_threshold.as_str(),
-                task_threshold.as_str(),
-                retry_after_ms.as_str(),
-                ttl_secs.as_str(),
-            ];
-
-            match lua_registry
-                .eval_triplet_with_fallback(
-                    self.state.cache_service.as_ref(),
-                    "etm_threshold_decide.lua",
-                    include_str!("../../lua/etm_threshold_decide.lua"),
-                    &keys,
-                    &args,
-                )
-                .await
-            {
-                Ok((0, _, _)) => return ChainDecision::Continue,
-                Ok((1, _, _)) => {
-                    let retry_schedule_key = chain_key::error_retry_schedule_key(&task_id);
-                    let retry_member =
-                        format!("{}:{}:{}", task_id, module_id, input.prefix_request);
-                    let schedule_keys = [retry_schedule_key.as_str()];
-                    let schedule_args = [
-                        retry_member.as_str(),
-                        retry_after_ms.as_str(),
-                        now_ms.as_str(),
-                        ttl_secs.as_str(),
-                    ];
-                    match lua_registry
-                        .eval_triplet_with_fallback(
-                            self.state.cache_service.as_ref(),
-                            "etm_retry_schedule.lua",
-                            include_str!("../../lua/etm_retry_schedule.lua"),
-                            &schedule_keys,
-                            &schedule_args,
-                        )
-                        .await
-                    {
-                        Ok((0, _, _)) => {
-                            counter!("mocra_error_task_lua_action_total", "action" => "retry_scheduled").increment(1);
-                        }
-                        Ok((1, msg, _)) | Ok((2, msg, _)) => {
-                            counter!("mocra_error_task_lua_action_total", "action" => "retry_schedule_rejected").increment(1);
-                            warn!(
-                                "[ThresholdDecisionService] etm_retry_schedule rejected: task_id={} module_id={} msg={}",
-                                task_id, module_id, msg
-                            );
-                        }
-                        Ok((code, msg, _)) => {
-                            counter!("mocra_error_task_lua_action_total", "action" => "retry_schedule_unknown").increment(1);
-                            warn!(
-                                "[ThresholdDecisionService] etm_retry_schedule unexpected code={} task_id={} module_id={} msg={}",
-                                code, task_id, module_id, msg
-                            );
-                        }
-                        Err(err) => {
-                            counter!("mocra_error_task_lua_action_total", "action" => "retry_schedule_error").increment(1);
-                            warn!(
-                                "[ThresholdDecisionService] etm_retry_schedule failed: task_id={} module_id={} error={}",
-                                task_id, module_id, err
-                            );
-                        }
-                    }
-                    return ChainDecision::RetryAfter {
-                        delay: std::time::Duration::from_millis(1000),
-                        action_applied: true,
-                    };
-                }
-                Ok((2, msg, _)) => {
-                    let terminate_key = chain_key::terminate_module_key(&task_id, &module_id);
-                    let terminate_keys = [terminate_key.as_str()];
-                    let terminate_args = [msg.as_str(), now_ms.as_str(), ttl_secs.as_str()];
-                    match lua_registry
-                        .eval_triplet_with_fallback(
-                            self.state.cache_service.as_ref(),
-                            "etm_terminate_mark.lua",
-                            include_str!("../../lua/etm_terminate_mark.lua"),
-                            &terminate_keys,
-                            &terminate_args,
-                        )
-                        .await
-                    {
-                        Ok((0, _, _)) => {
-                            counter!("mocra_error_task_lua_action_total", "action" => "terminate_module_marked").increment(1);
-                        }
-                        Ok((1, _, _)) => {
-                            counter!("mocra_error_task_lua_action_total", "action" => "terminate_module_already_marked").increment(1);
-                        }
-                        Ok((code, _, _)) => {
-                            counter!("mocra_error_task_lua_action_total", "action" => "terminate_module_unknown").increment(1);
-                            warn!(
-                                "[ThresholdDecisionService] etm_terminate_mark(module) unexpected code={} task_id={} module_id={}",
-                                code, task_id, module_id
-                            );
-                        }
-                        Err(err) => {
-                            counter!("mocra_error_task_lua_action_total", "action" => "terminate_module_error").increment(1);
-                            warn!(
-                                "[ThresholdDecisionService] etm_terminate_mark(module) failed: task_id={} module_id={} error={}",
-                                task_id, module_id, err
-                            );
-                        }
-                    }
-                    self.state
-                        .status_tracker
-                        .release_module_locker(&format!("{}-{}", module_id, input.run_id))
-                        .await;
-                    return ChainDecision::TerminateModule {
-                        reason: msg,
-                        action_applied: true,
-                    };
-                }
-                Ok((3, msg, _)) => {
-                    let terminate_key = chain_key::terminate_task_key(&task_id);
-                    let terminate_keys = [terminate_key.as_str()];
-                    let terminate_args = [msg.as_str(), now_ms.as_str(), ttl_secs.as_str()];
-                    match lua_registry
-                        .eval_triplet_with_fallback(
-                            self.state.cache_service.as_ref(),
-                            "etm_terminate_mark.lua",
-                            include_str!("../../lua/etm_terminate_mark.lua"),
-                            &terminate_keys,
-                            &terminate_args,
-                        )
-                        .await
-                    {
-                        Ok((0, _, _)) => {
-                            counter!("mocra_error_task_lua_action_total", "action" => "terminate_task_marked").increment(1);
-                        }
-                        Ok((1, _, _)) => {
-                            counter!("mocra_error_task_lua_action_total", "action" => "terminate_task_already_marked").increment(1);
-                        }
-                        Ok((code, _, _)) => {
-                            counter!("mocra_error_task_lua_action_total", "action" => "terminate_task_unknown").increment(1);
-                            warn!(
-                                "[ThresholdDecisionService] etm_terminate_mark(task) unexpected code={} task_id={}",
-                                code, task_id
-                            );
-                        }
-                        Err(err) => {
-                            counter!("mocra_error_task_lua_action_total", "action" => "terminate_task_error").increment(1);
-                            warn!(
-                                "[ThresholdDecisionService] etm_terminate_mark(task) failed: task_id={} error={}",
-                                task_id, err
-                            );
-                        }
-                    }
-                    let _ = self
-                        .state
-                        .status_tracker
-                        .mark_task_terminated(&task_id)
-                        .await;
-                    return ChainDecision::TerminateTask {
-                        reason: msg,
-                        action_applied: true,
-                    };
-                }
-                Ok((code, msg, _)) => {
-                    warn!(
-                        "[ThresholdDecisionService] unexpected lua decision code={} msg={}, fallback rust",
-                        code, msg
-                    );
-                }
-                Err(err) => {
-                    warn!(
-                        "[ThresholdDecisionService] lua decide failed, fallback rust: task_id={} module_id={} error={}",
-                        task_id, module_id, err
-                    );
-                }
-            }
-        }
 
         let parse_error: Error = ModuleError::ModuleNotFound(input.error_msg.clone().into()).into();
         let mut retry_after: Option<std::time::Duration> = None;
@@ -1364,7 +1160,6 @@ impl EventProcessorTrait<Module, SyncBoxStream<'static, Request>> for TaskProces
 pub struct RequestPublish {
     queue_manager: Arc<QueueManager>,
     state: Arc<PipelineContext>,
-    deduplicator: Option<Arc<Deduplicator>>,
 }
 
 #[async_trait]
@@ -1376,30 +1171,11 @@ impl ProcessorTrait<Request, ()> for RequestPublish {
     async fn process(&self, input: Request, context: ProcessorContext) -> ProcessorResult<()> {
         let request_id = input.id;
         let module_id = input.module_id();
-        let request_hash = input.hash();
         let backpressure_retry_delay_ms = {
             let cfg = self.state.config.read().await;
             cfg.crawler.backpressure_retry_delay_ms
         };
 
-        if let Some(deduplicator) = &self.deduplicator {
-            match deduplicator.check_and_set(&request_hash).await {
-                Ok(false) => {
-                    info!(
-                        "[RequestPublish] duplicate request skipped: request_id={} module_id={} hash={}",
-                        request_id, module_id, request_hash
-                    );
-                    return ProcessorResult::Success(());
-                }
-                Ok(true) => {}
-                Err(e) => {
-                    warn!(
-                        "[RequestPublish] deduplication check failed, allowing request: request_id={} module_id={} error={}",
-                        request_id, module_id, e
-                    );
-                }
-            }
-        }
         info!(
             "[RequestPublish] publish request: request_id={} module_id={}",
             request_id, module_id
@@ -1923,21 +1699,6 @@ impl<T: Send + Sync + 'static>
     }
 }
 
-async fn build_request_deduplicator(state: &Arc<PipelineContext>) -> Option<Arc<Deduplicator>> {
-    let dedup_ttl = state
-        .config
-        .read()
-        .await
-        .crawler
-        .dedup_ttl_secs
-        .unwrap_or(3600) as usize;
-    let namespace = state.cache_service.namespace().to_string();
-    state
-        .locker
-        .get_pool()
-        .map(|pool| Arc::new(Deduplicator::new(pool.clone(), dedup_ttl, namespace)))
-}
-
 pub struct UnifiedTaskIngressChain {
     /// Ingress chain for standard task creation path.
     task_chain: Arc<EventAwareTypedChain<TaskEvent, SyncBoxStream<'static, ()>>>,
@@ -1985,7 +1746,6 @@ pub async fn create_unified_task_ingress_chain(
     queue_manager: Arc<QueueManager>,
     event_bus: Option<Arc<EventBus>>,
     state: Arc<PipelineContext>,
-    lua_registry: Option<Arc<LuaScriptRegistry>>,
 ) -> UnifiedTaskIngressChain {
     let task_concurrency = state
         .config
@@ -2031,7 +1791,6 @@ pub async fn create_unified_task_ingress_chain(
         .publish_concurrency
         .unwrap_or(32);
 
-    let task_deduplicator = build_request_deduplicator(&state).await;
     let task_chain = Arc::new(
         EventAwareTypedChain::<TaskEvent, TaskEvent>::new(event_bus.clone())
             .then::<Task, _>(TaskModelProcessor {
@@ -2039,10 +1798,9 @@ pub async fn create_unified_task_ingress_chain(
                 state: state.clone(),
                 queue_manager: queue_manager.clone(),
                 event_bus: event_bus.clone(),
-                threshold_decision_service: Arc::new(StatusTrackerThresholdDecisionService::new(
-                    state.clone(),
-                    lua_registry.clone(),
-                )),
+                threshold_decision_service: Arc::new(
+                    StatusTrackerThresholdDecisionService::new(state.clone()),
+                ),
             })
             .then::<Vec<Module>, _>(TaskModuleProcessor {
                 state: state.clone(),
@@ -2068,14 +1826,12 @@ pub async fn create_unified_task_ingress_chain(
                 RequestPublish {
                     queue_manager: queue_manager.clone(),
                     state: state.clone(),
-                    deduplicator: task_deduplicator,
                 },
                 task_publish_concurrency,
                 ErrorStrategy::Skip,
             ),
     );
 
-    let parser_deduplicator = build_request_deduplicator(&state).await;
     let parser_chain = Arc::new(
         EventAwareTypedChain::<TaskParserEvent, TaskParserEvent>::new(event_bus.clone())
             .then::<Task, _>(TaskModelProcessor {
@@ -2083,10 +1839,9 @@ pub async fn create_unified_task_ingress_chain(
                 state: state.clone(),
                 queue_manager: queue_manager.clone(),
                 event_bus: event_bus.clone(),
-                threshold_decision_service: Arc::new(StatusTrackerThresholdDecisionService::new(
-                    state.clone(),
-                    lua_registry.clone(),
-                )),
+                threshold_decision_service: Arc::new(
+                    StatusTrackerThresholdDecisionService::new(state.clone()),
+                ),
             })
             .then::<Vec<Module>, _>(TaskModuleProcessor {
                 state: state.clone(),
@@ -2104,14 +1859,12 @@ pub async fn create_unified_task_ingress_chain(
                 RequestPublish {
                     queue_manager: queue_manager.clone(),
                     state: state.clone(),
-                    deduplicator: parser_deduplicator,
                 },
                 parser_publish_concurrency,
                 ErrorStrategy::Skip,
             ),
     );
 
-    let error_deduplicator = build_request_deduplicator(&state).await;
     let error_chain = Arc::new(
         EventAwareTypedChain::<TaskErrorEvent, TaskErrorEvent>::new(event_bus)
             .then::<Task, _>(TaskModelProcessor {
@@ -2119,10 +1872,9 @@ pub async fn create_unified_task_ingress_chain(
                 state: state.clone(),
                 queue_manager: queue_manager.clone(),
                 event_bus: None,
-                threshold_decision_service: Arc::new(StatusTrackerThresholdDecisionService::new(
-                    state.clone(),
-                    lua_registry,
-                )),
+                threshold_decision_service: Arc::new(
+                    StatusTrackerThresholdDecisionService::new(state.clone()),
+                ),
             })
             .then::<Vec<Module>, _>(TaskModuleProcessor {
                 state: state.clone(),
@@ -2140,7 +1892,6 @@ pub async fn create_unified_task_ingress_chain(
                 RequestPublish {
                     queue_manager,
                     state,
-                    deduplicator: error_deduplicator,
                 },
                 error_publish_concurrency,
                 ErrorStrategy::Skip,

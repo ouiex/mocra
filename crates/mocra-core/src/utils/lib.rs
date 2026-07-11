@@ -12,7 +12,7 @@ pub mod logger;
 pub mod polars_utils;
 pub mod priority;
 pub mod rate_limit;
-pub mod redis_lock;
+pub mod lock;
 pub mod storage;
 pub mod string_case;
 pub mod to_numeric;

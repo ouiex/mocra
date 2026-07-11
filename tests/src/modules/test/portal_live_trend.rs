@@ -1,9 +1,9 @@
 use async_trait::async_trait;
 use chrono::Local;
 use mocra::common::interface::{ModuleNodeTrait, ModuleTrait, SyncBoxStream};
-use mocra::common::model::data::Data;
+use mocra::common::model::data::DataEvent;
 use mocra::common::model::login_info::LoginInfo;
-use mocra::common::model::message::ParserData;
+use mocra::common::model::message::TaskOutputEvent;
 use mocra::common::model::request::RequestMethod;
 use mocra::common::model::{Headers, ModuleConfig, Request, Response};
 use mocra::errors::{ParserError, RequestError, Result};
@@ -116,7 +116,7 @@ impl ModuleNodeTrait for PortalLiveTrendNode {
         &self,
         response: Response,
         _config: Option<Arc<ModuleConfig>>,
-    ) -> Result<ParserData> {
+    ) -> Result<TaskOutputEvent> {
         let shop_id = response
             .get_login_config::<i64>("shopid")
             .ok_or(ParserError::InvalidMetaData("shopid".into()))?;
@@ -157,16 +157,16 @@ impl ModuleNodeTrait for PortalLiveTrendNode {
             .lazy()
             .with_columns([lit(shop_id).alias("shop_id"), lit(date).alias("date")])
             .collect()?;
-        let yesterday_data = Data::from(&response)
+        let yesterday_data = DataEvent::from(&response)
             .with_df(yesterday_df)
             .with_schema("taobao_sycm")
             .with_table("portal_live_trend");
-        let today_data = Data::from(&response)
+        let today_data = DataEvent::from(&response)
             .with_df(today_df)
             .with_schema("taobao_sycm")
             .with_table("portal_live_trend");
 
-        Ok(ParserData::default().with_data(vec![yesterday_data, today_data]))
+        Ok(TaskOutputEvent::default().with_data(vec![yesterday_data, today_data]))
     }
 }
 fn decode_value(value: &Map<String, Value>) -> Result<DataFrame> {

@@ -2,7 +2,7 @@
 
 This guide gets you from an empty project to a running crawler in a few minutes.
 You implement a **`Spider`**, hand it to `Mocra::builder()`, and call `.run()` — single-node,
-in-memory, **no database and no Redis**.
+in-memory, **no database**.
 
 ## Prerequisites
 
@@ -10,9 +10,9 @@ in-memory, **no database and no Redis**.
 
 That's it for the quickstart. mocra's default build is single-node with no external services.
 
-> A **database** (PostgreSQL / SQLite) and **Redis** are *optional* — they only come into play
-> on the advanced, multi-stage and distributed paths (the `store` feature, TOML config, or a
-> Redis-backed control plane). You do **not** need them to follow this guide.
+> A **database** (PostgreSQL / SQLite) is *optional* — it only comes into play
+> on the advanced, multi-stage and distributed paths (the `store` feature, TOML config, or the
+> embedded `cluster-embedded` control plane). You do **not** need it to follow this guide.
 
 ## Installation
 
@@ -191,9 +191,9 @@ All are off by default; enable per need, e.g.
 - [Module Development](module-development.md) — the **advanced** path: implement `ModuleTrait` /
   `ModuleNodeTrait` for multi-stage pipelines, login flows, and custom middleware.
 - [DAG Guide](dag-guide.md) — fan-out / fan-in graphs and advance gates.
-- [Configuration](configuration.md) — the full TOML reference (DB, Redis, queues, API).
+- [Configuration](configuration.md) — the full TOML reference (DB, queues, API).
 - Runnable examples in [`../examples/`](../examples/):
-  - [`spider_quickstart.rs`](../examples/spider_quickstart.rs) — the minimal `Spider` above (no DB / no Redis).
+  - [`spider_quickstart.rs`](../examples/spider_quickstart.rs) — the minimal `Spider` above (no DB).
   - [`custom_downloader.rs`](../examples/custom_downloader.rs) — implement the `Downloader` trait and inject it with `.default_downloader()`.
   - [`dashboard.rs`](../examples/dashboard.rs) — the built-in observability dashboard (`--features dashboard`).
   - [`cluster_quickstart.rs`](../examples/cluster_quickstart.rs) — a self-organizing embedded cluster (`--features cluster-embedded`).

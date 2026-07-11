@@ -8,7 +8,6 @@
 use std::time::Duration;
 
 use async_trait::async_trait;
-use deadpool_redis::redis::Value as RedisValue;
 use mocra_dag::DagStore;
 
 use super::CacheService;
@@ -32,16 +31,6 @@ impl DagStore for CacheService {
     }
     async fn incr(&self, key: &str, delta: i64) -> Result<i64, String> {
         CacheService::incr(self, key, delta)
-            .await
-            .map_err(|e| e.to_string())
-    }
-    async fn eval_lua(
-        &self,
-        script: &str,
-        keys: &[&str],
-        args: &[&str],
-    ) -> Result<RedisValue, String> {
-        CacheService::eval_lua(self, script, keys, args)
             .await
             .map_err(|e| e.to_string())
     }

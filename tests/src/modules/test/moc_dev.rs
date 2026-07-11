@@ -4,8 +4,8 @@ use mocra::common::interface::{ModuleTrait, ModuleNodeTrait, SyncBoxStream, Stor
 use mocra::common::model::{Headers, ModuleConfig, Request, Response};
 use mocra::common::model::login_info::LoginInfo;
 use mocra::common::model::request::RequestMethod;
-use mocra::common::model::message::ParserData;
-use mocra::common::model::data::Data;
+use mocra::common::model::message::TaskOutputEvent;
+use mocra::common::model::data::DataEvent;
 use mocra::errors::Result;
 use log::{info, warn};
 
@@ -81,18 +81,18 @@ impl ModuleNodeTrait for MocDevNode {
         &self,
         response: Response,
         _config: Option<Arc<ModuleConfig>>,
-    ) ->  Result<ParserData> {
+    ) ->  Result<TaskOutputEvent> {
         // Just extract basic info, don't store files
         let status = response.status_code;
-        
+
         // Build file store with response content
-        let data = Data::from(&response)
+        let data = DataEvent::from(&response)
             .with_file(response.content.clone())
             .with_name(format!("moc_dev_response_{}.html", status))
             .with_path("./data/moc_dev")
             .build();
 
-        Ok(ParserData::default().with_data(vec![data]))
+        Ok(TaskOutputEvent::default().with_data(vec![data]))
     }
 
 }

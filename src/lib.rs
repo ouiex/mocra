@@ -2,7 +2,7 @@
 //! that runs as an embeddable Rust library.
 //!
 //! Implement a [`Spider`](crate::facade::Spider) and run it with
-//! [`Mocra::builder`](crate::facade::Mocra::builder) — **no database and no Redis**
+//! [`Mocra::builder`](crate::facade::Mocra::builder) — **no database**
 //! required on a single node. Typed output is delivered through
 //! [`DataSink`](crate::facade::DataSink) / [`on_item`](crate::facade::on_item).
 //!
@@ -57,7 +57,7 @@
 //! # Beyond a single node
 //!
 //! - **Cluster** (`cluster-embedded`): a self-organizing Raft + redb control plane via
-//!   `Mocra::builder().cluster(..)` — no external ZooKeeper / etcd / Redis.
+//!   `Mocra::builder().cluster(..)` — no external ZooKeeper / etcd.
 //! - **Dashboard** (`dashboard`): `.dashboard(port)` serves a built-in web dashboard
 //!   plus a read-only, CORS-enabled observability API (metrics / logs / tasks / performance).
 //!

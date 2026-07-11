@@ -237,7 +237,7 @@ impl SyncService {
         if self.namespace.is_empty() {
             format!("sync_kv:{}", topic)
         } else {
-            // Redis keys can safely use ':' separators
+            // namespaced keys can safely use ':' separators
             format!("sync_kv:{}:{}", self.namespace, topic)
         }
     }

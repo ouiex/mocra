@@ -7,14 +7,12 @@ pub mod kafka;
 pub mod manager;
 #[cfg(feature = "queue-nats")]
 pub mod nats;
-pub mod redis;
 
 use crate::errors::Result;
 pub use crate::queue::channel::Channel;
 use async_trait::async_trait;
-pub use compensation::{Compensator, Identifiable, RedisCompensator};
+pub use compensation::{Compensator, Identifiable};
 pub use manager::QueueManager;
-pub use redis::RedisQueue;
 use tokio::sync::mpsc;
 
 #[cfg(test)]
@@ -55,6 +53,7 @@ pub enum NackDisposition {
     Dlq,
 }
 
+#[allow(dead_code)] // used by queue-kafka / queue-nats backends
 pub(crate) fn parse_attempt(headers: &HashMap<String, String>) -> u32 {
     headers
         .get(HEADER_ATTEMPT)

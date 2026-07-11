@@ -9,7 +9,7 @@
 //! - ✅ 单节点控制面([`LocalControlPlane`]):`set/get/cas/acquire_lock/renew_lock/release_lock`。
 //! - ✅ openraft 共识分层于状态机之上([`RaftControlPlane`]):持久化日志 + 快照。
 //! - ✅ 成员 / join API + 分区归属([`partition`]:rendezvous 分配 + Raft fencing 租约)。
-//! - ✅ 主 crate 侧 `RaftCoordinationBackend` 适配 `CoordinationBackend`,替换 Redis 协调。
+//! - ✅ 主 crate 侧 `RaftCoordinationBackend` 适配 `CoordinationBackend`,提供集群协调。
 
 pub mod cmd;
 pub mod control;

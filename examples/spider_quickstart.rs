@@ -4,7 +4,7 @@
 //! 通过 `on_item` 拿到类型化数据 —— 无需实现 `DataStoreMiddleware`、无需手写
 //! `ModuleTrait` + `ModuleNodeTrait`。
 //!
-//! 运行(无需数据库、无需 Redis —— 单机内存模式,抓完自动退出):
+//! 运行(无需数据库 —— 单机内存模式,抓完自动退出):
 //!
 //! ```bash
 //! cargo run --example spider_quickstart
@@ -49,7 +49,7 @@ impl Spider for Httpbin {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // 无数据库、无 Redis:单机内存模式,自动为 spider 注入种子任务。
+    // 无数据库:单机内存模式,自动为 spider 注入种子任务。
     Mocra::builder()
         .spider(
             Httpbin,

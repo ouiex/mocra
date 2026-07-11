@@ -1,6 +1,6 @@
 # 模块开发(进阶)
 
-> 大多数用户应从[门面快速上手](getting-started.md)开始 —— 单节点、无需 DB/Redis。本指南介绍进阶的 ModuleTrait/DAG 路径,面向多阶段、多节点或数据库驱动的流水线。
+> 大多数用户应从[门面快速上手](getting-started.md)开始 —— 单节点、无需 DB。本指南介绍进阶的 ModuleTrait/DAG 路径,面向多阶段、多节点或数据库驱动的流水线。
 
 `Spider` 门面已能覆盖绝大多数单节点采集。当你需要**多阶段**(扇出 / 汇合)、**登录 / 会话**流程、跨节点的游标**翻页**,或**数据库驱动的多租户**流水线时,再下沉到底层的 `ModuleTrait` / `ModuleNodeTrait` API。它跑在与门面完全相同的引擎上 —— 只是把图结构与请求 / 解析生命周期交到了你手里。
 
@@ -321,7 +321,7 @@ use mocra::common::state::State;
 
 #[tokio::main]
 async fn main() {
-    // 进阶模块需要配置(DB / Redis / 队列)—— 见「配置」。
+    // 进阶模块需要配置(DB / 队列)—— 见「配置」。
     let state = Arc::new(State::try_new("config.toml").await.expect("init state"));
     let engine = Engine::new(state, None).await.expect("init engine");
 
@@ -342,5 +342,5 @@ async fn main() {
 
 ## 示例
 
-- 可运行的门面示例:[`examples/spider_quickstart.rs`](../../examples/spider_quickstart.rs)(单节点、无 DB/Redis)—— 即上述一切的单节点形态。
+- 可运行的门面示例:[`examples/spider_quickstart.rs`](../../examples/spider_quickstart.rs)(单节点、无 DB)—— 即上述一切的单节点形态。
 - 多节点图、扇出 / 汇合,以及路由模型,继续阅读 [DAG 指南](dag-guide.md)。

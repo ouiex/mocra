@@ -1,6 +1,6 @@
 # DAG 执行指南(进阶)
 
-> 大多数用户应从[门面快速上手](getting-started.md)开始 —— 单节点、无需 DB/Redis。本指南介绍进阶的 ModuleTrait/DAG 路径,面向多阶段、多节点或数据库驱动的流水线。
+> 大多数用户应从[门面快速上手](getting-started.md)开始 —— 单节点、无需 DB。本指南介绍进阶的 ModuleTrait/DAG 路径,面向多阶段、多节点或数据库驱动的流水线。
 
 一个 `ModuleTrait` 模块会以 `ModuleNodeTrait` 节点组成的有向无环图(DAG)运行。本指南说明该图如何定义、组装与执行。trait 本身见[模块开发](module-development.md)。
 
@@ -143,7 +143,7 @@ start ──┤               ├── merge
 
 当节点产出空 `parser_task` 但有后继时,推进门控防止重复推进:
 
-- 一个按 `(run, module, node, successor)` 的一次性门控,存放在共享缓存中(分布式模式下为 Redis,单机为内存),键为 `dag:gate:advance:{run_id}:{module_id}:{node_id}:{successor_id}`。
+- 一个按 `(run, module, node, successor)` 的一次性门控,存放在共享缓存中(单机为内存;分布式为内嵌 Raft KV),键为 `dag:gate:advance:{run_id}:{module_id}:{node_id}:{successor_id}`。
 - 第一个赢得门控的响应向该后继合成占位任务;后续完成为空操作。
 
 这对产生 N 个请求但只需推进一次的节点很重要(例如「抓取所有分页」节点,任意一页完成即应触发下一阶段)。

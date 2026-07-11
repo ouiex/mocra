@@ -34,7 +34,7 @@ use futures::stream::{FuturesUnordered, StreamExt};
 use tokio::sync::Semaphore;
 
 async fn seed_database(state: &Arc<State>) {
-    let db_backend = state.db.get_database_backend();
+    let db_backend = state.db.as_ref().unwrap().get_database_backend();
     let config_name = state.config.read().await.name.clone();
 
     // 1. Run Init SQL to reset schema
@@ -51,7 +51,7 @@ async fn seed_database(state: &Arc<State>) {
         println!("Initializing database from {}", init_path.display());
         let stmts: Vec<&str> = sql.split(';').filter(|s| !s.trim().is_empty()).collect();
         if db_backend == DatabaseBackend::Sqlite {
-            if let Ok(txn) = state.db.begin().await {
+            if let Ok(txn) = state.db.as_ref().unwrap().begin().await {
                 for stmt in stmts {
                     if let Err(e) = txn
                         .execute(Statement::from_string(db_backend, stmt.to_string()))
@@ -64,7 +64,7 @@ async fn seed_database(state: &Arc<State>) {
             }
         } else {
             for stmt in stmts {
-                if let Err(e) = state.db.execute(Statement::from_string(db_backend, stmt.to_string())).await {
+                if let Err(e) = state.db.as_ref().unwrap().execute(Statement::from_string(db_backend, stmt.to_string())).await {
                     eprintln!("Failed to execute init statement: {} \nError: {}", stmt, e);
                 }
             }
@@ -108,7 +108,7 @@ async fn seed_database(state: &Arc<State>) {
 
         let stmts: Vec<&str> = seed_sql.split(';').filter(|s| !s.trim().is_empty()).collect();
         for stmt in stmts {
-            if let Err(e) = state.db.execute(Statement::from_string(db_backend, stmt.to_string())).await {
+            if let Err(e) = state.db.as_ref().unwrap().execute(Statement::from_string(db_backend, stmt.to_string())).await {
                 eprintln!("Failed to seed mock module data: {}", e);
             }
         }
@@ -116,7 +116,7 @@ async fn seed_database(state: &Arc<State>) {
 }
 
 async fn build_engine(config_path: &Path) -> Engine {
-    let state = Arc::new(State::new(config_path.to_str().unwrap()).await);
+    let state = Arc::new(State::try_new(config_path.to_str().unwrap()).await.expect("state init"));
     println!("Config loaded from {}", config_path.display());
 
     // logger init
@@ -125,7 +125,7 @@ async fn build_engine(config_path: &Path) -> Engine {
 
     seed_database(&state).await;
 
-    let engine: Engine = Engine::new(Arc::clone(&state), None).await;
+    let engine: Engine = Engine::new(Arc::clone(&state), None).await.expect("engine init");
     for middleware in middleware::register_data_middlewares(){
         engine.register_data_middleware(middleware).await;
     }

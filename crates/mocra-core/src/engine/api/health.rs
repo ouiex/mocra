@@ -5,7 +5,7 @@ use serde::Serialize;
 
 #[derive(Serialize)]
 pub struct Components {
-    redis: ComponentStatus,
+    cache: ComponentStatus,
     db: ComponentStatus,
 }
 
@@ -38,8 +38,8 @@ impl ComponentStatus {
 }
 
 pub async fn health_check(State(state): State<ApiState>) -> Json<HealthResponse> {
-    // Check Redis
-    let redis_status = match state.state.cache_service.ping().await {
+    // Check cache (in-process)
+    let cache_status = match state.state.cache_service.ping().await {
         Ok(_) => ComponentStatus::up(),
         Err(e) => ComponentStatus::down(e),
     };
@@ -56,7 +56,7 @@ pub async fn health_check(State(state): State<ApiState>) -> Json<HealthResponse>
     #[cfg(not(feature = "store"))]
     let db_status = ComponentStatus::up();
 
-    let global_status = if redis_status.status == "up" && db_status.status == "up" {
+    let global_status = if cache_status.status == "up" && db_status.status == "up" {
         "up"
     } else {
         "degraded"
@@ -65,7 +65,7 @@ pub async fn health_check(State(state): State<ApiState>) -> Json<HealthResponse>
     Json(HealthResponse {
         status: global_status.to_string(),
         components: Components {
-            redis: redis_status,
+            cache: cache_status,
             db: db_status,
         },
     })

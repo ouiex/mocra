@@ -83,7 +83,7 @@ impl
             let cached_task_decision = {
                 if let Some(entry) = self.decision_cache.get(&task_id) {
                     let (ts, decision) = entry.value();
-                    // 1s TTL to avoid hot-path Redis amplification.
+                    // 1s TTL to avoid hot-path cache amplification.
                     if ts.elapsed() < Duration::from_secs(1) {
                         Some(Ok(decision.clone()))
                     } else {
@@ -499,7 +499,7 @@ impl ProcessorTrait<Option<Response>, ()> for ResponsePublishProcessor {
         let item = QueuedItem::new(input);
 
         // OPTIMIZATION: Try local channel first to avoid serialization overhead
-        // If local channel is full or closed, fall back to the configured backend (Redis/Kafka)
+        // If local channel is full or closed, fall back to the configured backend (Kafka/NATS)
         let result = self.queue_manager.try_send_local_response(item);
 
         if let Err(e) = match result {

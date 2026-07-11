@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use mocra::common::interface::{
     DataMiddleware, DataMiddlewareHandle, DataStoreMiddleware, DataStoreMiddlewareHandle,
 };
-use mocra::common::model::data::{Data, DataType};
+use mocra::common::model::data::{DataEvent, DataType};
 use mocra::common::model::ModuleConfig;
 use mocra::errors::Result;
 use std::sync::Arc;
@@ -16,7 +16,7 @@ impl DataMiddleware for ObjectStoreMiddleware {
         "object_store".to_string()
     }
 
-    async fn handle_data(&mut self, data: Data, _config: &Option<ModuleConfig>) -> Option<Data> {
+    async fn handle_data(&mut self, data: DataEvent, _config: &Option<ModuleConfig>) -> Option<DataEvent> {
         Some(data)
     }
 
@@ -30,7 +30,7 @@ impl DataMiddleware for ObjectStoreMiddleware {
 
 #[async_trait]
 impl DataStoreMiddleware for ObjectStoreMiddleware {
-    async fn store_data(&mut self, data: Data, _config: &Option<ModuleConfig>) -> Result<()> {
+    async fn store_data(&mut self, data: DataEvent, _config: &Option<ModuleConfig>) -> Result<()> {
         if let DataType::File(file_data) = data.data {
             let path = std::path::Path::new(&file_data.file_path);
             if !path.exists() {

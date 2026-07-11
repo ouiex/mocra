@@ -1,7 +1,7 @@
 # 快速上手
 
 本指南带你在几分钟内从空项目跑起一个爬虫。你只需实现一个 **`Spider`**，交给
-`Mocra::builder()`，再调用 `.run()` —— 单机、内存模式，**无需数据库、无需 Redis**。
+`Mocra::builder()`，再调用 `.run()` —— 单机、内存模式，**无需数据库**。
 
 ## 前置条件
 
@@ -9,8 +9,8 @@
 
 快速上手就这一项。mocra 的默认构建是单机模式，不依赖任何外部服务。
 
-> **数据库**（PostgreSQL / SQLite）与 **Redis** 都是*可选*的 —— 它们只在进阶的多阶段
-> 与分布式路径上才用到（`store` 特性、TOML 配置，或 Redis 支撑的控制面）。本指南**无需**它们。
+> **数据库**（PostgreSQL / SQLite）是*可选*的 —— 它只在进阶的多阶段
+> 与分布式路径上才用到（`store` 特性、TOML 配置，或内嵌 `cluster-embedded` 控制面）。本指南**无需**它。
 
 ## 安装
 
@@ -186,9 +186,9 @@ engine.await.ok();
 - [模块开发](module-development.md) —— **进阶**路径：实现 `ModuleTrait` / `ModuleNodeTrait`，
   构建多阶段流水线、登录流程与自定义中间件。
 - [DAG 执行](dag-guide.md) —— 扇出 / 汇合图与推进门（advance gate）。
-- [配置参考](configuration.md) —— 完整 TOML 参考（数据库、Redis、队列、API）。
+- [配置参考](configuration.md) —— 完整 TOML 参考（数据库、队列、API）。
 - [`examples/`](../../examples/) 下的可运行示例：
-  - [`spider_quickstart.rs`](../../examples/spider_quickstart.rs) —— 上文的最小 `Spider`（无 DB / 无 Redis）。
+  - [`spider_quickstart.rs`](../../examples/spider_quickstart.rs) —— 上文的最小 `Spider`（无 DB）。
   - [`custom_downloader.rs`](../../examples/custom_downloader.rs) —— 实现 `Downloader` trait 并用 `.default_downloader()` 注入。
   - [`dashboard.rs`](../../examples/dashboard.rs) —— 内置可观测 dashboard（`--features dashboard`）。
   - [`cluster_quickstart.rs`](../../examples/cluster_quickstart.rs) —— 自组织内嵌集群（`--features cluster-embedded`）。

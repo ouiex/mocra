@@ -26,7 +26,7 @@ impl CacheAble for NodeInfo {
 
 /// Registry for managing active nodes in the cluster.
 ///
-/// Handles registration, heartbeats, and discovery of other nodes via Redis.
+/// Handles registration, heartbeats, and discovery of other nodes via the cache service.
 pub struct NodeRegistry {
     cache: Arc<CacheService>,
     node_id: String,
@@ -45,7 +45,7 @@ impl NodeRegistry {
 
     /// Sends a heartbeat to the registry to indicate this node is alive.
     ///
-    /// Updates the node information in Redis with a TTL.
+    /// Updates the node information in the cache service with a TTL.
     pub async fn heartbeat(
         &self,
         ip: &str,

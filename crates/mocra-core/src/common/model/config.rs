@@ -24,53 +24,6 @@ impl fmt::Debug for Api {
     }
 }
 
-/// Redis Configuration
-#[derive(Serialize, Deserialize, Clone)]
-pub struct RedisConfig {
-    /// Redis server hostname
-    pub redis_host: String,
-    /// Redis server port
-    pub redis_port: u16,
-    /// Redis database index
-    pub redis_db: u16,
-    /// Optional Redis username
-    pub redis_username: Option<String>,
-    /// Optional Redis password
-    pub redis_password: Option<String>,
-    /// Connection pool size
-    pub pool_size: Option<usize>,
-    /// Number of shards for stream operations
-    pub shards: Option<usize>,
-    /// Enable TLS for connection
-    pub tls: Option<bool>,
-    /// Minimum idle time in milliseconds for claiming stuck messages (default: 600000)
-    pub claim_min_idle: Option<u64>,
-    /// Number of messages to claim at once (default: 10)
-    pub claim_count: Option<usize>,
-    /// Interval in milliseconds for claiming stuck messages check (default: 60000)
-    pub claim_interval: Option<u64>,
-    /// Number of listener tasks for sharded multiplexing (default: 4)
-    pub listener_count: Option<usize>,
-}
-
-impl fmt::Debug for RedisConfig {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("RedisConfig")
-            .field("redis_host", &self.redis_host)
-            .field("redis_port", &self.redis_port)
-            .field("redis_db", &self.redis_db)
-            .field("redis_username", &self.redis_username)
-            .field(
-                "redis_password",
-                &self.redis_password.as_ref().map(|_| "***REDACTED***"),
-            )
-            .field("pool_size", &self.pool_size)
-            .field("shards", &self.shards)
-            .field("tls", &self.tls)
-            .finish()
-    }
-}
-
 /// Database Configuration
 #[derive(Serialize, Deserialize, Clone)]
 pub struct DatabaseConfig {
@@ -123,8 +76,6 @@ pub struct DownloadConfig {
 /// Synchronization Configuration
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct SyncConfig {
-    /// Redis configuration for synchronization
-    pub redis: Option<RedisConfig>,
     /// Kafka configuration for synchronization
     pub kafka: Option<KafkaConfig>,
     /// Allow rollback to older versions (default: true)
@@ -146,7 +97,6 @@ fn default_sync_envelope_enabled() -> bool {
 impl Default for SyncConfig {
     fn default() -> Self {
         Self {
-            redis: None,
             kafka: None,
             allow_rollback: true,
             envelope_enabled: false,
@@ -159,8 +109,6 @@ impl Default for SyncConfig {
 pub struct CacheConfig {
     /// Default TTL for cache items
     pub ttl: u64,
-    /// Redis configuration for cache storage
-    pub redis: Option<RedisConfig>,
     /// Compression threshold in bytes (payloads larger than this will be compressed)
     pub compression_threshold: Option<usize>,
     /// Enable L1 local cache layer (default: false)
@@ -279,15 +227,11 @@ pub struct BlobStorageConfig {
 pub struct ChannelConfig {
     /// Blob storage configuration
     pub blob_storage: Option<BlobStorageConfig>,
-    /// Redis configuration for queue
-    pub redis: Option<RedisConfig>,
     /// Kafka configuration for queue
     pub kafka: Option<KafkaConfig>,
     /// NATS (JetStream) configuration for queue
     #[serde(default)]
     pub nats: Option<NatsConfig>,
-    /// Compensator Redis configuration (for dead letter or retry)
-    pub compensator: Option<RedisConfig>,
     /// Minimum ID time (snowflake/uuid related)
     pub minid_time: u64,
     /// Channel capacity
@@ -332,8 +276,6 @@ pub struct Config {
     pub scheduler: Option<SchedulerConfig>,
     /// Synchronization configuration
     pub sync: Option<SyncConfig>,
-    /// Cookie storage configuration
-    pub cookie: Option<RedisConfig>,
     /// Message channel configuration
     pub channel_config: ChannelConfig,
     /// Proxy configuration
@@ -348,14 +290,6 @@ pub struct Config {
     pub policy: Option<PolicyConfig>,
 }
 impl Config {
-    /// Whether current config should run in single-node mode.
-    ///
-    /// Rule: if cache.redis is configured, runtime is distributed;
-    /// otherwise it is single-node mode.
-    pub fn is_single_node_mode(&self) -> bool {
-        self.cache.redis.is_none()
-    }
-
     /// Loads configuration from a TOML file
     pub fn load(path: &str) -> Result<Self, String> {
         // Read `config.toml` file content.

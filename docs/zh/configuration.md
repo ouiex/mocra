@@ -1,6 +1,6 @@
 # 配置参考 (Configuration Reference)
 
-> 单节点门面无需任何配置 —— `Mocra::builder().spider(..).run()` 无需 DB/Redis 即可运行。本参考面向通过 `.from_toml("config.toml")` 加载的**进阶路径**(DB 驱动的任务模型、Redis 协调、dashboard API 等)。
+> 单节点门面无需任何配置 —— `Mocra::builder().spider(..).run()` 无需 DB、无需任何外部服务即可运行。本参考面向通过 `.from_toml("config.toml")` 加载的**进阶路径**(DB 驱动的任务模型、分布式协调、dashboard API 等)。
 
 > 架构、流程内幕与分布式部署,见 [docs/README.md](README.md)。
 
@@ -8,17 +8,17 @@
 
 ## 什么时候才需要配置文件?
 
-通常并不需要。门面会为你构建一个无 DB、无 Redis、内存单节点的配置:
+通常并不需要。门面会为你构建一个无 DB、内存单节点的配置:
 
 ```rust
-// 无 TOML、无数据库、无 Redis —— 纯内存运行。
+// 无 TOML、无数据库、无外部服务 —— 纯内存运行。
 Mocra::builder()
     .spider(MySpider, on_item(|item| async move { /* ... */ }))
     .run()
     .await?;
 ```
 
-在 `Cargo.toml` 中加入 `mocra = "0.4"`。只有当你需要**进阶 / 分布式**路径时才需要 TOML 文件 —— 数据库驱动的任务模型、Redis(或 Kafka/NATS)协调与队列、dashboard/可观测 HTTP API、Cron 调度、代理池,或自定义错误策略。用以下方式加载:
+在 `Cargo.toml` 中加入 `mocra = "0.4"`。只有当你需要**进阶 / 分布式**路径时才需要 TOML 文件 —— 数据库驱动的任务模型、Kafka/NATS 数据面队列、dashboard/可观测 HTTP API、Cron 调度、代理池,或自定义错误策略。用以下方式加载:
 
 ```rust
 Mocra::builder()
@@ -30,12 +30,12 @@ Mocra::builder()
 
 ## 单节点 vs. 分布式
 
-运行模式由**配置推断**得出 —— 没有 `RuntimeMode` 开关。判定规则(`Config::is_single_node_mode()`,位于 `crates/mocra-core/src/common/model/config.rs`):
+运行模式在**运行时决定**,而非由任何配置字段决定 —— `Config::is_single_node_mode()` 已被移除。是否分布式取决于内嵌协调后端是否处于激活状态。
 
-- **配置了 `[cache.redis]` → 分布式。** 协调(锁、选主、共享缓存)走 Redis;启用基于 Redis 的原子脚本链路。
-- **未配置 `[cache.redis]` → 单节点。** 进程内协调 + 内存队列;跳过分布式 Redis 链路。
+- **单节点(默认)。** 进程内协调(锁、选主)、内存缓存与内存队列。无任何外部服务。
+- **分布式。** 开启 `cluster-embedded` Cargo 特性,并在 builder 上通过 `.cluster(…)` 启动内嵌集群。这会拉起一个内嵌的 **Raft + redb** 控制面 —— 提供跨节点选主、分布式锁与 KV 存储 —— 在运行时注入。只要该协调后端在运行,即为分布式。
 
-(内嵌 Raft 控制面是替代 Redis 协调的另一条、由代码驱动的路径 —— 开启 `cluster-embedded` 特性并调用 `.cluster(ClusterConfig::…)`。详见 README。)
+(在可观测 API 中,`single_node` 表示没有协调后端处于激活状态,`clustered` 表示有一个正在运行。)
 
 ## 特性开关 (Feature flags)
 
@@ -47,9 +47,7 @@ Mocra::builder()
 | `dashboard` | `[api]`(或 `.dashboard(port)`)开启的 admin/可观测 HTTP API + Web UI。 |
 | `queue-kafka` | Kafka 数据面队列(`channel_config.kafka`、`sync.kafka`、Kafka 日志输出)。 |
 | `queue-nats` | NATS JetStream 数据面队列(`channel_config.nats`)。 |
-| `cluster-embedded` | 内嵌 Raft + redb 控制面(`.cluster(…)`),Redis 协调的替代方案。 |
-
-Redis Streams 队列与 Redis 协调**无需**任何特性开关。
+| `cluster-embedded` | 内嵌 Raft + redb 控制面(`.cluster(…)`)—— 分布式协调后端:跨节点选主、分布式锁与 KV 存储。 |
 
 ## 最小可用配置
 
@@ -86,7 +84,7 @@ minid_time = 0
 capacity = 1000
 ```
 
-由于没有 `[cache.redis]`,此配置运行在**单节点**模式。
+由于没有 `.cluster(…)` 协调后端,此配置运行在**单节点**模式。
 
 ## 配置优先级 (Precedence)
 
@@ -101,7 +99,7 @@ capacity = 1000
 ## 单位约定
 
 - **秒:** `*_secs`、`timeout`、`wss_timeout`、`downloader_expire`、`cache_ttl`、`ttl`
-- **毫秒:** `claim_*`(Redis Stream 认领)、`*_ms`
+- **毫秒:** `*_ms`
 - **字节:** `compression_threshold`、`max_response_size`
 
 ---
@@ -115,12 +113,11 @@ capacity = 1000
 | `name` | 是 | string | 实例名称 / 命名空间;作为缓存与分布式键的前缀。 |
 | `db` | 是 | table | 数据库配置(可为空;见 `[db]`)。 |
 | `download_config` | 是 | table | 下载器与请求配置。 |
-| `cache` | 是 | table | 缓存配置(含 Redis,后者用于选择分布式模式)。 |
+| `cache` | 是 | table | 内存缓存配置。 |
 | `crawler` | 是 | table | 爬虫运行时行为与并发。 |
 | `channel_config` | 是 | table | 队列 / 消息通道配置。 |
 | `scheduler` | 否 | table | Cron 调度配置。 |
 | `sync` | 否 | table | 分布式状态同步配置。 |
-| `cookie` | 否 | table | Cookie / 登录态存储的 Redis 配置。 |
 | `proxy` | 否 | table | 内联代理池配置。 |
 | `api` | 否 | table | 内置 HTTP API / dashboard(需 `dashboard`)。 |
 | `event_bus` | 否 | table | 事件总线容量与并发。 |
@@ -155,29 +152,25 @@ capacity = 1000
 
 #### `enable_session` 行为说明
 
-当 `enable_session = true` 时,下载器会同步一个分布式会话:
+当 `enable_session = true` 时,下载器会通过缓存持久化会话状态:
 
 - **会话对象:** `SessionState` —— 字段 `session_id`、`module_id`、`headers`、`cookies`、`version`。
-- **存储:** Redis(经 `CacheService`)—— 因此这实质上是分布式模式下的能力。
+- **存储:** 进程内 `CacheService`(本地内存存储)。
 - **作用域:** `module_id + run_id`,使同一模块的不同运行批次互不污染。
 - **读取(发送前):** 拉取 `SessionState` 并将其 `headers`/`cookies` 合并进请求;请求自带的 `headers`/`cookies` 优先 —— session 仅补充缺失项。
 - **写入(响应后):** 从响应更新 `cookies`;仅 `request.cache_headers` 列出的 header 键会写回 session。
 - **Host-only Cookie:** 若响应 cookie 未携带 `Domain`,系统会用 `request.url` 的 host 回填后再存储。
 
-需要登录态 / 会话连续性的任务开启它;纯无状态抓取可关闭以减少 Redis 往返。
+需要登录态 / 会话连续性的任务开启它;纯无状态抓取可关闭以减少缓存往返。
 
 ### [cache]
 
-配置 `[cache.redis]` 会将运行时切换为**分布式**模式。
+进程内的内存缓存(`CacheService`,由本地存储支撑)。
 
 | 键 | 必填 | 类型 | 说明 |
 | --- | --- | --- | --- |
 | `ttl` | 是 | integer | 默认缓存 TTL(秒)。 |
-| `redis` | 否 | table | Redis 后端(见 [RedisConfig](#redisconfig-共享))。配置即代表分布式模式。 |
 | `compression_threshold` | 否 | integer | 超过该阈值的缓存载荷将被压缩(字节)。 |
-| `enable_l1` | 否 | boolean | 启用本地 L1 缓存层以减少 Redis 读(默认 false)。 |
-| `l1_ttl_secs` | 否 | integer | L1 缓存 TTL(秒,默认 30);过小会降低命中率。 |
-| `l1_max_entries` | 否 | integer | L1 最大条目数,超出即驱逐(默认 10000)。 |
 
 ### [crawler]
 
@@ -193,7 +186,6 @@ capacity = 1000
 | `parser_concurrency` | 否 | integer | 解析任务处理器并发。 |
 | `error_task_concurrency` | 否 | integer | 错误任务处理器并发。 |
 | `backpressure_retry_delay_ms` | 否 | integer | 发生队列背压(full/closed)时的重试延迟(毫秒);不填则用默认重试策略。 |
-| `dedup_ttl_secs` | 否 | integer | 请求去重 TTL(秒,默认 3600)。 |
 | `idle_stop_secs` | 否 | integer | 空闲这么多秒后自动停止引擎;`0`/不填为关闭。仅当本地队列为空且 Cron 调度器无运行中任务时才停止。 |
 
 ### [scheduler]
@@ -214,10 +206,8 @@ Cron 调度。所有字段可选。
 | `minid_time` | 是 | integer | MinID/雪花时间基准,用于生成有序 ID。 |
 | `capacity` | 是 | integer | 本地内存队列容量;过小会引发背压。 |
 | `blob_storage` | 否 | table | 将大载荷落盘(见下)。 |
-| `redis` | 否 | table | Redis Streams 队列后端(见 [RedisConfig](#redisconfig-共享))。 |
 | `kafka` | 否 | table | Kafka 队列后端(见 [KafkaConfig](#kafkaconfig-共享))。需 `queue-kafka`。 |
 | `nats` | 否 | table | NATS JetStream 队列后端(见 [NatsConfig](#natsconfig-共享))。需 `queue-nats`。 |
-| `compensator` | 否 | table | 补偿器(重试 / 死信)的 Redis 配置(见 [RedisConfig](#redisconfig-共享))。 |
 | `queue_codec` | 否 | string | 远程队列编解码:`json` 或 `msgpack`(须与生产/消费方一致)。 |
 | `batch_concurrency` | 否 | integer | 向远程队列批量刷写的最大并发(默认 10)。 |
 | `compression_threshold` | 否 | integer | 超过该阈值的队列载荷将被压缩(字节)。 |
@@ -236,20 +226,9 @@ Cron 调度。所有字段可选。
 
 | 键 | 必填 | 类型 | 说明 |
 | --- | --- | --- | --- |
-| `redis` | 否 | table | 同步用 Redis 配置(见 [RedisConfig](#redisconfig-共享))。 |
 | `kafka` | 否 | table | 同步用 Kafka 配置(见 [KafkaConfig](#kafkaconfig-共享))。需 `queue-kafka`。 |
 | `allow_rollback` | 否 | boolean | 是否允许回滚到旧值(默认 true)。 |
 | `envelope_enabled` | 否 | boolean | 是否为同步载荷启用版本化 envelope(默认 false)。 |
-
-### [cookie]
-
-一个 [RedisConfig](#redisconfig-共享),用于读取按账号的登录态 Cookie。未配置则无法从 Redis 获取 Cookie。Redis 中的 key 格式:
-
-```
-{namespace}:cookie:login_info:{account}-{platform}
-```
-
-例如 `crawler_local:cookie:login_info:benchmark-test`。其中 `{account}-{platform}` 与 `Task::id()` 一致。
 
 ### [api]
 
@@ -300,14 +279,13 @@ Cron 调度。所有字段可选。
 
 | 键 | 必填 | 类型 | 说明 |
 | --- | --- | --- | --- |
-| `backend` | 是 | string | `kafka` 或 `redis`。 |
+| `backend` | 是 | string | `kafka`。 |
 | `topic` | 是 | string | Topic 名称。 |
 | `format` | 否 | string | 仅支持 `json`。 |
 | `buffer` | 否 | integer | 缓冲区大小(默认 10000)。 |
 | `batch_size` | 否 | integer | 批量大小(保留字段)。 |
 | `compression` | 否 | string | 压缩算法(保留字段)。 |
 | `kafka` | 否 | table | 当 `backend = "kafka"` 时的 Kafka 配置(见 [KafkaConfig](#kafkaconfig-共享))。 |
-| `redis` | 否 | table | 当 `backend = "redis"` 时的 Redis 配置(见 [RedisConfig](#redisconfig-共享))。 |
 
 #### logger.prometheus
 
@@ -446,25 +424,6 @@ backoff = "None"
 
 ## 共享类型 (Shared types)
 
-### RedisConfig (共享)
-
-用于 `cache.redis`、`channel_config.redis`、`channel_config.compensator`、`cookie`、`sync.redis`,以及 `logger.outputs[].redis`。
-
-| 键 | 必填 | 类型 | 说明 |
-| --- | --- | --- | --- |
-| `redis_host` | 是 | string | Redis 主机。 |
-| `redis_port` | 是 | integer | Redis 端口。 |
-| `redis_db` | 是 | integer | Redis DB 索引。 |
-| `redis_username` | 否 | string | Redis 用户名。 |
-| `redis_password` | 否 | string | Redis 密码。 |
-| `pool_size` | 否 | integer | 连接池大小。 |
-| `shards` | 否 | integer | Stream 分片数(队列用);影响并发与吞吐。 |
-| `tls` | 否 | boolean | 启用 TLS。 |
-| `claim_min_idle` | 否 | integer | 消息空闲超过该毫秒数后会被认领(默认 600000)。 |
-| `claim_count` | 否 | integer | 每次认领的消息数(默认 10)。 |
-| `claim_interval` | 否 | integer | 认领扫描间隔(毫秒,默认 60000)。 |
-| `listener_count` | 否 | integer | 分片多路复用的入站监听任务数(默认 4)。 |
-
 ### KafkaConfig (共享)
 
 **特性:`queue-kafka`。** 用于 `channel_config.kafka`、`sync.kafka` 与 `logger.outputs[].kafka`。
@@ -491,7 +450,7 @@ backoff = "None"
 
 ## 示例:分布式配置
 
-一份贴近生产形态的配置:PostgreSQL 任务存储、Redis 协调 + 队列、dashboard API,以及多路日志。正是 `[cache.redis]` 段让它成为**分布式**。
+一份贴近生产形态的配置:PostgreSQL 任务存储、Kafka 数据面队列、dashboard API,以及多路日志。跨节点协调(选主、锁)需在代码中另行开启 —— 启用 `cluster-embedded` 特性并调用 `.cluster(…)`,详见 [部署](deployment.md)。
 
 ```toml
 name = "crawler"
@@ -519,12 +478,6 @@ max_response_size = 10485760
 [cache]
 ttl = 300
 
-[cache.redis]               # 配置即代表分布式模式
-redis_host = "127.0.0.1"
-redis_port = 6379
-redis_db = 0
-pool_size = 100
-
 [crawler]
 request_max_retries = 2
 task_max_errors = 50
@@ -532,7 +485,6 @@ module_max_errors = 10
 module_locker_ttl = 5
 task_concurrency = 200
 publish_concurrency = 200
-dedup_ttl_secs = 3600
 idle_stop_secs = 0
 
 [sync]
@@ -546,13 +498,8 @@ queue_codec = "msgpack"
 compression_threshold = 1024
 batch_concurrency = 500
 
-[channel_config.redis]
-redis_host = "127.0.0.1"
-redis_port = 6379
-redis_db = 0
-pool_size = 200
-shards = 8
-listener_count = 8
+[channel_config.kafka]      # 需要 `queue-kafka` 特性
+brokers = "127.0.0.1:9092"
 
 [event_bus]
 capacity = 200000

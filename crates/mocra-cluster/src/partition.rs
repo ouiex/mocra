@@ -11,7 +11,7 @@
 //!   取一个带单调 fencing token 的归属租约(复用 Raft 锁),陈旧属主凭更小的 token 被拒。
 //!
 //! 对有消费组的 MQ(Kafka/NATS),分区分配可直接复用消费组;此模块是**无消费组**
-//! 后端(内存 / Redis Streams)的兜底归属方案。
+//! 后端(内存)的兜底归属方案。
 
 use crate::raft::NodeId;
 

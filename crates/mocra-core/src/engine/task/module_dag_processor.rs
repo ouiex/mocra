@@ -222,7 +222,7 @@ impl ModuleDagProcessor {
 
         // Clean up all advance gate keys for this run.
         // Successors are already in memory — enumerate every edge and delete its gate key
-        // without needing a Redis SCAN.
+        // without needing a full backend SCAN.
         let gate_keys: Vec<String> = {
             let succ = self.successors.read().await;
             succ.iter()
@@ -724,7 +724,7 @@ mod tests {
     }
 
     fn make_cache() -> Arc<CacheService> {
-        Arc::new(CacheService::new(None, "test".to_string(), None, None))
+        Arc::new(CacheService::new("test".to_string(), None, None))
     }
 
     #[tokio::test]

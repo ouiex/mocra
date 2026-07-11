@@ -101,7 +101,7 @@ Liveness / readiness of the engine's backing services.
 {
   "status": "up",
   "components": {
-    "redis": { "status": "up" },
+    "cache": { "status": "up" },
     "db":    { "status": "up" }
   }
 }

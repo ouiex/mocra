@@ -260,13 +260,7 @@ impl Engine {
         };
         info!("Starting parser processor");
         let queue_manager = self.queue_manager.clone();
-        let state = self.state.clone();
-        let lua_registry = self.lua_registry.clone();
         let policy_resolver = PolicyResolver::new(self.state.config.read().await.policy.as_ref());
-        let single_node_mode = {
-            let cfg = self.state.config.read().await;
-            cfg.is_single_node_mode()
-        };
 
         self.run_processor_loop(
             "Parser",
@@ -275,125 +269,11 @@ impl Engine {
             move |task_item| {
                 let ingress = unified_task_ingress.clone();
                 let queue_manager = queue_manager.clone();
-                let state = state.clone();
-                let lua_registry = lua_registry.clone();
                 let policy_resolver = policy_resolver.clone();
-                let single_node_mode = single_node_mode;
                 async move {
                     let (task, mut ack_fn, mut nack_fn) = task_item.into_parts();
                     let task_for_dlq = task.clone();
                     let id = task.get_id();
-
-                    let module_id = task
-                        .context
-                        .module_id
-                        .clone()
-                        .or_else(|| {
-                            task.account_task
-                                .module
-                                .as_ref()
-                                .and_then(|modules| {
-                                    modules.first().map(|m| {
-                                        chain_key::module_runtime_id(
-                                            &task.account_task.account,
-                                            &task.account_task.platform,
-                                            m,
-                                        )
-                                    })
-                                })
-                        })
-                        .unwrap_or_else(|| {
-                            chain_key::module_runtime_id(
-                                &task.account_task.account,
-                                &task.account_task.platform,
-                                "unknown",
-                            )
-                        });
-                    let step_idx = task.context.step_idx.unwrap_or(0);
-                    let expected_step = step_idx.saturating_add(1);
-                    let ptm_key = chain_key::ptm_key(
-                        task.run_id,
-                        &task.account_task.account,
-                        &task.account_task.platform,
-                        &module_id,
-                        step_idx,
-                        task.prefix_request,
-                    );
-                    let dedup_key = chain_key::dedup_key(&ptm_key);
-                    let exec_key = chain_key::execution_state_key(task.run_id, &module_id);
-                    let lease_owner = state
-                        .config
-                        .read()
-                        .await
-                        .crawler
-                        .node_id
-                        .clone()
-                        .unwrap_or_else(|| format!("parser-node-{}", uuid::Uuid::now_v7()));
-                    let now_epoch = SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_secs()
-                        .to_string();
-
-                    let claim_keys = [dedup_key.as_str(), exec_key.as_str()];
-                    let expected_step_s = expected_step.to_string();
-                    let lease_ttl_s = "300".to_string();
-                    let claim_args = [
-                        expected_step_s.as_str(),
-                        lease_owner.as_str(),
-                        lease_ttl_s.as_str(),
-                        now_epoch.as_str(),
-                    ];
-
-                    if !single_node_mode {
-                        match lua_registry
-                            .eval_triplet_with_fallback(
-                                state.cache_service.as_ref(),
-                                "ptm_claim.lua",
-                                include_str!("../../lua/ptm_claim.lua"),
-                                &claim_keys,
-                                &claim_args,
-                            )
-                            .await
-                        {
-                            Ok((0, _, _)) => {}
-                            Ok((1, _, _)) | Ok((2, _, _)) => {
-                                info!("ParserTask {} already handled or stale, ack", id);
-                                if let Some(f) = ack_fn.take() {
-                                    let _ = f().await;
-                                }
-                                return;
-                            }
-                            Ok((3, msg, _)) | Ok((4, msg, _)) => {
-                                let retry_policy = RetryPolicy::default()
-                                    .with_reason(format!("ptm_claim deferred: {}", msg));
-                                Self::handle_policy_retry(
-                                    &policy_resolver,
-                                    &queue_manager,
-                                    "parser_task",
-                                    "parser_task_model",
-                                    &task_for_dlq,
-                                    &retry_policy,
-                                    &mut ack_fn,
-                                    &mut nack_fn,
-                                )
-                                .await;
-                                return;
-                            }
-                            Ok((code, msg, _)) => {
-                                warn!(
-                                    "Unexpected ptm_claim result code={} msg={}, fallback to retry",
-                                    code, msg
-                                );
-                            }
-                            Err(err) => {
-                                warn!(
-                                    "ptm_claim failed for parser task {}, fallback to retry: {}",
-                                    id, err
-                                );
-                            }
-                        }
-                    }
 
                     let result = ingress
                         .execute(
@@ -408,114 +288,6 @@ impl Engine {
                                 let _ = comp.remove_task("parser_task", &id).await;
                             }
 
-                            if !single_node_mode {
-                                let done_ttl_s = "86400".to_string();
-                                let commit_args = [
-                                    expected_step_s.as_str(),
-                                    lease_owner.as_str(),
-                                    now_epoch.as_str(),
-                                    done_ttl_s.as_str(),
-                                ];
-                                let commit_result = lua_registry
-                                    .eval_triplet_with_fallback(
-                                        state.cache_service.as_ref(),
-                                        "ptm_commit_success.lua",
-                                        include_str!("../../lua/ptm_commit_success.lua"),
-                                        &claim_keys,
-                                        &commit_args,
-                                    )
-                                    .await;
-
-                                match commit_result {
-                                    Ok((0, _, _)) => {
-                                        counter!("mocra_ptm_commit_total", "result" => "success").increment(1);
-                                    }
-                                    Ok((3, _, _)) => {
-                                        counter!("mocra_ptm_commit_total", "result" => "already_committed").increment(1);
-                                    }
-                                    Ok((1, msg, _)) => {
-                                        counter!("mocra_ptm_commit_total", "result" => "fencing_reject").increment(1);
-                                        let retry_policy = RetryPolicy::default()
-                                            .with_reason(format!(
-                                                "ptm_commit_success fencing reject: {}",
-                                                msg
-                                            ));
-                                        Self::handle_policy_retry(
-                                            &policy_resolver,
-                                            &queue_manager,
-                                            "parser_task",
-                                            "parser_task_model",
-                                            &task_for_dlq,
-                                            &retry_policy,
-                                            &mut ack_fn,
-                                            &mut nack_fn,
-                                        )
-                                        .await;
-                                        return;
-                                    }
-                                    Ok((2, msg, _)) => {
-                                        counter!("mocra_ptm_commit_total", "result" => "cas_conflict").increment(1);
-                                        let retry_policy = RetryPolicy::default()
-                                            .with_reason(format!("ptm_commit_success cas conflict: {}", msg));
-                                        Self::handle_policy_retry(
-                                            &policy_resolver,
-                                            &queue_manager,
-                                            "parser_task",
-                                            "parser_task_model",
-                                            &task_for_dlq,
-                                            &retry_policy,
-                                            &mut ack_fn,
-                                            &mut nack_fn,
-                                        )
-                                        .await;
-                                        return;
-                                    }
-                                    Ok((code, msg, _)) => {
-                                        counter!("mocra_ptm_commit_total", "result" => "unknown").increment(1);
-                                        warn!(
-                                            "Unexpected ptm_commit_success code={} msg={}, fallback retry",
-                                            code, msg
-                                        );
-                                        let retry_policy = RetryPolicy::default().with_reason(format!(
-                                            "ptm_commit_success unexpected code {}",
-                                            code
-                                        ));
-                                        Self::handle_policy_retry(
-                                            &policy_resolver,
-                                            &queue_manager,
-                                            "parser_task",
-                                            "parser_task_model",
-                                            &task_for_dlq,
-                                            &retry_policy,
-                                            &mut ack_fn,
-                                            &mut nack_fn,
-                                        )
-                                        .await;
-                                        return;
-                                    }
-                                    Err(err) => {
-                                        counter!("mocra_ptm_commit_total", "result" => "redis_error").increment(1);
-                                        warn!("ptm_commit_success failed: {}", err);
-                                        let retry_policy = RetryPolicy::default().with_reason(format!(
-                                            "ptm_commit_success redis error: {}",
-                                            err
-                                        ));
-                                        Self::handle_policy_retry(
-                                            &policy_resolver,
-                                            &queue_manager,
-                                            "parser_task",
-                                            "parser_task_model",
-                                            &task_for_dlq,
-                                            &retry_policy,
-                                            &mut ack_fn,
-                                            &mut nack_fn,
-                                        )
-                                        .await;
-                                        return;
-                                    }
-                                }
-                            }
-
                             if let Some(f) = ack_fn.take() {
                                 if let Err(e) = f().await {
                                     error!("Failed to ack parser task {}: {}", id, e);
@@ -523,76 +295,6 @@ impl Engine {
                             }
                         }
                         crate::common::processors::processor::ProcessorResult::RetryableFailure(retry_policy) => {
-                            if !single_node_mode {
-                                let error_hash = format!("retry:{}", id);
-                                let error_emit_key = chain_key::error_emit_key(
-                                    task.run_id,
-                                    &module_id,
-                                    step_idx as usize,
-                                    task.prefix_request,
-                                    &error_hash,
-                                );
-                                let fail_ttl_s = "300".to_string();
-                                let emit_ttl_s = "86400".to_string();
-                                let commit_err_keys = [
-                                    dedup_key.as_str(),
-                                    exec_key.as_str(),
-                                    error_emit_key.as_str(),
-                                ];
-                                let commit_err_args = [
-                                    lease_owner.as_str(),
-                                    fail_ttl_s.as_str(),
-                                    emit_ttl_s.as_str(),
-                                ];
-                                let commit_err_res = lua_registry
-                                    .eval_triplet_with_fallback(
-                                        state.cache_service.as_ref(),
-                                        "ptm_commit_error.lua",
-                                        include_str!("../../lua/ptm_commit_error.lua"),
-                                        &commit_err_keys,
-                                        &commit_err_args,
-                                    )
-                                    .await;
-                                match commit_err_res {
-                                    Ok((0, _, _)) => {
-                                        counter!("mocra_ptm_commit_total", "result" => "error_emit_ok").increment(1);
-                                    }
-                                    Ok((1, _, _)) => {
-                                        counter!("mocra_ptm_commit_total", "result" => "error_already_emitted")
-                                            .increment(1);
-                                    }
-                                    Ok((2, msg, _)) => {
-                                        counter!("mocra_ptm_commit_total", "result" => "fencing_reject").increment(1);
-                                        let retry_policy = RetryPolicy::default().with_reason(format!(
-                                            "ptm_commit_error fencing reject: {}",
-                                            msg
-                                        ));
-                                        Self::handle_policy_retry(
-                                            &policy_resolver,
-                                            &queue_manager,
-                                            "parser_task",
-                                            "parser_task_model",
-                                            &task_for_dlq,
-                                            &retry_policy,
-                                            &mut ack_fn,
-                                            &mut nack_fn,
-                                        )
-                                        .await;
-                                        return;
-                                    }
-                                    Ok((code, msg, _)) => {
-                                        counter!("mocra_ptm_commit_total", "result" => "unknown").increment(1);
-                                        warn!(
-                                            "Unexpected ptm_commit_error code={} msg={}, continue retry flow",
-                                            code, msg
-                                        );
-                                    }
-                                    Err(err) => {
-                                        counter!("mocra_ptm_commit_total", "result" => "redis_error").increment(1);
-                                        warn!("ptm_commit_error failed on retryable branch: {}", err);
-                                    }
-                                }
-                            }
                             Self::handle_policy_retry(
                                 &policy_resolver,
                                 &queue_manager,
@@ -606,55 +308,6 @@ impl Engine {
                             .await;
                         }
                         crate::common::processors::processor::ProcessorResult::FatalFailure(err) => {
-                            if !single_node_mode {
-                                let error_hash = format!("fatal:{}", id);
-                                let error_emit_key = chain_key::error_emit_key(
-                                    task.run_id,
-                                    &module_id,
-                                    step_idx as usize,
-                                    task.prefix_request,
-                                    &error_hash,
-                                );
-                                let fail_ttl_s = "300".to_string();
-                                let emit_ttl_s = "86400".to_string();
-                                let commit_err_keys = [
-                                    dedup_key.as_str(),
-                                    exec_key.as_str(),
-                                    error_emit_key.as_str(),
-                                ];
-                                let commit_err_args = [
-                                    lease_owner.as_str(),
-                                    fail_ttl_s.as_str(),
-                                    emit_ttl_s.as_str(),
-                                ];
-                                let commit_err_res = lua_registry
-                                    .eval_triplet_with_fallback(
-                                        state.cache_service.as_ref(),
-                                        "ptm_commit_error.lua",
-                                        include_str!("../../lua/ptm_commit_error.lua"),
-                                        &commit_err_keys,
-                                        &commit_err_args,
-                                    )
-                                    .await;
-                                match commit_err_res {
-                                    Ok((0, _, _)) => {
-                                        counter!("mocra_ptm_commit_total", "result" => "error_emit_ok").increment(1);
-                                    }
-                                    Ok((1, _, _)) => {
-                                        counter!("mocra_ptm_commit_total", "result" => "error_already_emitted")
-                                            .increment(1);
-                                    }
-                                    Ok((2, _, _)) => {
-                                        counter!("mocra_ptm_commit_total", "result" => "fencing_reject").increment(1);
-                                    }
-                                    Ok((_, _, _)) => {
-                                        counter!("mocra_ptm_commit_total", "result" => "unknown").increment(1);
-                                    }
-                                    Err(_) => {
-                                        counter!("mocra_ptm_commit_total", "result" => "redis_error").increment(1);
-                                    }
-                                }
-                            }
                             Self::handle_policy_failure(
                                 &policy_resolver,
                                 &queue_manager,
