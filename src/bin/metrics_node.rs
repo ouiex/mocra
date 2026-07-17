@@ -27,7 +27,12 @@ async fn main() {
     tokio::pin!(start_fut);
 
     tokio::select! {
-        _ = &mut start_fut => {}
+        res = &mut start_fut => {
+            if let Err(e) = res {
+                eprintln!("metrics_node engine failed to start: {e}");
+                std::process::exit(1);
+            }
+        }
         _ = signal::ctrl_c() => {
             engine.shutdown().await;
             let _ = (&mut start_fut).await;

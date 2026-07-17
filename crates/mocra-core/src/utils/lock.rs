@@ -460,12 +460,10 @@ impl DistributedLockManager {
             .map(|l| (l.local_map.clone(), l.lock_info.clone()));
         // guard dropped here
         if let Some((local_map, lock_info)) = snapshot {
-            if let Some(map) = &local_map {
-                if let Some(entry) = map.get(&lock_info.key) {
-                    Ok(entry.0 == lock_info.value && entry.1 > Instant::now())
-                } else {
-                    Ok(false)
-                }
+            if let Some(map) = &local_map
+                && let Some(entry) = map.get(&lock_info.key)
+            {
+                Ok(entry.0 == lock_info.value && entry.1 > Instant::now())
             } else {
                 Ok(false)
             }

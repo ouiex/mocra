@@ -1,4 +1,8 @@
 use super::*;
+// `Error` / `ErrorKind` are only constructed in the dashboard-gated API startup below.
+use crate::errors::Result;
+#[cfg(feature = "dashboard")]
+use crate::errors::{Error, ErrorKind};
 
 impl Engine {
     /// Registers optional event consumers (console log) and binds subscriptions.
@@ -25,17 +29,31 @@ impl Engine {
     /// 2. Event bus initialization.
     /// 3. Background services (cleaners/monitor/idle-stop watcher).
     /// 4. Chain construction and processor loops.
-    pub async fn start(&self) {
+    ///
+    /// Returns an error if a configured API port cannot be bound; every other phase logs and
+    /// carries on. Once started, this only returns when the processors stop.
+    pub async fn start(&self) -> Result<()> {
         info!("Starting Schedule with event-driven architecture");
         #[cfg(feature = "dashboard")]
         {
             let api_config = self.state.config.read().await.api.clone();
             if let Some(api) = api_config {
-                self.start_api(api.port).await;
+                // Abort rather than run on: an API port was configured, and enabling the dashboard
+                // also turns off single-node idle stop so the panel stays reachable. Carrying on
+                // after a failed bind would leave a process that never exits and serves nothing.
+                self.start_api(api.port).await.map_err(|e| {
+                    Error::new(
+                        ErrorKind::Service,
+                        Some(format!(
+                            "cannot bind the API server to port {}: {e}",
+                            api.port
+                        )),
+                    )
+                })?;
                 info!("API server started on host:  http://127.0.0.1:{}", api.port);
                 if api.api_key.is_none() {
                     warn!(
-                        "No API Key configured; API requests will be rejected. Set 'api.api_key' in config to enable access."
+                        "No API Key configured; the admin endpoints (/start_work, /nodes, /dlq, /control/*) will return 403. The dashboard, /health, /metrics and /observability/* stay available. Set 'api.api_key' in config to enable the admin endpoints."
                     );
                 }
             }
@@ -95,7 +113,7 @@ impl Engine {
         if idle_stop_secs > 0 {
             let queue_manager = self.queue_manager.clone();
             let cron_scheduler = self.cron_scheduler.clone();
-            let inflight_counter = self.inflight_counter.clone();
+            let inflight_counter = self.inflight.clone();
             let shutdown_tx = self.shutdown_tx.clone();
             let mut shutdown_rx = self.shutdown_tx.subscribe();
             tokio::spawn(async move {
@@ -112,7 +130,7 @@ impl Engine {
                             let (task, download, response, parser, error, remote_task) =
                                 queue_manager.local_pending_breakdown().await;
                             let pending = task + download + response + parser + error + remote_task;
-                            let inflight = inflight_counter.load(std::sync::atomic::Ordering::Relaxed);
+                            let inflight = inflight_counter.total();
                             let has_running_cron_tasks = cron_scheduler.has_running_tasks();
 
                             // Always log state every 5 seconds for diagnostics
@@ -222,6 +240,7 @@ impl Engine {
             run_processor!("ResponseProcessor", self.start_response_parser_processor()),
             run_processor!("NodeRegistry", self.start_node_registry()),
         );
+        Ok(())
     }
 
     /// Triggers graceful shutdown for processors and optional event infrastructure.
@@ -268,32 +287,27 @@ impl Engine {
         })
     }
 
-    /// Starts the HTTP API server in a detached task.
+    /// Binds the HTTP API port, then serves it on a detached task.
+    ///
+    /// The bind happens here rather than inside the spawned task, so a failure (a port already in
+    /// use, most often) reaches the caller instead of being stranded in a detached task while
+    /// startup reports success.
     #[cfg(feature = "dashboard")]
-    pub async fn start_api(&self, port: u16) {
-        let queue_manager = self.queue_manager.clone();
-        let prometheus_handle = self.prometheus_handle.clone();
-        let state = self.state.clone();
-        let node_registry = self.node_registry.clone();
+    pub async fn start_api(&self, port: u16) -> std::io::Result<()> {
+        let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
+        let listener = tokio::net::TcpListener::bind(addr).await?;
+        info!("Successfully bound to address {:?}", listener.local_addr()?);
+
+        let api_state = crate::engine::api::state::ApiState {
+            queue_manager: self.queue_manager.clone(),
+            prometheus_handle: self.prometheus_handle.clone(),
+            state: self.state.clone(),
+            node_registry: self.node_registry.clone(),
+            inflight: self.inflight.clone(),
+            outcomes: self.outcomes.clone(),
+        };
+        let app = crate::engine::api::router::router(api_state);
         tokio::spawn(async move {
-            let api_state = crate::engine::api::state::ApiState {
-                queue_manager,
-                prometheus_handle,
-                state,
-                node_registry,
-            };
-            let app = crate::engine::api::router::router(api_state);
-            let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
-            let listener = match tokio::net::TcpListener::bind(addr).await {
-                Ok(listener) => {
-                    info!("Successfully bound to address {:?}", listener);
-                    listener
-                }
-                Err(e) => {
-                    error!("Failed to bind to address {:?}", e);
-                    return;
-                }
-            };
             match axum::serve(listener, app.into_make_service()).await {
                 Ok(_) => {
                     info!("API server stopped gracefully");
@@ -303,6 +317,7 @@ impl Engine {
                 }
             }
         });
+        Ok(())
     }
 
     /// Starts cron scheduling loop.

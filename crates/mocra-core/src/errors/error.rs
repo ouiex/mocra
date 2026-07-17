@@ -146,7 +146,7 @@ impl Error {
 
 impl fmt::Debug for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let mut f = f.debug_struct("crawler_engine::Error");
+        let mut f = f.debug_struct("mocra::Error");
         f.field("kind", &self.inner.kind);
         if let Some(ref message) = self.inner.message {
             f.field("message", message);
