@@ -24,20 +24,20 @@ Then enable it one of two ways.
 ```rust
 Mocra::builder()
     .spider(MySpider, on_item(|item: Item| async move { /* ... */ }))
-    .dashboard(8080)   // GET / → web UI; /metrics, /observability/*
+    .dashboard(12800)   // GET / → web UI; /metrics, /observability/*
     .run()
     .await?;
 ```
 
 ```bash
-cargo run --example dashboard --features dashboard   # then open http://127.0.0.1:8080
+cargo run --example dashboard --features dashboard   # then open http://127.0.0.1:12800
 ```
 
 **TOML config (`from_toml`):** add an `[api]` section. This is the way to set an **API key**, which the write / control endpoints require.
 
 ```toml
 [api]
-port = 8080
+port = 12800
 api_key = "your-secret-key"   # required to use the write / control endpoints
 rate_limit = 50               # optional: requests per second, per caller
 ```

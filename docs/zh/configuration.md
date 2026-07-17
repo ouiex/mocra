@@ -456,7 +456,7 @@ backoff = "None"
 name = "crawler"
 
 [api]                       # 需要 `dashboard` 特性
-port = 8080
+port = 12800
 
 [db]                        # DB 任务模型需要 `store` 特性
 url = "postgres://user:password@127.0.0.1:5432/crawler"

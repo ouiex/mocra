@@ -12,7 +12,7 @@
 //! | Content-based routing | `follow` passes only the URL (no custom meta), so page features tell listing / author pages apart |
 //! | Typed emission | An `Item` enum (quote / author); `#[serde(tag = "kind")]` tags each saved row |
 //! | Custom persistence | Implement `DataSink` to split the two kinds into two JSONL files |
-//! | Observability (optional) | With `--features dashboard`, `.dashboard(8080)` starts the panel |
+//! | Observability (optional) | With `--features dashboard`, `.dashboard(12800)` starts the panel |
 //!
 //! Run it:
 //!
@@ -20,7 +20,7 @@
 //! cargo run --example quotes_scraper
 //! # Output: ./data/quotes/quotes.jsonl and ./data/quotes/authors.jsonl
 //!
-//! # With the monitoring panel (open http://127.0.0.1:8080 in a browser):
+//! # With the monitoring panel (open http://127.0.0.1:12800 in a browser):
 //! cargo run --example quotes_scraper --features dashboard
 //! ```
 //!
@@ -303,8 +303,8 @@ async fn main() -> Result<()> {
     // disables idle stop, so Ctrl+C is needed to exit).
     #[cfg(feature = "dashboard")]
     {
-        builder = builder.dashboard(8080);
-        println!("dashboard: http://127.0.0.1:8080 (Ctrl+C to stop)");
+        builder = builder.dashboard(12800);
+        println!("dashboard: http://127.0.0.1:12800 (Ctrl+C to stop)");
     }
 
     builder.run().await

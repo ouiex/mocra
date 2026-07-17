@@ -178,12 +178,12 @@ mocra = { version = "0.4", features = ["dashboard"] }
 ```rust
 Mocra::builder()
     .spider(MySpider, on_item(|_: Item| async move { /* ... */ }))
-    .dashboard(8080)   // GET / → Web UI；  /metrics、  /health、  /observability/*
+    .dashboard(12800)   // GET / → Web UI；  /metrics、  /health、  /observability/*
     .run().await?;
 ```
 
 ```bash
-cargo run --example dashboard --features dashboard   # 然后打开 http://127.0.0.1:8080
+cargo run --example dashboard --features dashboard   # 然后打开 http://127.0.0.1:12800
 ```
 
 端点：
@@ -214,7 +214,7 @@ docker compose -f docker-compose.monitoring.yml up -d
 
 # Prometheus: http://localhost:9090
 # Grafana:    http://localhost:3000   （admin / admin）
-# 指标:       http://localhost:8080/metrics   （即你的 .dashboard(port)）
+# 指标:       http://localhost:12800/metrics   （即你的 .dashboard(port)）
 ```
 
 预置的 Grafana 数据源与仪表盘位于 `monitoring/grafana/provisioning`。

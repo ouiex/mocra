@@ -125,12 +125,12 @@ mocra = { version = "0.4", features = ["dashboard"] }
 ```rust
 Mocra::builder()
     .spider(MySpider, on_item(|x: Item| async move { /* ... */ }))
-    .dashboard(8080)   // GET / → 网页面板；/metrics、/observability/{engine,cluster,system,logs}
+    .dashboard(12800)   // GET / → 网页面板；/metrics、/observability/{engine,cluster,system,logs}
     .run().await?;
 ```
 
 ```bash
-cargo run --example dashboard --features dashboard   # 然后浏览器打开 http://127.0.0.1:8080
+cargo run --example dashboard --features dashboard   # 然后浏览器打开 http://127.0.0.1:12800
 ```
 
 只读端点（`/`、`/metrics`、`/health`、`/observability/*`）开启了 CORS、免 API key，独立前端也可跨域消费；写操作端点（`/control/*`、`/start_work`）仍需鉴权。
@@ -283,7 +283,7 @@ docker compose -f docker-compose.monitoring.yml up -d
 
 # Prometheus: http://localhost:9090
 # Grafana:    http://localhost:3000
-# 指标:      http://localhost:8080/metrics
+# 指标:      http://localhost:12800/metrics
 ```
 
 ## 许可证

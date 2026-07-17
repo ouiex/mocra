@@ -124,12 +124,12 @@ mocra = { version = "0.4", features = ["dashboard"] }
 ```rust
 Mocra::builder()
     .spider(MySpider, on_item(|x: Item| async move { /* ... */ }))
-    .dashboard(8080)   // GET / → web UI;  /metrics,  /observability/{engine,cluster,system,logs}
+    .dashboard(12800)   // GET / → web UI;  /metrics,  /observability/{engine,cluster,system,logs}
     .run().await?;
 ```
 
 ```bash
-cargo run --example dashboard --features dashboard   # then open http://127.0.0.1:8080
+cargo run --example dashboard --features dashboard   # then open http://127.0.0.1:12800
 ```
 
 The read-only endpoints (`/`, `/metrics`, `/health`, `/observability/*`) are CORS-enabled and need no API key, so a standalone frontend can consume them cross-origin; write endpoints (`/control/*`, `/start_work`) stay authenticated.
@@ -281,7 +281,7 @@ docker compose -f docker-compose.monitoring.yml up -d
 
 # Prometheus: http://localhost:9090
 # Grafana:    http://localhost:3000
-# Metrics:    http://localhost:8080/metrics
+# Metrics:    http://localhost:12800/metrics
 ```
 
 ## License

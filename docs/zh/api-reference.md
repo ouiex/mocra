@@ -24,20 +24,20 @@ mocra = { version = "0.4", features = ["dashboard"] }
 ```rust
 Mocra::builder()
     .spider(MySpider, on_item(|item: Item| async move { /* ... */ }))
-    .dashboard(8080)   // GET / → Web UI; /metrics、/observability/*
+    .dashboard(12800)   // GET / → Web UI; /metrics、/observability/*
     .run()
     .await?;
 ```
 
 ```bash
-cargo run --example dashboard --features dashboard   # 然后浏览器打开 http://127.0.0.1:8080
+cargo run --example dashboard --features dashboard   # 然后浏览器打开 http://127.0.0.1:12800
 ```
 
 **TOML 配置（`from_toml`):** 添加 `[api]` 段。这是设置 **API key** 的方式,而写 / 控制端点需要它。
 
 ```toml
 [api]
-port = 8080
+port = 12800
 api_key = "your-secret-key"   # 使用写 / 控制端点所必需
 rate_limit = 50               # 可选:每秒请求数,按调用方计
 ```

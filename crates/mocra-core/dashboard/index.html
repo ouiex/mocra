@@ -37,6 +37,7 @@
   .card { grid-column: span 12; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; }
   @media (min-width: 720px) { .card.half { grid-column: span 6; } .card.third { grid-column: span 4; } }
   .card h2 { margin: 0 0 12px; font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); font-weight: 600; }
+  .card h2 .sub { text-transform: none; letter-spacing: 0; opacity: .7; font-weight: 400; }
   .row { display: flex; gap: 10px; flex-wrap: wrap; }
   .badge { display: inline-flex; align-items: center; gap: 6px; background: var(--panel2); border: 1px solid var(--border); border-radius: 999px; padding: 3px 10px; font-size: 12px; }
   .badge.good { color: var(--good); border-color: rgba(63,185,80,.4); }
@@ -71,13 +72,23 @@
   .lvl.INFO { color: var(--good); } .lvl.DEBUG, .lvl.TRACE { color: var(--muted); }
   .empty { color: var(--muted); text-align: center; padding: 28px; font-size: 13px; }
   .stats .empty { grid-column: 1 / -1; }
+  table.tp { width: 100%; border-collapse: collapse; font-size: 13px; }
+  table.tp th { text-align: right; padding: 6px 10px; color: var(--muted); font-weight: 600; font-size: 11px;
+                text-transform: uppercase; letter-spacing: .04em; border-bottom: 1px solid var(--border); }
+  table.tp th:first-child, table.tp td:first-child { text-align: left; }
+  table.tp td { text-align: right; padding: 8px 10px; font-family: var(--mono); border-bottom: 1px solid rgba(48,54,61,.5); }
+  table.tp td.stage { font-family: inherit; color: var(--muted); }
+  table.tp td.ok { color: var(--good); }
+  table.tp td.bad { color: var(--bad); }
+  table.tp td.zero { color: var(--muted); }
+  table.tp td.rate { color: var(--accent); font-weight: 600; }
   .hint { color: var(--muted); font-size: 12px; margin-top: 8px; }
 </style>
 </head>
 <body>
 <header>
   <span class="brand"><span class="dot" id="statusDot"></span> mocra <span style="color:var(--muted);font-weight:400">dashboard</span></span>
-  <input class="endpoint" id="endpoint" placeholder="http://127.0.0.1:8080" spellcheck="false" />
+  <input class="endpoint" id="endpoint" placeholder="http://127.0.0.1:12800" spellcheck="false" />
   <input class="apikey" id="apikey" placeholder="API key (optional)" spellcheck="false" />
   <button class="primary" id="connectBtn">Connect</button>
   <div class="spacer"></div>
@@ -127,8 +138,14 @@
 
     <!-- Tasks / queues -->
     <section class="card">
-      <h2>Tasks · Pending by queue</h2>
+      <h2>Tasks · Active by stage <span class="sub">(running + queued)</span></h2>
       <div class="stats" id="queueStats"><div class="empty">Not connected</div></div>
+    </section>
+
+    <!-- Throughput -->
+    <section class="card">
+      <h2>Throughput <span class="sub">(cumulative since engine start)</span></h2>
+      <div id="tpWrap"><div class="empty">Not connected</div></div>
     </section>
 
     <!-- Logs -->
@@ -172,12 +189,20 @@
   // Served directly by the engine → default to the same origin; opened as a standalone
   // file (file://) → default to the local engine.
   var defaultEndpoint = (location.protocol === "http:" || location.protocol === "https:")
-    ? location.origin : "http://127.0.0.1:8080";
+    ? location.origin : "http://127.0.0.1:12800";
 
   var state = {
     base: "", apiKey: "", timer: null, intervalMs: 2000,
-    connected: false, logPaused: false, inFlight: false,
+    connected: false, logPaused: false, inFlight: false, inFlightSince: 0,
+    // Previous throughput sample, for the per-second rates. The server only reports cumulative
+    // counters; the rate is the delta between two polls.
+    prevTp: null,
   };
+
+  // Every request needs a deadline. A socket that stalls rather than fails — the engine restarting
+  // mid-request, a sleeping laptop — leaves fetch pending forever, and poll() below would never
+  // clear `inFlight`, freezing the panel on stale numbers with the dot still green.
+  var REQUEST_TIMEOUT_MS = 8000;
 
   var LEVEL_RANK = { TRACE: 0, DEBUG: 1, INFO: 2, WARN: 3, ERROR: 4 };
 
@@ -201,10 +226,13 @@
   function fetchJSON(path) {
     var opts = { headers: {} };
     if (state.apiKey) opts.headers["x-api-key"] = state.apiKey;
+    var ctl = typeof AbortController !== "undefined" ? new AbortController() : null;
+    if (ctl) opts.signal = ctl.signal;
+    var timer = ctl ? setTimeout(function () { ctl.abort(); }, REQUEST_TIMEOUT_MS) : null;
     return fetch(apiUrl(path), opts).then(function (r) {
       if (!r.ok) throw new Error(path + " → " + r.status);
       return r.json();
-    });
+    }).finally(function () { if (timer) clearTimeout(timer); });
   }
 
   function renderEngine(e) {
@@ -214,25 +242,37 @@
     b("namespace: " + e.namespace, "accent");
     b(e.single_node ? "single node" : "multi node", e.single_node ? "" : "good");
     b(e.clustered ? "clustered" : "no coordination backend", e.clustered ? "good" : "");
-    b("pending " + (e.pending ? e.pending.total : 0));
+    var out = e.outstanding ? e.outstanding.total : 0;
+    b(out ? "working · " + out + " tasks" : "idle", out ? "good" : "");
+    // Backpressure only: pending sits at 0 whenever the processors keep up, so surface it as a
+    // warning when it appears rather than as a permanent zero.
+    if (e.pending && e.pending.total) b("backlog " + e.pending.total, "warn");
     $("engineHint").textContent = "";
   }
 
   function renderQueues(e) {
     var wrap = $("queueStats");
-    if (!e || !e.pending) { wrap.innerHTML = '<div class="empty">No data</div>'; return; }
-    var p = e.pending;
+    if (!e || !e.outstanding) { wrap.innerHTML = '<div class="empty">No data</div>'; return; }
+    var o = e.outstanding, f = e.inflight || {}, p = e.pending || {};
+    // Each cell is outstanding (= in-flight + queued) for that stage, with the split in the
+    // tooltip. Showing queued alone would read 0 for the whole of a healthy run.
     var items = [
-      ["task", p.task, ""], ["download", p.download, ""], ["response", p.response, ""],
-      ["parser", p.parser, ""], ["error", p.error, "err"], ["remote", p.remote_task, ""],
-      ["total", p.total, "total"],
+      ["task", "task"], ["download", "download"], ["response", "response"],
+      ["parser", "parser"], ["error", "error"], ["remote", "remote_task"],
     ];
     wrap.innerHTML = "";
     items.forEach(function (it) {
-      var d = document.createElement("div"); d.className = "stat" + (it[2] ? " " + it[2] : "");
-      d.innerHTML = '<div class="n">' + (it[1] == null ? "—" : it[1]) + '</div><div class="k">' + it[0] + "</div>";
+      var d = document.createElement("div");
+      d.className = "stat" + (it[0] === "error" ? " err" : "");
+      d.title = it[0] + ": " + (f[it[1]] || 0) + " running, " + (p[it[1]] || 0) + " queued";
+      d.innerHTML = '<div class="n">' + (o[it[1]] == null ? "—" : o[it[1]]) + '</div><div class="k">' + it[0] + "</div>";
       wrap.appendChild(d);
     });
+    var total = document.createElement("div");
+    total.className = "stat total";
+    total.title = "total: " + (f.total || 0) + " running, " + (p.total || 0) + " queued";
+    total.innerHTML = '<div class="n">' + o.total + '</div><div class="k">total</div>';
+    wrap.appendChild(total);
   }
 
   function renderSystem(s) {
@@ -258,6 +298,43 @@
     }).join("");
   }
 
+  var TP_STAGES = [["task", "task"], ["request", "request"], ["parse", "parse"], ["store", "store"]];
+
+  function renderThroughput(e) {
+    var wrap = $("tpWrap");
+    if (!e || !e.throughput) { wrap.innerHTML = '<div class="empty">No data</div>'; return; }
+    var tp = e.throughput, now = Date.now(), prev = state.prevTp;
+    var dt = prev ? (now - prev.at) / 1000 : 0;
+
+    var rows = TP_STAGES.map(function (st) {
+      var s = tp[st[1]] || { total: 0, success: 0, failure: 0, success_rate: null };
+      // Rate from the delta between polls. A negative delta means the engine restarted and its
+      // counters went back to zero — show nothing rather than a bogus number.
+      var rate = "—";
+      if (prev && dt > 0) {
+        var d = s.total - (prev.stats[st[1]] || 0);
+        if (d >= 0) rate = (d / dt).toFixed(d / dt >= 10 ? 0 : 1);
+      }
+      var pct = s.success_rate == null ? "—" : (s.success_rate * 100).toFixed(1) + "%";
+      return "<tr>" +
+        '<td class="stage">' + st[0] + "</td>" +
+        "<td>" + s.total + "</td>" +
+        '<td class="' + (s.success ? "ok" : "zero") + '">' + s.success + "</td>" +
+        '<td class="' + (s.failure ? "bad" : "zero") + '">' + s.failure + "</td>" +
+        "<td>" + pct + "</td>" +
+        '<td class="rate">' + rate + "</td>" +
+        "</tr>";
+    }).join("");
+
+    wrap.innerHTML =
+      '<table class="tp"><thead><tr><th>stage</th><th>total</th><th>ok</th><th>failed</th>' +
+      "<th>success</th><th>/sec</th></tr></thead><tbody>" + rows + "</tbody></table>";
+
+    var stats = {};
+    TP_STAGES.forEach(function (st) { stats[st[1]] = (tp[st[1]] || {}).total || 0; });
+    state.prevTp = { at: now, stats: stats };
+  }
+
   function esc(s) { return String(s == null ? "" : s).replace(/[&<>]/g, function (c) { return { "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]; }); }
   function renderLogs(list) {
     var body = $("logBody");
@@ -280,8 +357,14 @@
   }
 
   function poll() {
-    if (state.inFlight) return;
+    if (state.inFlight) {
+      // Watchdog. The deadline in fetchJSON should always settle the batch, but a poll that
+      // somehow never resolves would latch this flag and silently freeze the panel forever — a
+      // duplicate request is the cheaper failure.
+      if (Date.now() - state.inFlightSince < REQUEST_TIMEOUT_MS * 2) return;
+    }
     state.inFlight = true;
+    state.inFlightSince = Date.now();
     var limit = $("logLimit").value || "200";
     Promise.allSettled([
       fetchJSON("/observability/engine"),
@@ -293,7 +376,7 @@
       // The engine endpoint is the source of truth for "connected or not".
       if (res[0].status !== "fulfilled") { onDisconnect(res[0].reason); return; }
       state.connected = true; setDot("on");
-      renderEngine(engine); renderQueues(engine);
+      renderEngine(engine); renderQueues(engine); renderThroughput(engine);
       renderSystem(res[1].status === "fulfilled" ? res[1].value : null);
       renderCluster(res[2].status === "fulfilled" ? res[2].value : null);
       if (res[3].status === "fulfilled" && !res[3].value.__skip) renderLogs(res[3].value);
@@ -303,6 +386,9 @@
 
   function onDisconnect(err) {
     state.connected = false; setDot("err");
+    // Drop the rate baseline: whatever we reconnect to may be a restarted engine whose counters
+    // began again at zero, and a stale baseline would produce a nonsense first rate.
+    state.prevTp = null;
     $("engineBadges").innerHTML = '<span class="badge warn">connection failed</span>';
     $("engineHint").textContent = "Cannot reach " + state.base + " — " + (err && err.message ? err.message : "check the endpoint / CORS / whether the dashboard feature is enabled");
     $("lastUpdated").textContent = "Connection failed";

@@ -10,7 +10,7 @@
 //!
 //! ```bash
 //! cargo run --example dashboard --features dashboard
-//! # then open http://127.0.0.1:8080 in a browser
+//! # then open http://127.0.0.1:12800 in a browser
 //! ```
 //!
 //! This spider keeps fetching a batch of URLs so the queue / log / metric panels have live data to
@@ -58,11 +58,11 @@ impl Spider for Demo {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // The port can be overridden with the PORT environment variable (defaults to 8080).
+    // The port can be overridden with the PORT environment variable (defaults to 12800).
     let port: u16 = std::env::var("PORT")
         .ok()
         .and_then(|p| p.parse().ok())
-        .unwrap_or(8080);
+        .unwrap_or(12800);
     println!("dashboard: open http://127.0.0.1:{port} for metrics / logs / tasks / performance");
     Mocra::builder()
         .spider(

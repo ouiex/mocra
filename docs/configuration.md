@@ -485,7 +485,7 @@ with the `cluster-embedded` feature and `.cluster(…)` — see [deployment](dep
 name = "crawler"
 
 [api]                       # requires the `dashboard` feature
-port = 8080
+port = 12800
 
 [db]                        # requires the `store` feature for the DB task model
 url = "postgres://user:password@127.0.0.1:5432/crawler"
