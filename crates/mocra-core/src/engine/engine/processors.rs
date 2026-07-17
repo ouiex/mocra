@@ -32,11 +32,15 @@ impl Engine {
     }
 
     /// Shared runner for queue-backed processors with pause/shutdown awareness.
+    ///
+    /// `inflight` is this stage's counter, passed in explicitly so each processor reports its own
+    /// in-flight depth rather than all of them sharing one number.
     async fn run_processor_loop<T, F, Fut>(
         &self,
         name: &str,
         receiver: Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<T>>>,
         concurrency: usize,
+        inflight: Arc<std::sync::atomic::AtomicUsize>,
         execute_fn: F,
     ) where
         T: Identifiable + Send + 'static,
@@ -48,7 +52,7 @@ impl Engine {
             self.shutdown_tx.subscribe(),
             self.pause_tx.subscribe(),
             concurrency,
-            self.inflight_counter.clone(),
+            inflight,
         );
 
         runner.run(receiver, execute_fn).await;
@@ -70,14 +74,18 @@ impl Engine {
         let queue_manager = self.queue_manager.clone();
         let policy_resolver = PolicyResolver::new(self.state.config.read().await.policy.as_ref());
 
+        let outcomes = self.outcomes.task.clone();
+
         self.run_processor_loop(
             "Task",
             self.queue_manager.get_task_pop_channel(),
             concurrency,
+            self.inflight.task.clone(),
             move |task_item| {
                 let ingress = unified_task_ingress.clone();
                 let queue_manager = queue_manager.clone();
                 let policy_resolver = policy_resolver.clone();
+                let outcomes = outcomes.clone();
                 async move {
                     let (task, mut ack_fn, mut nack_fn) = task_item.into_parts();
                     let task_for_dlq = task.clone();
@@ -90,6 +98,7 @@ impl Engine {
                             mut stream,
                         ) => {
                             while stream.next().await.is_some() {}
+                            outcomes.record_success();
                             if let Some(comp) = &queue_manager.compensator {
                                 let _ = comp.remove_task("task", &id).await;
                             }
@@ -117,6 +126,7 @@ impl Engine {
                         crate::common::processors::processor::ProcessorResult::FatalFailure(
                             err,
                         ) => {
+                            outcomes.record_failure();
                             Self::handle_policy_failure(
                                 &policy_resolver,
                                 &queue_manager,
@@ -173,15 +183,19 @@ impl Engine {
         let queue_manager = self.queue_manager.clone();
         let policy_resolver = PolicyResolver::new(self.state.config.read().await.policy.as_ref());
 
+        let outcomes = self.outcomes.request.clone();
+
         self.run_processor_loop(
             "Download",
             self.queue_manager.get_request_pop_channel(),
             concurrency,
+            self.inflight.download.clone(),
             move |request_item| {
                 let download_chain = download_chain.clone();
                 let wss_chain = wss_download_chain.clone();
                 let queue_manager = queue_manager.clone();
                 let policy_resolver = policy_resolver.clone();
+                let outcomes = outcomes.clone();
                 async move {
                     let (request, mut ack_fn, mut nack_fn) = request_item.into_parts();
                     let request_for_dlq = request.clone();
@@ -204,6 +218,7 @@ impl Engine {
 
                     match result {
                         crate::common::processors::processor::ProcessorResult::Success(_) => {
+                            outcomes.record_success();
                             if let Some(comp) = &queue_manager.compensator {
                                 let _ = comp.remove_task("request", &id).await;
                             }
@@ -227,6 +242,7 @@ impl Engine {
                             .await;
                         }
                         crate::common::processors::processor::ProcessorResult::FatalFailure(err) => {
+                            outcomes.record_failure();
                             Self::handle_policy_failure(
                                 &policy_resolver,
                                 &queue_manager,
@@ -262,14 +278,19 @@ impl Engine {
         let queue_manager = self.queue_manager.clone();
         let policy_resolver = PolicyResolver::new(self.state.config.read().await.policy.as_ref());
 
+        // Both this loop and the Response loop below report into the single `parse` stage.
+        let outcomes = self.outcomes.parse.clone();
+
         self.run_processor_loop(
             "Parser",
             self.queue_manager.get_parser_task_pop_channel(),
             concurrency,
+            self.inflight.parser.clone(),
             move |task_item| {
                 let ingress = unified_task_ingress.clone();
                 let queue_manager = queue_manager.clone();
                 let policy_resolver = policy_resolver.clone();
+                let outcomes = outcomes.clone();
                 async move {
                     let (task, mut ack_fn, mut nack_fn) = task_item.into_parts();
                     let task_for_dlq = task.clone();
@@ -286,6 +307,7 @@ impl Engine {
                             mut stream,
                         ) => {
                             while stream.next().await.is_some() {}
+                            outcomes.record_success();
                             if let Some(comp) = &queue_manager.compensator {
                                 let _ = comp.remove_task("parser_task", &id).await;
                             }
@@ -314,6 +336,7 @@ impl Engine {
                         crate::common::processors::processor::ProcessorResult::FatalFailure(
                             err,
                         ) => {
+                            outcomes.record_failure();
                             Self::handle_policy_failure(
                                 &policy_resolver,
                                 &queue_manager,
@@ -353,6 +376,7 @@ impl Engine {
             "Error",
             self.queue_manager.get_error_pop_channel(),
             concurrency,
+            self.inflight.error.clone(),
             move |task_item| {
                 let ingress = unified_task_ingress.clone();
                 let queue_manager = queue_manager.clone();
@@ -435,20 +459,26 @@ impl Engine {
                 self.queue_manager.clone(),
                 self.event_bus.clone(),
                 self.state.cache_service.clone(),
+                self.outcomes.store.clone(),
             )
             .await,
         );
         let queue_manager = self.queue_manager.clone();
         let policy_resolver = PolicyResolver::new(self.state.config.read().await.policy.as_ref());
 
+        // Reports into the same `parse` stage as the Parser loop above.
+        let outcomes = self.outcomes.parse.clone();
+
         self.run_processor_loop(
             "Response",
             self.queue_manager.get_response_pop_channel(),
             concurrency,
+            self.inflight.response.clone(),
             move |response_item| {
                 let chain = parser_chain.clone();
                 let queue_manager = queue_manager.clone();
                 let policy_resolver = policy_resolver.clone();
+                let outcomes = outcomes.clone();
                 async move {
                     let (response, mut ack_fn, mut nack_fn) = response_item.into_parts();
                     let response_for_dlq = response.clone();
@@ -456,6 +486,7 @@ impl Engine {
                     let result = chain.execute(response, ProcessorContext::default()).await;
                     match result {
                         crate::common::processors::processor::ProcessorResult::Success(_) => {
+                            outcomes.record_success();
                             if let Some(comp) = &queue_manager.compensator {
                                 let _ = comp.remove_task("response", &id).await;
                             }
@@ -483,6 +514,7 @@ impl Engine {
                         crate::common::processors::processor::ProcessorResult::FatalFailure(
                             err,
                         ) => {
+                            outcomes.record_failure();
                             Self::handle_policy_failure(
                                 &policy_resolver,
                                 &queue_manager,

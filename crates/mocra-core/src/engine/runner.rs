@@ -1,9 +1,95 @@
 use crate::queue::Identifiable;
 use log::{debug, info};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use tokio::sync::{Mutex, Semaphore, broadcast, mpsc, watch};
 use tracing::Instrument;
+
+/// In-flight task counters, one per pipeline stage.
+///
+/// A task is *pending* while it waits in its queue channel and *in-flight* once a processor has
+/// taken it and started executing. The two are disjoint, so `pending + inflight` is the work the
+/// engine still owes — which is exactly what the idle-stop monitor treats as "busy".
+///
+/// Pending alone is a poor activity signal: processors drain their channel as fast as items arrive,
+/// so a healthy run sits at pending 0 with all the work counted here instead. A non-zero pending is
+/// backpressure, not throughput.
+///
+/// `remote_task` has no local processor (it is the outbound queue for remote dispatch), so it has a
+/// pending depth but never any in-flight count.
+#[derive(Clone, Default)]
+pub struct InflightCounters {
+    pub task: Arc<AtomicUsize>,
+    pub download: Arc<AtomicUsize>,
+    pub response: Arc<AtomicUsize>,
+    pub parser: Arc<AtomicUsize>,
+    pub error: Arc<AtomicUsize>,
+}
+
+impl InflightCounters {
+    /// `(task, download, response, parser, error)` — mirrors the queue order used by
+    /// [`QueueManager::local_pending_breakdown`](crate::queue::QueueManager::local_pending_breakdown).
+    pub fn breakdown(&self) -> (usize, usize, usize, usize, usize) {
+        (
+            self.task.load(Ordering::Relaxed),
+            self.download.load(Ordering::Relaxed),
+            self.response.load(Ordering::Relaxed),
+            self.parser.load(Ordering::Relaxed),
+            self.error.load(Ordering::Relaxed),
+        )
+    }
+
+    /// Total tasks executing across every stage.
+    pub fn total(&self) -> usize {
+        let (t, d, r, p, e) = self.breakdown();
+        t + d + r + p + e
+    }
+}
+
+/// Cumulative outcome counters for one pipeline stage, counted since engine start.
+///
+/// **Terminal outcomes only.** A task that fails and gets retried is recorded once, when it finally
+/// succeeds or fails for good — retry attempts are not counted. So `success + failure` is "work
+/// that finished", and the success rate answers *"of the work that finished, how much worked"*
+/// rather than *"how many attempts hit the network"*. A retry storm therefore shows up as the
+/// counters stalling, not as a failure spike.
+#[derive(Default)]
+pub struct StageCounter {
+    success: AtomicU64,
+    failure: AtomicU64,
+}
+
+impl StageCounter {
+    /// Records one item that finished successfully.
+    pub fn record_success(&self) {
+        self.success.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Records one item that failed terminally (not a retryable failure).
+    pub fn record_failure(&self) {
+        self.failure.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// `(success, failure)` since engine start.
+    pub fn snapshot(&self) -> (u64, u64) {
+        (
+            self.success.load(Ordering::Relaxed),
+            self.failure.load(Ordering::Relaxed),
+        )
+    }
+}
+
+/// Cumulative outcome counters for the four pipeline stages the dashboard reports.
+///
+/// `parse` covers both parser processors (the one parsing downloaded responses and the one draining
+/// the parser-task queue); they are one stage as far as a user is concerned.
+#[derive(Clone, Default)]
+pub struct StageCounters {
+    pub task: Arc<StageCounter>,
+    pub request: Arc<StageCounter>,
+    pub parse: Arc<StageCounter>,
+    pub store: Arc<StageCounter>,
+}
 
 /// Generic concurrent runner for queue-driven processors.
 ///
@@ -14,7 +100,7 @@ pub struct ProcessorRunner {
     pub shutdown_rx: broadcast::Receiver<()>,
     pub pause_rx: watch::Receiver<bool>,
     pub concurrency: usize,
-    /// Shared counter tracking in-flight tasks across all processors.
+    /// Counter for this processor's stage, incremented while a task executes.
     pub inflight_counter: Arc<AtomicUsize>,
 }
 

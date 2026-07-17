@@ -215,6 +215,7 @@ impl<Item: Send + 'static> DataSink<Item> for ChannelSink<Item> {
 struct SpiderModule<S: Spider> {
     spider: Arc<S>,
     sink: Arc<dyn DataSink<S::Item>>,
+    store_outcomes: Arc<crate::engine::runner::StageCounter>,
 }
 
 #[async_trait]
@@ -242,6 +243,7 @@ impl<S: Spider> ModuleTrait for SpiderModule<S> {
         vec![Arc::new(SpiderNode {
             spider: self.spider.clone(),
             sink: self.sink.clone(),
+            store_outcomes: self.store_outcomes.clone(),
         })]
     }
 }
@@ -249,6 +251,12 @@ impl<S: Spider> ModuleTrait for SpiderModule<S> {
 struct SpiderNode<S: Spider> {
     spider: Arc<S>,
     sink: Arc<dyn DataSink<S::Item>>,
+    /// Store outcomes for the sink, so the dashboard's store stage reflects a `Spider`'s writes.
+    ///
+    /// A `Spider` delivers items through its [`DataSink`], never through `DataStoreMiddleware`, so
+    /// it bypasses the engine's `DataStoreProcessor` entirely — the stage would read 0 forever
+    /// without this. `MocraBuilder::run` hands the engine this same counter, so both routes add up.
+    store_outcomes: Arc<crate::engine::runner::StageCounter>,
 }
 
 #[async_trait]
@@ -280,7 +288,13 @@ impl<S: Spider> ModuleNodeTrait for SpiderNode<S> {
 
         // Data → sink.
         for item in cx.items {
-            self.sink.write(item).await?;
+            match self.sink.write(item).await {
+                Ok(()) => self.store_outcomes.record_success(),
+                Err(e) => {
+                    self.store_outcomes.record_failure();
+                    return Err(e);
+                }
+            }
         }
 
         // Follow-up requests → fed back as parser tasks (re-entering this node's generate).
@@ -500,6 +514,10 @@ async fn start_embedded_cluster(
 pub struct MocraBuilder {
     config_path: Option<String>,
     modules: Vec<Arc<dyn ModuleTrait>>,
+    /// Store outcomes for every spider's sink. Created here because a `SpiderModule` is built by
+    /// [`spider`](MocraBuilder::spider), before `run` builds the engine; `run` then hands this same
+    /// counter to the engine so the observability API reports the sink's writes.
+    store_outcomes: Arc<crate::engine::runner::StageCounter>,
     /// User-registered named downloaders (routed by the `config.downloader` name).
     downloaders: Vec<Box<dyn crate::downloader::Downloader>>,
     /// Overrides the global default downloader (reqwest by default).
@@ -537,6 +555,7 @@ impl MocraBuilder {
         let module: Arc<dyn ModuleTrait> = Arc::new(SpiderModule {
             spider: Arc::new(spider),
             sink,
+            store_outcomes: self.store_outcomes.clone(),
         });
         self.modules.push(module);
         self
@@ -693,7 +712,11 @@ impl MocraBuilder {
         // Seed exactly once in a cluster: only the leader injects, which avoids every node
         // injecting the same seeds → N× duplicate crawling.
         let should_seed = coordination.as_ref().map(|c| c.is_leader()).unwrap_or(true);
-        let engine = Engine::new(state, None).await?;
+        let mut engine = Engine::new(state, None).await?;
+        // Point the engine's store stage at the counter the spiders' sinks already write to, so
+        // both persistence routes (DataSink and DataStoreMiddleware) add up to one number. Must
+        // happen before `start`, which clones this into the parser chain.
+        engine.outcomes.store = self.store_outcomes.clone();
 
         // User-registered downloaders / default downloader override (wired up before the engine
         // starts; the chains and the manager share the same Arc).
@@ -733,14 +756,15 @@ impl MocraBuilder {
             }
         }
 
-        engine.start().await;
+        let started = engine.start().await;
 
         // Gracefully shut the cluster control plane down after the engine stops (releasing the redb
-        // handle and the Raft background tasks).
+        // handle and the Raft background tasks). This runs even when startup failed, so an error
+        // such as an unbindable dashboard port does not strand the redb handle.
         if let Some(c) = &coordination {
             c.shutdown().await;
         }
-        Ok(())
+        started
     }
 }
 

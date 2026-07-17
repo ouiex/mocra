@@ -954,6 +954,15 @@ impl EventProcessorTrait<DataEvent, DataEvent> for DataMiddlewareProcessor {
 
 pub struct DataStoreProcessor {
     middleware_manager: Arc<MiddlewareManager>,
+    /// Cumulative store outcomes.
+    ///
+    /// This stage counts **per store operation**, unlike the terminal-outcome counting the other
+    /// stages use, because it has no terminal failure of its own: it can only answer "retry me",
+    /// and the give-up decision happens two layers up (the queue backend's NACK policy), which is
+    /// invisible from here. Under the single-node default (`nack_max_retries` unset → 0) nothing is
+    /// ever retried, so a `RetryableFailure` *is* terminal and the count is exact. With an MQ
+    /// backend and retries enabled, one item failing repeatedly is counted once per attempt.
+    outcomes: Arc<crate::engine::runner::StageCounter>,
 }
 #[async_trait]
 impl ProcessorTrait<DataEvent, ()> for DataStoreProcessor {
@@ -1011,12 +1020,14 @@ impl ProcessorTrait<DataEvent, ()> for DataStoreProcessor {
                 .await
         };
         if res.is_empty() {
+            self.outcomes.record_success();
             info!(
                 "[DataStoreProcessor] store success, request_id={}",
                 request_id
             );
             ProcessorResult::Success(())
         } else {
+            self.outcomes.record_failure();
             let error_msg = res
                 .iter()
                 .map(|(m, e)| format!("Middleware: {m}, Error: {e:?}"))
@@ -1099,6 +1110,7 @@ pub async fn create_parser_chain(
     queue_manager: Arc<QueueManager>,
     event_bus: Option<Arc<EventBus>>,
     cache_service: Arc<CacheService>,
+    store_outcomes: Arc<crate::engine::runner::StageCounter>,
 ) -> EventAwareTypedChain<Response, Vec<()>> {
     let response_module_processor = ResponseModuleProcessor {
         task_manager: task_manager.clone(),
@@ -1116,7 +1128,10 @@ pub async fn create_parser_chain(
     let data_middleware_processor = DataMiddlewareProcessor {
         middleware_manager: middleware_manager.clone(),
     };
-    let data_store_processor = DataStoreProcessor { middleware_manager };
+    let data_store_processor = DataStoreProcessor {
+        middleware_manager,
+        outcomes: store_outcomes,
+    };
 
     EventAwareTypedChain::<Response, Response>::new(event_bus)
         .then::<(Response, Arc<Module>, Arc<ModuleConfig>, Option<LoginInfo>), _>(

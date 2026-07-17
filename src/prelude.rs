@@ -70,7 +70,7 @@ pub mod engine {
 /// admin page / clients.
 #[cfg(feature = "dashboard")]
 pub mod dashboard {
-    pub use crate::engine::api::observability::{EngineStats, PendingBreakdown};
+    pub use crate::engine::api::observability::{EngineStats, QueueBreakdown};
     pub use crate::engine::monitor::SystemSnapshot;
     pub use crate::sync::ClusterStatusView;
     pub use crate::utils::logger::LogRecord;

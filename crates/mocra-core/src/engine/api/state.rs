@@ -1,5 +1,6 @@
 use crate::common::registry::NodeRegistry;
 use crate::common::state::State;
+use crate::engine::runner::{InflightCounters, StageCounters};
 use crate::queue::QueueManager;
 use metrics_exporter_prometheus::PrometheusHandle;
 use std::sync::Arc;
@@ -10,4 +11,6 @@ pub struct ApiState {
     pub(crate) prometheus_handle: Option<PrometheusHandle>,
     pub(crate) state: Arc<State>,
     pub(crate) node_registry: Arc<NodeRegistry>,
+    pub(crate) inflight: InflightCounters,
+    pub(crate) outcomes: StageCounters,
 }

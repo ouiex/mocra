@@ -90,8 +90,10 @@ pub struct Engine {
     pub node_registry: Arc<NodeRegistry>,
     /// Distributed cron scheduler.
     pub cron_scheduler: Arc<CronScheduler>,
-    /// Shared counter tracking in-flight tasks across all processors.
-    pub inflight_counter: Arc<std::sync::atomic::AtomicUsize>,
+    /// Per-stage counters of tasks currently executing.
+    pub inflight: crate::engine::runner::InflightCounters,
+    /// Per-stage cumulative success/failure counts.
+    pub outcomes: crate::engine::runner::StageCounters,
 }
 
 impl Engine {
@@ -608,7 +610,8 @@ impl Engine {
             prometheus_handle,
             node_registry,
             cron_scheduler,
-            inflight_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            inflight: crate::engine::runner::InflightCounters::default(),
+            outcomes: crate::engine::runner::StageCounters::default(),
         })
     }
     /// Register a download middleware.
