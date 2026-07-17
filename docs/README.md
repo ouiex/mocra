@@ -26,6 +26,7 @@ guides below go deeper into the runtime, the advanced module API, and operations
 Prefer to read code? The [`examples/`](../examples/) directory has complete, runnable programs:
 
 - [`spider_quickstart.rs`](../examples/spider_quickstart.rs) — the minimal `Spider` (no DB).
+- [`quotes_scraper.rs`](../examples/quotes_scraper.rs) — a real end-to-end crawl of [quotes.toscrape.com](https://quotes.toscrape.com): pagination, detail-page fan-out, dedup, typed items, and a custom `DataSink` writing JSONL.
 - [`custom_downloader.rs`](../examples/custom_downloader.rs) — implement the `Downloader` trait and inject it with `.default_downloader()` (offline, deterministic).
 - [`dashboard.rs`](../examples/dashboard.rs) — the built-in observability dashboard (`--features dashboard`).
 - [`cluster_quickstart.rs`](../examples/cluster_quickstart.rs) — a self-organizing embedded cluster (`--features cluster-embedded`).

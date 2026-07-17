@@ -11,7 +11,6 @@ data/
 .DS_Store
 .cargo/
 scripts/__pycache__/
-tests/tmp/
 monitoring/tmp/
 # internal refactor planning notes — not user-facing docs
 docs/refactor/

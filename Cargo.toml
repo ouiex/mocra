@@ -17,12 +17,10 @@ readme = "README.md"
 rust-version = "1.85"
 keywords = ["crawler", "distributed", "queue", "scraping", "framework"]
 categories = ["network-programming", "asynchronous", "web-programming"]
-autotests = false
 exclude = [
 	"target/**",
 	"data/**",
 	"logs/**",
-	"tests/logs/**",
 	"docker-compose.kafka.yml",
 	"scripts/**",
 	"benchmarks/**",
@@ -68,6 +66,7 @@ polars-ops = { version = "0.52.0", features = ["pivot"], optional = true }
 [dev-dependencies]
 # 仅测试 / 示例用,不进入下游用户的依赖树。
 reqwest = { version = "0.13", default-features = false, features = ["json"] } # dashboard 冒烟测试的 HTTP 客户端
+scraper = "0.27"                                 # examples:HTML 解析(CSS 选择器)
 semver = "1"                                     # 下载器门面测试(Version)
 serde = { version = "1", features = ["derive"] } # examples 派生 Serialize 输出项
 
@@ -128,3 +127,9 @@ required-features = ["cluster-embedded"]
 name = "dashboard"
 path = "examples/dashboard.rs"
 required-features = ["dashboard"]
+
+# 真实站点综合示例(quotes.toscrape.com):抓取 → 解析 → 保存。
+# 分页跟进 + 详情页扇出 + 去重 + 类型化产出 + 自定义 DataSink 落盘;dashboard 特性可选。
+[[example]]
+name = "quotes_scraper"
+path = "examples/quotes_scraper.rs"
