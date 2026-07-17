@@ -1,6 +1,6 @@
 [package]
 name = "mocra-proxy"
-version = "0.4.0"
+version = "0.4.1"
 edition = "2024"
 rust-version = "1.85"
 description = "Configuration-driven proxy pool / manager for the mocra crawler framework (zero-State, standalone)."

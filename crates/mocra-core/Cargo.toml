@@ -1,6 +1,6 @@
 [package]
 name = "mocra-core"
-version = "0.4.0"
+version = "0.4.1"
 edition = "2024"
 rust-version = "1.85"
 description = "The mocra crawler framework runtime: errors, cache, utilities, domain models, downloader, data-plane queue, coordination, scheduler and engine."
@@ -16,9 +16,9 @@ categories = ["network-programming", "web-programming", "asynchronous"]
 thiserror = "2"
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
-mocra-proxy = { path = "../mocra-proxy", version = "0.4.0" }
-mocra-dag = { path = "../mocra-dag", version = "0.4.0" }
-mocra-store = { path = "../mocra-store", version = "0.4.0", optional = true }
+mocra-proxy = { path = "../mocra-proxy", version = "0.4.1" }
+mocra-dag = { path = "../mocra-dag", version = "0.4.1" }
+mocra-store = { path = "../mocra-store", version = "0.4.1", optional = true }
 polars = { version = "0.52.0", features = ["json", "lazy", "serde", "csv", "timezones", "strings", "ipc", "dtype-decimal"], optional = true }
 # cacheable (cache service: local in-memory backend)
 async-trait = "0.1"
@@ -59,7 +59,7 @@ crc32fast = "1.5.0"
 rdkafka = { version = "0.39", features = ["cmake-build"], optional = true }
 async-nats = { version = "0.38", optional = true }
 # sync (coordination integration: embedded Raft backend)
-mocra-cluster = { path = "../mocra-cluster", version = "0.4.0", optional = true }
+mocra-cluster = { path = "../mocra-cluster", version = "0.4.1", optional = true }
 # engine (collection pipeline / processor / scheduling / monitoring); axum is only used by the
 # dashboard's observability HTTP API, so it is gated.
 axum = { version = "0.8", features = ["json"], optional = true }
