@@ -6,7 +6,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use sysinfo::System;
 use tokio::time::sleep;
 
-/// 主机资源快照(供 dashboard `GET /observability/system` 消费)。
+/// Host resource snapshot (consumed by the dashboard's `GET /observability/system`).
 #[derive(Debug, Clone, Serialize)]
 pub struct SystemSnapshot {
     pub cpu_usage_percent: f64,
@@ -15,13 +15,13 @@ pub struct SystemSnapshot {
     pub memory_usage_percent: f64,
     pub swap_used_bytes: u64,
     pub swap_total_bytes: u64,
-    /// 采集时刻(UNIX 毫秒)。
+    /// Collection timestamp (UNIX milliseconds).
     pub updated_at_ms: u64,
 }
 
 static SYSTEM_SNAPSHOT: Lazy<RwLock<Option<SystemSnapshot>>> = Lazy::new(|| RwLock::new(None));
 
-/// 最近一次主机资源快照(尚未采集则 `None`)。
+/// The most recent host resource snapshot (`None` if nothing has been collected yet).
 pub fn latest_system_snapshot() -> Option<SystemSnapshot> {
     SYSTEM_SNAPSHOT.read().ok().and_then(|g| g.clone())
 }

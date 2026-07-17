@@ -1,17 +1,17 @@
-//! High-level `Spider` facade (重构 Phase 1).
+//! High-level `Spider` facade (refactor Phase 1).
 //!
-//! 面向 80% 场景的简单入口:实现一个 [`Spider`],用 [`Mocra::builder`] 三步跑起来,
-//! 通过 [`DataSink`] / [`on_item`] 拿到类型化数据,无需实现 `DataStoreMiddleware`。
+//! A simple entry point covering 80% of use cases: implement a [`Spider`], get it running in three
+//! steps with [`Mocra::builder`], and receive typed data through [`DataSink`] / [`on_item`] — no
+//! need to implement `DataStoreMiddleware`.
 //!
-//! 现有的 [`ModuleTrait`] + DAG 仍是进阶路径;
-//! `Spider` 会被适配成一个单节点模块编译进现有引擎。
+//! The existing [`ModuleTrait`] + DAG remains the advanced path;
+//! a `Spider` is adapted into a single-node module and compiled into the existing engine.
 //!
-//! 详见 `docs/refactor/02-target-api.md`。
-//!
-//! # 现状(v0)
-//! - `run()` 目前复用 `State::try_new(path)`,仍需一个 config(含 `db.url`)。
-//!   「无 DB 的 L0」与「程序化默认配置」在重构 Phase 2 落地(见 `docs/refactor/04-roadmap.md`)。
-//! - `Ctx::follow` 通过 `TaskParserEvent` 元数据回灌同一节点的 `generate`,实现翻页/跟进。
+//! # Current status (v0)
+//! - `run()` currently reuses `State::try_new(path)` and still requires a config (including
+//!   `db.url`). "DB-less L0" and "programmatic default config" land in refactor Phase 2.
+//! - `Ctx::follow` feeds requests back into the same node's `generate` via `TaskParserEvent`
+//!   metadata, which is how pagination / follow-up is implemented.
 
 use std::future::Future;
 use std::marker::PhantomData;
@@ -38,10 +38,11 @@ use crate::common::model::message::TaskEvent;
 use crate::queue::QueuedItem;
 use tokio::sync::watch;
 
-/// `Ctx::follow` 回灌请求 URL 时使用的元数据键(内部约定)。
+/// Metadata key used when `Ctx::follow` feeds a request URL back in (an internal convention).
 const FOLLOW_URL_KEY: &str = "__mocra_spider_follow_url";
 
-/// 一个采集单元:定义抓什么([`start`](Spider::start))与怎么解析([`parse`](Spider::parse))。
+/// A unit of collection: defines what to fetch ([`start`](Spider::start)) and how to parse it
+/// ([`parse`](Spider::parse)).
 ///
 /// ```ignore
 /// use mocra::prelude::*;
@@ -64,43 +65,44 @@ const FOLLOW_URL_KEY: &str = "__mocra_spider_follow_url";
 /// ```
 #[async_trait]
 pub trait Spider: Send + Sync + 'static {
-    /// 类型化的产出项,经 [`DataSink`] 交付。
+    /// The typed item this spider emits, delivered through a [`DataSink`].
     type Item: Send + 'static;
 
-    /// 唯一名称(用于队列 topic、指标标签、去重命名空间)。
+    /// Unique name (used for the queue topic, metric labels, and the deduplication namespace).
     fn name(&self) -> &str;
 
-    /// 播种初始请求。
+    /// Seed the initial requests.
     async fn start(&self, seeds: &mut Seeds);
 
-    /// 解析单个响应:`cx.emit` 产出数据,`cx.follow` 追加后继请求。
+    /// Parse a single response: `cx.emit` emits data, `cx.follow` queues follow-up requests.
     async fn parse(&self, res: Response, cx: &mut Ctx<Self::Item>) -> Result<()>;
 
-    /// 是否需要登录流程(默认 `false`)。
+    /// Whether a login flow is required (defaults to `false`).
     fn should_login(&self) -> bool {
         false
     }
 
-    /// 版本号(默认 `1`)。
+    /// Version number (defaults to `1`).
     fn version(&self) -> i32 {
         1
     }
 }
 
-/// 种子请求收集器,传给 [`Spider::start`]。
+/// Collector for seed requests, passed to [`Spider::start`].
 #[derive(Default)]
 pub struct Seeds {
     reqs: Vec<Request>,
 }
 
 impl Seeds {
-    /// 便捷 GET:入队一个请求并返回可变引用以便继续设置头/元数据。
+    /// Convenience GET: queues a request and returns a mutable reference so you can go on to set
+    /// headers / metadata.
     pub fn get(&mut self, url: impl AsRef<str>) -> &mut Request {
         self.reqs.push(Request::new(url, RequestMethod::Get));
         self.reqs.last_mut().expect("just pushed")
     }
 
-    /// 入队任意方法的请求。
+    /// Queue a request with any method.
     pub fn add(&mut self, req: Request) -> &mut Request {
         self.reqs.push(req);
         self.reqs.last_mut().expect("just pushed")
@@ -111,7 +113,7 @@ impl Seeds {
     }
 }
 
-/// 解析上下文,传给 [`Spider::parse`]:产出数据、追加后继请求。
+/// Parse context, passed to [`Spider::parse`]: emit data and queue follow-up requests.
 pub struct Ctx<Item> {
     items: Vec<Item>,
     follows: Vec<Request>,
@@ -125,32 +127,33 @@ impl<Item> Ctx<Item> {
         }
     }
 
-    /// 产出一条类型化数据(交付给 [`DataSink`])。
+    /// Emit one typed item (delivered to the [`DataSink`]).
     pub fn emit(&mut self, item: Item) {
         self.items.push(item);
     }
 
-    /// 追加一个后继请求(下载后重新进入本 spider 的 `parse`)。
+    /// Queue a follow-up request (once downloaded it re-enters this spider's `parse`).
     pub fn follow(&mut self, req: Request) {
         self.follows.push(req);
     }
 
-    /// 便捷 GET 版 [`follow`](Ctx::follow)。
+    /// Convenience GET version of [`follow`](Ctx::follow).
     pub fn follow_get(&mut self, url: impl AsRef<str>) {
         self.follows.push(Request::new(url, RequestMethod::Get));
     }
 }
 
-/// 数据出口:类型化 Item 如何离开系统(回调 / channel / MQ / 自定义)。
+/// Data outlet: how typed items leave the system (callback / channel / MQ / custom).
 ///
-/// 取代「必须实现 `DataStoreMiddleware` + 库中 relation 挂载」的老路。
+/// Replaces the old route that required implementing `DataStoreMiddleware` and mounting a relation
+/// in the database.
 #[async_trait]
 pub trait DataSink<Item>: Send + Sync {
-    /// 交付一条数据。
+    /// Deliver a single item.
     async fn write(&self, item: Item) -> Result<()>;
 }
 
-/// 闭包 sink(由 [`on_item`] 构造)。
+/// A closure-backed sink (constructed by [`on_item`]).
 pub struct ClosureSink<Item, F> {
     f: F,
     _p: PhantomData<fn(Item)>,
@@ -169,7 +172,7 @@ where
     }
 }
 
-/// 用一个异步闭包构造 [`DataSink`]:`on_item(|item| async move { ... })`。
+/// Build a [`DataSink`] from an async closure: `on_item(|item| async move { ... })`.
 pub fn on_item<Item, Fut, F>(f: F) -> ClosureSink<Item, F>
 where
     Item: Send + 'static,
@@ -179,15 +182,16 @@ where
     ClosureSink { f, _p: PhantomData }
 }
 
-/// 把每条 Item 送进一个 tokio channel 的 [`DataSink`]。
+/// A [`DataSink`] that pushes every item into a tokio channel.
 ///
-/// 便于把采集数据交给下游任务处理:`ChannelSink::new(tx)`,消费端 `rx.recv().await`。
+/// Handy for handing collected data to a downstream task: `ChannelSink::new(tx)`, with the
+/// consumer calling `rx.recv().await`.
 pub struct ChannelSink<Item> {
     tx: tokio::sync::mpsc::Sender<Item>,
 }
 
 impl<Item> ChannelSink<Item> {
-    /// 用一个 `mpsc::Sender` 构造。
+    /// Construct from an `mpsc::Sender`.
     pub fn new(tx: tokio::sync::mpsc::Sender<Item>) -> Self {
         Self { tx }
     }
@@ -206,7 +210,7 @@ impl<Item: Send + 'static> DataSink<Item> for ChannelSink<Item> {
     }
 }
 
-// ---- Spider → ModuleTrait / ModuleNodeTrait 适配器 ----
+// ---- Spider → ModuleTrait / ModuleNodeTrait adapter ----
 
 struct SpiderModule<S: Spider> {
     spider: Arc<S>,
@@ -231,7 +235,7 @@ impl<S: Spider> ModuleTrait for SpiderModule<S> {
     where
         Self: Sized,
     {
-        panic!("SpiderModule 需要一个 spider 实例,请使用 Mocra::builder().spider(..)");
+        panic!("SpiderModule requires a spider instance; use Mocra::builder().spider(..)");
     }
 
     async fn add_step(&self) -> Vec<Arc<dyn ModuleNodeTrait>> {
@@ -255,12 +259,12 @@ impl<S: Spider> ModuleNodeTrait for SpiderNode<S> {
         params: Map<String, Value>,
         _login_info: Option<LoginInfo>,
     ) -> Result<SyncBoxStream<'static, Request>> {
-        // 跟进请求:由上一轮 parse 的 follow 通过元数据回灌。
+        // Follow-up request: fed back in through metadata by the previous parse round's follow.
         if let Some(url) = params.get(FOLLOW_URL_KEY).and_then(|v| v.as_str()) {
             let req = Request::new(url, RequestMethod::Get);
             return Ok(Box::pin(futures::stream::iter(vec![req])));
         }
-        // 首轮:播种。
+        // First round: seeding.
         let mut seeds = Seeds::default();
         self.spider.start(&mut seeds).await;
         Ok(Box::pin(futures::stream::iter(seeds.into_vec())))
@@ -274,16 +278,17 @@ impl<S: Spider> ModuleNodeTrait for SpiderNode<S> {
         let mut cx = Ctx::new();
         self.spider.parse(response.clone(), &mut cx).await?;
 
-        // 数据 → sink。
+        // Data → sink.
         for item in cx.items {
             self.sink.write(item).await?;
         }
 
-        // 跟进请求 → 回灌 parser task(重新进入本节点 generate)。
+        // Follow-up requests → fed back as parser tasks (re-entering this node's generate).
         //
-        // 必须显式 `stay_current_step`:`SpiderNode` 是单节点(既是入口也是叶子),
-        // 不标记的话任务会走「自动路由到后继」分支,而叶子节点无后继 —— 会被静默丢弃
-        // (见 `module_dag_processor::execute_parse` 的 leaf 分支),`Ctx::follow` 便失效。
+        // `stay_current_step` is mandatory here: `SpiderNode` is a single node (both the entry
+        // point and a leaf). Without the marker the task takes the "auto-route to successor"
+        // branch, and a leaf node has no successor — so it would be silently dropped (see the leaf
+        // branch in `module_dag_processor::execute_parse`), making `Ctx::follow` a no-op.
         let mut out = TaskOutputEvent::default();
         for req in cx.follows {
             let task = TaskParserEvent::from(&response)
@@ -299,37 +304,38 @@ impl<S: Spider> ModuleNodeTrait for SpiderNode<S> {
     }
 }
 
-// ---- Mocra 构建器 ----
+// ---- Mocra builder ----
 
-/// 高层入口。用 [`Mocra::builder`] 注册 spider、配置并运行。
+/// The high-level entry point. Use [`Mocra::builder`] to register spiders, configure, and run.
 pub struct Mocra;
 
 impl Mocra {
-    /// 创建一个构建器。
+    /// Create a builder.
     pub fn builder() -> MocraBuilder {
         MocraBuilder::default()
     }
 }
 
-/// 内嵌集群配置(需 `cluster-embedded` 特性)。
+/// Embedded cluster configuration (requires the `cluster-embedded` feature).
 #[cfg(feature = "cluster-embedded")]
 #[derive(Debug, Clone)]
 pub struct ClusterConfig {
-    /// 本节点唯一 id。
+    /// This node's unique id.
     pub node_id: u64,
-    /// 本节点绑定并对外的地址(如 `127.0.0.1:7001`)。
+    /// The address this node binds and advertises (e.g. `127.0.0.1:7001`).
     pub http_addr: String,
-    /// redb 状态机 + 日志目录。
+    /// Directory for the redb state machine + log.
     pub data_dir: String,
-    /// 种子节点地址;为空 = 本节点自举一个新集群(首个核心),非空 = 向种子 join。
+    /// Seed node addresses; empty = this node bootstraps a new cluster (the first core node),
+    /// non-empty = join via the seeds.
     pub seeds: Vec<String>,
-    /// 可选 Raft 时序调参(默认适配局域网;广域网 / 高延迟可放大)。
+    /// Optional Raft timing tuning (the defaults suit a LAN; enlarge for WAN / high latency).
     pub raft_tuning: Option<mocra_cluster::RaftTuning>,
 }
 
 #[cfg(feature = "cluster-embedded")]
 impl ClusterConfig {
-    /// **自举**一个新集群的首个核心节点(`seeds` 为空)。
+    /// **Bootstrap** the first core node of a new cluster (`seeds` is empty).
     ///
     /// ```ignore
     /// Mocra::builder().spider(s, sink)
@@ -350,7 +356,8 @@ impl ClusterConfig {
         }
     }
 
-    /// **加入**已有集群:通过任意一个已知节点(种子)地址入网(作 learner)。
+    /// **Join** an existing cluster: enter the network through any known node's (seed) address, as
+    /// a learner.
     ///
     /// ```ignore
     /// .cluster(ClusterConfig::join(2, "127.0.0.1:7002", "./data/node-2", "127.0.0.1:7001"))
@@ -370,12 +377,13 @@ impl ClusterConfig {
         }
     }
 
-    /// 从环境变量读取集群配置 —— 便于**容器化部署**:同一镜像跨节点,仅换环境变量。
+    /// Read the cluster config from environment variables — convenient for **containerized
+    /// deployments**: the same image across nodes, with only the env vars changing.
     ///
-    /// - `MOCRA_NODE_ID`(必填,u64)
-    /// - `MOCRA_HTTP_ADDR`(必填,本节点对外地址)
-    /// - `MOCRA_DATA_DIR`(选填,缺省 `./mocra-data/node-{id}`)
-    /// - `MOCRA_SEEDS`(选填,逗号分隔的种子地址;为空 = 自举)
+    /// - `MOCRA_NODE_ID` (required, u64)
+    /// - `MOCRA_HTTP_ADDR` (required, this node's advertised address)
+    /// - `MOCRA_DATA_DIR` (optional, defaults to `./mocra-data/node-{id}`)
+    /// - `MOCRA_SEEDS` (optional, comma-separated seed addresses; empty = bootstrap)
     pub fn from_env() -> std::result::Result<Self, String> {
         Self::from_vars(
             std::env::var("MOCRA_NODE_ID").ok(),
@@ -385,7 +393,8 @@ impl ClusterConfig {
         )
     }
 
-    /// [`from_env`](Self::from_env) 的纯解析核心(便于单测,不读环境)。
+    /// The pure parsing core of [`from_env`](Self::from_env) (unit-test friendly; reads no
+    /// environment).
     fn from_vars(
         node_id: Option<String>,
         http_addr: Option<String>,
@@ -422,16 +431,18 @@ impl ClusterConfig {
         })
     }
 
-    /// 自定义 Raft 时序(广域网 / 高延迟集群);默认适配局域网。
+    /// Customize the Raft timing (WAN / high-latency clusters); the defaults suit a LAN.
     pub fn with_raft_tuning(mut self, tuning: mocra_cluster::RaftTuning) -> Self {
         self.raft_tuning = Some(tuning);
         self
     }
 }
 
-/// 启动内嵌 redb+Raft 控制面并返回其 [`CoordinationBackend`](crate::sync::CoordinationBackend)。
+/// Start the embedded redb+Raft control plane and return its
+/// [`CoordinationBackend`](crate::sync::CoordinationBackend).
 ///
-/// `seeds` 空 → 自举新集群并等待选主;非空 → 向首个种子 join(作 learner)。
+/// `seeds` empty → bootstrap a new cluster and wait for leader election; non-empty → join via the
+/// first seed (as a learner).
 #[cfg(feature = "cluster-embedded")]
 async fn start_embedded_cluster(
     cluster: &ClusterConfig,
@@ -484,14 +495,14 @@ async fn start_embedded_cluster(
     Ok(Arc::new(RaftCoordinationBackend::new(cp)))
 }
 
-/// [`Mocra`] 的构建器。
+/// Builder for [`Mocra`].
 #[derive(Default)]
 pub struct MocraBuilder {
     config_path: Option<String>,
     modules: Vec<Arc<dyn ModuleTrait>>,
-    /// 用户注册的具名下载器(按 `config.downloader` 名字路由)。
+    /// User-registered named downloaders (routed by the `config.downloader` name).
     downloaders: Vec<Box<dyn crate::downloader::Downloader>>,
-    /// 替换全局默认下载器(缺省 reqwest)。
+    /// Overrides the global default downloader (reqwest by default).
     default_downloader: Option<Box<dyn crate::downloader::Downloader>>,
     #[cfg(feature = "cluster-embedded")]
     cluster: Option<ClusterConfig>,
@@ -500,15 +511,15 @@ pub struct MocraBuilder {
 }
 
 impl MocraBuilder {
-    /// 从 TOML 文件加载配置。
+    /// Load the config from a TOML file.
     ///
-    /// v0 必需;程序化默认配置与无 DB 运行在重构 Phase 2 落地。
+    /// Required in v0; programmatic default config and DB-less runs land in refactor Phase 2.
     pub fn from_toml(mut self, path: impl Into<String>) -> Self {
         self.config_path = Some(path.into());
         self
     }
 
-    /// 注册一个 spider 及其数据出口。
+    /// Register a spider along with its data outlet.
     ///
     /// ```ignore
     /// Mocra::builder()
@@ -531,15 +542,17 @@ impl MocraBuilder {
         self
     }
 
-    /// 注册一个自定义下载器(实现 [`Downloader`](crate::downloader::Downloader) trait)。
+    /// Register a custom downloader (implementing the
+    /// [`Downloader`](crate::downloader::Downloader) trait).
     ///
-    /// 模块把 `DownloadConfig.downloader` 设为该下载器的 `name()` 即可路由到它;
-    /// 未匹配时仍用默认下载器。可注册多个。适合按模块选择不同下载策略。
+    /// A module routes to it by setting `DownloadConfig.downloader` to that downloader's `name()`;
+    /// anything unmatched still uses the default downloader. Multiple downloaders can be
+    /// registered. Useful for picking a different download strategy per module.
     ///
     /// ```ignore
     /// Mocra::builder()
     ///     .spider(MySpider, on_item(|_| async {}))
-    ///     .downloader(MyDownloader::new())   // 模块 config.downloader = "<其 name()>" 时启用
+    ///     .downloader(MyDownloader::new())   // used when config.downloader = "<its name()>"
     ///     .run().await?;
     /// ```
     pub fn downloader<D: crate::downloader::Downloader>(mut self, downloader: D) -> Self {
@@ -547,52 +560,65 @@ impl MocraBuilder {
         self
     }
 
-    /// 替换**全局默认**下载器(缺省是 reqwest)。当请求的 `config.downloader` 未匹配任何
-    /// 已注册下载器时走它 —— 适合整体换掉 reqwest(如浏览器渲染 / 代理轮换 / 自定义重试)。
+    /// Replace the **global default** downloader (reqwest by default). It handles any request
+    /// whose `config.downloader` matches no registered downloader — useful for swapping out
+    /// reqwest wholesale (e.g. browser rendering / proxy rotation / custom retry).
     pub fn default_downloader<D: crate::downloader::Downloader>(mut self, downloader: D) -> Self {
         self.default_downloader = Some(Box::new(downloader));
         self
     }
 
-    /// 启用内嵌 redb+Raft 控制面(需 `cluster-embedded` 特性)。
+    /// Enable the embedded redb+Raft control plane (requires the `cluster-embedded` feature).
     ///
-    /// - `seeds` 为空 → 本节点自举一个新集群(首个核心,方案 A)。
-    /// - `seeds` 非空 → 向种子节点 join(作 learner)。
+    /// - `seeds` empty → this node bootstraps a new cluster (the first core node, option A).
+    /// - `seeds` non-empty → join via a seed node (as a learner).
     ///
-    /// 开启后,引擎的选举 / 锁走 Raft 集群,无需外部协调器。
+    /// Once enabled, the engine's leader election / locks go through the Raft cluster — no
+    /// external coordinator required.
     #[cfg(feature = "cluster-embedded")]
     pub fn cluster(mut self, cluster: ClusterConfig) -> Self {
         self.cluster = Some(cluster);
         self
     }
 
-    /// 启用后台管理 / 监控 dashboard(需 `dashboard` 特性)。
+    /// Enable the admin / monitoring dashboard (requires the `dashboard` feature).
     ///
-    /// 引擎在 `port` 上暴露 admin + 可观测 HTTP API,供后台管理页面消费:
-    /// - `GET /metrics`(Prometheus 指标)、`GET /health`
-    /// - `GET /observability/cluster`(集群状态)、`GET /observability/engine`(队列/引擎)
-    /// - `GET /observability/system`(主机 CPU/内存/swap)、`GET /observability/logs?limit=N`(近期日志)
-    /// - `GET /nodes`、`GET /dlq`、`POST /control/pause|resume`、`POST /start_work`
+    /// The engine exposes an admin + observability HTTP API on `port` for the admin page to
+    /// consume:
+    /// - `GET /metrics` (Prometheus metrics), `GET /health`
+    /// - `GET /observability/cluster` (cluster status), `GET /observability/engine` (queue/engine)
+    /// - `GET /observability/system` (host CPU/memory/swap), `GET /observability/logs?limit=N`
+    ///   (recent logs)
+    /// - `GET /nodes`, `GET /dlq`, `POST /control/pause|resume`, `POST /start_work`
     ///
-    /// 另在 `GET /` 内置一个单文件前端页面:浏览器打开该端口即见 指标 / 日志 / 任务 / 性能
-    /// 面板(同源自动指向本引擎,无需手填 endpoint)。只读可观测端点(`/`、`/metrics`、
-    /// `/health`、`/observability/*`)免 API key 且开启 CORS,独立前端也可跨域消费;写操作端点仍需鉴权。
+    /// It also serves a built-in single-file frontend page at `GET /`: open that port in a browser
+    /// and you get the metrics / logs / tasks / performance panels (same-origin, so they point at
+    /// this engine automatically — no endpoint to fill in by hand). The read-only observability
+    /// endpoints (`/`, `/metrics`, `/health`, `/observability/*`) need no API key and have CORS
+    /// enabled, so a standalone frontend can consume them cross-origin; write endpoints still
+    /// require authentication.
     ///
-    /// 单机模式下额外把引擎切到「服务态」:关闭空闲自停(否则空闲 30s 退出、面板失联),
-    /// 并在未显式配日志时默认开启日志采集,让「日志」面板开箱即有数据。
+    /// In single-node mode this additionally switches the engine into "service mode": idle stop is
+    /// disabled (otherwise it would exit after 30s idle and the dashboard would go dark), and log
+    /// collection is enabled by default when logging was not configured explicitly, so the "logs"
+    /// panel has data out of the box.
     ///
-    /// 从 `from_toml` 的 `[api]` 配置也能开启;此方法用于程序化(免 TOML)开启。
+    /// It can also be enabled through the `[api]` section of `from_toml`; this method is for
+    /// enabling it programmatically (without TOML).
     #[cfg(feature = "dashboard")]
     pub fn dashboard(mut self, port: u16) -> Self {
         self.dashboard_port = Some(port);
         self
     }
 
-    /// 构建 State + Engine,注册所有 spider,启动引擎(阻塞至关闭)。
+    /// Build the State + Engine, register every spider, and start the engine (blocks until
+    /// shutdown).
     ///
-    /// - 提供了 [`from_toml`](MocraBuilder::from_toml) → 用该 config(可含 DB)。
-    /// - 未提供 → **无 DB / 单机** 默认配置,并为每个 spider 自动注入一个种子任务。
-    /// - 提供了 [`cluster`](MocraBuilder::cluster) → 起内嵌 Raft 控制面,协调走 Raft。
+    /// - [`from_toml`](MocraBuilder::from_toml) provided → use that config (may include a DB).
+    /// - Not provided → **DB-less / single-node** default config, with one seed task injected
+    ///   automatically per spider.
+    /// - [`cluster`](MocraBuilder::cluster) provided → start the embedded Raft control plane and
+    ///   route coordination through Raft.
     pub async fn run(self) -> Result<()> {
         let standalone = self.config_path.is_none();
         let provider: Box<dyn ConfigProvider> = match &self.config_path {
@@ -602,8 +628,9 @@ impl MocraBuilder {
             }),
         };
 
-        // 先于 State 起集群:控制面就绪后把协调后端交给 State,使分布式锁 / 选举
-        // 从构造起即走 Raft(而非退化的进程内锁)。
+        // Start the cluster before State: once the control plane is ready we hand the coordination
+        // backend to State, so distributed locks / leader election go through Raft from
+        // construction time (rather than falling back to in-process locks).
         let coordination: Option<Arc<dyn crate::sync::CoordinationBackend>> = {
             #[cfg(feature = "cluster-embedded")]
             {
@@ -623,7 +650,8 @@ impl MocraBuilder {
             .map_err(|e| Error::new(ErrorKind::Service, Some(e.to_string())))?;
 
         let state = Arc::new(state);
-        // dashboard:程序化开启时把端口写进 config.api,引擎 start 时据此起后台管理 HTTP API。
+        // dashboard: when enabled programmatically, write the port into config.api so the engine
+        // brings up the admin HTTP API from it on start.
         #[cfg(feature = "dashboard")]
         if let Some(port) = self.dashboard_port {
             let mut cfg = state.config.write().await;
@@ -632,12 +660,15 @@ impl MocraBuilder {
                 api_key: None,
                 rate_limit: None,
             });
-            // dashboard 即「服务态」:单机默认会空闲 30s 自停,那样监控面板会随进程退出而失联。
-            // 程序化开启 dashboard 时关闭单机空闲自停,让可观测端点常驻(from_toml 的显式配置不受影响)。
+            // A dashboard implies "service mode": single-node defaults to stopping after 30s idle,
+            // which would take the monitoring panel down with the process. Enabling the dashboard
+            // programmatically therefore disables single-node idle stop so the observability
+            // endpoints stay up (explicit from_toml config is left untouched).
             if standalone {
                 cfg.crawler.idle_stop_secs = None;
-                // 未显式配日志时,默认开启日志采集,让 dashboard 的「日志」面板开箱即有数据:
-                // LogSinkLayer 把 log/tracing 事件送入内存环形缓冲,供 `/observability/logs` 读取。
+                // When logging was not configured explicitly, enable log collection by default so
+                // the dashboard's "logs" panel has data out of the box: LogSinkLayer feeds
+                // log/tracing events into an in-memory ring buffer for `/observability/logs`.
                 if cfg.logger.is_none() {
                     use crate::common::model::logger_config::{LogOutputConfig, LoggerConfig};
                     cfg.logger = Some(LoggerConfig {
@@ -655,14 +686,17 @@ impl MocraBuilder {
             drop(cfg);
             log::info!("dashboard: admin/observability API on http://127.0.0.1:{port}");
         }
-        // 在 state 移入 engine 前捕获协调后端句柄:用于「种子只注入一次」的 leader 门,
-        // 以及引擎停机后的优雅关闭。
+        // Capture the coordination backend handle before state moves into the engine: used for the
+        // leader gate that keeps seeding to exactly once, and for graceful shutdown after the
+        // engine stops.
         let coordination = state.coordination.clone();
-        // 集群下「种子只注入一次」:仅 leader 注入,避免每节点重复注入 → N× 重复抓取。
+        // Seed exactly once in a cluster: only the leader injects, which avoids every node
+        // injecting the same seeds → N× duplicate crawling.
         let should_seed = coordination.as_ref().map(|c| c.is_leader()).unwrap_or(true);
         let engine = Engine::new(state, None).await?;
 
-        // 用户自定义下载器 / 替换默认下载器(在引擎启动前接线;chains 与 manager 共享同一 Arc)。
+        // User-registered downloaders / default downloader override (wired up before the engine
+        // starts; the chains and the manager share the same Arc).
         for downloader in self.downloaders {
             engine.downloader_manager.register(downloader).await;
         }
@@ -678,9 +712,11 @@ impl MocraBuilder {
             engine.register_module(module).await;
         }
 
-        // 单机 / 集群 leader:为每个 spider 注入一个种子任务(否则引擎空转)。
-        // 集群 follower 跳过,避免 N× 重复注入。种子的跨节点分发取决于数据面 MQ:
-        // 配了分布式 MQ(Kafka/NATS)则扇出到各节点;默认内存队列则留在 leader。
+        // Single-node / cluster leader: inject one seed task per spider (otherwise the engine idles
+        // with nothing to do). Cluster followers skip this to avoid N× duplicate injection. How
+        // seeds spread across nodes depends on the data-plane MQ: with a distributed MQ
+        // (Kafka/NATS) they fan out to every node; with the default in-memory queue they stay on
+        // the leader.
         if standalone && should_seed {
             let task_tx = engine.queue_manager.get_task_push_channel();
             for name in spider_names {
@@ -699,7 +735,8 @@ impl MocraBuilder {
 
         engine.start().await;
 
-        // 引擎停机后优雅关闭集群控制面(释放 redb 句柄与 Raft 后台任务)。
+        // Gracefully shut the cluster control plane down after the engine stops (releasing the redb
+        // handle and the Raft background tasks).
         if let Some(c) = &coordination {
             c.shutdown().await;
         }
@@ -707,7 +744,7 @@ impl MocraBuilder {
     }
 }
 
-/// 无 DB / 单机的程序化默认配置(内存队列)。
+/// Programmatic default config for DB-less / single-node runs (in-memory queue).
 fn default_standalone_config(name: &str) -> Config {
     Config {
         name: name.to_string(),
@@ -748,7 +785,8 @@ fn default_standalone_config(name: &str) -> Config {
             error_task_concurrency: None,
             backpressure_retry_delay_ms: None,
             dedup_ttl_secs: None,
-            // 单机:队列空闲 30s 后自动停止(有限抓取跑完即退;持续产任务的 spider 不受影响)。
+            // Single-node: stop automatically once the queue has been idle for 30s (a finite crawl
+            // exits when done; spiders that keep producing tasks are unaffected).
             idle_stop_secs: Some(30),
         },
         scheduler: None,
@@ -773,7 +811,8 @@ fn default_standalone_config(name: &str) -> Config {
     }
 }
 
-/// 把一份固定 [`Config`] 提供给 [`State`](crate::common::state::State)(无文件、程序化)。
+/// Supplies a fixed [`Config`] to [`State`](crate::common::state::State) (file-less,
+/// programmatic).
 struct StaticConfigProvider {
     config: Config,
 }
@@ -785,7 +824,8 @@ impl ConfigProvider for StaticConfigProvider {
     }
 
     async fn watch(&self) -> std::result::Result<watch::Receiver<Config>, String> {
-        // 静态配置:不监听变更(发送端立即释放,State 的监听循环随即退出)。
+        // Static config: no change watching (the sender is dropped immediately, so State's watch
+        // loop exits right away).
         let (_tx, rx) = watch::channel(self.config.clone());
         Ok(rx)
     }
@@ -800,7 +840,10 @@ mod cluster_config_tests {
         let boot = ClusterConfig::bootstrap(1, "127.0.0.1:7001", "./d1");
         assert_eq!(boot.node_id, 1);
         assert_eq!(boot.http_addr, "127.0.0.1:7001");
-        assert!(boot.seeds.is_empty(), "bootstrap 节点无种子(自举)");
+        assert!(
+            boot.seeds.is_empty(),
+            "a bootstrap node has no seeds (it self-bootstraps)"
+        );
 
         let joined = ClusterConfig::join(2, "127.0.0.1:7002", "./d2", "127.0.0.1:7001");
         assert_eq!(joined.node_id, 2);
@@ -809,7 +852,7 @@ mod cluster_config_tests {
 
     #[test]
     fn from_vars_parses_env_style_config() {
-        // 完整:含逗号分隔的多种子(join)。
+        // Full case: multiple comma-separated seeds (join).
         let c = ClusterConfig::from_vars(
             Some("3".into()),
             Some("127.0.0.1:7003".into()),
@@ -825,14 +868,14 @@ mod cluster_config_tests {
             vec!["127.0.0.1:7001".to_string(), "127.0.0.1:7002".to_string()]
         );
 
-        // 无种子 + 省略 data_dir → 自举 + 默认目录。
+        // No seeds + omitted data_dir → bootstrap + default directory.
         let boot =
             ClusterConfig::from_vars(Some("1".into()), Some("127.0.0.1:7001".into()), None, None)
                 .unwrap();
         assert!(boot.seeds.is_empty());
         assert_eq!(boot.data_dir, "./mocra-data/node-1");
 
-        // 缺必填项 / 非法 id → 报错(不 panic)。
+        // Missing required vars / invalid id → error (not a panic).
         assert!(ClusterConfig::from_vars(None, Some("a".into()), None, None).is_err());
         assert!(ClusterConfig::from_vars(Some("x".into()), Some("a".into()), None, None).is_err());
         assert!(ClusterConfig::from_vars(Some("1".into()), None, None, None).is_err());
@@ -857,7 +900,7 @@ mod dashboard_tests {
         }
     }
 
-    /// 端到端:`.dashboard(port)` 真的在该端口提供可观测 HTTP API。
+    /// End-to-end: `.dashboard(port)` really does serve the observability HTTP API on that port.
     #[tokio::test]
     async fn dashboard_serves_observability_endpoints() {
         let port = 17673u16;
@@ -872,7 +915,7 @@ mod dashboard_tests {
         let base = format!("http://127.0.0.1:{port}");
         let client = reqwest::Client::new();
 
-        // 轮询 /health 直到 server 绑定。
+        // Poll /health until the server binds.
         let mut ready = false;
         for _ in 0..60 {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -885,7 +928,7 @@ mod dashboard_tests {
         }
         assert!(ready, "dashboard /health did not come up");
 
-        // /observability/engine → 引擎/队列快照。
+        // /observability/engine → engine/queue snapshot.
         let engine: serde_json::Value = client
             .get(format!("{base}/observability/engine"))
             .send()
@@ -898,7 +941,7 @@ mod dashboard_tests {
         assert_eq!(engine["namespace"], serde_json::json!("mocra"));
         assert!(engine["pending"]["total"].is_number());
 
-        // /observability/cluster → null(无集群协调后端)。
+        // /observability/cluster → null (no cluster coordination backend).
         let cluster: serde_json::Value = client
             .get(format!("{base}/observability/cluster"))
             .send()
@@ -909,7 +952,8 @@ mod dashboard_tests {
             .unwrap();
         assert!(cluster.is_null());
 
-        // /observability/system → 200 + JSON(快照 null 或对象);顺带验证 CORS 头。
+        // /observability/system → 200 + JSON (snapshot is null or an object); also checks the CORS
+        // header.
         let sys = client
             .get(format!("{base}/observability/system"))
             .header("Origin", "http://localhost:3000")
@@ -919,11 +963,11 @@ mod dashboard_tests {
         assert!(sys.status().is_success());
         assert!(
             sys.headers().contains_key("access-control-allow-origin"),
-            "CORS header missing — 前端跨域会被拦"
+            "CORS header missing — cross-origin frontend requests would be blocked"
         );
         let _sys_json: serde_json::Value = sys.json().await.unwrap();
 
-        // /observability/logs → 200 + JSON 数组。
+        // /observability/logs → 200 + a JSON array.
         let logs: serde_json::Value = client
             .get(format!("{base}/observability/logs?limit=50"))
             .send()
@@ -932,15 +976,15 @@ mod dashboard_tests {
             .json()
             .await
             .unwrap();
-        assert!(logs.is_array(), "logs 端点应返回数组");
+        assert!(logs.is_array(), "the logs endpoint should return an array");
 
-        // GET / → 内置单文件 dashboard 页面(HTML)。
+        // GET / → the built-in single-file dashboard page (HTML).
         let page = client.get(format!("{base}/")).send().await.unwrap();
         assert!(page.status().is_success());
         let html = page.text().await.unwrap();
         assert!(
             html.contains("mocra dashboard"),
-            "根路径应托管内置 dashboard 页面"
+            "the root path should serve the built-in dashboard page"
         );
 
         server.abort();
@@ -958,7 +1002,8 @@ mod downloader_tests {
     use crate::downloader::Downloader;
     use crate::errors::Result;
 
-    /// 自定义下载器:忽略网络,返回固定响应 —— 用于证明它被管线真正调用(而非 reqwest)。
+    /// A custom downloader: ignores the network and returns a fixed response — used to prove the
+    /// pipeline really calls it (rather than reqwest).
     #[derive(Clone)]
     struct FakeDownloader;
 
@@ -1009,7 +1054,8 @@ mod downloader_tests {
             "downloader_probe"
         }
         async fn start(&self, s: &mut Seeds) {
-            // 故意用不可解析的域名:若走真实 reqwest 会失败;走 fake 才能拿到固定响应体。
+            // Deliberately unresolvable domain: real reqwest would fail on it, so only the fake
+            // downloader can return the fixed body.
             s.get("https://this-host-does-not-resolve.invalid/x");
         }
         async fn parse(&self, res: Response, cx: &mut Ctx<Self::Item>) -> Result<()> {
@@ -1020,7 +1066,8 @@ mod downloader_tests {
         }
     }
 
-    /// 端到端:`Mocra::builder().default_downloader(..)` 注入的自定义下载器真的被管线使用。
+    /// End-to-end: the custom downloader injected via `Mocra::builder().default_downloader(..)` is
+    /// really used by the pipeline.
     #[tokio::test]
     async fn custom_default_downloader_serves_requests() {
         let (tx, mut rx) = tokio::sync::mpsc::channel::<u16>(4);
@@ -1038,7 +1085,8 @@ mod downloader_tests {
         assert_eq!(
             got.ok().flatten(),
             Some(299),
-            "自定义默认下载器应已服务该请求(状态 299 + fake body);若为 None 说明仍走了 reqwest"
+            "the custom default downloader should have served this request (status 299 + fake \
+             body); None means reqwest was still used"
         );
     }
 }

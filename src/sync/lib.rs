@@ -1,6 +1,7 @@
-//! 协调 / 同步子系统已抽为独立 crate [`mocra_core`] 的 `sync` 模块。
+//! The coordination / sync subsystem has been extracted into the `sync` module of the standalone
+//! [`mocra_core`] crate.
 //!
-//! 此模块保留为 re-export shim,使既有 `crate::sync::*` 引用继续有效(零改动迁移);
-//! 新代码可直接 `use mocra_core::sync::...`。
+//! This module remains as a re-export shim so that existing `crate::sync::*` references keep
+//! working (zero-change migration); new code can use `mocra_core::sync::...` directly.
 
 pub use mocra_core::sync::*;

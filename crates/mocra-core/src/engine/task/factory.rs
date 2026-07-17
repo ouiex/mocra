@@ -18,7 +18,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
-/// 有 `store` 特性时为 `Option<TaskRepository>`,否则为占位 `()`(始终无 DB / synthetic)。
+/// `Option<TaskRepository>` with the `store` feature, otherwise a placeholder `()` (always no-DB /
+/// synthetic).
 #[cfg(feature = "store")]
 type MaybeRepository = Option<Arc<dyn MetadataStore>>;
 #[cfg(not(feature = "store"))]
@@ -26,7 +27,8 @@ type MaybeRepository = ();
 
 /// Task factory that materializes Task instances from runtime inputs.
 pub struct TaskFactory {
-    /// `None`/占位 = 无 DB(standalone)模式,任务从内存模块注册表合成。
+    /// `None`/placeholder = no-DB (standalone) mode; tasks are synthesized from the in-memory
+    /// module registry.
     #[allow(dead_code)]
     repository: MaybeRepository,
     cache_service: Arc<CacheService>,
@@ -34,7 +36,8 @@ pub struct TaskFactory {
     module_assembler: Arc<tokio::sync::RwLock<ModuleAssembler>>,
     // In-memory cache keyed by task id (account-platform).
     cache: Arc<DashMap<String, CacheEntry>>,
-    /// 窄依赖:仅需应用配置(此前吃整个 `Arc<State>` —— 重构 Phase 2)。
+    /// Narrowed dependencies: only the application config is needed (it used to take the entire
+    /// `Arc<State>` — refactor Phase 2).
     app_config: Arc<tokio::sync::RwLock<Config>>,
 }
 
@@ -48,7 +51,7 @@ struct CacheEntry {
 impl TaskFactory {
     /// Creates a task factory with repository/cache/assembler dependencies.
     ///
-    /// `repository = None` 时进入无 DB 模式(从模块注册表合成任务)。
+    /// With `repository = None` it enters no-DB mode (synthesizing tasks from the module registry).
     pub fn new(
         repository: MaybeRepository,
         sync_service: Arc<CacheService>,
@@ -67,7 +70,8 @@ impl TaskFactory {
     }
 
     /// Synthesizes a task from the in-memory module registry when no database
-    /// is configured(无 DB 模式:合成默认 account/platform + 注册模块)。
+    /// is configured (no-DB mode: synthesizes a default account/platform plus the registered
+    /// modules).
     async fn create_synthetic_task(
         &self,
         platform_name: &str,
@@ -182,7 +186,7 @@ impl TaskFactory {
     // Cache key uses Task::id() => account-platform; value stores full task module set.
 
     /// Dispatches task construction: DB-backed when a repository is present,
-    /// otherwise synthesizes a task from the in-memory module registry(无 DB 模式)。
+    /// otherwise synthesizes a task from the in-memory module registry (no-DB mode).
     async fn create_task_with_modules(
         &self,
         platform_name: &str,
@@ -239,7 +243,8 @@ impl TaskFactory {
             .load_account_platform_relation(account.id, platform.id)
             .await?;
 
-        // 转成不依赖 sea-orm 的轻量信息;原实体 account/platform 仍供 ConfigAssembler 使用。
+        // Convert into lightweight, sea-orm-free info; the original account/platform entities are
+        // still used by ConfigAssembler.
         let account_info = AccountInfo {
             id: account.id,
             name: account.name.clone(),

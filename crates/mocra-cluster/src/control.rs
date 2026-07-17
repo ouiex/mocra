@@ -1,10 +1,12 @@
-//! 控制面 API:在状态机之上提供强一致的 KV + 分布式锁。
+//! Control plane API: strongly consistent KV + distributed locks on top of the state machine.
 //!
-//! [`LocalControlPlane`] 是**单节点**实现(命令直接 apply 到本地状态机,无共识)。
-//! 分布式部署时由 `RaftControlPlane` 替换 —— 命令先经 Raft 复制到多数派再 apply(后续增量)。
+//! [`LocalControlPlane`] is the **single-node** implementation (commands are applied directly to
+//! the local state machine, with no consensus). In a distributed deployment it is replaced by
+//! `RaftControlPlane` — commands are first replicated to a majority through Raft and only then
+//! applied (a follow-up increment).
 //!
-//! 该 trait 的形状对应主 crate 的 `CoordinationBackend`;两者的适配在 `mocra` 侧完成,
-//! 从而用内嵌控制面做协调。
+//! This trait's shape mirrors the main crate's `CoordinationBackend`; the adapter between the two
+//! lives on the `mocra` side, so the embedded control plane can be used for coordination.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -15,7 +17,7 @@ use async_trait::async_trait;
 use crate::cmd::{Cmd, CmdResult};
 use crate::state_machine::{StateMachine, StateMachineError};
 
-/// 控制面错误:状态机错误 + 共识 / 配置错误。
+/// Control plane errors: state machine errors plus consensus / configuration errors.
 #[derive(Debug, thiserror::Error)]
 pub enum ControlError {
     #[error(transparent)]
@@ -26,20 +28,20 @@ pub enum ControlError {
     Config(String),
 }
 
-/// 控制面:强一致的 KV + 分布式锁(+ 将来的成员/归属)。
+/// Control plane: strongly consistent KV + distributed locks (+ membership/ownership later).
 #[async_trait]
 pub trait ControlPlane: Send + Sync {
     async fn set(&self, key: &[u8], value: &[u8]) -> Result<(), ControlError>;
     async fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, ControlError>;
     async fn delete(&self, key: &[u8]) -> Result<(), ControlError>;
-    /// 比较并交换,返回是否成功。
+    /// Compare-and-swap; returns whether it succeeded.
     async fn cas(
         &self,
         key: &[u8],
         expect: Option<&[u8]>,
         value: &[u8],
     ) -> Result<bool, ControlError>;
-    /// 获取锁,成功返回 fencing token。
+    /// Acquire a lock; returns a fencing token on success.
     async fn acquire_lock(
         &self,
         key: &str,
@@ -57,7 +59,8 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-/// 单节点控制面:命令直接 apply 到本地 redb 状态机(无共识)。
+/// Single-node control plane: commands are applied directly to the local redb state machine
+/// (no consensus).
 #[derive(Clone)]
 pub struct LocalControlPlane {
     sm: Arc<StateMachine>,
@@ -68,7 +71,7 @@ impl LocalControlPlane {
         Self { sm }
     }
 
-    /// 打开一个 redb 支撑的单节点控制面。
+    /// Open a redb-backed single-node control plane.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, ControlError> {
         Ok(Self {
             sm: Arc::new(StateMachine::open(path)?),

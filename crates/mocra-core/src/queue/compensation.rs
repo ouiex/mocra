@@ -11,13 +11,15 @@ use std::sync::Arc;
 pub trait Identifiable {
     fn get_id(&self) -> String;
 
-    /// MQ 分区键:决定消息路由到哪个分区 / 流分片 / 消费者,用于**账号亲和**
-    /// (会话粘性 + 集群里同账号任务落同一节点)。
+    /// MQ partition key: decides which partition / stream shard / consumer a message is routed
+    /// to, used for **account affinity** (session stickiness + tasks for the same account landing
+    /// on the same node within the cluster).
     ///
-    /// 默认与 [`get_id`](Self::get_id) 相同(无亲和,随机分布);`TaskEvent` 覆写为
-    /// **账号**,使同一账号的任务经 `hash(account)` 稳定落到同一分区,从而复用
-    /// Kafka/NATS 消费组分配 实现跨节点消费亲和。与去重 / 补偿用的
-    /// `get_id` 相互独立。
+    /// Defaults to the same value as [`get_id`](Self::get_id) (no affinity, random distribution);
+    /// `TaskEvent` overrides it with the **account**, so that tasks for one account land on the
+    /// same partition consistently via `hash(account)`, reusing Kafka/NATS consumer group
+    /// assignment to achieve cross-node consumer affinity. It is independent of `get_id`, which
+    /// is used for deduplication / compensation.
     fn partition_key(&self) -> String {
         self.get_id()
     }
@@ -60,7 +62,8 @@ impl Identifiable for TaskEvent {
         self.run_id.to_string()
     }
 
-    /// 账号亲和:同账号任务落同一分区(会话粘性 + 集群同账号同节点)。
+    /// Account affinity: tasks for one account land on the same partition (session stickiness +
+    /// same account on the same node across the cluster).
     fn partition_key(&self) -> String {
         self.account.clone()
     }
@@ -73,4 +76,3 @@ pub trait Compensator: Send + Sync {
     /// Remove a task from the compensation queue.
     async fn remove_task(&self, topic: &str, id: &str) -> Result<()>;
 }
-

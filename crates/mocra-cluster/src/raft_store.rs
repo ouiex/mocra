@@ -1,8 +1,9 @@
-//! Raft 存储:内存日志 + redb 状态机。
+//! Raft storage: in-memory log + redb state machine.
 //!
-//! - [`LogStore`]:Raft 日志(当前**内存**实现;redb 持久化日志为后续项)。
-//! - [`StateMachineStore`]:把 openraft 的状态机接到 redb [`StateMachine`] ——
-//!   `apply` 时把 `Cmd` 交给 redb;快照 = dump/restore 整个业务状态。
+//! - [`LogStore`]: the Raft log (currently an **in-memory** implementation; a redb-persisted log
+//!   is a follow-up item).
+//! - [`StateMachineStore`]: wires openraft's state machine to the redb [`StateMachine`] —
+//!   `apply` hands the `Cmd` to redb; a snapshot is a dump/restore of the whole business state.
 
 use std::collections::BTreeMap;
 use std::fmt::Debug;
@@ -25,7 +26,7 @@ use crate::state_machine::StateMachine;
 
 type StorageResult<T> = Result<T, StorageError<NodeId>>;
 
-// ============ 日志存储(内存) ============
+// ============ Log storage (in-memory) ============
 
 #[derive(Clone, Default)]
 pub struct LogStore {
@@ -97,14 +98,14 @@ impl RaftLogStorage<TypeConfig> for LogStore {
     }
 
     async fn truncate(&mut self, log_id: LogId<NodeId>) -> StorageResult<()> {
-        // 删除 [index, +oo):split_off 保留 < index。
+        // Delete [index, +oo): split_off keeps everything < index.
         let mut inner = self.inner.lock().await;
         let _ = inner.log.split_off(&log_id.index);
         Ok(())
     }
 
     async fn purge(&mut self, log_id: LogId<NodeId>) -> StorageResult<()> {
-        // 保留 (index, +oo):split_off 返回 >= index+1。
+        // Keep (index, +oo): split_off returns everything >= index+1.
         let mut inner = self.inner.lock().await;
         inner.last_purged = Some(log_id);
         let keep = inner.log.split_off(&(log_id.index + 1));
@@ -117,16 +118,16 @@ impl RaftLogStorage<TypeConfig> for LogStore {
     }
 }
 
-// ============ 状态机存储(redb) ============
+// ============ State machine storage (redb) ============
 
-/// 状态机快照的持久表示。
+/// The persistent representation of a state machine snapshot.
 #[derive(Serialize, Deserialize, Clone)]
 pub struct StoredSnapshot {
     pub meta: SnapshotMeta<NodeId, Node>,
     pub data: Vec<u8>,
 }
 
-/// 把 openraft 状态机接到 redb [`StateMachine`]。
+/// Wires the openraft state machine to the redb [`StateMachine`].
 #[derive(Clone)]
 pub struct StateMachineStore {
     sm: Arc<StateMachine>,

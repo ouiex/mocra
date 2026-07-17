@@ -1,14 +1,17 @@
-//! redb 持久化的 Raft 日志存储。
+//! redb-persisted Raft log storage.
 //!
-//! 取代内存日志,使控制面**完全 redb 持久化**(状态机 + 日志)—— 自包含嵌入式集群的关键。
-//! 以官方 `raft-kv-rocksdb` 的 `LogStore` 为模板,把 rocksdb 换成 redb。
+//! Replaces the in-memory log so that the control plane is **fully persisted in redb** (state
+//! machine + log) — the key to a self-contained embedded cluster.
+//! Modelled on the `LogStore` from the official `raft-kv-rocksdb` example, with rocksdb swapped
+//! for redb.
 //!
-//! 表:
-//! - `raft_logs`: `u64`(日志 index)→ 序列化的 [`Entry`]
-//! - `raft_meta`: `&str` → 序列化的 `last_purged` / `committed` / `vote`
+//! Tables:
+//! - `raft_logs`: `u64` (log index) → serialized [`Entry`]
+//! - `raft_meta`: `&str` → serialized `last_purged` / `committed` / `vote`
 
-// 存储 trait 的错误类型由 openraft 固定为 `StorageError`(~224B),无法在本地装箱;
-// 这些 `StorageResult` 助手必须沿用它以对接 trait,故豁免 result_large_err。
+// openraft fixes the storage traits' error type to `StorageError` (~224B), which cannot be boxed
+// locally; these `StorageResult` helpers must keep using it to match the traits, hence the
+// result_large_err exemption.
 #![allow(clippy::result_large_err)]
 
 use std::fmt::Debug;
@@ -33,7 +36,7 @@ const KEY_VOTE: &str = "vote";
 
 type StorageResult<T> = Result<T, StorageError<NodeId>>;
 
-/// 把任意可显示错误映射为 openraft 的 `StorageError`。
+/// Maps any displayable error into openraft's `StorageError`.
 fn sto<E: std::fmt::Display>(e: E) -> StorageError<NodeId> {
     let io = std::io::Error::other(e.to_string());
     StorageIOError::read(&io).into()
@@ -47,14 +50,14 @@ fn dec<T: DeserializeOwned>(b: &[u8]) -> StorageResult<T> {
     rmp_serde::from_slice(b).map_err(sto)
 }
 
-/// redb 持久化日志存储。
+/// redb-persisted log storage.
 #[derive(Clone)]
 pub struct RedbLogStore {
     db: Arc<Database>,
 }
 
 impl RedbLogStore {
-    /// 打开(或创建)一个 redb 支撑的日志存储。
+    /// Open (or create) a redb-backed log store.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StateMachineIo> {
         let db = Database::create(path).map_err(|e| StateMachineIo(e.to_string()))?;
         let w = db
@@ -91,7 +94,8 @@ impl RedbLogStore {
     }
 }
 
-/// 打开日志存储时的 IO 错误(启动期用,便于 `?` 到应用错误)。
+/// An IO error raised while opening the log store (used at startup so it can be `?`-ed into an
+/// application error).
 #[derive(Debug, thiserror::Error)]
 #[error("redb log store: {0}")]
 pub struct StateMachineIo(pub String);
@@ -178,13 +182,14 @@ impl RaftLogStorage<TypeConfig> for RedbLogStore {
             }
             w.commit().map_err(sto)?;
         }
-        // redb commit 已落盘 -> 通知 openraft IO 完成。
+        // The redb commit has already hit disk -> tell openraft the IO is complete.
         callback.log_io_completed(Ok(()));
         Ok(())
     }
 
     async fn truncate(&mut self, log_id: LogId<NodeId>) -> StorageResult<()> {
-        // 删除 [index, +oo):redb 2.x 无 drain,先收集键再逐个删除。
+        // Delete [index, +oo): redb 2.x has no drain, so collect the keys first and remove them
+        // one by one.
         let w = self.db.begin_write().map_err(sto)?;
         {
             let mut t = w.open_table(LOGS).map_err(sto)?;
@@ -203,7 +208,7 @@ impl RaftLogStorage<TypeConfig> for RedbLogStore {
 
     async fn purge(&mut self, log_id: LogId<NodeId>) -> StorageResult<()> {
         self.put_meta(KEY_LAST_PURGED, &Some(log_id))?;
-        // 删除 [0, index]。
+        // Delete [0, index].
         let w = self.db.begin_write().map_err(sto)?;
         {
             let mut t = w.open_table(LOGS).map_err(sto)?;

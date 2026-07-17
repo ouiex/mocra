@@ -1,21 +1,28 @@
-//! 分区归属(重构 Phase 3):把采集工作按分区分摊到集群节点。
+//! Partition ownership (refactor Phase 3): spreads collection work across cluster nodes by
+//! partition.
 //!
-//! 设计:
-//! - **分区键**:`hash(account) % N` 把账号映射到固定数量的虚拟分区(默认 256)。
-//! - **归属**:Rendezvous(HRW)哈希 —— 每个分区归属于 `(partition, node)` 组合
-//!   哈希值最高的那个节点。成员增减时**只有约 1/N 的分区迁移**,天然最小化再平衡。
-//! - **一致性**:成员列表来自 Raft(强一致),且哈希是**确定性**的(不用带随机种子的
-//!   `DefaultHasher`),因此所有节点算出的归属完全一致,无需额外协商即达成共识。
-//! - **防脑裂**:成员切换的瞬间各节点视图可能短暂不一致;需要强保证时,再用
-//!   [`RaftControlPlane::acquire_partition`](crate::RaftControlPlane::acquire_partition)
-//!   取一个带单调 fencing token 的归属租约(复用 Raft 锁),陈旧属主凭更小的 token 被拒。
+//! Design:
+//! - **Partition key**: `hash(account) % N` maps an account onto a fixed number of virtual
+//!   partitions (256 by default).
+//! - **Ownership**: rendezvous (HRW) hashing — each partition belongs to the node whose
+//!   `(partition, node)` combination hashes highest. When members are added or removed, **only
+//!   about 1/N of the partitions migrate**, which minimizes rebalancing by construction.
+//! - **Consistency**: the member list comes from Raft (strongly consistent) and the hash is
+//!   **deterministic** (no randomly seeded `DefaultHasher`), so every node computes exactly the
+//!   same ownership and reaches consensus without any extra negotiation.
+//! - **Split-brain protection**: node views can diverge briefly at the moment membership changes;
+//!   when a strong guarantee is needed, take an ownership lease carrying a monotonic fencing token
+//!   with [`RaftControlPlane::acquire_partition`](crate::RaftControlPlane::acquire_partition)
+//!   (which reuses the Raft lock) — a stale owner is rejected on its smaller token.
 //!
-//! 对有消费组的 MQ(Kafka/NATS),分区分配可直接复用消费组;此模块是**无消费组**
-//! 后端(内存)的兜底归属方案。
+//! For MQs with consumer groups (Kafka/NATS), partition assignment can reuse the consumer group
+//! directly; this module is the fallback ownership scheme for backends **without** consumer groups
+//! (in-memory).
 
 use crate::raft::NodeId;
 
-/// 默认虚拟分区数。取 2 的幂,便于均匀分布;足够细以在中小集群里均衡负载。
+/// The default number of virtual partitions. A power of two, which distributes evenly; fine
+/// enough to balance load across small and medium clusters.
 pub const DEFAULT_PARTITIONS: u32 = 256;
 
 const FNV_OFFSET: u64 = 14695981039346656037;
@@ -31,13 +38,13 @@ fn fnv1a(bytes: &[u8]) -> u64 {
     h
 }
 
-/// 账号 / 会话键 → 分区号。稳定且与进程无关。
+/// Account / session key → partition number. Stable and process-independent.
 pub fn partition_of(key: &str, partitions: u32) -> u32 {
     let n = partitions.max(1);
     (fnv1a(key.as_bytes()) % n as u64) as u32
 }
 
-/// Rendezvous(HRW)评分:`(partition, node)` 组合的稳定哈希。
+/// Rendezvous (HRW) score: a stable hash of the `(partition, node)` combination.
 #[inline]
 fn hrw_score(partition: u32, node: NodeId) -> u64 {
     let mut buf = [0u8; 12];
@@ -46,9 +53,10 @@ fn hrw_score(partition: u32, node: NodeId) -> u64 {
     fnv1a(&buf)
 }
 
-/// 计算某分区在给定成员集合下的归属节点(评分最高者)。
+/// Computes which node owns a partition for a given member set (the highest score wins).
 ///
-/// 成员为空返回 `None`。评分相同则取 `node_id` 较大者(确定性 tie-break)。
+/// Returns `None` when the member set is empty. Ties are broken in favour of the larger `node_id`
+/// (a deterministic tie-break).
 pub fn owner_of_partition(partition: u32, members: &[NodeId]) -> Option<NodeId> {
     members
         .iter()
@@ -58,7 +66,7 @@ pub fn owner_of_partition(partition: u32, members: &[NodeId]) -> Option<NodeId> 
         .map(|(_, node)| node)
 }
 
-/// 某成员在给定成员集合下拥有的分区集合。
+/// The set of partitions a member owns for a given member set.
 pub fn partitions_owned_by(me: NodeId, members: &[NodeId], partitions: u32) -> Vec<u32> {
     let n = partitions.max(1);
     (0..n)
@@ -66,7 +74,7 @@ pub fn partitions_owned_by(me: NodeId, members: &[NodeId], partitions: u32) -> V
         .collect()
 }
 
-/// 某账号 / 会话键是否归 `me` 处理。
+/// Whether a given account / session key is handled by `me`.
 pub fn owns_key(me: NodeId, key: &str, members: &[NodeId], partitions: u32) -> bool {
     owner_of_partition(partition_of(key, partitions), members) == Some(me)
 }
@@ -78,7 +86,7 @@ mod tests {
 
     #[test]
     fn assignment_is_deterministic_and_process_independent() {
-        // 同样输入必得同样归属(不依赖随机种子)。
+        // The same input must always yield the same ownership (no reliance on a random seed).
         let members = vec![1u64, 2, 3, 4, 5];
         for p in 0..DEFAULT_PARTITIONS {
             let a = owner_of_partition(p, &members);
@@ -86,7 +94,8 @@ mod tests {
             assert_eq!(a, b);
             assert!(a.is_some());
         }
-        // 已知向量:分区哈希稳定(回归护栏,值随算法固定即可)。
+        // Known vector: the partition hash is stable (a regression guard; the value only needs to
+        // stay pinned to the algorithm).
         assert_eq!(
             partition_of("account-42", DEFAULT_PARTITIONS),
             partition_of("account-42", DEFAULT_PARTITIONS)
@@ -99,14 +108,14 @@ mod tests {
         let mut union: BTreeSet<u32> = BTreeSet::new();
         for &m in &members {
             for p in partitions_owned_by(m, &members, DEFAULT_PARTITIONS) {
-                // 无重叠:同一分区不能被两个成员认领。
+                // No overlap: the same partition must not be claimed by two members.
                 assert!(
                     union.insert(p),
                     "partition {p} owned by more than one member"
                 );
             }
         }
-        // 全覆盖:每个分区都有归属。
+        // Full coverage: every partition has an owner.
         assert_eq!(union.len(), DEFAULT_PARTITIONS as usize);
     }
 
@@ -116,7 +125,7 @@ mod tests {
         let per = DEFAULT_PARTITIONS as usize / members.len();
         for &m in &members {
             let owned = partitions_owned_by(m, &members, DEFAULT_PARTITIONS).len();
-            // 允许 ±50% 抖动(256 分区 / 4 节点 ≈ 64,区间 [32,96])。
+            // Allow ±50% jitter (256 partitions / 4 nodes ≈ 64, i.e. the range [32,96]).
             assert!(
                 owned >= per / 2 && owned <= per * 3 / 2,
                 "member {m} owns {owned}, expected ~{per}"
@@ -126,7 +135,8 @@ mod tests {
 
     #[test]
     fn membership_change_moves_minimal_partitions() {
-        // HRW 关键性质:加一个节点,只有归属新节点的分区迁移,其余不动。
+        // The key HRW property: adding a node migrates only the partitions that move to the new
+        // node; everything else stays put.
         let before = vec![1u64, 2, 3];
         let after = vec![1u64, 2, 3, 4];
         let mut moved = 0;
@@ -135,11 +145,12 @@ mod tests {
             let o2 = owner_of_partition(p, &after).unwrap();
             if o1 != o2 {
                 moved += 1;
-                // 迁移的目标只可能是新加入的节点 4。
+                // The only possible migration target is the newly joined node 4.
                 assert_eq!(o2, 4, "partition {p} moved to a non-new node");
             }
         }
-        // 迁移量应接近 1/4(新节点应得的份额),远小于全量。
+        // The number moved should be close to 1/4 (the new node's fair share), far short of the
+        // whole set.
         let expected = DEFAULT_PARTITIONS as usize / after.len();
         assert!(
             moved > 0 && moved < DEFAULT_PARTITIONS as usize / 2,

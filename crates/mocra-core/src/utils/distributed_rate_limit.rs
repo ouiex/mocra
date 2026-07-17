@@ -47,16 +47,18 @@ impl RateLimitConfig {
     }
 }
 
-/// 进程内平滑限流器(可选按集群成员数分摊全局限额)。
+/// In-process smoothing rate limiter (can optionally divide a global limit across cluster
+/// members).
 ///
-/// 限流状态全部保存在进程内(`DashMap`)。集群(内嵌 Raft 等)
-/// 模式下,注入 [`CoordinationBackend`](crate::utils::coordination::CoordinationBackend)
-/// 后按成员数把全局每秒限额分摊到每个节点,得到近似的分布式限流。
+/// All rate-limiting state is kept in-process (`DashMap`). In cluster mode (embedded Raft,
+/// etc.), once a [`CoordinationBackend`](crate::utils::coordination::CoordinationBackend) is
+/// injected, the global per-second limit is divided across nodes by member count, giving
+/// approximate distributed rate limiting.
 ///
-/// 特性:
-/// 1. 每标识符独立限速,平滑配速(按区间计算)。
-/// 2. 用 [`DistributedLockManager`] 保护读改写。
-/// 3. 支持 per-key 限速与动态更新。
+/// Features:
+/// 1. Independent, smoothly paced rate limiting per identifier (computed per interval).
+/// 2. Read-modify-write is guarded by a [`DistributedLockManager`].
+/// 3. Supports per-key rates and dynamic updates.
 #[derive(Clone)]
 pub struct DistributedSlidingWindowRateLimiter {
     /// Distributed lock manager.
@@ -84,8 +86,9 @@ pub struct DistributedSlidingWindowRateLimiter {
     /// Cache for suspension checks.
     /// Key: identifier, Value: (Last Check Time, Suspend Until Timestamp)
     suspend_cache: Arc<DashMap<String, (Instant, Option<u64>)>>,
-    /// 可选协调后端(内嵌 Raft 等)。置位后用其成员数把全局限额**按节点分摊**
-    /// (近似分布式限流);未置位时不分摊(单机语义)。
+    /// Optional coordination backend (embedded Raft, etc.). When set, its member count is used
+    /// to **divide the global limit per node** (approximate distributed rate limiting); when
+    /// unset the limit is not divided (single-node semantics).
     coordination: Option<Arc<dyn crate::utils::coordination::CoordinationBackend>>,
 }
 
@@ -114,7 +117,8 @@ impl DistributedSlidingWindowRateLimiter {
         Self::new_with_coordination(locker, None, namespace, default_config)
     }
 
-    /// 带协调后端构造:集群模式下把全局限额按成员数分摊到每个节点。
+    /// Construct with a coordination backend: in cluster mode the global limit is divided
+    /// across nodes by member count.
     pub fn new_with_coordination(
         locker: Arc<DistributedLockManager>,
         coordination: Option<Arc<dyn crate::utils::coordination::CoordinationBackend>>,
@@ -143,8 +147,9 @@ impl DistributedSlidingWindowRateLimiter {
         }
     }
 
-    /// 把每秒限额按集群成员数分摊(仅有协调后端时);无协调后端 → 不分摊。
-    /// 返回值恒 > 0,避免区间计算除零。
+    /// Divide the per-second limit by the cluster member count (only when a coordination
+    /// backend is present); without one, the limit is not divided. The return value is always
+    /// > 0, to avoid a division by zero in the interval computation.
     fn share_rps(&self, rps: f32) -> f32 {
         let n = self
             .coordination
@@ -154,8 +159,10 @@ impl DistributedSlidingWindowRateLimiter {
         (rps / n).max(f32::MIN_POSITIVE)
     }
 
-    /// 解析某标识符的**生效**限速配置:在 [`get_key_config`](Self::get_key_config)
-    /// 的全局配置上应用集群分摊。所有限流判定路径都应经此,而非直接读全局配置。
+    /// Resolve the **effective** rate-limit config for an identifier: applies the cluster
+    /// division on top of the global config from [`get_key_config`](Self::get_key_config).
+    /// Every rate-limiting decision path should go through this rather than reading the global
+    /// config directly.
     async fn effective_config(&self, identifier: &str) -> RateLimitConfig {
         let mut cfg = match self.get_key_config(identifier).await {
             Ok(c) => c,
@@ -239,8 +246,10 @@ impl DistributedSlidingWindowRateLimiter {
         }
 
         // Update cache
-        self.suspend_cache
-            .insert(identifier.to_string(), (Instant::now(), found_suspend_until));
+        self.suspend_cache.insert(
+            identifier.to_string(),
+            (Instant::now(), found_suspend_until),
+        );
 
         if let Some(suspend_until) = found_suspend_until {
             Ok(Some(suspend_until - current_time))
@@ -342,7 +351,8 @@ impl DistributedSlidingWindowRateLimiter {
             }
 
             let current_time = self.get_current_timestamp().await?;
-            self.local_last_request.insert(last_request_key, current_time);
+            self.local_last_request
+                .insert(last_request_key, current_time);
 
             // Release lock.
             let _ = self.lock_manager.release_lock(&lock_key).await;
@@ -593,7 +603,8 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
-    /// 只覆写 `cluster_size` 的最小 CoordinationBackend,用于验证限额分摊。
+    /// Minimal CoordinationBackend that only overrides `cluster_size`, used to verify that the
+    /// limit is divided correctly.
     struct SizeBackend(usize);
     #[async_trait::async_trait]
     impl crate::utils::coordination::CoordinationBackend for SizeBackend {
@@ -639,7 +650,7 @@ mod tests {
 
     #[test]
     fn shares_global_limit_by_cluster_size() {
-        // 4 节点集群:每秒 8 的全局限额按节点分摊为每节点 2。
+        // 4-node cluster: a global limit of 8 per second divides to 2 per node.
         let locker = Arc::new(DistributedLockManager::new("t"));
         let backend: Arc<dyn crate::utils::coordination::CoordinationBackend> =
             Arc::new(SizeBackend(4));
@@ -651,7 +662,7 @@ mod tests {
         );
         assert_eq!(limiter.share_rps(8.0), 2.0);
 
-        // 无协调后端 → 不分摊(单机语义不变)。
+        // No coordination backend: the limit is not divided (single-node semantics unchanged).
         let plain = DistributedSlidingWindowRateLimiter::new(
             Arc::new(DistributedLockManager::new("t")),
             "ns",

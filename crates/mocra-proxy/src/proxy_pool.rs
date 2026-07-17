@@ -14,23 +14,23 @@ use url::Url;
 #[derive(Clone)]
 pub struct RateLimitTracker {
     requests_in_window: u32,
-    window_start: Instant,     // 窗口开始（单调时钟）
-    window_duration: Duration, // 窗口长度
+    window_start: Instant,     // Window start (monotonic clock)
+    window_duration: Duration, // Window length
 }
 
 impl RateLimitTracker {
-    /// 创建新的限速跟踪器（毫秒级）
+    /// Creates a new rate-limit tracker (millisecond resolution).
     pub fn new() -> Self {
         Self {
             requests_in_window: 0,
             window_start: Instant::now(),
-            window_duration: Duration::from_millis(1000), // 固定 1 秒窗口
+            window_duration: Duration::from_millis(1000), // Fixed 1-second window
         }
     }
 
-    /// 记录一个请求
+    /// Records a single request.
     pub fn record_request(&mut self) {
-        // 如果时间窗口已过期，重置计数器
+        // Reset the counter if the time window has expired.
         if self.window_start.elapsed() >= self.window_duration {
             self.requests_in_window = 0;
             self.window_start = Instant::now();
@@ -38,13 +38,13 @@ impl RateLimitTracker {
         self.requests_in_window += 1;
     }
 
-    /// 检查是否达到限速（毫秒级）
+    /// Checks whether the rate limit has been reached (millisecond resolution).
     pub fn is_rate_limited(&mut self, rate_limit: f32) -> bool {
-        // 非正限速视为不限制
+        // A non-positive rate limit means no limiting.
         if rate_limit <= 0.0 {
             return false;
         }
-        // 若窗口已过，视为未限
+        // If the window has elapsed, treat as not limited.
         if self.window_start.elapsed() >= self.window_duration {
             self.requests_in_window = 0;
             self.window_start = Instant::now();
@@ -54,7 +54,7 @@ impl RateLimitTracker {
         self.requests_in_window >= cap
     }
 
-    /// 获取当前请求频率（毫秒级）
+    /// Returns the current request rate (millisecond resolution).
     pub fn get_current_rate(&self) -> f32 {
         let elapsed = self.window_start.elapsed();
         if elapsed >= self.window_duration || elapsed.as_millis() == 0 {
@@ -63,7 +63,7 @@ impl RateLimitTracker {
         self.requests_in_window as f32 / elapsed.as_secs_f32()
     }
 
-    /// 剩余窗口时长（用于等待）
+    /// Remaining duration of the current window (used for waiting).
     pub fn remaining_in_window(&self) -> Duration {
         let elapsed = self.window_start.elapsed();
         if elapsed >= self.window_duration {
@@ -73,7 +73,7 @@ impl RateLimitTracker {
         }
     }
 
-    /// 当前窗口内已计数的请求数（若窗口已过期则返回0）
+    /// Number of requests counted in the current window (returns 0 if the window has expired).
     pub fn current_window_count(&self) -> u32 {
         if self.window_start.elapsed() >= self.window_duration {
             0
@@ -96,9 +96,9 @@ pub struct IpProvider {
     pub retry_codes: Vec<u16>,
     pub timeout: u64,
     pub rate_limit: f32,
-    pub provider_expire_time: Option<String>, // 提供商的过期时间
-    pub proxy_expire_time: u64,               // 当前供应商的代理过期时间
-    pub weight: Option<u32>,                  // 添加权重支持
+    pub provider_expire_time: Option<String>, // Provider expiry time
+    pub proxy_expire_time: u64,               // Expiry time of this provider's proxies
+    pub weight: Option<u32>,                  // Weight support
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -108,12 +108,12 @@ pub struct IpProxy {
     pub username: Option<String>,
     pub password: Option<String>,
     pub proxy_type: Option<String>, // http, socks5, etc
-    pub rate_limit: f32,            // 每秒最大请求数
+    pub rate_limit: f32,            // Maximum requests per second
 }
 
 impl Display for IpProxy {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        // 格式化为reqwest可以直接使用的代理URL格式
+        // Format as a proxy URL that reqwest can consume directly.
         let proxy_type = self.proxy_type.as_deref().unwrap_or("http");
         match (&self.username, &self.password) {
             (Some(username), Some(password)) => {
@@ -140,12 +140,12 @@ pub struct Tunnel {
     pub password: Option<String>,
     pub tunnel_type: String,
     pub expire_time: String,
-    pub rate_limit: f32, // 每秒最大请求数
+    pub rate_limit: f32, // Maximum requests per second
 }
 
 impl Display for Tunnel {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        // 格式化为reqwest可以直接使用的代理URL格式
+        // Format as a proxy URL that reqwest can consume directly.
         match (&self.username, &self.password) {
             (Some(username), Some(password)) => {
                 write!(
@@ -198,7 +198,7 @@ impl PartialEq<IpProxy> for ProxyEnum {
                 && ip_proxy.username == other.username
                 && ip_proxy.password == other.password
                 && ip_proxy.proxy_type == other.proxy_type
-                && (ip_proxy.rate_limit - other.rate_limit).abs() < f32::EPSILON // 比较浮点数时使用容差
+                && (ip_proxy.rate_limit - other.rate_limit).abs() < f32::EPSILON // Float tolerance
         } else {
             false
         }
@@ -259,7 +259,7 @@ impl DirectProxy {
         let proxy_type = match scheme.as_str() {
             "http" => "http",
             "https" => "https",
-            // websocket 代理统一归一到 http/https 代理协议
+            // WebSocket proxies are normalized to the http/https proxy protocol.
             "ws" => "http",
             "wss" => "https",
             _ => {
@@ -349,7 +349,7 @@ pub struct PoolConfig {
     pub max_size: usize,
     pub max_errors: u32,
     pub health_check_interval_secs: u64,
-    pub refill_threshold: f32, // 当池大小低于这个比例时触发补充
+    pub refill_threshold: f32, // Refill is triggered when the pool falls below this ratio
 }
 
 impl Default for PoolConfig {
@@ -374,7 +374,7 @@ pub trait IpProxyLoader: Send + Sync {
     async fn health_check(&self, proxy: &IpProxy) -> bool;
 }
 
-/// 代理池构建器
+/// Proxy pool builder.
 pub struct ProxyPoolBuilder {
     config: PoolConfig,
     tunnels: Vec<Tunnel>,
@@ -446,10 +446,10 @@ pub struct ProxyItem {
     pub last_used: Option<Duration>,
     pub expire_time: Duration,
     pub provider_name: String,
-    pub response_time: Option<Duration>,      // 响应时间
-    pub success_rate: f32,                    // 成功率
-    pub rate_limit_tracker: RateLimitTracker, // 限速跟踪器
-    pub provider_rate_limit: f32,             // 提供商设置的限速值
+    pub response_time: Option<Duration>,      // Response time
+    pub success_rate: f32,                    // Success rate
+    pub rate_limit_tracker: RateLimitTracker, // Rate-limit tracker
+    pub provider_rate_limit: f32,             // Rate limit configured by the provider
 }
 
 impl ProxyItem {
@@ -466,7 +466,7 @@ impl ProxyItem {
                     .unwrap_or_default()
         };
 
-        let rate = tunnel.rate_limit; // 默认每秒10个请求
+        let rate = tunnel.rate_limit; // Defaults to 10 requests per second
         let name = tunnel.name.clone();
         Self {
             proxy: ProxyEnum::Tunnel(tunnel),
@@ -478,14 +478,14 @@ impl ProxyItem {
             response_time: None,
             success_rate: 1.0,
             rate_limit_tracker: RateLimitTracker::new(),
-            provider_rate_limit: rate, // 使用隧道的限速值
+            provider_rate_limit: rate, // Use the tunnel's rate limit
         }
     }
     pub fn new_for_ip_proxy(ip_proxy: IpProxy, ip_provider: &IpProvider) -> Self {
         let expire_time = Duration::from_secs(ip_provider.proxy_expire_time)
             + SystemTime::now()
                 .duration_since(UNIX_EPOCH)
-                .unwrap_or_default(); // 默认5分钟
+                .unwrap_or_default(); // Defaults to 5 minutes
         Self {
             proxy: ProxyEnum::IpProxy(ip_proxy),
             error_count: 0,
@@ -496,7 +496,7 @@ impl ProxyItem {
             response_time: None,
             success_rate: 1.0,
             rate_limit_tracker: RateLimitTracker::new(),
-            provider_rate_limit: ip_provider.rate_limit, // 使用提供商的限速值
+            provider_rate_limit: ip_provider.rate_limit, // Use the provider's rate limit
         }
     }
 
@@ -553,7 +553,7 @@ impl ProxyItem {
                 .unwrap_or_default(),
         );
         self.update_success_rate();
-        // 失败同样计入本窗口请求数，保持与选择时的一致性
+        // Failures also count toward this window's requests, consistent with selection.
         self.rate_limit_tracker.record_request();
     }
     fn update_success_rate(&mut self) {
@@ -566,13 +566,13 @@ impl ProxyItem {
     pub fn quality_score(&self) -> f32 {
         let mut score = self.success_rate * 100.0;
 
-        // 响应时间影响分数
+        // Response time affects the score.
         if let Some(response_time) = self.response_time {
             let response_ms = response_time.as_millis() as f32;
-            score -= response_ms / 100.0; // 响应时间越长，分数越低
+            score -= response_ms / 100.0; // The slower the response, the lower the score
         }
 
-        // 最近使用时间影响分数
+        // Time since last use affects the score.
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default();
@@ -581,13 +581,13 @@ impl ProxyItem {
         } else {
             0
         };
-        score -= time_since_last_use as f32 / 3600.0; // 越久未使用，分数越低
+        score -= time_since_last_use as f32 / 3600.0; // Longer unused, lower score
 
         score.max(0.0)
     }
 
     pub fn is_rate_limited(&mut self) -> bool {
-        // 确定使用的限速值
+        // Determine which rate limit applies.
         let actual_rate_limit = match &self.proxy {
             ProxyEnum::IpProxy(ip_proxy) => {
                 if ip_proxy.rate_limit > 0.0 {
@@ -722,26 +722,26 @@ impl ProxyPool {
             .push(item);
     }
 
-    /// 获取代理，支持负载均衡和故障转移
+    /// Gets a proxy, with load balancing and failover.
     pub async fn get_proxy(&self, provider_name: Option<&str>) -> Result<ProxyEnum> {
         if let Some(name) = provider_name {
             return self.get_ip_proxy_from_provider(name).await;
         }
-        // 首先尝试获取最佳隧道代理
+        // First try to get the best tunnel proxy.
         if let Some(tunnel) = self.get_best_tunnel().await {
             return Ok(tunnel);
         }
 
-        // 如果没有可用的隧道代理，处理IP代理
+        // Fall back to IP proxies if no tunnel proxy is available.
         self.get_best_ip_proxy().await
     }
 
-    /// 获取质量最好的隧道代理
+    /// Gets the highest-quality tunnel proxy.
     pub async fn get_best_tunnel(&self) -> Option<ProxyEnum> {
-        // 获取写锁，直接操作pools中的数据
+        // Take the write lock and operate on the pool data directly.
         let mut pools = self.pools.write().await;
 
-        // 收集所有隧道代理并按质量分数排序
+        // Collect all tunnel proxies and sort them by quality score.
         let mut tunnel_items = Vec::new();
         for pool in pools.values_mut() {
             for item in pool.iter_mut() {
@@ -755,14 +755,14 @@ impl ProxyPool {
             return None;
         }
         tunnel_items.sort();
-        // 按质量分数排序（降序）
+        // Sort by quality score (descending).
         // tunnel_items.sort_by(|a, b| {
         //     b.quality_score()
         //         .partial_cmp(&a.quality_score())
         //         .unwrap_or(std::cmp::Ordering::Equal)
         // });
 
-        // 尝试找到未达到限速的最佳隧道代理
+        // Try to find the best tunnel proxy that has not hit its rate limit.
 
         for item in tunnel_items.iter_mut() {
             if !item.is_rate_limited() {
@@ -771,7 +771,7 @@ impl ProxyPool {
             }
         }
 
-        // 全部被限，计算最短剩余时间等待
+        // All are rate limited: wait for the shortest remaining window.
         if let Some(min_remaining) = tunnel_items
             .iter()
             .map(|i| i.rate_limit_tracker.remaining_in_window())
@@ -783,7 +783,7 @@ impl ProxyPool {
                 Duration::from_millis(50)
             };
             tokio::time::sleep(sleep_dur).await;
-            // 重试一次（不递归多次，交给调用方后续节奏）
+            // Retry once (no deep recursion; leave further pacing to the caller).
             for item in tunnel_items.iter_mut() {
                 if !item.is_rate_limited() {
                     item.rate_limit_tracker.record_request();
@@ -795,23 +795,23 @@ impl ProxyPool {
         None
     }
 
-    /// 从指定提供商获取代理
+    /// Gets a proxy from a specific provider.
     async fn get_ip_proxy_from_provider(&self, provider_name: &str) -> Result<ProxyEnum> {
         self.ensure_pool_size(provider_name).await?;
 
-        // 先获取代理池的副本，避免锁跨越await
+        // Copy out of the proxy pool first so the lock is not held across an await.
         {
             let mut pools = self.pools.write().await;
             let pool = pools.get_mut(provider_name).ok_or_else(|| {
                 ProxyError::InvalidConfig(format!("Provider {provider_name} not found").into())
             })?;
 
-            // 移除过期和无效的代理
+            // Drop expired and invalid proxies.
             pool.retain(|item| item.is_valid(self.config.max_errors));
 
-            // 按质量分数排序
+            // Sort by quality score.
             pool.sort();
-            // 尝试找到未达到限速的最佳代理
+            // Try to find the best proxy that has not hit its rate limit.
             for item in pool.iter_mut() {
                 if !item.is_rate_limited() {
                     item.rate_limit_tracker.record_request();
@@ -820,7 +820,7 @@ impl ProxyPool {
             }
         }
 
-        // 如果所有代理都达到限速，尝试获取新的代理
+        // If every proxy is rate limited, try to fetch new ones.
         self.refill_pool(provider_name).await?;
 
         {
@@ -829,19 +829,19 @@ impl ProxyPool {
                 ProxyError::InvalidConfig(format!("Provider {provider_name} not found").into())
             })?;
 
-            // 移除过期和无效的代理
+            // Drop expired and invalid proxies.
             pool.retain(|item| item.is_valid(self.config.max_errors));
 
-            // 按质量分数排序
+            // Sort by quality score.
             pool.sort();
-            // 尝试找到未达到限速的最佳代理
+            // Try to find the best proxy that has not hit its rate limit.
             for item in pool.iter_mut() {
                 if !item.is_rate_limited() {
                     item.rate_limit_tracker.record_request();
                     return Ok(item.proxy.clone());
                 }
             }
-            // 如果仍然没有可用代理，计算最短剩余时间等待后重试一次
+            // If none are available, wait the shortest remaining window and retry once.
             if let Some(min_remaining) = pool
                 .iter()
                 .map(|i| i.rate_limit_tracker.remaining_in_window())
@@ -865,7 +865,7 @@ impl ProxyPool {
         Err(ProxyError::InvalidConfig("No valid proxy available".into()))
     }
 
-    /// 获取最佳代理（跨所有提供商）
+    /// Gets the best proxy across all providers.
     async fn get_best_ip_proxy(&self) -> Result<ProxyEnum> {
         let mut pools = self.pools.write().await;
         let mut proxy_items = pools
@@ -881,7 +881,8 @@ impl ProxyPool {
             }
         }
 
-        // 如果所有代理都达到限速，获取权重最高的IpProvider 执行self.get_ip_proxy_from_provider
+        // If every proxy is rate limited, call self.get_ip_proxy_from_provider on the
+        // highest-weighted IpProvider.
 
         let mut providers: Vec<_> = {
             let providers = self.ip_providers.lock().await;
@@ -890,9 +891,9 @@ impl ProxyPool {
                 .map(|(name, provider)| (name.clone(), provider.get_weight()))
                 .collect()
         };
-        providers.sort_by_key(|x| std::cmp::Reverse(x.1)); // 按权重降序排序
+        providers.sort_by_key(|x| std::cmp::Reverse(x.1)); // Sort by weight, descending
         if let Some((provider_name, _)) = providers.first() {
-            // 计算全局最短剩余时间并等待一次
+            // Compute the global shortest remaining window and wait once.
             if let Some(min_remaining) = proxy_items
                 .iter()
                 .map(|i| i.rate_limit_tracker.remaining_in_window())
@@ -907,7 +908,7 @@ impl ProxyPool {
             }
             self.get_ip_proxy_from_provider(provider_name).await
         } else if !proxy_items.is_empty() {
-            // 再尝试一次是否已解除限速（需要可变借用）
+            // Check once more whether the rate limit has lifted (needs a mutable borrow).
             let mut_idx = 0usize;
             if !proxy_items[mut_idx].is_rate_limited() {
                 proxy_items[mut_idx].rate_limit_tracker.record_request();
@@ -920,7 +921,7 @@ impl ProxyPool {
         }
     }
 
-    /// 报告代理使用结果
+    /// Reports the outcome of using a proxy.
     pub async fn report_proxy_result(
         &self,
         proxy: &ProxyEnum,
@@ -939,7 +940,7 @@ impl ProxyPool {
         }
     }
 
-    /// 报告隧道代理使用结果
+    /// Reports the outcome of using a tunnel proxy.
     async fn report_tunnel_result(
         &self,
         tunnel: &Tunnel,
@@ -965,18 +966,18 @@ impl ProxyPool {
                     }
                 }
             }
-        } // 写锁作用域提前结束
+        } // End the write-lock scope early
         if !found {
             return Err(ProxyError::InvalidConfig(
                 format!("Tunnel {} not found", tunnel.endpoint).into(),
             ));
         }
-        // 更新统计信息
+        // Update statistics.
         self.update_stats().await;
         Ok(())
     }
 
-    /// 报告IP代理使用结果
+    /// Reports the outcome of using an IP proxy.
     async fn report_ip_proxy_result(
         &self,
         proxy: &IpProxy,
@@ -985,7 +986,7 @@ impl ProxyPool {
     ) -> Result<()> {
         let mut proxy_found = false;
         {
-            // 遍历所有提供商的池查找代理
+            // Scan every provider's pool looking for the proxy.
             let mut pools = self.pools.write().await;
             for pool in pools.values_mut() {
                 for item in pool.iter_mut() {
@@ -1006,12 +1007,12 @@ impl ProxyPool {
                 }
             }
 
-            // 清理所有池中的无效代理
+            // Purge invalid proxies from every pool.
             for pool in pools.values_mut() {
                 pool.retain(|item| item.is_valid(self.config.max_errors));
             }
-        } // 写锁作用域提前结束
-        // 如果没有找到代理，返回错误
+        } // End the write-lock scope early
+        // Return an error if the proxy was not found.
         if !proxy_found {
             return Err(ProxyError::InvalidConfig(
                 format!(
@@ -1021,12 +1022,12 @@ impl ProxyPool {
                 .into(),
             ));
         }
-        // 更新统计信息
+        // Update statistics.
         self.update_stats().await;
         Ok(())
     }
 
-    /// 报告代理成功使用
+    /// Reports a successful proxy use.
     pub async fn report_success(
         &self,
         proxy: &ProxyEnum,
@@ -1035,12 +1036,13 @@ impl ProxyPool {
         self.report_proxy_result(proxy, true, response_time).await
     }
 
-    /// 报告代理失败使用
+    /// Reports a failed proxy use.
     pub async fn report_failure(&self, proxy: &ProxyEnum) -> Result<()> {
         self.report_proxy_result(proxy, false, None).await
     }
 
-    /// 确保池大小满足要求，具体补充多少由对应的struct决定
+    /// Ensures the pool meets the required size; how much to refill is decided by the
+    /// corresponding struct.
     async fn ensure_pool_size(&self, provider_name: &str) -> Result<()> {
         let current_size = {
             let pools = self.pools.read().await;
@@ -1056,9 +1058,10 @@ impl ProxyPool {
         Ok(())
     }
 
-    /// 当所有代理IP超限了，获取新一批的代理并添加进去，之前的代理仍然存在
+    /// When every proxy IP is over its limit, fetches a fresh batch and adds it; existing
+    /// proxies are kept.
     async fn refill_pool(&self, provider_name: &str) -> Result<()> {
-        // await 前 clone Arc 指针
+        // Clone the Arc pointer before awaiting.
         let provider: Arc<Box<dyn IpProxyLoader>> = {
             let providers = self.ip_providers.lock().await;
             providers.get(provider_name).cloned().ok_or_else(|| {
@@ -1093,7 +1096,7 @@ impl ProxyPool {
         Ok(())
     }
 
-    /// 更新统计信息
+    /// Updates the statistics.
     async fn update_stats(&self) {
         let pools = self.pools.read().await;
         let mut stats = self.stats.write().await;
@@ -1159,7 +1162,7 @@ impl ProxyPool {
         }
     }
 
-    /// 获取池状态
+    /// Gets the pool status.
     pub async fn get_pool_status(&self) -> HashMap<String, usize> {
         let pools = self.pools.read().await;
         pools
@@ -1168,12 +1171,12 @@ impl ProxyPool {
             .collect()
     }
 
-    /// 获取详细统计信息
+    /// Gets detailed statistics.
     pub async fn get_stats(&self) -> PoolStats {
         self.stats.read().await.clone()
     }
 
-    /// 执行健康检查
+    /// Runs a health check.
     pub async fn health_check(&self) -> Result<()> {
         let providers: Vec<String> = {
             let providers = self.ip_providers.lock().await;
@@ -1192,7 +1195,7 @@ impl ProxyPool {
                 let mut healthy_proxies = Vec::new();
                 for item in pool.into_iter() {
                     if let ProxyEnum::IpProxy(ref proxy) = item.proxy {
-                        // 执行健康检查
+                        // Run the health check.
                         if provider.health_check(proxy).await {
                             healthy_proxies.push(item.clone());
                         }

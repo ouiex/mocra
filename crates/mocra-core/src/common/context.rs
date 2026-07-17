@@ -6,26 +6,33 @@ use crate::common::model::config::Config;
 use crate::common::status_tracker::StatusTracker;
 use crate::utils::lock::DistributedLockManager;
 
-/// 采集管线(download / parser / task-model / stream chains)所需的**聚焦运行时上下文**。
+/// The **focused runtime context** required by the collection pipeline (download / parser /
+/// task-model / stream chains).
 ///
-/// 它是 [`State`](crate::common::state::State) 的一个窄化视图 —— 只暴露管线真正用到的
-/// 四样共享服务,而非整个 10 字段上帝对象。chains 依赖它(而非 `State`),使核心管线与
-/// 数据库 / API 限流器 / cookie / 协调后端等**可选或集群子系统解耦**,
-/// 是后续把管线抽成 `mocra-core` 的前置条件。
+/// It is a narrowed view of [`State`](crate::common::state::State) — it exposes only the four
+/// shared services the pipeline actually uses, rather than the whole 10-field god object. Chains
+/// depend on it (instead of on `State`), which **decouples the core pipeline from optional or
+/// cluster-only subsystems** such as the database / API rate limiter / cookies / coordination
+/// backend, and is a prerequisite for later extracting the pipeline into `mocra-core`.
 ///
-/// 字段名与类型与 `State` 的对应字段一致,[`State::pipeline_ctx`](crate::common::state::State::pipeline_ctx)
-/// 直接克隆这几个 `Arc` 构造 —— 因此与 `State` **共享**同一份服务(配置热更新等可见)。
+/// The field names and types mirror the corresponding fields on `State`;
+/// [`State::pipeline_ctx`](crate::common::state::State::pipeline_ctx) builds it by cloning those
+/// `Arc`s directly — so it **shares** the very same services with `State` (config hot reloads stay
+/// visible to the pipeline, and so on).
 ///
-/// > 说明:`locker` 看似是协调设施,但管线本就经 `status_tracker`(内部持有同一个
-/// > `DistributedLockManager`)间接依赖它;这里直接暴露仅供串行化 / 限流等协调用途,
-/// > 未扩大真实依赖面。
+/// > Note: `locker` looks like coordination infrastructure, but the pipeline already depends on it
+/// > indirectly through `status_tracker` (which internally holds the same `DistributedLockManager`);
+/// > exposing it directly here serves only coordination purposes such as serialization / rate
+/// > limiting, and does not widen the real dependency surface.
 pub struct PipelineContext {
-    /// 动态配置(与 `State` 共享同一 `RwLock`,配置热更新对管线可见)。
+    /// Dynamic configuration (shares the same `RwLock` as `State`, so config hot reloads are
+    /// visible to the pipeline).
     pub config: Arc<RwLock<Config>>,
-    /// 通用缓存服务(去重 / 会话 / 中间结果等)。
+    /// General purpose cache service (deduplication / sessions / intermediate results, etc.).
     pub cache_service: Arc<CacheService>,
-    /// 任务 / 模块状态与错误追踪(重试、熔断、锁等)。
+    /// Task / module status and error tracking (retries, circuit breaker, locks, etc.).
     pub status_tracker: Arc<StatusTracker>,
-    /// 分布式锁管理器(协调后端 / 进程内本地锁;供串行化 / 限流等协调用途)。
+    /// Distributed lock manager (coordination backend / in-process local locks; serves coordination
+    /// purposes such as serialization / rate limiting).
     pub locker: Arc<DistributedLockManager>,
 }

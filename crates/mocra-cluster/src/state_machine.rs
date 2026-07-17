@@ -1,9 +1,10 @@
-//! redb 支撑的复制状态机。
+//! A redb-backed replicated state machine.
 //!
-//! 命令经 [`apply`](StateMachine::apply) 确定性地改变持久状态。这正是 Raft 将要复制的状态机:
-//! 每个节点在日志条目提交后调用 `apply`,得到一致的结果。
+//! Commands mutate the persistent state deterministically through [`apply`](StateMachine::apply).
+//! This is exactly the state machine Raft replicates: every node calls `apply` once a log entry is
+//! committed and arrives at the same result.
 //!
-//! 表:`kv`(通用 KV)、`locks`(分布式锁)、`meta`(fencing 计数器)。
+//! Tables: `kv` (general-purpose KV), `locks` (distributed locks), `meta` (the fencing counter).
 
 use std::path::Path;
 use std::sync::Arc;
@@ -17,7 +18,7 @@ const LOCKS: TableDefinition<&str, &[u8]> = TableDefinition::new("locks");
 const META: TableDefinition<&str, u64> = TableDefinition::new("meta");
 const FENCING_COUNTER: &str = "fencing_counter";
 
-/// 状态机错误。
+/// State machine errors.
 #[derive(Debug, thiserror::Error)]
 pub enum StateMachineError {
     #[error("redb: {0}")]
@@ -38,14 +39,14 @@ fn decode_lock(b: &[u8]) -> Result<Lock, StateMachineError> {
     rmp_serde::from_slice(b).map_err(|e| StateMachineError::Codec(e.to_string()))
 }
 
-/// redb 支撑的复制状态机。
+/// A redb-backed replicated state machine.
 #[derive(Clone)]
 pub struct StateMachine {
     db: Arc<Database>,
 }
 
 impl StateMachine {
-    /// 打开(或创建)一个 redb 支撑的状态机,并预建所需的表。
+    /// Open (or create) a redb-backed state machine, creating the required tables up front.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StateMachineError> {
         let db = Database::create(path).map_err(redb_err)?;
         let w = db.begin_write().map_err(redb_err)?;
@@ -58,7 +59,7 @@ impl StateMachine {
         Ok(Self { db: Arc::new(db) })
     }
 
-    /// 确定性地应用一条命令(Raft 提交后由每个节点调用)。
+    /// Apply a single command deterministically (called by every node once Raft has committed it).
     pub fn apply(&self, cmd: &Cmd) -> Result<CmdResult, StateMachineError> {
         let w = self.db.begin_write().map_err(redb_err)?;
         let result = match cmd {
@@ -165,14 +166,14 @@ impl StateMachine {
         Ok(result)
     }
 
-    /// 读取一个 KV(本地读;线性一致由上层 Raft read-index 保证)。
+    /// Read a KV pair (a local read; linearizability is guaranteed by the Raft read-index above).
     pub fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, StateMachineError> {
         let r = self.db.begin_read().map_err(redb_err)?;
         let t = r.open_table(KV).map_err(redb_err)?;
         Ok(t.get(key).map_err(redb_err)?.map(|g| g.value().to_vec()))
     }
 
-    /// 快照用:把整个业务状态(kv + locks)序列化为字节。
+    /// For snapshots: serialize the entire business state (kv + locks) into bytes.
     pub fn dump(&self) -> Result<Vec<u8>, StateMachineError> {
         let r = self.db.begin_read().map_err(redb_err)?;
         let mut kv = Vec::new();
@@ -195,7 +196,7 @@ impl StateMachine {
             .map_err(|e| StateMachineError::Codec(e.to_string()))
     }
 
-    /// 从快照恢复:清空 kv / locks 并载入。
+    /// Restore from a snapshot: clear kv / locks, then load the contents.
     pub fn restore(&self, bytes: &[u8]) -> Result<(), StateMachineError> {
         let dump: SmDump =
             rmp_serde::from_slice(bytes).map_err(|e| StateMachineError::Codec(e.to_string()))?;
@@ -219,7 +220,7 @@ impl StateMachine {
     }
 }
 
-/// 状态机快照的可序列化表示(kv + locks 全量)。
+/// The serializable representation of a state machine snapshot (all of kv + locks).
 #[derive(serde::Serialize, serde::Deserialize)]
 struct SmDump {
     kv: Vec<(Vec<u8>, Vec<u8>)>,
@@ -245,7 +246,7 @@ mod tests {
         .unwrap();
         assert_eq!(sm.get(b"x").unwrap(), Some(b"1".to_vec()));
 
-        // CAS 失败(expect 不匹配)。
+        // CAS fails (expect does not match).
         assert_eq!(
             sm.apply(&Cmd::Cas {
                 key: b"x".to_vec(),
@@ -255,7 +256,7 @@ mod tests {
             .unwrap(),
             CmdResult::Bool(false)
         );
-        // CAS 成功。
+        // CAS succeeds.
         assert_eq!(
             sm.apply(&Cmd::Cas {
                 key: b"x".to_vec(),
@@ -273,7 +274,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let sm = sm(&dir);
 
-        // a 获取锁 -> fencing token 1。
+        // a acquires the lock -> fencing token 1.
         assert_eq!(
             sm.apply(&Cmd::AcquireLock {
                 key: "k".into(),
@@ -284,7 +285,7 @@ mod tests {
             .unwrap(),
             CmdResult::Fencing(Some(1))
         );
-        // b 在未过期时被拒。
+        // b is rejected while the lock has not expired.
         assert_eq!(
             sm.apply(&Cmd::AcquireLock {
                 key: "k".into(),
@@ -295,7 +296,7 @@ mod tests {
             .unwrap(),
             CmdResult::Fencing(None)
         );
-        // 过期后 b 获取 -> fencing token 递增到 2。
+        // After expiry b acquires it -> the fencing token increments to 2.
         assert_eq!(
             sm.apply(&Cmd::AcquireLock {
                 key: "k".into(),
@@ -306,7 +307,7 @@ mod tests {
             .unwrap(),
             CmdResult::Fencing(Some(2))
         );
-        // a 续租失败(已非持有者)。
+        // a's lease renewal fails (it is no longer the holder).
         assert_eq!(
             sm.apply(&Cmd::RenewLock {
                 key: "k".into(),
@@ -317,7 +318,7 @@ mod tests {
             .unwrap(),
             CmdResult::Bool(false)
         );
-        // b 续租成功。
+        // b's lease renewal succeeds.
         assert_eq!(
             sm.apply(&Cmd::RenewLock {
                 key: "k".into(),
@@ -328,7 +329,7 @@ mod tests {
             .unwrap(),
             CmdResult::Bool(true)
         );
-        // b 释放后 a 可获取。
+        // Once b releases it, a can acquire it.
         sm.apply(&Cmd::ReleaseLock {
             key: "k".into(),
             holder: "b".into(),

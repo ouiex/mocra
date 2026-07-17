@@ -12,12 +12,14 @@ use std::time::SystemTime;
 use tokio::sync::RwLock;
 
 pub struct DownloaderManager {
-    /// 应用配置(命名空间名等);此前吃整个 `Arc<State>`,现窄化为具体依赖(重构 Phase 2)。
+    /// Application config (namespace name, etc.); it used to take the entire `Arc<State>`, now
+    /// narrowed to the concrete dependency (refactor Phase 2).
     pub app_config: Arc<RwLock<Config>>,
-    /// 分布式锁管理器(协调后端 / 进程内本地锁)。
+    /// Distributed lock manager (coordination backend / in-process local locks).
     pub locker: Arc<DistributedLockManager>,
-    /// 默认下载器(缺省 reqwest);可经 [`set_default_downloader`](Self::set_default_downloader)
-    /// 在启动前替换(如换成浏览器渲染 / 代理轮换 / 自定义重试的下载器)。
+    /// Default downloader (reqwest by default); can be swapped out before startup via
+    /// [`set_default_downloader`](Self::set_default_downloader) (e.g. for a downloader that does
+    /// browser rendering / proxy rotation / custom retries).
     pub default_downloader: RwLock<Box<dyn Downloader>>,
     // Registered downloader factories.
     pub downloader: Arc<DashMap<String, Box<dyn Downloader>>>,
@@ -120,7 +122,8 @@ impl DownloaderManager {
         let current_time = Self::current_timestamp();
         let max_score = current_time.saturating_sub(downloader_expire_time);
 
-        // 本地按最近使用时间淘汰过期下载器(进程内 `expire_update_cache` 作索引)。
+        // Evict expired downloaders locally by last-used time (the in-process
+        // `expire_update_cache` acts as the index).
         let mut expired_keys: Vec<String> = Vec::new();
         for entry in self.expire_update_cache.iter() {
             if *entry.value() < max_score {

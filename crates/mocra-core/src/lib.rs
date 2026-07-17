@@ -6,8 +6,9 @@
 //! [`utils`] / [`common`] / [`downloader`] / [`queue`] / [`sync`] / [`schedule`] / [`engine`]).
 //! The host `mocra` crate is a thin facade over it.
 
-// 结构性 clippy lint —— 现有设计取舍(参数数、类型复杂度、模块同名、error/枚举变体尺寸),
-// 非 bug;与主 crate 保持一致的统一豁免(这些模块原在主 crate,依赖同样的豁免)。
+// Structural clippy lints — deliberate design trade-offs (argument count, type complexity,
+// module inception, error / enum variant size), not bugs. Exempted uniformly to stay consistent
+// with the host crate (these modules used to live there and relied on the same exemptions).
 #![allow(
     clippy::too_many_arguments,
     clippy::type_complexity,

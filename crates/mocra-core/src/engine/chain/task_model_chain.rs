@@ -161,7 +161,6 @@ impl ThresholdDecisionService for StatusTrackerThresholdDecisionService {
             input.run_id,
         );
 
-
         let parse_error: Error = ModuleError::ModuleNotFound(input.error_msg.clone().into()).into();
         let mut retry_after: Option<std::time::Duration> = None;
 
@@ -1798,9 +1797,9 @@ pub async fn create_unified_task_ingress_chain(
                 state: state.clone(),
                 queue_manager: queue_manager.clone(),
                 event_bus: event_bus.clone(),
-                threshold_decision_service: Arc::new(
-                    StatusTrackerThresholdDecisionService::new(state.clone()),
-                ),
+                threshold_decision_service: Arc::new(StatusTrackerThresholdDecisionService::new(
+                    state.clone(),
+                )),
             })
             .then::<Vec<Module>, _>(TaskModuleProcessor {
                 state: state.clone(),
@@ -1839,9 +1838,9 @@ pub async fn create_unified_task_ingress_chain(
                 state: state.clone(),
                 queue_manager: queue_manager.clone(),
                 event_bus: event_bus.clone(),
-                threshold_decision_service: Arc::new(
-                    StatusTrackerThresholdDecisionService::new(state.clone()),
-                ),
+                threshold_decision_service: Arc::new(StatusTrackerThresholdDecisionService::new(
+                    state.clone(),
+                )),
             })
             .then::<Vec<Module>, _>(TaskModuleProcessor {
                 state: state.clone(),
@@ -1872,9 +1871,9 @@ pub async fn create_unified_task_ingress_chain(
                 state: state.clone(),
                 queue_manager: queue_manager.clone(),
                 event_bus: None,
-                threshold_decision_service: Arc::new(
-                    StatusTrackerThresholdDecisionService::new(state.clone()),
-                ),
+                threshold_decision_service: Arc::new(StatusTrackerThresholdDecisionService::new(
+                    state.clone(),
+                )),
             })
             .then::<Vec<Module>, _>(TaskModuleProcessor {
                 state: state.clone(),

@@ -24,9 +24,9 @@ use uuid::Uuid;
 pub struct Module {
     /// Resolved module configuration.
     pub config: Arc<ModuleConfig>,
-    /// Bound account info(轻量,不依赖 sea-orm)。
+    /// Bound account info (lightweight, no sea-orm dependency).
     pub account: AccountInfo,
-    /// Bound platform info(轻量,不依赖 sea-orm)。
+    /// Bound platform info (lightweight, no sea-orm dependency).
     pub platform: PlatformInfo,
     /// In-memory error counter snapshot.
     pub error_times: u32,
@@ -298,9 +298,7 @@ impl ModuleEntity {
 mod tests {
     use super::*;
     use crate::cacheable::CacheService;
-    use crate::common::interface::{ModuleTrait, SyncBoxStream, ToSyncBoxStream};
-    use crate::common::model::message::TaskOutputEvent;
-    use crate::common::model::{Request, Response};
+    use crate::common::interface::ModuleTrait;
     use crate::engine::task::module_dag_processor::ModuleDagProcessor;
     use async_trait::async_trait;
 

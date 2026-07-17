@@ -29,7 +29,7 @@ pub struct Response {
     pub priority: crate::common::model::Priority,
 }
 impl Response {
-    /// 响应体按 UTF-8 解码为字符串(严格;无效字节返回错误)。
+    /// Decodes the response body as a UTF-8 string (strict; invalid bytes return an error).
     pub fn text(&self) -> crate::errors::Result<&str> {
         std::str::from_utf8(&self.content).map_err(|e| {
             crate::errors::Error::new(
@@ -39,12 +39,12 @@ impl Response {
         })
     }
 
-    /// 响应体按 UTF-8 解码(无效字节以 U+FFFD 替换)。
+    /// Decodes the response body as UTF-8 (invalid bytes are replaced with U+FFFD).
     pub fn text_lossy(&self) -> std::borrow::Cow<'_, str> {
         String::from_utf8_lossy(&self.content)
     }
 
-    /// 响应体反序列化为 JSON。
+    /// Deserializes the response body as JSON.
     pub fn json<T: serde::de::DeserializeOwned>(&self) -> crate::errors::Result<T> {
         serde_json::from_slice(&self.content).map_err(|e| {
             crate::errors::Error::new(

@@ -1,17 +1,18 @@
-//! mocra-proxy 的错误类型。
+//! Error types for mocra-proxy.
 //!
-//! 独立于宿主 crate —— 作为可单独使用的库,proxy 有自己的 `ProxyError` / `Result`;
-//! 宿主 `mocra` 通过 `impl From<ProxyError> for mocra::Error` 在边界纳入自身 Error 体系。
+//! Independent of the host crate — as a standalone-usable library, proxy has its own
+//! `ProxyError` / `Result`; the host `mocra` folds them into its own error hierarchy at the
+//! boundary via `impl From<ProxyError> for mocra::Error`.
 
 use thiserror::Error;
 
-/// 装箱的底层错误源(与宿主 `mocra::BoxError` 同形)。
+/// A boxed underlying error source (same shape as the host's `mocra::BoxError`).
 pub type BoxError = Box<dyn std::error::Error + Send + Sync + 'static>;
 
-/// mocra-proxy 的 `Result` 别名。
+/// `Result` alias for mocra-proxy.
 pub type Result<T> = std::result::Result<T, ProxyError>;
 
-/// 代理子系统错误。
+/// Proxy subsystem errors.
 #[derive(Debug, Error)]
 pub enum ProxyError {
     #[error("invalid config: {0}")]

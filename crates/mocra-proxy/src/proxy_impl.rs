@@ -52,7 +52,7 @@ async fn fetch_text_proxies(config: &IpProvider) -> crate::error::Result<Vec<IpP
     Ok(proxies)
 }
 
-/// 快代理加载器
+/// Kuaidaili proxy loader.
 pub(crate) struct KuaiDaiLiLoader {
     pub(crate) config: IpProvider,
 }
@@ -83,7 +83,7 @@ impl IpProxyLoader for KuaiDaiLiLoader {
     }
 }
 
-/// 芝麻代理加载器
+/// Zhima proxy loader.
 pub(crate) struct ZmLoader {
     pub(crate) config: IpProvider,
 }

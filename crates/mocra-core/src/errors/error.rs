@@ -5,9 +5,10 @@ use std::fmt;
 use std::num::ParseIntError;
 use std::str::ParseBoolError;
 use thiserror::Error;
-// ProxyError 已抽到独立 crate mocra-proxy;主 crate 经下方 `From` 在边界纳入自身 Error。
+// ProxyError has been extracted into its own crate, mocra-proxy; the main crate folds it into
+// its own Error at the boundary via the `From` impl below.
 use mocra_proxy::ProxyError;
-/// 通用错误详情类型
+/// Generic error-detail type.
 pub type BoxError = Box<dyn StdError + Send + Sync + 'static>;
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -126,7 +127,7 @@ impl Error {
     }
     pub fn is_timeout(&self) -> bool {
         if let Some(source) = &self.inner.source {
-            // 检查是否为超时错误
+            // Check whether this is a timeout error.
             source.to_string().to_lowercase().contains("timeout")
         } else {
             false
@@ -182,7 +183,7 @@ impl StdError for Error {
     }
 }
 
-/// 便利宏，用于创建不同类型的错误
+/// Convenience macro for constructing the various kinds of errors.
 macro_rules! error {
     ($kind:ident) => {
         Error::new(ErrorKind::$kind, None::<BoxError>)
@@ -197,7 +198,7 @@ macro_rules! error {
 
 pub(crate) use error;
 
-// 从特定错误类型转换为通用错误
+// Conversions from specific error types into the generic error.
 impl From<RequestError> for Error {
     fn from(err: RequestError) -> Self {
         Error::new(ErrorKind::Request, Some(err))
@@ -304,7 +305,7 @@ impl From<DynLibError> for Error {
     }
 }
 
-// 具体错误类型定义
+// Concrete error type definitions.
 #[derive(Debug, Error)]
 pub enum RequestError {
     #[error("invalid method")]
@@ -644,7 +645,7 @@ pub enum CacheError {
     Io(#[from] std::io::Error),
 }
 
-// 便利函数，用于创建常见的错误类型
+// Convenience constructors for the common error types.
 impl Error {
     pub fn request_timeout() -> Self {
         Error::from(RequestError::Timeout)
@@ -675,7 +676,7 @@ impl Error {
     }
 }
 
-// 针对常见的外部错误类型的转换
+// Conversions for the common external error types.
 impl From<std::io::Error> for Error {
     fn from(err: std::io::Error) -> Self {
         match err.kind() {

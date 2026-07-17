@@ -1,8 +1,9 @@
-//! 单节点占位网络。
+//! Stub network for single-node deployments.
 //!
-//! 实现 `RaftNetwork` / `RaftNetworkFactory` 以满足 [`Raft::new`](openraft::Raft::new) 的类型要求。
-//! 单一投票者的集群从不发起节点间 RPC,故这些方法不会被调用;
-//! 多节点 RPC(HTTP / gRPC)是后续项(方案 A:小投票核心 + 多 worker)。
+//! Implements `RaftNetwork` / `RaftNetworkFactory` to satisfy the type requirements of
+//! [`Raft::new`](openraft::Raft::new). A cluster with a single voter never issues node-to-node
+//! RPCs, so these methods are never called; multi-node RPC (HTTP / gRPC) is a follow-up item
+//! (plan A: a small voting core + many workers).
 
 use openraft::error::{InstallSnapshotError, NetworkError, RPCError, RaftError};
 use openraft::network::{RPCOption, RaftNetwork, RaftNetworkFactory};
@@ -13,11 +14,11 @@ use openraft::raft::{
 
 use crate::raft::{Node, NodeId, TypeConfig};
 
-/// 占位网络工厂。
+/// Stub network factory.
 #[derive(Clone, Default)]
 pub struct StubNetwork;
 
-/// 占位连接。
+/// Stub connection.
 pub struct StubConnection;
 
 fn stub_err() -> std::io::Error {

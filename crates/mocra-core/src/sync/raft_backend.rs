@@ -1,9 +1,11 @@
-//! `CoordinationBackend` over the embedded redb+Raft control plane(重构 Phase 3)。
+//! `CoordinationBackend` over the embedded redb+Raft control plane (refactor Phase 3).
 //!
-//! 用自组网的 Raft 集群做协调:
-//! - **锁 / 选举**(`LeaderElector` 走 acquire/renew_lock)/ **KV** / **CAS** —— Raft 强一致。
-//! - **pub/sub**(`SyncService` 用)—— 用 Raft KV 的「每 topic 单调 seq append + 轮询」实现,
-//!   跨节点正确且持久(仅依赖 get/cas/set)。控制面流量小,轮询间隔足够。
+//! Coordination is handled by a self-forming Raft cluster:
+//! - **locks / leader election** (`LeaderElector` goes through acquire/renew_lock) / **KV** /
+//!   **CAS** — strongly consistent via Raft.
+//! - **pub/sub** (used by `SyncService`) — implemented on Raft KV as "monotonic per-topic seq
+//!   append + polling", which is correct across nodes and durable (it only relies on
+//!   get/cas/set). Control-plane traffic is light, so the polling interval is good enough.
 
 use std::time::Duration;
 
@@ -13,13 +15,13 @@ use tokio::sync::mpsc;
 
 use crate::sync::backend::CoordinationBackend;
 
-/// 把内嵌 Raft 控制面适配为 [`CoordinationBackend`]。
+/// Adapts the embedded Raft control plane to a [`CoordinationBackend`].
 pub struct RaftCoordinationBackend {
     cp: RaftControlPlane,
 }
 
 impl RaftCoordinationBackend {
-    /// 包装一个已启动的 Raft 控制面。
+    /// Wrap an already started Raft control plane.
     pub fn new(cp: RaftControlPlane) -> Self {
         Self { cp }
     }
@@ -72,7 +74,8 @@ impl CoordinationBackend for RaftCoordinationBackend {
 
     async fn release_lock(&self, key: &str, value: &[u8]) -> Result<bool, String> {
         let holder = String::from_utf8_lossy(value);
-        // ControlPlane::release_lock 仅当持有者匹配时删除,返回 `()`;成功即视为已释放。
+        // ControlPlane::release_lock only deletes when the holder matches and returns `()`; a
+        // success therefore means the lock was released.
         self.cp
             .release_lock(key, holder.as_ref())
             .await
@@ -113,7 +116,8 @@ impl CoordinationBackend for RaftCoordinationBackend {
 
     async fn publish(&self, topic: &str, payload: &[u8]) -> Result<(), String> {
         let seq_key = format!("__psq/{topic}");
-        // 对每 topic 序号做 cas 原子自增,再写消息(Raft 强一致 + 持久)。
+        // Atomically bump the per-topic sequence number with cas, then write the message
+        // (strongly consistent and durable via Raft).
         loop {
             let cur = self
                 .cp
@@ -134,7 +138,7 @@ impl CoordinationBackend for RaftCoordinationBackend {
                     .map_err(|e| e.to_string())?;
                 return Ok(());
             }
-            // cas 失败(并发发布)→ 重试。
+            // cas failed (a concurrent publish), so retry.
         }
     }
 
@@ -143,7 +147,8 @@ impl CoordinationBackend for RaftCoordinationBackend {
         let cp = self.cp.clone();
         let seq_key = format!("__psq/{topic}");
         let topic = topic.to_string();
-        // 从当前序号起(只投递订阅之后的新消息)。
+        // Start from the current sequence number (only deliver messages published after the
+        // subscription).
         let start = cp
             .get(seq_key.as_bytes())
             .await
@@ -155,7 +160,8 @@ impl CoordinationBackend for RaftCoordinationBackend {
         tokio::spawn(async move {
             let _ = &topic;
             let mut last = start;
-            // 同一 seq 连续缺失的轮询次数;超过阈值(~5s)判为「真丢失」而非复制滞后。
+            // Number of consecutive polls where the same seq was missing; past the threshold
+            // (~5s) we treat it as genuinely lost rather than replication lag.
             let mut stall = 0u32;
             const STALL_SKIP: u32 = 25; // 25 * 200ms ≈ 5s
             loop {
@@ -168,22 +174,25 @@ impl CoordinationBackend for RaftCoordinationBackend {
                     .map(u64_from)
                     .unwrap_or(last);
                 while last < cur {
-                    // 只在成功读到消息后推进 `last`:follower 上 seq(前一条日志)可能
-                    // 先于消息(后一条日志)被 apply,若此时贸然自增会永久跳过该消息。
+                    // Only advance `last` once the message has been read: on a follower the
+                    // seq (the earlier log entry) can be applied before the message (the later
+                    // one), and bumping eagerly here would skip that message forever.
                     let next = last + 1;
                     let msg_key = format!("__psm/{topic}/{next}");
                     match cp.get(msg_key.as_bytes()).await {
                         Ok(Some(p)) => {
                             if tx.send(p).await.is_err() {
-                                return; // 订阅端已释放。
+                                return; // The subscriber has been dropped.
                             }
                             last = next;
                             stall = 0;
                         }
                         _ => {
-                            // 消息未就绪。通常是 follower apply 滞后 → 下轮重试同一 seq;
-                            // 若长时间仍缺失(如 publish 两次写之间 leader 崩溃,seq 已占位
-                            // 但消息永远不会写入),跳过以免永久阻塞后续消息。
+                            // The message is not ready yet. Usually this is follower apply lag,
+                            // so retry the same seq on the next round; if it stays missing for
+                            // a long time (e.g. the leader crashed between publish's two
+                            // writes, so the seq is reserved but the message will never be
+                            // written), skip it rather than block every later message forever.
                             stall += 1;
                             if stall >= STALL_SKIP {
                                 last = next;
@@ -222,7 +231,7 @@ mod tests {
         assert!(!be.cas("k", Some(b"v"), b"v3").await.unwrap());
         assert_eq!(be.get("k").await.unwrap(), Some(b"v2".to_vec()));
 
-        // 分布式锁(LeaderElector 走这条)。
+        // Distributed lock (this is the path LeaderElector takes).
         assert!(be.acquire_lock("L", b"owner1", 5000).await.unwrap());
         assert!(!be.acquire_lock("L", b"owner2", 5000).await.unwrap());
         assert!(be.renew_lock("L", b"owner1", 5000).await.unwrap());
@@ -243,12 +252,13 @@ mod tests {
         assert_eq!(m1, b"m1".to_vec());
         assert_eq!(m2, b"m2".to_vec());
 
-        // 集群语义(单节点):自己是 leader、成员数 1、任何分区键都归本地。
+        // Cluster semantics (single node): we are the leader, the member count is 1, and every
+        // partition key is owned locally.
         assert!(be.is_leader(), "single node must be leader");
         assert_eq!(be.cluster_size(), 1);
         assert!(be.owns_partition_key("any-account"));
         assert!(be.release_lock("L", b"owner1").await.unwrap());
-        // 释放后可被他人抢到(验证 release 走原生 CAS-del)。
+        // Once released, someone else can take it (verifies that release uses native CAS-del).
         assert!(be.acquire_lock("L", b"owner2", 5000).await.unwrap());
     }
 }

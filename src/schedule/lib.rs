@@ -1,12 +1,13 @@
-//! DAG 调度(`mocra-dag` shim + 宿主 adapter)已抽为独立 crate [`mocra_core`] 的
-//! `schedule` 模块。
+//! DAG scheduling (the `mocra-dag` shim + host adapter) has been extracted into the `schedule`
+//! module of the standalone [`mocra_core`] crate.
 //!
-//! 此模块保留为 re-export shim,使既有 `crate::schedule::*` 与 `crate::schedule::dag::*`
-//! 路径继续有效(零改动迁移);新代码可直接 `use mocra_core::schedule::...`。
+//! This module remains as a re-export shim so that the existing `crate::schedule::*` and
+//! `crate::schedule::dag::*` paths keep working (zero-change migration); new code can use
+//! `mocra_core::schedule::...` directly.
 
 pub use mocra_core::schedule::*;
 
-/// 兼容旧路径 `crate::schedule::dag::*`。
+/// Compatibility shim for the old `crate::schedule::dag::*` path.
 pub mod dag {
     pub use mocra_core::schedule::dag::*;
 }

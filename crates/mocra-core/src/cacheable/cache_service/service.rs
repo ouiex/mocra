@@ -12,10 +12,11 @@ pub struct CacheService {
 }
 
 impl CacheService {
-    /// 构造一个进程内(本地内存)缓存服务。
+    /// Builds an in-process (local in-memory) cache service.
     ///
-    /// 缓存后端始终是进程内的 [`LocalBackend`]。
-    /// `compression_threshold` 参数保留以兼容既有调用方,但本地后端不做压缩。
+    /// The cache backend is always the in-process `LocalBackend`.
+    /// The `compression_threshold` parameter is kept for compatibility with existing callers, but
+    /// the local backend performs no compression.
     pub fn new(
         namespace: String,
         default_ttl: Option<Duration>,

@@ -897,7 +897,8 @@ impl QueueManager {
 
         for item in items {
             let id = item.get_id();
-            // 分区键用于 MQ 路由 / 分片(账号亲和);与去重 / 日志用的 id 相互独立。
+            // The partition key drives MQ routing / sharding (account affinity); it is
+            // independent of the id used for deduplication / logging.
             let partition_key = item.partition_key();
             if let Some(id_list) = ids.as_mut() {
                 id_list.push(id.clone());

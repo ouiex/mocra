@@ -6,21 +6,26 @@ use serde_json::Value;
 
 #[derive(Default, Debug, Clone, Serialize, Deserialize)]
 pub struct MetaData {
-    /// 任务元数据。来源链路：Task定义 → ParserModel/ErrorModel 处理 → TaskFactory合并 → Module.generate() → Request.meta
-    /// 通过 `add_task_config()` 方法将任务配置序列化为 Value 存储
+    /// Task metadata. Provenance: Task definition → ParserModel/ErrorModel processing →
+    /// TaskFactory merge → Module.generate() → Request.meta
+    /// Stored by serializing the task config into a Value via `add_task_config()`.
     #[serde(with = "crate::common::model::serde_value::value")]
     pub task: Value,
-    /// 登录信息。来源链路：LoginInfo.extra 字段 → 用户认证/授权系统 → Module.generate() → Request.meta
-    /// 通过 `add_login_info()` 方法从 LoginInfo 的 extra 字段提取并序列化
+    /// Login information. Provenance: the LoginInfo.extra field → user authentication/authorization
+    /// system → Module.generate() → Request.meta
+    /// Extracted from LoginInfo's extra field and serialized via `add_login_info()`.
     #[serde(with = "crate::common::model::serde_value::value")]
     pub login_info: Value,
-    /// 模块配置。来源链路：数据库(account/platform/middleware关系表) → ModuleConfig实例 → 模块初始化 → Module.generate() → Request.meta
-    /// 包含: account表配置、platform表配置、module自身配置、rel_module_account配置、rel_module_platform配置、中间件配置等
-    /// 通过 `add_module_config()` 方法将整个 ModuleConfig 结构序列化存储
+    /// Module configuration. Provenance: database (account/platform/middleware relation tables) →
+    /// ModuleConfig instance → module initialization → Module.generate() → Request.meta
+    /// Includes: account table config, platform table config, the module's own config,
+    /// rel_module_account config, rel_module_platform config, middleware config, and so on.
+    /// Stored by serializing the whole ModuleConfig struct via `add_module_config()`.
     #[serde(with = "crate::common::model::serde_value::value")]
     pub module_config: Value,
-    /// trait元数据。来源链路：各trait实现 → trait类型定义 → 业务代码调用 → add_trait_config() → Request.meta
-    /// 通过 `add_trait_config()` 方法存储trait级别的自定义配置和扩展数据
+    /// Trait metadata. Provenance: individual trait implementations → trait type definitions →
+    /// business code calls → add_trait_config() → Request.meta
+    /// Stores trait-level custom configuration and extension data via `add_trait_config()`.
     #[serde(with = "crate::common::model::serde_value::value")]
     pub trait_meta: Value,
 }

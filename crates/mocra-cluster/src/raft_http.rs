@@ -1,11 +1,12 @@
-//! 节点间控制面 RPC:HTTP + msgpack。
+//! Node-to-node control plane RPC: HTTP + msgpack.
 //!
-//! - **服务端**:[`raft_router`] 把 openraft 的 append_entries / vote / install_snapshot
-//!   暴露为 HTTP 端点。
-//! - **客户端**:[`HttpNetwork`] / [`HttpConnection`] 实现 `RaftNetworkFactory` / `RaftNetwork`,
-//!   用 reqwest 向对端 [`BasicNode`] 的 `addr` 发起 RPC。
+//! - **Server**: [`raft_router`] exposes openraft's append_entries / vote / install_snapshot as
+//!   HTTP endpoints.
+//! - **Client**: [`HttpNetwork`] / [`HttpConnection`] implement `RaftNetworkFactory` /
+//!   `RaftNetwork`, issuing RPCs with reqwest to the `addr` of the peer [`BasicNode`].
 //!
-//! 控制面流量小(成员 / 锁 / 配置 / 心跳),HTTP/msgpack 足够且自包含(无需 protobuf codegen)。
+//! Control plane traffic is small (membership / locks / configuration / heartbeats), so
+//! HTTP/msgpack is sufficient and self-contained (no protobuf codegen required).
 
 use axum::Router;
 use axum::body::Bytes;
@@ -23,16 +24,17 @@ use serde::{Deserialize, Serialize};
 use crate::cmd::{Cmd, CmdResult};
 use crate::raft::{MocraRaft, Node, NodeId, TypeConfig};
 
-/// join 请求体:新节点携带自己的 id 与 HTTP 地址。
+/// The join request body: a new node carries its own id and HTTP address.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JoinRequest {
     pub node_id: NodeId,
     pub addr: String,
 }
 
-// ============ 服务端 ============
+// ============ Server ============
 
-/// 把一个 Raft 实例的 RPC + 集群管理暴露为 HTTP 路由。挂到节点自己的 HTTP server 上。
+/// Exposes a Raft instance's RPC + cluster management as HTTP routes. Mounted on the node's own
+/// HTTP server.
 pub fn raft_router(raft: MocraRaft) -> Router {
     Router::new()
         .route("/raft/append", post(append))
@@ -43,10 +45,11 @@ pub fn raft_router(raft: MocraRaft) -> Router {
         .with_state(raft)
 }
 
-/// 客户端写转发端点:任意节点收到写请求后,若自己不是 leader,其 `client_write`
-/// 会失败;follower 侧的 [`RaftControlPlane::write`](crate::RaftControlPlane) 会把
-/// [`Cmd`] 转发到 leader 的本端点。leader 在此本地提交并回 [`CmdResult`]。
-/// 这样「注册到任意节点」的写请求都能落地。
+/// The client write-forwarding endpoint: when any node receives a write request, its
+/// `client_write` fails if that node is not the leader; on the follower side,
+/// [`RaftControlPlane::write`](crate::RaftControlPlane) forwards the [`Cmd`] to this endpoint on
+/// the leader. The leader commits it locally here and returns a [`CmdResult`].
+/// This is what makes "register against any node" writes land.
 async fn cluster_write(State(raft): State<MocraRaft>, body: Bytes) -> Vec<u8> {
     let cmd: Cmd = match rmp_serde::from_slice(&body) {
         Ok(c) => c,
@@ -63,8 +66,10 @@ async fn cluster_write(State(raft): State<MocraRaft>, body: Bytes) -> Vec<u8> {
     rmp_serde::to_vec(&out).unwrap_or_default()
 }
 
-/// 集群 join:把新节点加为 **learner**(方案 A:worker 先作 learner,提升为 voter 是显式操作)。
-/// 应打到 leader;非 leader 会返回 openraft 的 ForwardToLeader 错误(序列化在结果里)。
+/// Cluster join: adds the new node as a **learner** (plan A: a worker starts out as a learner;
+/// promoting it to a voter is an explicit operation).
+/// Should be sent to the leader; a non-leader returns openraft's ForwardToLeader error
+/// (serialized into the result).
 async fn join(State(raft): State<MocraRaft>, body: Bytes) -> Vec<u8> {
     let req: JoinRequest = match rmp_serde::from_slice(&body) {
         Ok(r) => r,
@@ -104,9 +109,9 @@ async fn snapshot(State(raft): State<MocraRaft>, body: Bytes) -> Vec<u8> {
     rmp_serde::to_vec(&res).unwrap_or_default()
 }
 
-// ============ 客户端 ============
+// ============ Client ============
 
-/// RaftNetwork 工厂:持有一个共享的 reqwest 客户端。
+/// RaftNetwork factory: holds one shared reqwest client.
 #[derive(Clone)]
 pub struct HttpNetwork {
     client: reqwest::Client,
@@ -126,7 +131,7 @@ impl Default for HttpNetwork {
     }
 }
 
-/// 到某个对端节点的连接。
+/// A connection to a peer node.
 pub struct HttpConnection {
     client: reqwest::Client,
     target: NodeId,
@@ -134,7 +139,8 @@ pub struct HttpConnection {
 }
 
 impl HttpConnection {
-    /// POST 原始字节到对端某端点,返回响应字节(仅产生网络错误)。
+    /// POSTs raw bytes to one of the peer's endpoints and returns the response bytes (only
+    /// network errors are produced).
     async fn post(&self, path: &str, body: Vec<u8>) -> Result<Vec<u8>, NetworkError> {
         let url = format!("http://{}{}", self.addr, path);
         let resp = self

@@ -282,7 +282,9 @@ impl Engine {
                         )
                         .await;
                     match result {
-                        crate::common::processors::processor::ProcessorResult::Success(mut stream) => {
+                        crate::common::processors::processor::ProcessorResult::Success(
+                            mut stream,
+                        ) => {
                             while stream.next().await.is_some() {}
                             if let Some(comp) = &queue_manager.compensator {
                                 let _ = comp.remove_task("parser_task", &id).await;
@@ -294,7 +296,9 @@ impl Engine {
                                 }
                             }
                         }
-                        crate::common::processors::processor::ProcessorResult::RetryableFailure(retry_policy) => {
+                        crate::common::processors::processor::ProcessorResult::RetryableFailure(
+                            retry_policy,
+                        ) => {
                             Self::handle_policy_retry(
                                 &policy_resolver,
                                 &queue_manager,
@@ -307,7 +311,9 @@ impl Engine {
                             )
                             .await;
                         }
-                        crate::common::processors::processor::ProcessorResult::FatalFailure(err) => {
+                        crate::common::processors::processor::ProcessorResult::FatalFailure(
+                            err,
+                        ) => {
                             Self::handle_policy_failure(
                                 &policy_resolver,
                                 &queue_manager,

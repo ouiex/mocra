@@ -1,7 +1,9 @@
-//! 单节点 Raft 控制面:装配 openraft 节点,命令经 Raft 提交后 apply 到 redb 状态机。
+//! Single-node Raft control plane: assembles the openraft node; commands are committed through
+//! Raft and then applied to the redb state machine.
 //!
-//! 多节点(join / 成员变更 / 网络 RPC)为后续项;此处先跑通单节点共识路径:
-//! `client_write(Cmd)` → Raft 复制提交 → `StateMachineStore::apply` → redb。
+//! Multi-node support (join / membership changes / network RPC) is a follow-up item; this gets the
+//! single-node consensus path working first:
+//! `client_write(Cmd)` → Raft replicates and commits → `StateMachineStore::apply` → redb.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -27,39 +29,41 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-/// 集群状态快照,由 [`RaftControlPlane::status`] 返回,供运维监控 / 健康检查。
+/// A cluster status snapshot, returned by [`RaftControlPlane::status`] for operational monitoring
+/// / health checks.
 #[derive(Debug, Clone)]
 pub struct ClusterStatus {
-    /// 本节点 id。
+    /// This node's id.
     pub node_id: NodeId,
-    /// 本节点当前是否是 leader。
+    /// Whether this node is currently the leader.
     pub is_leader: bool,
-    /// 当前已知 leader(选举中为 `None`)。
+    /// The currently known leader (`None` during a leader election).
     pub current_leader: Option<NodeId>,
-    /// 当前 Raft 任期。
+    /// The current Raft term.
     pub term: u64,
-    /// 已应用到状态机的最高日志位点(`None` = 尚无)。
+    /// The highest log position applied to the state machine (`None` = nothing yet).
     pub last_applied_index: Option<u64>,
-    /// 成员总数(投票者 + learner)。
+    /// Total number of members (voters + learners).
     pub member_count: usize,
-    /// 投票核心成员数。
+    /// The number of members in the voting core.
     pub voter_count: usize,
 }
 
-/// Raft 时序调参:默认适配局域网;高延迟 / 广域网可放大以避免误判 leader 失联。
+/// Raft timing knobs: the defaults suit a LAN; on high-latency / wide-area networks, scale them up
+/// to avoid falsely concluding that the leader is unreachable.
 #[derive(Debug, Clone)]
 pub struct RaftTuning {
-    /// leader 心跳间隔(ms)。
+    /// Leader heartbeat interval (ms).
     pub heartbeat_ms: u64,
-    /// 选举超时下界(ms)。应远大于心跳间隔。
+    /// Lower bound of the election timeout (ms). Should be far larger than the heartbeat interval.
     pub election_timeout_min_ms: u64,
-    /// 选举超时上界(ms)。
+    /// Upper bound of the election timeout (ms).
     pub election_timeout_max_ms: u64,
 }
 
 impl Default for RaftTuning {
     fn default() -> Self {
-        // 局域网默认:心跳 250ms,选举 600~1200ms。
+        // LAN defaults: 250ms heartbeat, 600~1200ms election.
         Self {
             heartbeat_ms: 250,
             election_timeout_min_ms: 600,
@@ -68,21 +72,22 @@ impl Default for RaftTuning {
     }
 }
 
-/// 基于 openraft 的控制面。
+/// An openraft-based control plane.
 #[derive(Clone)]
 pub struct RaftControlPlane {
     node_id: NodeId,
     raft: MocraRaft,
     sm: Arc<StateMachine>,
-    /// 共享 HTTP 客户端(复用连接池),用于写转发热路径。
+    /// A shared HTTP client (reusing the connection pool) for the write-forwarding hot path.
     client: reqwest::Client,
 }
 
 impl RaftControlPlane {
-    /// 起一个单节点 Raft 控制面。
+    /// Starts a single-node Raft control plane.
     ///
-    /// `dir` 下放两个 redb 文件:`sm.redb`(状态机)与 `log.redb`(Raft 日志)——
-    /// 状态机与日志均持久化,整个控制面自包含、可崩溃恢复。
+    /// Two redb files live under `dir`: `sm.redb` (the state machine) and `log.redb` (the Raft
+    /// log) — both the state machine and the log are persisted, so the whole control plane is
+    /// self-contained and recoverable after a crash.
     pub async fn start_single_node(
         node_id: NodeId,
         dir: impl AsRef<Path>,
@@ -109,7 +114,8 @@ impl RaftControlPlane {
             .await
             .map_err(|e| ControlError::Raft(e.to_string()))?;
 
-        // 初始化单节点集群(自己为唯一投票者)。已初始化则忽略。
+        // Initialize the single-node cluster (this node is the only voter). Ignored if it was
+        // already initialized.
         let mut members = BTreeMap::new();
         members.insert(node_id, Node::default());
         let _ = raft.initialize(members).await;
@@ -122,10 +128,12 @@ impl RaftControlPlane {
         })
     }
 
-    /// 起一个**集群**节点:HTTP 网络 + 自带 HTTP server(暴露 Raft RPC 与 `/cluster/join`)。
+    /// Starts a **cluster** node: the HTTP network plus its own HTTP server (exposing the Raft RPC
+    /// and `/cluster/join`).
     ///
-    /// - `dir`:redb 状态机 + 日志目录。
-    /// - `http_addr`:本节点绑定并对外的地址(如 `127.0.0.1:7001`),即它在集群里的标识地址。
+    /// - `dir`: the directory for the redb state machine + log.
+    /// - `http_addr`: the address this node binds and advertises (e.g. `127.0.0.1:7001`), i.e. the
+    ///   address that identifies it within the cluster.
     pub async fn start_cluster_node(
         node_id: NodeId,
         dir: impl AsRef<Path>,
@@ -134,8 +142,8 @@ impl RaftControlPlane {
         Self::start_cluster_node_with(node_id, dir, http_addr, RaftTuning::default()).await
     }
 
-    /// 同 [`start_cluster_node`](Self::start_cluster_node),但可自定义 Raft 时序
-    /// ([`RaftTuning`]),用于高延迟 / 广域网集群。
+    /// Same as [`start_cluster_node`](Self::start_cluster_node), but with customizable Raft timing
+    /// ([`RaftTuning`]) for high-latency / wide-area clusters.
     pub async fn start_cluster_node_with(
         node_id: NodeId,
         dir: impl AsRef<Path>,
@@ -165,7 +173,7 @@ impl RaftControlPlane {
             .await
             .map_err(|e| ControlError::Raft(e.to_string()))?;
 
-        // 起 HTTP server 暴露 Raft RPC + join。
+        // Start the HTTP server exposing the Raft RPC + join.
         let router = raft_router(raft.clone());
         let listener = tokio::net::TcpListener::bind(&http_addr)
             .await
@@ -182,7 +190,8 @@ impl RaftControlPlane {
         })
     }
 
-    /// 初始化一个新集群(把给定 `{id: addr}` 作为初始投票集;通常只在第一个核心节点上调用一次)。
+    /// Initializes a new cluster (the given `{id: addr}` becomes the initial voting set; normally
+    /// called exactly once, on the first core node).
     pub async fn init_cluster(
         &self,
         members: BTreeMap<NodeId, String>,
@@ -198,7 +207,7 @@ impl RaftControlPlane {
         Ok(())
     }
 
-    /// 把一个节点加为 learner(方案 A:worker 先作 learner)。
+    /// Adds a node as a learner (plan A: a worker starts out as a learner).
     pub async fn add_learner(
         &self,
         node_id: NodeId,
@@ -211,7 +220,8 @@ impl RaftControlPlane {
         Ok(())
     }
 
-    /// 变更投票成员(方案 A:小投票核心 3~5;learner/worker 不受影响)。
+    /// Changes the voting membership (plan A: a small voting core of 3~5; learners/workers are
+    /// unaffected).
     pub async fn change_membership(&self, voters: BTreeSet<NodeId>) -> Result<(), ControlError> {
         self.raft
             .change_membership(voters, false)
@@ -220,8 +230,10 @@ impl RaftControlPlane {
         Ok(())
     }
 
-    /// 本节点向种子节点发起 join(把自己加进集群,作 learner)。
-    /// 「注册任意节点即入网」:`seed_addr` 是集群里任意一个已知节点的地址(应为当前 leader)。
+    /// Sends a join request from this node to a seed node (adding itself to the cluster as a
+    /// learner).
+    /// "Register against any node to join": `seed_addr` is the address of any known node in the
+    /// cluster (it should be the current leader).
     pub async fn join_cluster(
         seed_addr: &str,
         node_id: NodeId,
@@ -246,15 +258,16 @@ impl RaftControlPlane {
         res.map_err(ControlError::Raft)
     }
 
-    /// 底层 openraft 句柄(成员变更 / 状态查询)。
+    /// The underlying openraft handle (membership changes / status queries).
     pub fn raft(&self) -> &MocraRaft {
         &self.raft
     }
 
-    /// 集群当前配置的所有成员(投票者 + learner)及其地址。
+    /// All members currently configured in the cluster (voters + learners) and their addresses.
     ///
-    /// 基于 Raft membership 配置(强一致),而非实时存活探测 —— 足够支撑
-    /// 「按成员数分摊限流」「分区归属」等近似分布式语义。
+    /// Based on the Raft membership configuration (strongly consistent) rather than live liveness
+    /// probing — good enough for approximate distributed semantics such as "spread rate limits
+    /// across the member count" and "partition ownership".
     pub fn members(&self) -> Vec<(NodeId, String)> {
         let mc = self.raft.metrics().borrow().membership_config.clone();
         mc.membership()
@@ -263,24 +276,25 @@ impl RaftControlPlane {
             .collect()
     }
 
-    /// 集群成员总数(投票者 + learner)。至少为 1。
+    /// Total number of cluster members (voters + learners). At least 1.
     pub fn member_count(&self) -> usize {
         let mc = self.raft.metrics().borrow().membership_config.clone();
         mc.membership().nodes().count().max(1)
     }
 
-    /// 投票核心成员数(方案 A 的小投票集,通常 3~5)。
+    /// The number of members in the voting core (plan A's small voting set, typically 3~5).
     pub fn voter_count(&self) -> usize {
         let mc = self.raft.metrics().borrow().membership_config.clone();
         mc.membership().voter_ids().count()
     }
 
-    /// 当前已知 leader(未知 / 选举中返回 `None`)。
+    /// The currently known leader (returns `None` when unknown / during a leader election).
     pub fn current_leader(&self) -> Option<NodeId> {
         self.raft.metrics().borrow().current_leader
     }
 
-    /// 集群状态快照(可观测性 / 运维监控:leader、任期、已应用位点、成员数)。
+    /// A cluster status snapshot (observability / operational monitoring: leader, term, applied
+    /// position, member count).
     pub fn status(&self) -> ClusterStatus {
         let m = self.raft.metrics().borrow().clone();
         let mc = m.membership_config.clone();
@@ -295,12 +309,13 @@ impl RaftControlPlane {
         }
     }
 
-    /// 本节点 id。
+    /// This node's id.
     pub fn node_id(&self) -> NodeId {
         self.node_id
     }
 
-    /// 本节点在当前成员视图下负责的分区(rendezvous 分配,默认分区数)。
+    /// The partitions this node is responsible for under the current membership view (rendezvous
+    /// assignment, default partition count).
     pub fn owned_partitions(&self) -> Vec<u32> {
         let members: Vec<NodeId> = self.members().into_iter().map(|(id, _)| id).collect();
         crate::partition::partitions_owned_by(
@@ -310,9 +325,11 @@ impl RaftControlPlane {
         )
     }
 
-    /// 某账号 / 会话键是否归本节点处理(rendezvous 分配,默认分区数)。
+    /// Whether a given account / session key is handled by this node (rendezvous assignment,
+    /// default partition count).
     ///
-    /// 无需协商:成员来自 Raft 强一致视图,哈希确定性,各节点结论一致。
+    /// No negotiation needed: membership comes from Raft's strongly consistent view and the hash
+    /// is deterministic, so every node reaches the same conclusion.
     pub fn owns_key(&self, key: &str) -> bool {
         let members: Vec<NodeId> = self.members().into_iter().map(|(id, _)| id).collect();
         crate::partition::owns_key(
@@ -323,11 +340,13 @@ impl RaftControlPlane {
         )
     }
 
-    /// 抢占某分区的**归属租约**,返回单调 fencing token。
+    /// Claims a partition's **ownership lease** and returns a monotonic fencing token.
     ///
-    /// 用于成员切换瞬间需要强保证的场景:两个节点视图短暂不一致时,只有持最新
-    /// token 的节点能安全处理该分区;陈旧属主的下游写入可凭更小 token 被拒。
-    /// 稳态归属由 [`owns_key`](Self::owns_key) 决定,本方法在其上加 Raft 强保证。
+    /// For situations that need a strong guarantee at the moment membership changes: while two
+    /// nodes' views briefly disagree, only the node holding the newest token can safely handle the
+    /// partition; downstream writes from a stale owner can be rejected on their smaller token.
+    /// Steady-state ownership is decided by [`owns_key`](Self::owns_key); this method layers a
+    /// Raft-backed strong guarantee on top of it.
     pub async fn acquire_partition(
         &self,
         partition: u32,
@@ -338,16 +357,17 @@ impl RaftControlPlane {
             .await
     }
 
-    /// 释放分区归属租约(仅当仍由本节点持有时)。
+    /// Releases the partition ownership lease (only if it is still held by this node).
     pub async fn release_partition(&self, partition: u32) -> Result<(), ControlError> {
         let key = format!("__part/{partition}");
         self.release_lock(&key, &self.node_id.to_string()).await
     }
 
-    /// 优雅关闭本节点的 Raft 运行时:停止后台任务并释放存储(含 redb 文件锁)。
+    /// Gracefully shuts down this node's Raft runtime: stops background tasks and releases storage
+    /// (including the redb file lock).
     ///
-    /// 崩溃恢复 / 重启前应调用它,确保 redb 数据库句柄释放,重开同一目录不再报
-    /// 「Database already open」。
+    /// Call it before crash recovery / restart to make sure the redb database handle is released,
+    /// so reopening the same directory no longer reports "Database already open".
     pub async fn shutdown(&self) -> Result<(), ControlError> {
         self.raft
             .shutdown()
@@ -356,7 +376,8 @@ impl RaftControlPlane {
         Ok(())
     }
 
-    /// 等待本节点成为 leader(单节点极快;多节点选举需一个选举超时窗口)。
+    /// Waits for this node to become the leader (near-instant on a single node; a multi-node
+    /// leader election takes one election-timeout window).
     pub async fn wait_leader(&self, timeout: std::time::Duration) -> Result<(), ControlError> {
         self.raft
             .wait(Some(timeout))
@@ -366,14 +387,17 @@ impl RaftControlPlane {
         Ok(())
     }
 
-    /// 把一条命令经 Raft 复制提交,返回状态机应用结果。
+    /// Replicates and commits a command through Raft, returning the state machine's apply result.
     ///
-    /// - 本节点是 leader → 直接提交。
-    /// - 本节点是 follower 且已知 leader → 把 [`Cmd`] 经 HTTP 转发到 leader 的
-    ///   `/cluster/write`(「注册到任意节点即可用」)。
-    /// - **选举中、暂无 leader** → 命令确定尚未提交,短暂退避后**重试本地 client_write**
-    ///   (只重试这一种确定未提交的情况,故对非幂等命令 CAS / AcquireLock 无双应用风险;
-    ///   转发的 HTTP 失败则不重试 —— leader 可能已应用,结果不确定)。
+    /// - This node is the leader → commit directly.
+    /// - This node is a follower and the leader is known → forward the [`Cmd`] over HTTP to the
+    ///   leader's `/cluster/write` ("register against any node and it works").
+    /// - **A leader election is in progress, with no leader yet** → the command is definitely not
+    ///   committed, so back off briefly and **retry the local client_write** (this is the only
+    ///   case that is retried, precisely because it is known to be uncommitted, so the
+    ///   non-idempotent CAS / AcquireLock commands cannot be applied twice; a failed forwarded
+    ///   HTTP call is not retried — the leader may already have applied it, leaving the result
+    ///   uncertain).
     async fn write(&self, cmd: Cmd) -> Result<CmdResult, ControlError> {
         use openraft::error::{ClientWriteError, RaftError};
 
@@ -383,11 +407,13 @@ impl RaftControlPlane {
                 Ok(resp) => return Ok(resp.data),
                 Err(RaftError::APIError(ClientWriteError::ForwardToLeader(f))) => {
                     match &f.leader_node {
-                        // 已知 leader:转发一次(HTTP 失败即返回,不重试 —— 结果不确定)。
+                        // Leader known: forward once (an HTTP failure returns immediately with no
+                        // retry — the result is uncertain).
                         Some(node) => {
                             return forward_write_to_leader(&self.client, &node.addr, &cmd).await;
                         }
-                        // 选举中无 leader:命令未提交,退避后重试(安全)。
+                        // No leader during the election: the command is uncommitted, so back off
+                        // and retry (safe).
                         None => {
                             tokio::time::sleep(std::time::Duration::from_millis(
                                 150 * (attempt as u64 + 1),
@@ -405,7 +431,8 @@ impl RaftControlPlane {
     }
 }
 
-/// 把一条命令转发到 leader 的 `/cluster/write` 端点并解析结果(复用共享客户端)。
+/// Forwards a command to the leader's `/cluster/write` endpoint and parses the result (reusing the
+/// shared client).
 async fn forward_write_to_leader(
     client: &reqwest::Client,
     leader_addr: &str,
@@ -438,7 +465,7 @@ impl ControlPlane for RaftControlPlane {
     }
 
     async fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, ControlError> {
-        // 本地读(线性一致读可先 ensure_linearizable 再读 —— 后续)。
+        // Local read (for a linearizable read, call ensure_linearizable first — a follow-up item).
         Ok(self.sm.get(key)?)
     }
 
@@ -523,26 +550,27 @@ mod tests {
             .await
             .unwrap();
 
-        // 单节点很快成为 leader。
+        // A single node becomes the leader quickly.
         cp.raft()
             .wait(Some(Duration::from_secs(10)))
             .state(openraft::ServerState::Leader, "become leader")
             .await
             .unwrap();
 
-        // set / get 经 Raft。
+        // set / get through Raft.
         cp.set(b"k", b"v").await.unwrap();
         assert_eq!(cp.get(b"k").await.unwrap(), Some(b"v".to_vec()));
 
-        // cas 经 Raft。
+        // cas through Raft.
         assert!(cp.cas(b"k", Some(b"v"), b"v2").await.unwrap());
         assert_eq!(cp.get(b"k").await.unwrap(), Some(b"v2".to_vec()));
 
-        // 分布式锁 + fencing 经 Raft。
+        // Distributed lock + fencing through Raft.
         assert_eq!(cp.acquire_lock("lock", "a", 5000).await.unwrap(), Some(1));
         assert_eq!(cp.acquire_lock("lock", "b", 5000).await.unwrap(), None);
 
-        // 状态快照:单节点自己是 leader、成员 1、已应用位点随写入前进。
+        // Status snapshot: a single node is its own leader, has 1 member, and the applied position
+        // advances with each write.
         let st = cp.status();
         assert!(st.is_leader);
         assert_eq!(st.node_id, 1);
@@ -554,10 +582,11 @@ mod tests {
 
     #[tokio::test]
     async fn single_node_recovers_state_after_restart() {
-        // 崩溃恢复:控制面(状态机 + 日志)全 redb 持久化,重开同一目录应恢复已提交状态。
+        // Crash recovery: the control plane (state machine + log) is fully persisted in redb, so
+        // reopening the same directory should restore the committed state.
         let dir = tempfile::tempdir().unwrap();
 
-        // 第一次生命周期:写入并提交(client_write 返回即已持久化)。
+        // First lifetime: write and commit (once client_write returns, the data is persisted).
         {
             let cp = RaftControlPlane::start_single_node(1, dir.path())
                 .await
@@ -569,23 +598,27 @@ mod tests {
                 cp.acquire_lock("L", "owner", 60_000).await.unwrap(),
                 Some(1)
             );
-            // 优雅关闭以释放 redb 句柄;已提交数据落盘。cp 随块结束 drop。
+            // Shut down gracefully to release the redb handle; committed data is already on disk.
+            // cp is dropped when the block ends.
             cp.shutdown().await.unwrap();
         }
-        // 让后台任务完全退出、文件锁释放。
+        // Let the background tasks exit fully and the file lock be released.
         tokio::time::sleep(Duration::from_millis(200)).await;
 
-        // 第二次生命周期:重开同一目录 → 从 redb 恢复(无需重放外部日志)。
+        // Second lifetime: reopen the same directory → recover from redb (no external log replay
+        // needed).
         {
             let cp = RaftControlPlane::start_single_node(1, dir.path())
                 .await
                 .unwrap();
             cp.wait_leader(Duration::from_secs(10)).await.unwrap();
-            // KV / CAS 结果恢复。
+            // KV / CAS results are restored.
             assert_eq!(cp.get(b"persist").await.unwrap(), Some(b"v2".to_vec()));
-            // 锁状态恢复:同 key 仍被 owner 持有,他人抢不到。
+            // Lock state is restored: the same key is still held by owner, so nobody else can
+            // take it.
             assert_eq!(cp.acquire_lock("L", "other", 60_000).await.unwrap(), None);
-            // 恢复后仍可继续写入(日志可追加、fencing 计数单调延续)。
+            // Writes can continue after recovery (the log is appendable and the fencing counter
+            // continues monotonically).
             cp.set(b"after", b"restart").await.unwrap();
             assert_eq!(cp.get(b"after").await.unwrap(), Some(b"restart".to_vec()));
         }
@@ -608,10 +641,10 @@ mod tests {
             .await
             .unwrap();
 
-        // 给 HTTP server 一点起动时间。
+        // Give the HTTP server a moment to start up.
         tokio::time::sleep(Duration::from_millis(300)).await;
 
-        // 节点 1 初始化单节点集群 → 成为 leader。
+        // Node 1 initializes a single-node cluster → becomes the leader.
         let mut init = BTreeMap::new();
         init.insert(1u64, a1.to_string());
         cp1.init_cluster(init).await.unwrap();
@@ -621,13 +654,14 @@ mod tests {
             .await
             .unwrap();
 
-        // 加节点 2、3 为 learner(add_learner 阻塞至追平),再提升为 voter(方案 A 核心)。
+        // Add nodes 2 and 3 as learners (add_learner blocks until they catch up), then promote
+        // them to voters (plan A's core).
         cp1.add_learner(2, a2).await.unwrap();
         cp1.add_learner(3, a3).await.unwrap();
         let voters: BTreeSet<NodeId> = [1, 2, 3].into_iter().collect();
         cp1.change_membership(voters).await.unwrap();
 
-        // 成员 API:三节点全在册且均为投票者;leader 已知。
+        // Membership API: all three nodes are registered and all are voters; the leader is known.
         assert_eq!(cp1.member_count(), 3);
         assert_eq!(cp1.voter_count(), 3);
         assert_eq!(cp1.current_leader(), Some(1));
@@ -635,10 +669,10 @@ mod tests {
         addrs.sort();
         assert_eq!(addrs, vec![a1.to_string(), a2.to_string(), a3.to_string()]);
 
-        // 在 leader 写入 → 经 Raft 复制到多数派。
+        // Write on the leader → replicated to a majority through Raft.
         cp1.set(b"hello", b"world").await.unwrap();
 
-        // follower 本地读应最终一致(轮询等待 apply)。
+        // A local read on a follower should be eventually consistent (poll until it applies).
         for cp in [&cp2, &cp3] {
             let mut ok = false;
             for _ in 0..50 {
@@ -651,12 +685,14 @@ mod tests {
             assert!(ok, "follower did not replicate the write");
         }
 
-        // 分布式锁 + fencing 经 Raft(在 leader 提交)。
-        // (锁在 LOCKS 表;KV 已验证复制,锁走同一条 Raft 日志,故不另查 follower。)
+        // Distributed lock + fencing through Raft (committed on the leader).
+        // (Locks live in the LOCKS table; KV replication is already verified and locks travel the
+        // same Raft log, so the followers are not queried separately.)
         assert_eq!(cp1.acquire_lock("L", "a", 5000).await.unwrap(), Some(1));
         assert_eq!(cp1.acquire_lock("L", "b", 5000).await.unwrap(), None);
 
-        // 等 follower 也看到完整成员视图(成员经 Raft 提交后复制)。
+        // Wait for the followers to see the full membership view too (membership is replicated
+        // after being committed through Raft).
         for cp in [&cp2, &cp3] {
             for _ in 0..50 {
                 if cp.member_count() == 3 {
@@ -667,7 +703,8 @@ mod tests {
             assert_eq!(cp.member_count(), 3);
         }
 
-        // 分区归属:三节点各自负责的分区互不重叠且并集覆盖全部(无需协商即一致)。
+        // Partition ownership: the partitions each of the three nodes is responsible for do not
+        // overlap, and their union covers everything (consistent without negotiation).
         let p1: BTreeSet<u32> = cp1.owned_partitions().into_iter().collect();
         let p2: BTreeSet<u32> = cp2.owned_partitions().into_iter().collect();
         let p3: BTreeSet<u32> = cp3.owned_partitions().into_iter().collect();
@@ -676,7 +713,7 @@ mod tests {
             p1.len() + p2.len() + p3.len(),
             crate::partition::DEFAULT_PARTITIONS as usize
         );
-        // 任一账号恰好被一个节点认领(三节点视图一致)。
+        // Any given account is claimed by exactly one node (all three views agree).
         let owners = [
             cp1.owns_key("account-42"),
             cp2.owns_key("account-42"),
@@ -684,8 +721,9 @@ mod tests {
         ];
         assert_eq!(owners.iter().filter(|&&b| b).count(), 1);
 
-        // fencing 归属租约:cp1 抢占分区 7 → 拿到 token;cp2 抢同分区被拒;
-        // cp1 释放后 cp2 可得,且 token 单调递增(防脑裂)。
+        // Fencing ownership lease: cp1 claims partition 7 → gets a token; cp2 is rejected for the
+        // same partition; once cp1 releases it, cp2 can take it, and the token increases
+        // monotonically (split-brain protection).
         let t1 = cp1.acquire_partition(7, 5000).await.unwrap();
         assert!(t1.is_some());
         assert_eq!(cp2.acquire_partition(7, 5000).await.unwrap(), None);
@@ -696,7 +734,8 @@ mod tests {
 
     #[tokio::test]
     async fn cluster_handles_voter_removal() {
-        // 缩容 / 下线:3 投票节点移除一个 → 集群按新多数派继续提交(quorum 重算)。
+        // Scale-down / decommission: remove one of the 3 voting nodes → the cluster keeps
+        // committing under the new majority (the quorum is recomputed).
         let d1 = tempfile::tempdir().unwrap();
         let d2 = tempfile::tempdir().unwrap();
         let d3 = tempfile::tempdir().unwrap();
@@ -726,14 +765,14 @@ mod tests {
         assert_eq!(cp1.member_count(), 3);
         cp1.set(b"before", b"3nodes").await.unwrap();
 
-        // 移除节点 3(缩为 {1,2});新多数派 = 2/2。
+        // Remove node 3 (shrinking to {1,2}); the new majority = 2/2.
         cp1.change_membership([1u64, 2].into_iter().collect())
             .await
             .unwrap();
         assert_eq!(cp1.member_count(), 2);
         assert_eq!(cp1.voter_count(), 2);
 
-        // 缩容后仍可提交,并复制到剩余成员。
+        // Commits still work after the scale-down and replicate to the remaining members.
         cp1.set(b"after", b"2nodes").await.unwrap();
         let mut ok = false;
         for _ in 0..50 {
@@ -749,9 +788,10 @@ mod tests {
 
     #[tokio::test]
     async fn new_node_catches_up_via_snapshot_install() {
-        // 日志压缩 + 快照恢复:leader 写入若干条 → 触发快照 → 清除已快照日志 →
-        // 新节点加入时日志已被 purge,只能经 **install_snapshot** 追平(而非重放日志)。
-        // 验证 RaftSnapshotBuilder → install_snapshot RPC → redb restore 全链路。
+        // Log compaction + snapshot recovery: the leader writes a number of entries → triggers a
+        // snapshot → purges the snapshotted log → by the time the new node joins the log has been
+        // purged, so it can only catch up via **install_snapshot** (not by replaying the log).
+        // Exercises the whole RaftSnapshotBuilder → install_snapshot RPC → redb restore chain.
         let d1 = tempfile::tempdir().unwrap();
         let d2 = tempfile::tempdir().unwrap();
         let (a1, a2) = ("127.0.0.1:27861", "127.0.0.1:27862");
@@ -769,12 +809,12 @@ mod tests {
         cp1.init_cluster(init).await.unwrap();
         cp1.wait_leader(Duration::from_secs(10)).await.unwrap();
 
-        // 写入若干条(单节点期间快速提交)。
+        // Write a number of entries (committed quickly while still single-node).
         for i in 0..30u32 {
             cp1.set(format!("k{i}").as_bytes(), b"v").await.unwrap();
         }
 
-        // 触发快照并等待其构建完成(metrics.snapshot 出现)。
+        // Trigger a snapshot and wait for it to finish building (metrics.snapshot appears).
         cp1.raft().trigger().snapshot().await.unwrap();
         let mut snap_idx = None;
         for _ in 0..50 {
@@ -786,13 +826,15 @@ mod tests {
         }
         let snap_idx = snap_idx.expect("snapshot should have been built");
 
-        // 清除已快照日志(之后新节点无法靠重放追平,必须走快照安装)。
+        // Purge the snapshotted log (after this a new node cannot catch up by replay and must go
+        // through snapshot installation).
         cp1.raft().trigger().purge_log(snap_idx).await.unwrap();
 
-        // 新节点加入:add_learner 阻塞至追平 —— 追平只能经 install_snapshot。
+        // A new node joins: add_learner blocks until it catches up — and it can only catch up via
+        // install_snapshot.
         cp1.add_learner(2, a2).await.unwrap();
 
-        // 节点 2 应已具备快照里的全部 KV。
+        // Node 2 should now hold every KV from the snapshot.
         for i in [0u32, 15, 29] {
             let mut ok = false;
             for _ in 0..50 {
@@ -808,8 +850,10 @@ mod tests {
 
     #[tokio::test]
     async fn cluster_rebalances_partitions_as_nodes_join() {
-        // 动态自组网:节点逐个加入,分区归属随成员增长重平衡。
-        // HRW 关键性质在**活集群**里成立 —— 既有节点的归属集合只缩小,新增节点分走一部分。
+        // Dynamic self-organizing network: nodes join one by one and partition ownership
+        // rebalances as membership grows.
+        // The key HRW property holds in a **live cluster** — an existing node's ownership set only
+        // shrinks, and a newly added node takes a share.
         let d1 = tempfile::tempdir().unwrap();
         let d2 = tempfile::tempdir().unwrap();
         let d3 = tempfile::tempdir().unwrap();
@@ -824,7 +868,7 @@ mod tests {
         let cp3 = RaftControlPlane::start_cluster_node(3, d3.path(), a3)
             .await
             .unwrap();
-        let _ = (&cp2, &cp3); // 需存活以便 add_learner 复制。
+        let _ = (&cp2, &cp3); // Must stay alive so that add_learner can replicate.
         tokio::time::sleep(Duration::from_millis(300)).await;
 
         let mut init = BTreeMap::new();
@@ -832,12 +876,12 @@ mod tests {
         cp1.init_cluster(init).await.unwrap();
         cp1.wait_leader(Duration::from_secs(10)).await.unwrap();
 
-        // 单节点:独占全部分区。
+        // Single node: owns every partition.
         assert_eq!(cp1.member_count(), 1);
         let set1: BTreeSet<u32> = cp1.owned_partitions().into_iter().collect();
         assert_eq!(set1.len(), crate::partition::DEFAULT_PARTITIONS as usize);
 
-        // 节点 2 入网:归属分裂,节点 1 让出一部分给节点 2(集合真子集)。
+        // Node 2 joins: ownership splits and node 1 gives up a share to node 2 (a proper subset).
         cp1.add_learner(2, a2).await.unwrap();
         assert_eq!(cp1.member_count(), 2);
         let set2: BTreeSet<u32> = cp1.owned_partitions().into_iter().collect();
@@ -850,8 +894,9 @@ mod tests {
             "node 2 must take a share from node 1"
         );
 
-        // 节点 3 入网:HRW 关键不变量 —— 节点 1 的归属只会失去,**绝不重新获得**分区
-        //(set3 ⊆ set2);节点 3 从节点 1/2 各分走一部分。
+        // Node 3 joins: the key HRW invariant — node 1's ownership can only shrink and it
+        // **never regains** a partition (set3 ⊆ set2); node 3 takes a share from both node 1
+        // and node 2.
         cp1.add_learner(3, a3).await.unwrap();
         assert_eq!(cp1.member_count(), 3);
         let set3: BTreeSet<u32> = cp1.owned_partitions().into_iter().collect();
@@ -867,7 +912,8 @@ mod tests {
 
     #[tokio::test]
     async fn cluster_survives_leader_failure() {
-        // 3 投票节点;干掉 leader 后,剩余多数派应重新选主并继续提交(写经转发到新 leader)。
+        // 3 voting nodes; after the leader is killed, the surviving majority should elect a new
+        // leader and keep committing (writes are forwarded to the new leader).
         let d1 = tempfile::tempdir().unwrap();
         let d2 = tempfile::tempdir().unwrap();
         let d3 = tempfile::tempdir().unwrap();
@@ -893,19 +939,20 @@ mod tests {
         let voters: BTreeSet<NodeId> = [1, 2, 3].into_iter().collect();
         cp1.change_membership(voters).await.unwrap();
 
-        // 崩溃前写入,经 Raft 提交。
+        // Write before the crash, committed through Raft.
         cp1.set(b"before", b"crash").await.unwrap();
 
-        // 干掉 leader(节点 1)。
+        // Kill the leader (node 1).
         cp1.shutdown().await.unwrap();
 
-        // 剩余两节点应在若干个选举超时窗口内选出新 leader(2 或 3)。
+        // The two surviving nodes should elect a new leader (2 or 3) within a few
+        // election-timeout windows.
         let mut new_leader = None;
         for _ in 0..100 {
             tokio::time::sleep(Duration::from_millis(100)).await;
             let l2 = cp2.current_leader();
             let l3 = cp3.current_leader();
-            // 新 leader 必须是存活节点之一,且两存活节点看法一致。
+            // The new leader must be one of the surviving nodes, and both survivors must agree.
             if let Some(l) = l2 {
                 if l != 1 && Some(l) == l3 {
                     new_leader = Some(l);
@@ -916,7 +963,8 @@ mod tests {
         let leader = new_leader.expect("cluster failed to elect a new leader after leader crash");
         assert!(leader == 2 || leader == 3, "unexpected new leader {leader}");
 
-        // 经存活节点写入(非 leader 会转发到新 leader);选举抖动期重试直至成功。
+        // Write via a surviving node (a non-leader forwards to the new leader); retry through the
+        // election churn until it succeeds.
         let mut wrote = false;
         for _ in 0..100 {
             if cp2.set(b"after", b"failover").await.is_ok() {
@@ -930,7 +978,8 @@ mod tests {
             "surviving majority could not commit a write after failover"
         );
 
-        // 另一存活节点最终读到新值(经 Raft 复制),且崩溃前的数据仍在。
+        // The other survivor eventually reads the new value (replicated through Raft), and the
+        // pre-crash data is still there.
         let mut replicated = false;
         for _ in 0..50 {
             if cp3.get(b"after").await.unwrap() == Some(b"failover".to_vec()) {

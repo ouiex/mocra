@@ -42,7 +42,8 @@ pub fn router(state: ApiState) -> Router {
             auth_middleware,
         ));
 
-    // 只读监控端点:无需 API key(与 /metrics 一致),仅限流。供后台管理页面轮询。
+    // Read-only monitoring endpoints: no API key required (consistent with /metrics), rate limiting
+    // only. Polled by the admin page.
     let rate_limited_routes = Router::new()
         .route("/metrics", get(metrics_handler))
         .route("/observability/cluster", get(observability::cluster_status))
@@ -62,14 +63,17 @@ pub fn router(state: ApiState) -> Router {
     rate_limited_routes
         .merge(health_route)
         .with_state(state)
-        // 允许独立前端(浏览器)跨域访问 dashboard API。
+        // Allow a standalone frontend (browser) to access the dashboard API cross-origin.
         .layer(CorsLayer::permissive())
 }
 
-/// 内置后台管理页面(单文件、零构建的前端),随 `dashboard` 特性编译进二进制。
+/// Built-in admin page (a single-file, zero-build frontend), compiled into the binary with the
+/// `dashboard` feature.
 ///
-/// 浏览器打开引擎地址(`GET /`)即见 指标 / 日志 / 任务 / 性能 面板;页面同源托管时
-/// 自动指向本引擎,无需手填 endpoint。同一文件也可单独分发,填入任意 endpoint 使用。
+/// Opening the engine address in a browser (`GET /`) shows the metrics / logs / tasks / performance
+/// panels; when the page is served from the same origin it points at this engine automatically, with
+/// no endpoint to fill in by hand. The same file can also be distributed on its own and pointed at
+/// any endpoint.
 async fn dashboard_page() -> axum::response::Html<&'static str> {
     axum::response::Html(include_str!("../../../dashboard/index.html"))
 }

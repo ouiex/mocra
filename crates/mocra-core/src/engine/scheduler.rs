@@ -50,9 +50,11 @@ impl Drop for ActiveCronJobGuard<'_> {
 /// - Periodically refresh enabled `(module, account, platform)` contexts.
 /// - Cache parsed schedules for low-latency tick matching.
 /// - Trigger queue tasks distributed across the cluster:
-///   - **多节点 Raft 集群**:每个节点只调度**归属自己的分区**(账号 rendezvous 分配,
-///     跨节点互斥),无 leader 瓶颈 —— cron 负载随节点数水平扩展。
-///   - **单机 / 集群协调**:仅 leader 节点调度全部 context(维持既有语义)。
+///   - **Multi-node Raft cluster**: each node only schedules **the partitions it owns** (accounts
+///     are assigned by rendezvous hashing, mutually exclusive across nodes), with no leader
+///     bottleneck — cron load scales horizontally with the node count.
+///   - **Single-node / cluster coordination**: only the leader node schedules all contexts
+///     (preserving the existing semantics).
 /// - Recover short scheduler pauses with configurable misfire catch-up.
 pub struct CronScheduler {
     task_manager: Arc<TaskManager>,
@@ -361,17 +363,20 @@ impl CronScheduler {
         }
     }
 
-    /// 纯决策(便于单测):给定协调后端的成员数与本地 leader 状态,返回
-    /// `(是否分区集群, 本 tick 是否应调度)`。
+    /// Pure decision logic (easy to unit test): given the coordination backend's member count and
+    /// the local leader status, returns `(is partitioned cluster, should schedule this tick)`.
     ///
-    /// - 成员数 > 1 → 分区集群:所有节点都调度(各管自己的分区),与 leader 无关。
-    /// - 否则(单机 / 单节点 / 集群协调不感知成员)→ 仅 leader 调度全部 context。
+    /// - Member count > 1 → partitioned cluster: every node schedules (each handling its own
+    ///   partitions), regardless of leadership.
+    /// - Otherwise (single-node / single-member cluster / coordination unaware of members) → only
+    ///   the leader schedules all contexts.
     fn scheduling_decision(cluster_size: Option<usize>, is_leader: bool) -> (bool, bool) {
         let partitioned = cluster_size.map(|n| n > 1).unwrap_or(false);
         (partitioned, partitioned || is_leader)
     }
 
-    /// 是否为「按分区分摊」的多节点集群(内嵌 Raft 且成员数 > 1)。
+    /// Whether this is a multi-node cluster that shares work "by partition" (embedded Raft with a
+    /// member count > 1).
     fn is_partitioned_cluster(&self) -> bool {
         Self::scheduling_decision(
             self.state.coordination.as_ref().map(|c| c.cluster_size()),
@@ -380,7 +385,7 @@ impl CronScheduler {
         .0
     }
 
-    /// 本节点这一 tick 是否应执行调度。
+    /// Whether this node should perform scheduling on this tick.
     fn scheduling_active(&self) -> bool {
         Self::scheduling_decision(
             self.state.coordination.as_ref().map(|c| c.cluster_size()),
@@ -407,7 +412,8 @@ impl CronScheduler {
             let current_second_ts = now.timestamp();
 
             if let Some(current_second) = Utc.timestamp_opt(current_second_ts, 0).single() {
-                // 分区集群:所有节点都调度(各管自己的分区);单机/集群:仅 leader。
+                // Partitioned cluster: every node schedules (each handling its own partitions);
+                // single-node/cluster: leader only.
                 if self.scheduling_active() {
                     // Handle temporary pauses by optionally replaying missed ticks.
                     if let Some(last_run) = last_tick {
@@ -530,8 +536,9 @@ impl CronScheduler {
         let namespace_prefix = Arc::new(namespace_prefix);
         let batch_size = 500;
 
-        // 分区集群:仅处理归属本节点的账号(rendezvous 分配跨节点互斥);
-        // 单机 / 集群:`partitioned = false`,不过滤(维持既有全量语义)。
+        // Partitioned cluster: only handle accounts owned by this node (rendezvous assignment is
+        // mutually exclusive across nodes); single-node / cluster: `partitioned = false`, no
+        // filtering (preserving the existing process-everything semantics).
         let partitioned = self.is_partitioned_cluster();
         let coordination = self.state.coordination.clone();
 
@@ -545,7 +552,8 @@ impl CronScheduler {
                     let mut batch_items = Vec::with_capacity(batch.len());
 
                     for (account, platform) in batch {
-                        // 归属过滤:非本节点分区的账号交给其归属节点处理。
+                        // Ownership filter: accounts outside this node's partitions are left to
+                        // their owning node.
                         if partitioned
                             && let Some(c) = coordination.as_ref()
                             && !c.owns_partition_key(account)
@@ -655,7 +663,7 @@ impl CronScheduler {
         let results: Vec<(String, String, String)> = Vec::new();
         #[cfg(feature = "store")]
         let results: Vec<(String, String, String)> = {
-            // 无 DB(standalone)模式:没有可调度的 DB 上下文。
+            // No-DB (standalone) mode: there are no DB contexts to schedule.
             let Some(db) = self.state.db.as_ref() else {
                 return Ok(Vec::new());
             };
@@ -734,7 +742,7 @@ mod tests {
 
     #[test]
     fn scheduling_decision_partitions_multi_node_else_leader_gated() {
-        // 无协调后端(单机):仅 leader 调度。
+        // No coordination backend (single-node): leader schedules only.
         assert_eq!(
             CronScheduler::scheduling_decision(None, true),
             (false, true)
@@ -743,7 +751,7 @@ mod tests {
             CronScheduler::scheduling_decision(None, false),
             (false, false)
         );
-        // 单节点集群(size=1):仍走 leader 门(自己就是 leader)。
+        // Single-member cluster (size=1): still goes through the leader gate (it is the leader).
         assert_eq!(
             CronScheduler::scheduling_decision(Some(1), true),
             (false, true)
@@ -752,7 +760,8 @@ mod tests {
             CronScheduler::scheduling_decision(Some(1), false),
             (false, false)
         );
-        // 多节点集群:所有节点都调度(各管自己的分区),与 leader 状态无关。
+        // Multi-node cluster: every node schedules (each handling its own partitions), regardless
+        // of leader status.
         assert_eq!(
             CronScheduler::scheduling_decision(Some(3), false),
             (true, true)

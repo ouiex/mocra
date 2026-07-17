@@ -1,9 +1,12 @@
-//! 可观测端点:集群 / 引擎运行时状态,供后台管理 / 监控页面消费。
+//! Observability endpoints: cluster / engine runtime status, consumed by admin / monitoring pages.
 //!
-//! - `GET /observability/cluster` → [`ClusterStatusView`];仅内嵌 Raft 时有值,否则 `null`。
-//! - `GET /observability/engine`  → [`EngineStats`](引擎命名空间、模式、各队列待处理数)。
+//! - `GET /observability/cluster` → [`ClusterStatusView`]; only populated with embedded Raft,
+//!   otherwise `null`.
+//! - `GET /observability/engine`  → [`EngineStats`] (engine namespace, mode, and per-queue pending
+//!   counts).
 //!
-//! 指标(延迟 / 吞吐 / 错误率)走已有的 `GET /metrics`(Prometheus 文本)。
+//! Metrics (latency / throughput / error rate) go through the existing `GET /metrics` (Prometheus
+//! text format).
 
 use axum::Json;
 use axum::extract::{Query, State};
@@ -14,7 +17,7 @@ use crate::engine::monitor::{SystemSnapshot, latest_system_snapshot};
 use crate::sync::ClusterStatusView;
 use crate::utils::logger::LogRecord;
 
-/// 集群状态:内嵌 Raft 协调时返回快照,否则 `null`。
+/// Cluster status: returns a snapshot when coordinating via embedded Raft, otherwise `null`.
 pub async fn cluster_status(State(state): State<ApiState>) -> Json<Option<ClusterStatusView>> {
     Json(
         state
@@ -25,7 +28,7 @@ pub async fn cluster_status(State(state): State<ApiState>) -> Json<Option<Cluste
     )
 }
 
-/// 各队列(task/request/response/parser/error/remote-task)待处理数。
+/// Pending counts per queue (task/request/response/parser/error/remote-task).
 #[derive(Debug, Clone, Serialize)]
 pub struct PendingBreakdown {
     pub task: usize,
@@ -37,16 +40,16 @@ pub struct PendingBreakdown {
     pub total: usize,
 }
 
-/// 引擎 / 队列运行时快照。
+/// Engine / queue runtime snapshot.
 #[derive(Debug, Clone, Serialize)]
 pub struct EngineStats {
-    /// 命名空间(`config.name`)。
+    /// Namespace (`config.name`).
     pub namespace: String,
-    /// 是否单节点模式。
+    /// Whether the runtime is in single-node mode.
     pub single_node: bool,
-    /// 是否接入集群协调(内嵌 Raft 等)。
+    /// Whether cluster coordination is wired up (embedded Raft, etc.).
     pub clustered: bool,
-    /// 本地各队列待处理数。
+    /// Local pending counts per queue.
     pub pending: PendingBreakdown,
 }
 
@@ -71,19 +74,20 @@ pub async fn engine_stats(State(state): State<ApiState>) -> Json<EngineStats> {
     })
 }
 
-/// 主机资源(CPU / 内存 / swap)最近快照。首个快照在引擎启动后即出。
+/// Most recent snapshot of host resources (CPU / memory / swap). The first snapshot appears as soon
+/// as the engine starts.
 pub async fn system_stats() -> Json<Option<SystemSnapshot>> {
     Json(latest_system_snapshot())
 }
 
-/// 日志查询参数。
+/// Log query parameters.
 #[derive(Debug, Deserialize)]
 pub struct LogsQuery {
-    /// 返回最近多少条(默认 200,上限 1000)。
+    /// How many recent records to return (default 200, capped at 1000).
     pub limit: Option<usize>,
 }
 
-/// 最近日志(最新在前)。供后台管理页面日志面板消费。
+/// Recent logs (newest first). Consumed by the admin page's log panel.
 pub async fn recent_logs(Query(q): Query<LogsQuery>) -> Json<Vec<LogRecord>> {
     let limit = q.limit.unwrap_or(200).min(1000);
     Json(crate::utils::logger::recent_logs(limit))

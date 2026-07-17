@@ -7,52 +7,53 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::sync::mpsc::{Receiver, Sender, channel};
 
-/// 消息队列通道管理器
+/// Message queue channel manager.
 ///
-/// 数据流转流程：
-/// 1. Task Flow: 监控 TaskModel -> 生成 Request
-/// 2. Request Flow: 监控 Request -> 下载 -> 生成 Response
-/// 3. Response Flow: 监控 Response -> 解析 -> 结束 或 生成新 Request
+/// Data flow:
+/// 1. Task Flow: watch TaskModel -> produce Request
+/// 2. Request Flow: watch Request -> download -> produce Response
+/// 3. Response Flow: watch Response -> parse -> finish, or produce a new Request
 pub struct Channel {
-    // --- 1. 初始任务队列 (Task Queue) ---
-    // 生产者: 外部API / 种子生成器
-    // 消费者: 任务处理器 (TaskProcessor) -> 生成 Request
+    // --- 1. Initial task queue (Task Queue) ---
+    // Producer: external API / seed generator
+    // Consumer: task processor (TaskProcessor) -> produces Request
     pub task_sender: Sender<QueuedItem<TaskEvent>>,
     pub task_receiver: Arc<Mutex<Receiver<QueuedItem<TaskEvent>>>>,
 
-    // --- 2. 请求队列 (Request Queue) ---
-    // 生产者: 任务处理器 / 响应处理器 (解析结果)
-    // 消费者: 下载器 (Downloader) -> 执行下载 -> 生成 Response
+    // --- 2. Request queue (Request Queue) ---
+    // Producer: task processor / response processor (parse results)
+    // Consumer: downloader (Downloader) -> performs the download -> produces Response
     pub request_sender: Sender<QueuedItem<Request>>,
     pub request_receiver: Arc<Mutex<Receiver<QueuedItem<Request>>>>,
 
-    // (可选) 下载专用队列，用于区分调度前后的请求
+    // (Optional) download-only queue, distinguishing requests before and after scheduling
     pub download_request_sender: Sender<QueuedItem<Request>>,
     pub download_request_receiver: Arc<Mutex<Receiver<QueuedItem<Request>>>>,
 
-    // --- 3. 响应队列 (Response Queue) ---
-    // 生产者: 下载器 (Downloader)
-    // 消费者: 响应处理器 (ResponseProcessor) -> 解析数据 -> (存储 / 生成新 Request)
+    // --- 3. Response queue (Response Queue) ---
+    // Producer: downloader (Downloader)
+    // Consumer: response processor (ResponseProcessor) -> parses data -> (store / produce a new
+    // Request)
     pub response_sender: Sender<QueuedItem<Response>>,
     pub response_receiver: Arc<Mutex<Receiver<QueuedItem<Response>>>>,
 
-    // --- 4. 辅助队列 (Auxiliary Queues) ---
+    // --- 4. Auxiliary Queues ---
 
-    // 错误处理
+    // Error handling
     pub error_sender: Sender<QueuedItem<TaskErrorEvent>>,
     pub error_receiver: Arc<Mutex<Receiver<QueuedItem<TaskErrorEvent>>>>,
 
-    // 日志处理
+    // Log handling
     pub log_sender: Sender<QueuedItem<LogModel>>,
     pub log_receiver: Arc<Mutex<Receiver<QueuedItem<LogModel>>>>,
 
-    // --- 5. 其他/扩展队列 (Others) ---
+    // --- 5. Other / extension queues (Others) ---
 
-    // 解析任务队列 (如果解析独立于响应处理)
+    // Parser task queue (when parsing is decoupled from response handling)
     pub parser_task_sender: Sender<QueuedItem<TaskParserEvent>>,
     pub parser_task_receiver: Arc<Mutex<Receiver<QueuedItem<TaskParserEvent>>>>,
 
-    // 远程/分布式节点通信队列
+    // Remote / distributed node communication queues
     pub remote_response_sender: Sender<QueuedItem<Response>>,
     pub remote_response_receiver: Arc<Mutex<Receiver<QueuedItem<Response>>>>,
 

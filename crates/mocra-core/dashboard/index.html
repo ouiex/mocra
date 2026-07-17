@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="zh">
+<html lang="en">
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
@@ -43,8 +43,9 @@
   .badge.warn { color: var(--warn); border-color: rgba(210,153,34,.4); }
   .badge.accent { color: var(--accent); border-color: rgba(88,166,255,.4); }
   .meter { margin: 10px 0; }
-  .meter .lbl { display: flex; justify-content: space-between; font-size: 12px; color: var(--muted); margin-bottom: 5px; }
-  .meter .lbl b { color: var(--text); font-family: var(--mono); font-weight: 600; }
+  .meter .lbl { display: flex; justify-content: space-between; gap: 10px; font-size: 12px; color: var(--muted); margin-bottom: 5px; }
+  .meter .lbl span { flex: none; }
+  .meter .lbl b { color: var(--text); font-family: var(--mono); font-weight: 600; text-align: right; }
   .meter .track { height: 8px; background: var(--panel2); border-radius: 999px; overflow: hidden; }
   .meter .fill { height: 100%; width: 0; border-radius: 999px; background: var(--good); transition: width .4s ease, background .4s ease; }
   .stats { display: grid; grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); gap: 10px; }
@@ -69,6 +70,7 @@
   .lvl.ERROR { color: var(--bad); } .lvl.WARN { color: var(--warn); }
   .lvl.INFO { color: var(--good); } .lvl.DEBUG, .lvl.TRACE { color: var(--muted); }
   .empty { color: var(--muted); text-align: center; padding: 28px; font-size: 13px; }
+  .stats .empty { grid-column: 1 / -1; }
   .hint { color: var(--muted); font-size: 12px; margin-top: 8px; }
 </style>
 </head>
@@ -76,16 +78,16 @@
 <header>
   <span class="brand"><span class="dot" id="statusDot"></span> mocra <span style="color:var(--muted);font-weight:400">dashboard</span></span>
   <input class="endpoint" id="endpoint" placeholder="http://127.0.0.1:8080" spellcheck="false" />
-  <input class="apikey" id="apikey" placeholder="API key(可选)" spellcheck="false" />
-  <button class="primary" id="connectBtn">连接</button>
+  <input class="apikey" id="apikey" placeholder="API key (optional)" spellcheck="false" />
+  <button class="primary" id="connectBtn">Connect</button>
   <div class="spacer"></div>
-  <label class="meta">刷新
+  <label class="meta">Refresh
     <select id="interval">
       <option value="1000">1s</option>
       <option value="2000" selected>2s</option>
       <option value="5000">5s</option>
       <option value="10000">10s</option>
-      <option value="0">暂停</option>
+      <option value="0">Paused</option>
     </select>
   </label>
   <span class="meta" id="lastUpdated">—</span>
@@ -93,22 +95,22 @@
 
 <main>
   <div class="grid">
-    <!-- 概览 / 引擎 -->
+    <!-- Overview / engine -->
     <section class="card third">
-      <h2>引擎</h2>
-      <div class="row" id="engineBadges"><span class="badge">未连接</span></div>
-      <div class="hint" id="engineHint">输入 endpoint 后点“连接”。</div>
+      <h2>Engine</h2>
+      <div class="row" id="engineBadges"><span class="badge">Not connected</span></div>
+      <div class="hint" id="engineHint">Enter an endpoint, then click "Connect".</div>
     </section>
 
-    <!-- 性能 / 主机资源 -->
+    <!-- Performance / host resources -->
     <section class="card third">
-      <h2>性能 · 主机资源</h2>
+      <h2>Performance · Host resources</h2>
       <div class="meter">
         <div class="lbl"><span>CPU</span><b id="cpuVal">—</b></div>
         <div class="track"><div class="fill" id="cpuBar"></div></div>
       </div>
       <div class="meter">
-        <div class="lbl"><span>内存</span><b id="memVal">—</b></div>
+        <div class="lbl"><span>Memory</span><b id="memVal">—</b></div>
         <div class="track"><div class="fill" id="memBar"></div></div>
       </div>
       <div class="meter">
@@ -117,23 +119,23 @@
       </div>
     </section>
 
-    <!-- 集群 -->
+    <!-- Cluster -->
     <section class="card third" id="clusterCard" style="display:none">
-      <h2>集群 · Raft</h2>
+      <h2>Cluster · Raft</h2>
       <div class="kv" id="clusterKv"></div>
     </section>
 
-    <!-- 任务 / 队列 -->
+    <!-- Tasks / queues -->
     <section class="card">
-      <h2>任务 · 队列待处理</h2>
-      <div class="stats" id="queueStats"><div class="empty">未连接</div></div>
+      <h2>Tasks · Pending by queue</h2>
+      <div class="stats" id="queueStats"><div class="empty">Not connected</div></div>
     </section>
 
-    <!-- 日志 -->
+    <!-- Logs -->
     <section class="card">
-      <h2>日志</h2>
+      <h2>Logs</h2>
       <div class="logs-ctl">
-        <label class="meta">条数
+        <label class="meta">Limit
           <select id="logLimit">
             <option value="100">100</option>
             <option value="200" selected>200</option>
@@ -141,21 +143,21 @@
             <option value="1000">1000</option>
           </select>
         </label>
-        <label class="meta">级别
+        <label class="meta">Level
           <select id="logLevel">
-            <option value="">全部</option>
+            <option value="">All</option>
             <option value="ERROR">ERROR</option>
             <option value="WARN">WARN+</option>
             <option value="INFO">INFO+</option>
           </select>
         </label>
-        <button id="logPause">⏸ 暂停滚动</button>
+        <button id="logPause">⏸ Pause scroll</button>
         <span class="meta" id="logCount"></span>
       </div>
       <div class="logwrap">
         <table class="logs">
-          <thead><tr><th>时间</th><th>级别</th><th>模块</th><th>消息</th><th>task/trace</th></tr></thead>
-          <tbody id="logBody"><tr><td colspan="5" class="empty">未连接</td></tr></tbody>
+          <thead><tr><th>Time</th><th>Level</th><th>Module</th><th>Message</th><th>task/trace</th></tr></thead>
+          <tbody id="logBody"><tr><td colspan="5" class="empty">Not connected</td></tr></tbody>
         </table>
       </div>
     </section>
@@ -167,7 +169,8 @@
   "use strict";
   var $ = function (id) { return document.getElementById(id); };
 
-  // 服务端直接托管本页时,默认指向同源;作为独立文件(file://)打开时,默认本地引擎。
+  // Served directly by the engine → default to the same origin; opened as a standalone
+  // file (file://) → default to the local engine.
   var defaultEndpoint = (location.protocol === "http:" || location.protocol === "https:")
     ? location.origin : "http://127.0.0.1:8080";
 
@@ -206,18 +209,18 @@
 
   function renderEngine(e) {
     var badges = $("engineBadges"); badges.innerHTML = "";
-    if (!e) { badges.innerHTML = '<span class="badge">无数据</span>'; return; }
+    if (!e) { badges.innerHTML = '<span class="badge">no data</span>'; return; }
     function b(txt, cls) { var s = document.createElement("span"); s.className = "badge" + (cls ? " " + cls : ""); s.textContent = txt; badges.appendChild(s); }
     b("namespace: " + e.namespace, "accent");
-    b(e.single_node ? "单节点" : "多节点", e.single_node ? "" : "good");
-    b(e.clustered ? "已接入集群" : "无协调后端", e.clustered ? "good" : "");
-    b("待处理 " + (e.pending ? e.pending.total : 0));
+    b(e.single_node ? "single node" : "multi node", e.single_node ? "" : "good");
+    b(e.clustered ? "clustered" : "no coordination backend", e.clustered ? "good" : "");
+    b("pending " + (e.pending ? e.pending.total : 0));
     $("engineHint").textContent = "";
   }
 
   function renderQueues(e) {
     var wrap = $("queueStats");
-    if (!e || !e.pending) { wrap.innerHTML = '<div class="empty">无数据</div>'; return; }
+    if (!e || !e.pending) { wrap.innerHTML = '<div class="empty">No data</div>'; return; }
     var p = e.pending;
     var items = [
       ["task", p.task, ""], ["download", p.download, ""], ["response", p.response, ""],
@@ -245,7 +248,7 @@
     if (!c) { card.style.display = "none"; return; }
     card.style.display = "";
     var rows = [
-      ["node", c.node_id], ["角色", c.is_leader ? "leader" : "follower"],
+      ["node", c.node_id], ["role", c.is_leader ? "leader" : "follower"],
       ["current leader", c.current_leader == null ? "—" : c.current_leader],
       ["term", c.term], ["members", c.member_count], ["voters", c.voter_count],
       ["last applied", c.last_applied_index],
@@ -264,8 +267,8 @@
       var rk = LEVEL_RANK[(r.level || "").toUpperCase()];
       return rk == null || rk >= minRank;
     });
-    $("logCount").textContent = rows.length ? rows.length + " 条" : "";
-    if (!rows.length) { body.innerHTML = '<tr><td colspan="5" class="empty">无日志</td></tr>'; return; }
+    $("logCount").textContent = rows.length ? rows.length + " rows" : "";
+    if (!rows.length) { body.innerHTML = '<tr><td colspan="5" class="empty">No logs</td></tr>'; return; }
     body.innerHTML = rows.map(function (r) {
       var lvl = (r.level || "").toUpperCase();
       var t = r.time ? String(r.time).replace("T", " ").replace(/\.\d+.*$/, "") : "—";
@@ -287,22 +290,22 @@
       state.logPaused ? Promise.resolve({ __skip: true }) : fetchJSON("/observability/logs?limit=" + limit),
     ]).then(function (res) {
       var engine = res[0].status === "fulfilled" ? res[0].value : null;
-      // engine 端点作为“是否连接”的判定基准。
+      // The engine endpoint is the source of truth for "connected or not".
       if (res[0].status !== "fulfilled") { onDisconnect(res[0].reason); return; }
       state.connected = true; setDot("on");
       renderEngine(engine); renderQueues(engine);
       renderSystem(res[1].status === "fulfilled" ? res[1].value : null);
       renderCluster(res[2].status === "fulfilled" ? res[2].value : null);
       if (res[3].status === "fulfilled" && !res[3].value.__skip) renderLogs(res[3].value);
-      $("lastUpdated").textContent = "更新于 " + new Date().toLocaleTimeString();
+      $("lastUpdated").textContent = "Updated " + new Date().toLocaleTimeString();
     }).finally(function () { state.inFlight = false; });
   }
 
   function onDisconnect(err) {
     state.connected = false; setDot("err");
-    $("engineBadges").innerHTML = '<span class="badge warn">连接失败</span>';
-    $("engineHint").textContent = "无法访问 " + state.base + " — " + (err && err.message ? err.message : "请检查 endpoint / CORS / dashboard 特性是否开启");
-    $("lastUpdated").textContent = "连接失败";
+    $("engineBadges").innerHTML = '<span class="badge warn">connection failed</span>';
+    $("engineHint").textContent = "Cannot reach " + state.base + " — " + (err && err.message ? err.message : "check the endpoint / CORS / whether the dashboard feature is enabled");
+    $("lastUpdated").textContent = "Connection failed";
   }
 
   function schedule() {
@@ -313,11 +316,11 @@
   function connect() {
     state.base = ($("endpoint").value || defaultEndpoint).trim();
     state.apiKey = $("apikey").value.trim();
-    setDot(""); $("engineHint").textContent = "连接中…";
+    setDot(""); $("engineHint").textContent = "Connecting…";
     poll(); schedule();
   }
 
-  // 事件绑定
+  // Event bindings
   $("connectBtn").addEventListener("click", connect);
   $("endpoint").addEventListener("keydown", function (e) { if (e.key === "Enter") connect(); });
   $("apikey").addEventListener("keydown", function (e) { if (e.key === "Enter") connect(); });
@@ -326,12 +329,12 @@
   $("logLimit").addEventListener("change", poll);
   $("logPause").addEventListener("click", function () {
     state.logPaused = !state.logPaused;
-    this.textContent = state.logPaused ? "▶ 恢复滚动" : "⏸ 暂停滚动";
+    this.textContent = state.logPaused ? "▶ Resume scroll" : "⏸ Pause scroll";
   });
 
-  // 初始化
+  // Init
   $("endpoint").value = defaultEndpoint;
-  // 同源托管时自动连接;独立文件需用户点“连接”。
+  // Auto-connect when served from the same origin; a standalone file requires clicking "Connect".
   if (location.protocol === "http:" || location.protocol === "https:") connect();
 })();
 </script>

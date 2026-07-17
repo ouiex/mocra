@@ -41,7 +41,8 @@ impl Default for MiddlewareManager {
     }
 }
 impl MiddlewareManager {
-    /// 不再持有 `Arc<State>`(此前存了却从未使用 —— 重构 Phase 2 去除该死耦合)。
+    /// No longer holds an `Arc<State>` (it used to be stored but was never used — refactor Phase 2
+    /// removed that dead coupling).
     pub fn new() -> Self {
         MiddlewareManager {
             download_middleware: Default::default(),

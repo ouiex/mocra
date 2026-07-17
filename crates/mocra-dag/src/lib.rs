@@ -1,13 +1,19 @@
-//! mocra-dag:通用分布式 DAG 执行引擎(从 mocra 主 crate 抽出,**零爬虫耦合**)。
+//! mocra-dag: a general-purpose distributed DAG execution engine (extracted from the main mocra
+//! crate, with **zero crawler coupling**).
 //!
-//! - [`Dag`] / [`DagChainBuilder`]:构图(节点 + 依赖边,拓扑校验、环检测)。
-//! - [`DagScheduler`]:分层并发执行、重试策略、fencing 保护的分布式运行守卫。
-//! - 节点派发经 [`DagNodeDispatcher`] 抽象注入(内置 [`LocalNodeDispatcher`],宿主可自定义)。
-//! - 运行时依赖经 trait 注入([`DagStore`] / [`DagEventSink`] / [`DagFencingStore`]),
-//!   宿主用嵌入式集群 KV / 分布式 pub-sub 实现,故本 crate 不反依赖宿主。
+//! - [`Dag`] / [`DagChainBuilder`]: graph construction (nodes + dependency edges, topological
+//!   validation, cycle detection).
+//! - [`DagScheduler`]: layered concurrent execution, retry policies, and a distributed run guard
+//!   protected by fencing.
+//! - Node dispatch is injected through the [`DagNodeDispatcher`] abstraction (with a built-in
+//!   [`LocalNodeDispatcher`]; the host can supply its own).
+//! - Runtime dependencies are injected through traits ([`DagStore`] / [`DagEventSink`] /
+//!   [`DagFencingStore`]); the host implements them with the embedded cluster KV / distributed
+//!   pub-sub, so this crate does not depend back on the host.
 
-// 迁移自主 crate 的既有风格:emit_sync_state 遥测函数参数多(逐个状态字段),
-// graph 的空列表 guard —— 保留原逻辑(已被 54 个测试覆盖),豁免这两项 pedantic lint。
+// Existing style carried over from the main crate: the emit_sync_state telemetry function takes
+// many arguments (one per state field), and graph has an empty-list guard — the original logic is
+// kept (covered by 54 tests), so these two pedantic lints are waived.
 #![allow(clippy::too_many_arguments, clippy::redundant_guards)]
 
 mod graph;

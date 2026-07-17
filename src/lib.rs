@@ -63,8 +63,9 @@
 //!
 //! See the [`prelude`] for the curated public surface and [`facade`] for the entry types.
 
-// 结构性 clippy lint —— 现有设计取舍(参数数、类型复杂度、模块同名、error/枚举变体尺寸),
-// 非 bug;统一豁免,便于逐步对主 crate 收紧 `-D warnings`。
+// Structural clippy lints — these reflect deliberate design trade-offs (argument counts, type
+// complexity, module inception, error/enum variant sizes), not bugs; allowed crate-wide so we can
+// tighten `-D warnings` on the main crate incrementally.
 #![allow(
     clippy::too_many_arguments,
     clippy::type_complexity,
@@ -75,9 +76,10 @@
 
 pub mod prelude;
 
-// 高层 `Spider` 门面(重构 Phase 1)—— 面向 80% 场景的简单入口。
-// 模块级文档见 `facade.rs` 顶部的 `//!`(此处用普通注释,避免与其内部
-// `//!` 合并后在 crate 根作用域解析、导致 intra-doc 链接失效)。
+// The high-level `Spider` facade (refactor Phase 1) — a simple entry point covering 80% of use
+// cases. Module-level docs live in the `//!` block at the top of `facade.rs` (a plain comment is
+// used here to avoid merging with those inner `//!` docs, which would resolve them in the crate
+// root scope and break their intra-doc links).
 pub mod facade;
 
 #[path = "cacheable/lib.rs"]

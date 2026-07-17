@@ -654,9 +654,7 @@ mod tests {
     use serde_json::Map;
     use std::sync::Arc;
 
-    struct DummyNode {
-        pub name: &'static str,
-    }
+    struct DummyNode;
 
     #[async_trait]
     impl ModuleNodeTrait for DummyNode {
@@ -687,9 +685,7 @@ mod tests {
             .iter()
             .map(|id| ModuleDagNodeDef {
                 node_id: id.clone(),
-                node: Arc::new(DummyNode {
-                    name: Box::leak(id.clone().into_boxed_str()),
-                }),
+                node: Arc::new(DummyNode),
                 placement_override: None,
                 policy_override: None,
                 tags: vec![],

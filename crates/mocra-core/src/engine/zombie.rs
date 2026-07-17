@@ -58,7 +58,7 @@ async fn clean_zombies(
     compensator: &Option<Arc<dyn Compensator>>,
 ) -> Result<u64, sea_orm::DbErr> {
     let formatted_time = threshold_time.format("%Y-%m-%d %H:%M:%S").to_string();
-    // 无 DB(standalone)模式:无僵尸任务表可清理。
+    // No-DB (standalone) mode: there is no zombie task table to clean up.
     let Some(db) = state.db.as_ref() else {
         return Ok(0);
     };

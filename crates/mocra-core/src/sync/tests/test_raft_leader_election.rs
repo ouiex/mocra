@@ -1,9 +1,11 @@
-//! 端到端:引擎真正的协调消费者 [`LeaderElector`] 在**多节点 Raft 集群**上选主。
+//! End-to-end: [`LeaderElector`], the engine's real coordination consumer, electing a leader on
+//! a **multi-node Raft cluster**.
 //!
-//! 这是控制面集成的收口证明 —— 打通
+//! This is the closing proof of the control-plane integration — it exercises the whole
 //! `LeaderElector → RaftCoordinationBackend → RaftControlPlane → Raft → redb`
-//! 全链路:两个节点各跑一个 elector 抢同一把锁,Raft 全局串行化 `acquire_lock`,
-//! 故**恰好一个**成为 leader;原 leader 停止续租后,另一个在 TTL 内接管。
+//! chain: two nodes each run an elector contending for the same lock, Raft globally serializes
+//! `acquire_lock`, so **exactly one** becomes leader; once the original leader stops renewing
+//! its lease, the other takes over within the TTL.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -26,7 +28,7 @@ async fn two_node_cluster(
     let cp2 = RaftControlPlane::start_cluster_node(2, d2, a2)
         .await
         .unwrap();
-    // 给 HTTP server 起动时间。
+    // Give the HTTP server time to start.
     sleep(Duration::from_millis(300)).await;
 
     let mut init = BTreeMap::new();
@@ -39,9 +41,10 @@ async fn two_node_cluster(
     (cp1, cp2)
 }
 
-/// 跨节点 pub/sub:在节点 1 publish,节点 2 订阅应收到 —— 消息经 Raft 复制的 KV
-/// (每 topic 单调 seq + 消息键)在各节点本地读可见,验证 `CoordinationBackend`
-/// 的 pub/sub 契约在集群里成立(用户的 `SyncService` 跨节点可用)。
+/// Cross-node pub/sub: publish on node 1, and a subscriber on node 2 must receive it — the
+/// message becomes visible to a local read on every node through the Raft-replicated KV
+/// (monotonic per-topic seq + message key), verifying that the `CoordinationBackend` pub/sub
+/// contract holds in a cluster (so a user's `SyncService` works across nodes).
 #[tokio::test]
 async fn raft_backend_pubsub_across_nodes() {
     let d1 = tempfile::tempdir().unwrap();
@@ -52,7 +55,8 @@ async fn raft_backend_pubsub_across_nodes() {
     let be1: Arc<dyn CoordinationBackend> = Arc::new(RaftCoordinationBackend::new(cp1));
     let be2: Arc<dyn CoordinationBackend> = Arc::new(RaftCoordinationBackend::new(cp2));
 
-    // 种子去重基础:集群里恰好一个节点 `is_leader()`(facade 只让 leader 注入种子)。
+    // Basis for seed deduplication: exactly one node in the cluster reports `is_leader()` (the
+    // facade only lets the leader inject seeds).
     let leaders = [be1.is_leader(), be2.is_leader()]
         .iter()
         .filter(|&&b| b)
@@ -62,7 +66,8 @@ async fn raft_backend_pubsub_across_nodes() {
         "exactly one node must report is_leader (seed-dedup basis)"
     );
 
-    // 节点 2 订阅;节点 1 发布(写经转发到 leader,复制到节点 2 本地 redb)。
+    // Node 2 subscribes; node 1 publishes (the write is forwarded to the leader and replicated
+    // into node 2's local redb).
     let mut rx = be2.subscribe("evt").await.unwrap();
     be1.publish("evt", b"hello").await.unwrap();
     be1.publish("evt", b"world").await.unwrap();
@@ -86,7 +91,8 @@ async fn raft_cluster_elects_single_cron_leader() {
     let (cp1, cp2) =
         two_node_cluster("127.0.0.1:27811", "127.0.0.1:27812", d1.path(), d2.path()).await;
 
-    // 两个节点各把自己的控制面适配为协调后端,各跑一个 cron leader elector(同一把锁)。
+    // Each node adapts its own control plane into a coordination backend and runs one cron
+    // leader elector (contending for the same lock).
     let be1: Arc<dyn CoordinationBackend> = Arc::new(RaftCoordinationBackend::new(cp1));
     let be2: Arc<dyn CoordinationBackend> = Arc::new(RaftCoordinationBackend::new(cp2));
     let key = "mocra:leader:cron".to_string();
@@ -96,7 +102,7 @@ async fn raft_cluster_elects_single_cron_leader() {
     let h1 = tokio::spawn(e1.clone().start());
     let h2 = tokio::spawn(e2.clone().start());
 
-    // 选举收敛:轮询直到恰好一个成为 leader(最多 ~8s)。
+    // Election convergence: poll until exactly one node becomes leader (up to ~8s).
     let mut settled = false;
     for _ in 0..80 {
         sleep(Duration::from_millis(100)).await;
@@ -111,7 +117,8 @@ async fn raft_cluster_elects_single_cron_leader() {
     }
     assert!(settled, "cluster failed to elect exactly one cron leader");
 
-    // 失效接管:掐掉当前 leader 的续租任务,另一节点应在 TTL 过期后接管。
+    // Failover: kill the current leader's lease-renewal task, and the other node should take
+    // over once the TTL expires.
     let (leader_handle, follower) = if e1.is_leader() {
         (h1, e2.clone())
     } else {
@@ -131,5 +138,5 @@ async fn raft_cluster_elects_single_cron_leader() {
         failover,
         "follower did not take over leadership after leader stopped renewing"
     );
-    // 剩余 elector 任务由 tokio runtime 在测试结束时回收。
+    // The remaining elector task is reclaimed by the tokio runtime when the test ends.
 }

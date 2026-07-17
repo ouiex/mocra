@@ -1,6 +1,7 @@
-//! 缓存服务已抽为独立 crate [`mocra_core`] 的 `cacheable` 模块。
+//! The cache service has been extracted into the `cacheable` module of the standalone
+//! [`mocra_core`] crate.
 //!
-//! 此模块保留为 re-export shim,使既有 `crate::cacheable::*` 引用继续有效(零改动迁移);
-//! 新代码可直接 `use mocra_core::cacheable::...`。
+//! This module remains as a re-export shim so that existing `crate::cacheable::*` references keep
+//! working (zero-change migration); new code can use `mocra_core::cacheable::...` directly.
 
 pub use mocra_core::cacheable::*;

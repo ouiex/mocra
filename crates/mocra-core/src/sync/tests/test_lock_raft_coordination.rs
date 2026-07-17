@@ -1,8 +1,10 @@
-//! 端到端:`DistributedLockManager`(现 `mocra-core::utils`)→ `CoordinationBackend` →
-//! Raft → redb。证明集群下,锁跨「持有者」互斥且可提前释放(不靠 TTL)。
+//! End-to-end: `DistributedLockManager` (now `mocra-core::utils`) → `CoordinationBackend` →
+//! Raft → redb. Proves that in a cluster, locks are mutually exclusive across "holders" and
+//! can be released early (without waiting for the TTL).
 //!
-//! 该测试原在 `utils::lock` 内;`utils` 迁入 `mocra-core` 后它需要 host 侧的
-//! `RaftCoordinationBackend`,故移到 `sync` 的测试套件(同时能访问锁管理器与 Raft 后端)。
+//! This test used to live in `utils::lock`; once `utils` moved into `mocra-core` it needed the
+//! host-side `RaftCoordinationBackend`, so it was moved to the `sync` test suite (which can
+//! reach both the lock manager and the Raft backend).
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -21,13 +23,12 @@ async fn lock_manager_routes_through_raft_coordination() {
     cp.wait_leader(Duration::from_secs(10)).await.unwrap();
     let backend: Arc<dyn CoordinationBackend> = Arc::new(RaftCoordinationBackend::new(cp));
 
-    // 两个「节点」共享同一后端(单进程内模拟两方争锁)。
-    let node_a =
-        DistributedLockManager::new_with_coordination(Some(backend.clone()), "cluster");
-    let node_b =
-        DistributedLockManager::new_with_coordination(Some(backend.clone()), "cluster");
+    // Two "nodes" sharing one backend (simulating two contenders inside a single process).
+    let node_a = DistributedLockManager::new_with_coordination(Some(backend.clone()), "cluster");
+    let node_b = DistributedLockManager::new_with_coordination(Some(backend.clone()), "cluster");
 
-    // A 抢到锁;B 抢同名锁应失败(强一致互斥,非进程内)。
+    // A takes the lock; B must fail to take the same one (strongly consistent mutual
+    // exclusion, not merely in-process).
     assert!(
         node_a
             .acquire_lock("job", 30, Duration::from_millis(200))
@@ -42,7 +43,7 @@ async fn lock_manager_routes_through_raft_coordination() {
     );
     assert!(node_a.is_lock_valid("job").await.unwrap());
 
-    // A 提前释放(不等 TTL),B 随即可抢到。
+    // A releases early (without waiting for the TTL), and B can take it right away.
     assert!(node_a.release_lock("job").await.unwrap());
     assert!(
         node_b

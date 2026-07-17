@@ -24,8 +24,10 @@ pub struct TaskManager {
 
 impl TaskManager {
     /// Creates a task manager with repository, factory, and module assembler wiring.
-    /// 窄依赖:仅需 DB 句柄 + 缓存 / cookie / 配置(此前吃整个 `Arc<State>` —— 重构 Phase 2)。
-    /// `db = None`(或无 `store` 特性)时进入无 DB 模式,任务从内存模块注册表合成。
+    /// Narrowed dependencies: only a DB handle + cache / cookies / config are needed (it used to
+    /// take the entire `Arc<State>` — refactor Phase 2).
+    /// With `db = None` (or without the `store` feature) it enters no-DB mode, synthesizing tasks
+    /// from the in-memory module registry.
     pub fn new(
         db: &DbHandle,
         cache_service: Arc<CacheService>,

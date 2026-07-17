@@ -220,15 +220,18 @@ impl DataFrameStore {
 }
 
 /// Data type enum.
-// 变体刻意不装箱(`File`/`DataFrame` 直接内联),以便下游用 `DataType::File(f)` 直接
-// 解构;`Empty` 为轻量默认。装箱会改动公共 API,故此处豁免大小差异 lint。
+// The variants are deliberately not boxed (`File`/`DataFrame` are inlined directly) so that
+// downstream code can destructure them straight away via `DataType::File(f)`; `Empty` is the
+// lightweight default. Boxing would change the public API, so the size-difference lint is
+// waived here.
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, Default)]
 pub enum DataType {
-    /// 空载荷:默认变体(尚未填充具体数据),无需任何可选依赖。
+    /// Empty payload: the default variant (no concrete data filled in yet), requiring no optional
+    /// dependencies.
     #[default]
     Empty,
-    /// Structured tabular data(需 `polars` 特性)。
+    /// Structured tabular data (requires the `polars` feature).
     #[cfg(feature = "polars")]
     DataFrame(DataFrameStore),
     /// File data.
@@ -298,7 +301,7 @@ impl DataEvent {
     pub fn module_id(&self) -> String {
         format!("{}-{}-{}", self.account, self.platform, self.module)
     }
-    /// Converts into `DataFrameStore`(需 `polars` 特性)。
+    /// Converts into `DataFrameStore` (requires the `polars` feature).
     #[cfg(feature = "polars")]
     pub fn with_df(self, data: DataFrame) -> DataFrameStore {
         DataFrameStore::default().with_data(data)

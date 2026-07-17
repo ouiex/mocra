@@ -13,17 +13,20 @@ keywords = ["raft", "cluster", "consensus", "distributed", "redb"]
 categories = ["network-programming", "asynchronous", "database-implementations"]
 
 [dependencies]
-# 共识:Rust 事实标准的异步 Raft。storage-v2 让 RaftLogStorage/RaftStateMachine 可直接实现。
+# Consensus: the de facto standard async Raft for Rust. storage-v2 lets
+# RaftLogStorage/RaftStateMachine be implemented directly.
 openraft = { version = "0.9", features = ["serde", "storage-v2"] }
-# 状态机存储:纯 Rust、ACID、无 C++ 工具链(对标 RocksDB 的轻量替代)。
+# State machine storage: pure Rust, ACID, no C++ toolchain (a lightweight alternative to RocksDB).
 redb = "2"
 serde = { version = "1", features = ["derive"] }
 rmp-serde = "1"
 thiserror = "2"
 async-trait = "0.1"
 tokio = { version = "1", features = ["sync", "rt", "macros", "time", "net"] }
-# 节点间控制面 RPC(HTTP + msgpack)。控制面流量小,HTTP/msgpack 足够且自包含。
-# reqwest 最小特性:内部集群走 http://(无需 TLS);随 workspace 特性并集。
+# Node-to-node control plane RPC (HTTP + msgpack). Control plane traffic is small, so HTTP/msgpack
+# is sufficient and self-contained.
+# Minimal reqwest features: internal cluster traffic goes over http:// (no TLS needed); features
+# are unioned with the workspace's.
 axum = "0.8"
 reqwest = { version = "0.13", default-features = false }
 

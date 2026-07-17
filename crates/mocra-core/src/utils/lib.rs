@@ -7,12 +7,12 @@ pub mod distributed_rate_limit;
 pub mod encrypt;
 #[cfg(feature = "excel")]
 pub mod excel_dataframe;
+pub mod lock;
 pub mod logger;
 #[cfg(feature = "polars")]
 pub mod polars_utils;
 pub mod priority;
 pub mod rate_limit;
-pub mod lock;
 pub mod storage;
 pub mod string_case;
 pub mod to_numeric;

@@ -11,10 +11,12 @@ use sea_orm::{
 use std::collections::HashMap;
 use std::sync::Arc;
 
-/// 只读元数据存储抽象:从 DB 加载 `account × platform × module` 及中间件 / 关系。
+/// Read-only metadata store abstraction: loads `account × platform × module` plus middleware /
+/// relations from the DB.
 ///
-/// 引擎持有 `Arc<dyn MetadataStore>`(而非具体 [`TaskRepository`]),把 DB 访问收敛为
-/// 正式接口 —— 便于替换后端、mock 测试,并为 `mocra-store` 收纳该逻辑铺路。
+/// The engine holds an `Arc<dyn MetadataStore>` (rather than a concrete [`TaskRepository`]),
+/// funnelling DB access through a formal interface — which makes swapping backends and mocking in
+/// tests easy, and paves the way for `mocra-store` to take over this logic.
 #[async_trait]
 pub trait MetadataStore: Send + Sync {
     async fn load_account(&self, account_name: &str) -> Result<AccountModel>;

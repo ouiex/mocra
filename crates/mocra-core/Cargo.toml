@@ -20,7 +20,7 @@ mocra-proxy = { path = "../mocra-proxy", version = "0.4.0" }
 mocra-dag = { path = "../mocra-dag", version = "0.4.0" }
 mocra-store = { path = "../mocra-store", version = "0.4.0", optional = true }
 polars = { version = "0.52.0", features = ["json", "lazy", "serde", "csv", "timezones", "strings", "ipc", "dtype-decimal"], optional = true }
-# cacheable(缓存服务:本地内存后端)
+# cacheable (cache service: local in-memory backend)
 async-trait = "0.1"
 tokio = { version = "1", features = ["full"] }
 log = "0.4"
@@ -28,7 +28,7 @@ dashmap = "6"
 zstd = "0.13"
 flate2 = "1.1.9"
 metrics = "0.24"
-# utils(限流 / 锁 / 协调 / 日志 / 连接器 / 编码 等)
+# utils (rate limiting / locks / coordination / logging / connectors / encoding, etc.)
 chrono = { version = "0.4.43", features = ["serde"] }
 once_cell = "1"
 regex = "1"
@@ -39,36 +39,37 @@ tracing = "0.1"
 tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "time", "json"] }
 tracing-log = "0.2"
-# common(域模型 / 接口 / 状态 / 配置 / processor 链 等)
+# common (domain models / interfaces / state / config / processor chain, etc.)
 cron = "0.15"
 futures = "0.3"
 indexmap = { version = "2", features = ["serde"] }
 reqwest_cookie_store = { version = "0.10", features = ["serde"] }
 url = "2"
 toml = "0.9"
-# downloader(HTTP / WebSocket 下载器)
+# downloader (HTTP / WebSocket downloaders)
 futures-util = "0.3"
 rand = "0.9.2"
 semver = { version = "1", features = ["serde"] }
 tokio-tungstenite = { version = "0.28", features = ["native-tls"] }
 dyn-clone = "1"
-# queue(数据面 MQ:内存默认;kafka / nats 按特性可选)
+# queue (data-plane MQ: in-memory by default; kafka / nats are optional, gated by features)
 rmp-serde = "1.3"
 serde_path_to_error = "0.1"
 crc32fast = "1.5.0"
 rdkafka = { version = "0.39", features = ["cmake-build"], optional = true }
 async-nats = { version = "0.38", optional = true }
-# sync(协调集成:内嵌 Raft 后端)
+# sync (coordination integration: embedded Raft backend)
 mocra-cluster = { path = "../mocra-cluster", version = "0.4.0", optional = true }
-# engine(采集管线 / processor / 调度 / 监控);axum 仅用于 dashboard 的可观测 HTTP API,门控之。
+# engine (collection pipeline / processor / scheduling / monitoring); axum is only used by the
+# dashboard's observability HTTP API, so it is gated.
 axum = { version = "0.8", features = ["json"], optional = true }
 bloomfilter = "3"
 metrics-exporter-prometheus = "0.18"
 sysinfo = "0.38"
 tower-http = { version = "0.6", features = ["cors"], optional = true }
-# store(sea-orm 连接器 / 事务) — 默认关闭
+# store (sea-orm connector / transactions) — off by default
 sea-orm = { version = "1", features = ["postgres-array", "runtime-tokio-native-tls", "sqlx-postgres", "sqlx-sqlite"], optional = true }
-# excel(calamine → DataFrame) — 默认关闭,隐含 polars
+# excel (calamine → DataFrame) — off by default, implies polars
 calamine = { version = "0.33.0", features = ["chrono", "dates"], optional = true }
 
 [dev-dependencies]

@@ -1,32 +1,34 @@
-//! openraft 类型配置:把控制面的 [`Cmd`] / [`CmdResult`] 接入 Raft(openraft 0.9.24)。
+//! openraft type configuration: wires the control plane's [`Cmd`] / [`CmdResult`] into Raft
+//! (openraft 0.9.24).
 //!
-//! Raft 复制的应用数据(`D`)就是 [`Cmd`],响应(`R`)是 [`CmdResult`];
-//! 每个节点在日志条目提交后,把 `Cmd` 交给 redb 状态机 [`apply`](crate::state_machine::StateMachine::apply)。
+//! The application data Raft replicates (`D`) is [`Cmd`] and the response (`R`) is [`CmdResult`];
+//! once a log entry is committed, every node hands the `Cmd` to the redb state machine's
+//! [`apply`](crate::state_machine::StateMachine::apply).
 
 use std::io::Cursor;
 
 use crate::cmd::{Cmd, CmdResult};
 
-/// 节点标识。
+/// Node identifier.
 pub type NodeId = u64;
 
-/// 节点信息(此处用 openraft 内置的 `BasicNode`,携带一个地址字符串)。
+/// Node information (openraft's built-in `BasicNode` is used here; it carries an address string).
 pub type Node = openraft::BasicNode;
 
-/// 快照数据载体(默认游标)。
+/// Snapshot data carrier (the default cursor).
 pub type SnapshotData = Cursor<Vec<u8>>;
 
 openraft::declare_raft_types!(
-    /// mocra 控制面的 Raft 类型配置。
+    /// Raft type configuration for the mocra control plane.
     pub TypeConfig:
         D = Cmd,
         R = CmdResult,
 );
 
-/// Raft 实例类型别名。
+/// Type alias for the Raft instance.
 pub type MocraRaft = openraft::Raft<TypeConfig>;
 
-/// 常用 openraft 类型别名(仿官方示例的 `typ` 模块)。
+/// Common openraft type aliases (mirrors the `typ` module from the official examples).
 pub mod typ {
     use openraft::error::Infallible;
 

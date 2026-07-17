@@ -44,7 +44,7 @@ pub async fn health_check(State(state): State<ApiState>) -> Json<HealthResponse>
         Err(e) => ComponentStatus::down(e),
     };
 
-    // Check DB(无 `store` 特性 / 无 DB 模式视为 up)。
+    // Check DB (without the `store` feature / in no-DB mode, treated as up).
     #[cfg(feature = "store")]
     let db_status = match state.state.db.as_ref() {
         Some(db) => match db.ping().await {

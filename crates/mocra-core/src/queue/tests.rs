@@ -23,7 +23,7 @@ use uuid::Uuid;
 #[derive(Clone)]
 struct MockBackend {
     pub messages: Arc<Mutex<Vec<(String, Vec<u8>, std::collections::HashMap<String, String>)>>>,
-    /// 捕获每条消息的分区键(验证账号亲和路由)。
+    /// Captures each message's partition key (verifies account-affinity routing).
     pub keys: Arc<Mutex<Vec<Option<String>>>>,
 }
 
@@ -183,11 +183,13 @@ fn task_event_partition_key_is_account_not_run_id() {
         run_id: Uuid::now_v7(),
         priority: Default::default(),
     };
-    // 分区键 = 账号(用于亲和路由);id = run_id(用于去重 / 补偿);二者独立。
+    // Partition key = account (for affinity routing); id = run_id (for deduplication /
+    // compensation); the two are independent.
     assert_eq!(ev.partition_key(), "acct-7");
     assert_eq!(ev.get_id(), ev.run_id.to_string());
     assert_ne!(ev.partition_key(), ev.get_id());
-    // QueuedItem 必须把 partition_key 透传到 inner(而非退化回 get_id)。
+    // QueuedItem must forward partition_key through to inner (rather than falling back to
+    // get_id).
     let qi = QueuedItem::new(ev.clone());
     assert_eq!(qi.partition_key(), "acct-7");
     assert_eq!(qi.get_id(), ev.run_id.to_string());
@@ -221,7 +223,8 @@ async fn task_published_with_account_partition_key_end_to_end() {
         !keys.is_empty(),
         "task should have been published to backend"
     );
-    // 经完整 forwarder → encode_items 路径,MQ 分区键应是账号(而非随机 run_id)。
+    // Through the full forwarder → encode_items path, the MQ partition key should be the account
+    // (not the random run_id).
     assert_eq!(keys[0].as_deref(), Some("acct-9"));
 }
 

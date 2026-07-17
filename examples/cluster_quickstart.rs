@@ -1,21 +1,23 @@
-//! 内嵌集群示例:起一个**自组网的分布式采集节点**,无需外部协调器。
+//! Embedded cluster example: bring up a **self-forming distributed collection node**, with no
+//! external coordinator.
 //!
-//! 控制面(选举 / 锁 / KV / 成员 / 分区归属)用内嵌 redb+Raft;数据面可插拔 MQ
-//! (此处单机内存)。「注册到任意节点即入网」:非首节点带上种子地址即可 join。
+//! The control plane (leader election / locks / KV / membership / partition ownership) uses
+//! embedded redb+Raft; the data plane is a pluggable MQ (single-node in-memory here). "Register
+//! with any node to join the network": every node after the first just needs a seed address.
 //!
-//! 起一个 3 节点集群(三个终端,首节点自举,其余 join):
+//! Bring up a 3-node cluster (three terminals; the first node bootstraps, the rest join):
 //!
 //! ```bash
-//! # 首个核心节点(seeds 为空 → 自举新集群)
+//! # The first core node (seeds empty → bootstraps a new cluster)
 //! cargo run --example cluster_quickstart --features cluster-embedded -- 1 127.0.0.1:7001
-//! # 其余节点(第三个参数 = 种子 = 首节点地址 → join)
+//! # The remaining nodes (third argument = seed = the first node's address → join)
 //! cargo run --example cluster_quickstart --features cluster-embedded -- 2 127.0.0.1:7002 127.0.0.1:7001
 //! cargo run --example cluster_quickstart --features cluster-embedded -- 3 127.0.0.1:7003 127.0.0.1:7001
 //! ```
 //!
-//! 容器化部署可改用环境变量(同一镜像跨节点,仅换 env):
-//! `MOCRA_NODE_ID` / `MOCRA_HTTP_ADDR` / `MOCRA_DATA_DIR` / `MOCRA_SEEDS`,
-//! 代码里用 [`ClusterConfig::from_env`] 读取。
+//! Containerized deployments can use environment variables instead (the same image across nodes,
+//! with only the env changing): `MOCRA_NODE_ID` / `MOCRA_HTTP_ADDR` / `MOCRA_DATA_DIR` /
+//! `MOCRA_SEEDS`, read in code via [`ClusterConfig::from_env`].
 
 use async_trait::async_trait;
 use mocra::prelude::*;
@@ -52,8 +54,9 @@ impl Spider for Httpbin {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // 用法:cluster_quickstart <node_id> <http_addr> [seed_addr]
-    // 无命令行参数时回退到环境变量(容器化部署路径)。
+    // Usage: cluster_quickstart <node_id> <http_addr> [seed_addr]
+    // With no command-line arguments, fall back to environment variables (the containerized
+    // deployment path).
     let args: Vec<String> = std::env::args().collect();
     let cluster = if args.len() >= 3 {
         let node_id: u64 = args[1].parse().unwrap_or(1);
@@ -64,7 +67,7 @@ async fn main() -> Result<()> {
             None => ClusterConfig::bootstrap(node_id, http_addr, data_dir),
         }
     } else {
-        // 从 MOCRA_NODE_ID / MOCRA_HTTP_ADDR / MOCRA_DATA_DIR / MOCRA_SEEDS 读取。
+        // Read from MOCRA_NODE_ID / MOCRA_HTTP_ADDR / MOCRA_DATA_DIR / MOCRA_SEEDS.
         ClusterConfig::from_env().map_err(|e| Error::new(ErrorKind::Service, Some(e)))?
     };
     println!(

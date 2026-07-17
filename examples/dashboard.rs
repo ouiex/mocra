@@ -1,17 +1,20 @@
-//! 后台管理 dashboard 示例(`dashboard` 特性)。
+//! Admin dashboard example (the `dashboard` feature).
 //!
-//! 启用 `dashboard` 特性后,引擎在指定端口托管一套只读可观测 HTTP API **以及**一个
-//! 内置的单文件前端页面 —— 浏览器打开该端口即见 指标 / 日志 / 任务 / 性能 面板,
-//! 无需任何前端构建、无需手填 endpoint(页面同源自动指向本引擎)。
+//! With the `dashboard` feature enabled, the engine serves a read-only observability HTTP API on
+//! the given port **as well as** a built-in single-file frontend page — open that port in a browser
+//! and you get the metrics / logs / tasks / performance panels, with no frontend build and no
+//! endpoint to fill in by hand (the page is same-origin, so it points at this engine
+//! automatically).
 //!
-//! 运行(单机内存模式,无需数据库):
+//! Run it (single-node in-memory mode, no database required):
 //!
 //! ```bash
 //! cargo run --example dashboard --features dashboard
-//! # 然后浏览器打开 http://127.0.0.1:8080
+//! # then open http://127.0.0.1:8080 in a browser
 //! ```
 //!
-//! 该 spider 会持续抓取一批 URL,使队列 / 日志 / 指标面板有实时数据可看。
+//! This spider keeps fetching a batch of URLs so the queue / log / metric panels have live data to
+//! show.
 
 use async_trait::async_trait;
 use mocra::prelude::*;
@@ -35,7 +38,7 @@ impl Spider for Demo {
     }
 
     async fn start(&self, s: &mut Seeds) {
-        // 播入一批种子,让任务 / 下载 / 解析队列有可观测的实时活动。
+        // Seed a batch of requests so the task / download / parse queues show live activity.
         for _ in 0..40 {
             s.get("https://httpbin.org/get");
             s.get("https://httpbin.org/uuid");
@@ -55,12 +58,12 @@ impl Spider for Demo {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // 端口可用 PORT 环境变量覆盖(默认 8080)。
+    // The port can be overridden with the PORT environment variable (defaults to 8080).
     let port: u16 = std::env::var("PORT")
         .ok()
         .and_then(|p| p.parse().ok())
         .unwrap_or(8080);
-    println!("dashboard: 打开 http://127.0.0.1:{port} 查看 指标 / 日志 / 任务 / 性能");
+    println!("dashboard: open http://127.0.0.1:{port} for metrics / logs / tasks / performance");
     Mocra::builder()
         .spider(
             Demo,

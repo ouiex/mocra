@@ -1,6 +1,8 @@
-//! 协调后端抽象已移至 [`crate::utils::coordination`]
-//! —— 其主要消费者(分布式锁管理器、限流器)都在 `utils`,放在那里可避免 `common ↔ utils` 环。
+//! The coordination backend abstraction has moved to [`crate::utils::coordination`]
+//! — its main consumers (the distributed lock manager and the rate limiter) both live in `utils`,
+//! so putting it there avoids a `common ↔ utils` cycle.
 //!
-//! 此模块保留为 re-export shim,使既有 `crate::common::coordination::*` 路径继续有效。
+//! This module remains as a re-export shim, keeping existing `crate::common::coordination::*` paths
+//! valid.
 
 pub use crate::utils::coordination::*;

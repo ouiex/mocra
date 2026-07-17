@@ -1,10 +1,10 @@
-//! 最小 Spider 示例(重构 Phase 1 门面 API)。
+//! Minimal Spider example (the refactor Phase 1 facade API).
 //!
-//! 演示新的高层入口:实现一个 `Spider`,用 `Mocra::builder()` 注册并运行,
-//! 通过 `on_item` 拿到类型化数据 —— 无需实现 `DataStoreMiddleware`、无需手写
-//! `ModuleTrait` + `ModuleNodeTrait`。
+//! Demonstrates the new high-level entry point: implement a `Spider`, register and run it with
+//! `Mocra::builder()`, and receive typed data through `on_item` — no need to implement
+//! `DataStoreMiddleware`, and no hand-written `ModuleTrait` + `ModuleNodeTrait`.
 //!
-//! 运行(无需数据库 —— 单机内存模式,抓完自动退出):
+//! Run it (no database required — single-node in-memory mode, exits once the crawl finishes):
 //!
 //! ```bash
 //! cargo run --example spider_quickstart
@@ -14,7 +14,7 @@ use async_trait::async_trait;
 use mocra::prelude::*;
 use serde::Serialize;
 
-/// 类型化产出项。
+/// The typed item this spider emits.
 #[derive(Debug, Serialize)]
 struct Page {
     url: String,
@@ -49,7 +49,8 @@ impl Spider for Httpbin {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // 无数据库:单机内存模式,自动为 spider 注入种子任务。
+    // No database: single-node in-memory mode, with a seed task injected for the spider
+    // automatically.
     Mocra::builder()
         .spider(
             Httpbin,

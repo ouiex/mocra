@@ -191,13 +191,13 @@ impl fmt::Debug for KafkaConfig {
 /// NATS (JetStream) Configuration
 #[derive(Serialize, Deserialize, Clone)]
 pub struct NatsConfig {
-    /// 服务器地址(如 `nats://127.0.0.1:4222`;逗号分隔多个)。
+    /// Server address (e.g. `nats://127.0.0.1:4222`; comma-separated for multiple).
     pub url: String,
-    /// 可选用户名。
+    /// Optional username.
     pub username: Option<String>,
-    /// 可选密码。
+    /// Optional password.
     pub password: Option<String>,
-    /// 可选 token 认证。
+    /// Optional token authentication.
     pub token: Option<String>,
 }
 

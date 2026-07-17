@@ -31,12 +31,6 @@ Prefer to read code? The [`examples/`](../examples/) directory has complete, run
 - [`dashboard.rs`](../examples/dashboard.rs) — the built-in observability dashboard (`--features dashboard`).
 - [`cluster_quickstart.rs`](../examples/cluster_quickstart.rs) — a self-organizing embedded cluster (`--features cluster-embedded`).
 
-## Design & Refactoring (设计与重构)
-
-| Document | Description |
-|---|---|
-| [Refactoring Plan (中文)](refactor/README.md) | Design notes on the evolution into an embeddable distributed crawler library: target API, cluster architecture (redb + Raft control plane / pluggable MQ data plane), and roadmap |
-
 ## Quick Links
 
 - **Repository:** <https://github.com/ouiex/mocra>

@@ -1,14 +1,19 @@
-//! NATS(JetStream)数据面队列后端(`queue-nats` 特性)。
+//! NATS (JetStream) data-plane queue backend (the `queue-nats` feature).
 //!
-//! 用 JetStream 提供**持久化 + explicit ack + nack 重投/DLQ**,语义对齐 Kafka 后端;
-//! 比 Kafka 轻得多(单二进制、无 ZooKeeper/cmake),适合内嵌 Raft 集群的数据面。
+//! JetStream provides **persistence + explicit ack + nack redelivery/DLQ**, with semantics
+//! matching the Kafka backend; it is far lighter than Kafka (a single binary, no ZooKeeper or
+//! cmake), which suits the data plane of an embedded Raft cluster.
 //!
-//! - 一个 stream(`{ns}_stream`,subjects `{ns}.>`)承载所有 topic;
-//! - 每个 topic 一个 **durable pull consumer**(同名 durable = 竞争消费 / 负载均衡);
-//! - nack 按 [`NackPolicy`] 决定:重发原 subject(`attempt+1`)或投 DLQ subject。
+//! - A single stream (`{ns}_stream`, subjects `{ns}.>`) carries every topic;
+//! - one **durable pull consumer** per topic (a shared durable name = competing consumption /
+//!   load balancing);
+//! - nack is resolved by [`NackPolicy`]: republish to the original subject (`attempt+1`) or
+//!   send to the DLQ subject.
 //!
-//! > 账号亲和(`hash(account)`)在 NATS 下暂为竞争消费(负载均衡,不粘账号);后续可用
-//! > 「按 `owns_partition_key` 订阅分区 subject」实现(见路线图数据面亲和项)。
+//! > Account affinity (`hash(account)`) is currently plain competing consumption under NATS
+//! > (load balancing, not sticky per account); it can later be implemented by "subscribing to
+//! > partition subjects via `owns_partition_key`" (see the data-plane affinity item on the
+//! > roadmap).
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -32,7 +37,7 @@ fn nats_err<E: std::fmt::Display>(e: E) -> crate::errors::Error {
     QueueError::OperationFailed(Box::new(std::io::Error::other(e.to_string()))).into()
 }
 
-/// NATS subject / stream 名 token 保护:非法字符替换为 `_`。
+/// Guards NATS subject / stream name tokens: illegal characters are replaced with `_`.
 fn sanitize(s: &str) -> String {
     s.chars()
         .map(|c| match c {
@@ -50,7 +55,8 @@ fn to_header_map(headers: &HashMap<String, String>) -> async_nats::HeaderMap {
     h
 }
 
-/// JetStream 数据面后端。连接惰性建立(首次 publish/subscribe 时),适配同步构造。
+/// JetStream data-plane backend. The connection is established lazily (on the first
+/// publish/subscribe), which accommodates synchronous construction.
 pub struct NatsQueue {
     config: NatsConfig,
     namespace: String,
@@ -79,7 +85,7 @@ impl NatsQueue {
         })
     }
 
-    /// 惰性连接 NATS 并返回 JetStream 上下文(只连接一次)。
+    /// Lazily connects to NATS and returns the JetStream context (connects only once).
     async fn context(&self) -> Result<async_nats::jetstream::Context> {
         let ctx = self
             .ctx
@@ -105,7 +111,7 @@ impl NatsQueue {
         Ok(ctx.clone())
     }
 
-    /// 确保承载 stream 存在(只建一次),返回 JetStream 上下文。
+    /// Ensures the carrier stream exists (created only once) and returns the JetStream context.
     async fn ensure_stream(&self) -> Result<async_nats::jetstream::Context> {
         let js = self.context().await?;
         let js2 = js.clone();
@@ -154,7 +160,7 @@ impl MqBackend for NatsQueue {
             .publish_with_headers(subject, h, payload.to_vec().into())
             .await
             .map_err(nats_err)?;
-        // 等 server 持久化确认(至少一次)。
+        // Wait for the server's persistence acknowledgement (at-least-once).
         ack.await.map_err(nats_err)?;
         Ok(())
     }
@@ -203,12 +209,14 @@ impl MqBackend for NatsQueue {
             };
             info!("NatsQueue listening topic {topic_log} (subject {subject})");
 
-            // id(stream sequence)-> owned jetstream 消息,供 ack processor 取出确认。
+            // id (stream sequence) -> owned jetstream message, for the ack processor to pick up
+            // and acknowledge.
             let inflight: Arc<DashMap<String, async_nats::jetstream::Message>> =
                 Arc::new(DashMap::new());
             let (ack_tx, mut ack_rx) = mpsc::channel::<(String, AckAction)>(1000);
 
-            // ack processor:Ack → 确认;Nack → 按策略重发原 subject 或投 DLQ,再确认原消息。
+            // ack processor: Ack → acknowledge; Nack → per policy, republish to the original
+            // subject or send to the DLQ, then acknowledge the original message.
             let inflight_ack = inflight.clone();
             let js_ack = js.clone();
             let subj_retry = subject.clone();
@@ -262,7 +270,7 @@ impl MqBackend for NatsQueue {
                 }
             });
 
-            // 主接收循环。
+            // Main receive loop.
             while let Some(item) = messages.next().await {
                 let msg = match item {
                     Ok(m) => m,
@@ -300,7 +308,8 @@ impl MqBackend for NatsQueue {
     }
 
     async fn clean_storage(&self) -> Result<()> {
-        // JetStream 的保留由 stream `max_age` 控制(见 ensure_stream),无需主动清理。
+        // JetStream retention is governed by the stream's `max_age` (see ensure_stream), so no
+        // active cleanup is needed.
         Ok(())
     }
 
@@ -327,8 +336,9 @@ impl MqBackend for NatsQueue {
         _topic: &str,
         _count: usize,
     ) -> Result<Vec<(String, Vec<u8>, String, String)>> {
-        // DLQ 消息已写入 `{ns}._dlq.{topic}` subject(可用 nats CLI / 单独消费者读取);
-        // 程序化读取待后续实现(与 KafkaQueue 一致)。
+        // DLQ messages are written to the `{ns}._dlq.{topic}` subject (readable via the nats CLI
+        // or a separate consumer); programmatic reads are not implemented yet (same as
+        // KafkaQueue).
         warn!("NatsQueue DLQ inspection not implemented yet");
         Ok(Vec::new())
     }
@@ -348,7 +358,7 @@ mod tests {
         }
     }
 
-    /// 唯一 namespace(→ 唯一 stream),避免测试间残留冲突。
+    /// A unique namespace (→ a unique stream), avoiding leftover conflicts between tests.
     fn unique_ns(tag: &str) -> String {
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -358,14 +368,14 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "需要本地 nats-server: docker run -p 4222:4222 nats -js"]
+    #[ignore = "requires a local nats-server: docker run -p 4222:4222 nats -js"]
     async fn nats_publish_subscribe_ack_roundtrip() {
         let ns = unique_ns("rt");
         let q = NatsQueue::new(&cfg(), 0, &ns, NackPolicy::default()).unwrap();
 
         let (tx, mut rx) = mpsc::channel::<Message>(16);
         q.subscribe("task-normal", tx).await.unwrap();
-        // 等 durable consumer 就绪。
+        // Wait for the durable consumer to be ready.
         tokio::time::sleep(Duration::from_millis(500)).await;
 
         let mut headers = HashMap::new();
@@ -389,9 +399,10 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "需要本地 nats-server"]
+    #[ignore = "requires a local nats-server"]
     async fn nats_nack_retries_then_dlq() {
-        // max_retries=1:attempt 0 nack → 重投(attempt 1);attempt 1 nack → DLQ(不再重投)。
+        // max_retries=1: nack on attempt 0 → redeliver (attempt 1); nack on attempt 1 → DLQ (no
+        // further redelivery).
         let ns = unique_ns("nack");
         let policy = NackPolicy {
             max_retries: 1,
@@ -409,7 +420,7 @@ mod tests {
             .await
             .unwrap();
 
-        // 第一次:attempt 0 → nack → 重投为 attempt 1。
+        // First delivery: attempt 0 → nack → redelivered as attempt 1.
         let m1 = tokio::time::timeout(Duration::from_secs(5), rx.recv())
             .await
             .expect("timeout m1")
@@ -420,7 +431,7 @@ mod tests {
         );
         m1.nack("boom-fail-1").await.unwrap();
 
-        // 第二次:attempt 1 → nack → 投 DLQ。
+        // Second delivery: attempt 1 → nack → sent to the DLQ.
         let m2 = tokio::time::timeout(Duration::from_secs(5), rx.recv())
             .await
             .expect("timeout m2")
@@ -431,7 +442,8 @@ mod tests {
         );
         m2.nack("boom-fail-2").await.unwrap();
 
-        // 第三次:不应再收到(已进 DLQ subject,不匹配 consumer filter)。
+        // Third delivery: should not arrive (it is on the DLQ subject, which does not match the
+        // consumer filter).
         let m3 = tokio::time::timeout(Duration::from_millis(1500), rx.recv()).await;
         assert!(m3.is_err(), "message should be in DLQ, not redelivered");
     }

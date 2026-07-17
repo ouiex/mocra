@@ -44,8 +44,8 @@ impl ProxyManager {
         success: bool,
         response_time: Option<Duration>,
     ) -> Result<()> {
-        // 直接调用代理池的report_proxy_result方法
-        // 系统会自动根据代理类型进行相应的处理
+        // Call the proxy pool's report_proxy_result directly; it dispatches on the proxy
+        // type automatically.
         self.pool
             .report_proxy_result(proxy, success, response_time)
             .await

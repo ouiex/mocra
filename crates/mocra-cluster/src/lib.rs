@@ -1,15 +1,20 @@
-//! mocra-cluster:内嵌控制面(重构 Phase 3)。
+//! mocra-cluster: the embedded control plane (refactor Phase 3).
 //!
-//! **控制面**用 redb 状态机 + Raft 共识提供强一致的成员 / 锁 / KV / 分区归属;
-//! **数据面**(队列)仍走主 crate 可插拔的 `MqBackend`。
-//! 设计见 `docs/refactor/03-cluster-architecture.md`。
+//! The **control plane** uses a redb state machine + Raft consensus to provide strongly consistent
+//! membership / locks / KV / partition ownership; the **data plane** (queues) still goes through
+//! the main crate's pluggable `MqBackend`.
 //!
-//! # 当前进度
-//! - ✅ redb 复制状态机([`StateMachine`]):`kv` / `locks`(含单调 fencing token)。
-//! - ✅ 单节点控制面([`LocalControlPlane`]):`set/get/cas/acquire_lock/renew_lock/release_lock`。
-//! - ✅ openraft 共识分层于状态机之上([`RaftControlPlane`]):持久化日志 + 快照。
-//! - ✅ 成员 / join API + 分区归属([`partition`]:rendezvous 分配 + Raft fencing 租约)。
-//! - ✅ 主 crate 侧 `RaftCoordinationBackend` 适配 `CoordinationBackend`,提供集群协调。
+//! # Current progress
+//! - ✅ redb replicated state machine ([`StateMachine`]): `kv` / `locks` (with monotonic fencing
+//!   tokens).
+//! - ✅ Single-node control plane ([`LocalControlPlane`]):
+//!   `set/get/cas/acquire_lock/renew_lock/release_lock`.
+//! - ✅ openraft consensus layered on top of the state machine ([`RaftControlPlane`]): persistent
+//!   log + snapshots.
+//! - ✅ Membership / join API + partition ownership ([`partition`]: rendezvous assignment + Raft
+//!   fencing leases).
+//! - ✅ On the main crate side, `RaftCoordinationBackend` adapts `CoordinationBackend` to provide
+//!   cluster coordination.
 
 pub mod cmd;
 pub mod control;

@@ -1,5 +1,6 @@
-//! 轻量遥测(metrics crate)。从宿主 `common::metrics` 精简迁入 —— 去掉 node 维度
-//! (dag 作为独立库不感知集群节点 id),其余标签一致。
+//! Lightweight telemetry (the metrics crate). Trimmed down and moved over from the host's
+//! `common::metrics` — the node dimension is dropped (as a standalone library, dag is unaware of
+//! cluster node ids); all other labels are unchanged.
 
 use metrics::{counter, histogram};
 

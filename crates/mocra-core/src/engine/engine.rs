@@ -573,7 +573,8 @@ impl Engine {
         ));
 
         let leader_elector = if let Some(backend) = state.coordination.clone() {
-            // 内嵌 redb+Raft 等协调后端(集群):跨节点选主。
+            // Coordination backends such as the embedded redb+Raft one (cluster): cross-node
+            // leader election.
             let (elector, _) =
                 LeaderElector::new(Some(backend), format!("{}:leader:cron", namespace), 5000);
             elector

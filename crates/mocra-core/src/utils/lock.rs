@@ -1,9 +1,11 @@
 #![allow(unused)]
-//! 分布式锁管理器。
+//! Distributed lock manager.
 //!
-//! 锁有两条路径 ——
-//! - **协调后端**([`CoordinationBackend`],如内嵌 redb+Raft):跨节点强一致,集群模式默认;
-//! - **进程内本地锁**(`DashMap`):无协调后端注入时的单机降级实现。
+//! Locks take one of two paths —
+//! - **coordination backend** ([`CoordinationBackend`], e.g. embedded redb+Raft): strongly
+//!   consistent across nodes, the default in cluster mode;
+//! - **in-process local lock** (`DashMap`): the single-node fallback used when no coordination
+//!   backend is injected.
 use dashmap::DashMap;
 use log::trace;
 use std::future::Future;
@@ -40,7 +42,8 @@ pub struct LockInfo {
     created_at: Instant,
 }
 
-/// 进程内本地锁句柄(无协调后端注入时的默认实现;自带续租任务)。
+/// In-process local lock handle (the default when no coordination backend is injected; comes
+/// with its own lease-renewal task).
 pub struct AdvancedDistributedLock {
     local_map: Option<Arc<DashMap<String, (String, Instant)>>>,
     lock_info: LockInfo,
@@ -209,15 +212,17 @@ impl Drop for AdvancedDistributedLock {
     }
 }
 
-/// 由 [`CoordinationBackend`] 支撑的分布式锁句柄。
+/// Distributed lock handle backed by a [`CoordinationBackend`].
 ///
-/// 集群(如内嵌 redb+Raft)模式下,锁经共识落库,跨节点强一致 —— 取代无协调后端
-/// 时退化的**进程内**本地锁。自带续租任务;`release` 走 CAS-del(仅持有者可删)。
+/// In cluster mode (e.g. embedded redb+Raft) the lock is persisted through consensus and is
+/// strongly consistent across nodes — replacing the **in-process** local lock it falls back to
+/// when no coordination backend is present. Comes with its own lease-renewal task; `release`
+/// goes through CAS-del (only the holder can delete it).
 pub struct CoordinationLock {
     backend: Arc<dyn CoordinationBackend>,
-    key: String,   // 完整格式化后的 key
-    value: String, // 唯一持有者 token
-    ttl_ms: u64,   // 校验 / 续租用的 TTL
+    key: String,   // fully formatted key
+    value: String, // unique holder token
+    ttl_ms: u64,   // TTL used for validation / lease renewal
     renewal_handle: Option<tokio::task::JoinHandle<()>>,
 }
 
@@ -241,7 +246,8 @@ impl Drop for CoordinationLock {
     }
 }
 
-/// 后台续租:每 `ttl_ms/3` 续一次;丢锁 / 出错即停。
+/// Background lease renewal: renews every `ttl_ms/3`; stops as soon as the lock is lost or an
+/// error occurs.
 fn spawn_coord_renewal(
     backend: Arc<dyn CoordinationBackend>,
     key: String,
@@ -268,8 +274,9 @@ fn spawn_coord_renewal(
 }
 
 pub struct DistributedLockManager {
-    /// 可选的协调后端(内嵌 Raft 等);置位后**优先**于进程内本地锁,
-    /// 使集群模式下的锁跨节点强一致。
+    /// Optional coordination backend (embedded Raft, etc.); when set it takes **precedence**
+    /// over the in-process local lock, making locks strongly consistent across nodes in
+    /// cluster mode.
     coordination: Option<Arc<dyn CoordinationBackend>>,
     locks: Arc<DashMap<String, AdvancedDistributedLock>>,
     coord_locks: Arc<DashMap<String, CoordinationLock>>,
@@ -291,7 +298,8 @@ impl DistributedLockManager {
         Self::new_with_coordination(None, prefix)
     }
 
-    /// 带协调后端构造:集群模式下所有锁经 `coordination`(如 Raft)协商。
+    /// Construct with a coordination backend: in cluster mode every lock is negotiated through
+    /// `coordination` (e.g. Raft).
     pub fn new_with_coordination(
         coordination: Option<Arc<dyn CoordinationBackend>>,
         prefix: &str,
@@ -319,7 +327,8 @@ impl DistributedLockManager {
         ttl_seconds: u64,
         max_wait: Duration,
     ) -> Result<bool, LockError> {
-        // 集群协调后端优先(Raft 强一致锁),取代无协调后端时的进程内本地锁。
+        // The cluster coordination backend wins (strongly consistent Raft lock), replacing the
+        // in-process local lock used when no coordination backend is present.
         if let Some(backend) = self.coordination.clone() {
             return self
                 .acquire_lock_via_coordination(backend, lock_name, ttl_seconds, max_wait)
@@ -344,8 +353,8 @@ impl DistributedLockManager {
         }
     }
 
-    /// 经协调后端(Raft 等)获取锁:重试直至成功或超过 `max_wait`,
-    /// 成功后登记续租任务与句柄。
+    /// Acquire a lock through the coordination backend (Raft, etc.): retries until it succeeds
+    /// or `max_wait` elapses, then registers the lease-renewal task and the handle.
     async fn acquire_lock_via_coordination(
         &self,
         backend: Arc<dyn CoordinationBackend>,
@@ -391,7 +400,7 @@ impl DistributedLockManager {
     }
 
     pub async fn release_lock(&self, lock_name: &str) -> Result<bool, LockError> {
-        // 协调后端(集群)锁优先释放。
+        // Release the coordination-backend (cluster) lock first.
         if let Some((_, lock)) = self.coord_locks.remove(lock_name) {
             return Ok(lock.release().await);
         }
@@ -424,10 +433,11 @@ impl DistributedLockManager {
 
     // Checks whether lock is still valid.
     pub async fn is_lock_valid(&self, lock_name: &str) -> Result<bool, LockError> {
-        // 协调后端(集群)锁:锁存于独立 LOCKS 命名空间,`get`(读 KV)看不到;
-        // 用 `renew_lock` 校验 —— 仅当仍由我们的 token 持有时返回 true(顺带续租,无害)。
+        // Coordination-backend (cluster) lock: it lives in a separate LOCKS namespace that
+        // `get` (a KV read) cannot see, so validate with `renew_lock` — it returns true only
+        // while our token still holds the lock (renewing the lease as a harmless side effect).
         if self.coordination.is_some() {
-            // 快照后再 await,避免跨 await 持有 DashMap guard。
+            // Snapshot before awaiting, so we never hold a DashMap guard across an await.
             let snapshot = self
                 .coord_locks
                 .get(lock_name)
