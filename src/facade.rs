@@ -280,9 +280,15 @@ impl<S: Spider> ModuleNodeTrait for SpiderNode<S> {
         }
 
         // 跟进请求 → 回灌 parser task(重新进入本节点 generate)。
+        //
+        // 必须显式 `stay_current_step`:`SpiderNode` 是单节点(既是入口也是叶子),
+        // 不标记的话任务会走「自动路由到后继」分支,而叶子节点无后继 —— 会被静默丢弃
+        // (见 `module_dag_processor::execute_parse` 的 leaf 分支),`Ctx::follow` 便失效。
         let mut out = TaskOutputEvent::default();
         for req in cx.follows {
-            let task = TaskParserEvent::from(&response).add_meta(FOLLOW_URL_KEY, req.url);
+            let task = TaskParserEvent::from(&response)
+                .add_meta(FOLLOW_URL_KEY, req.url)
+                .stay_current_step();
             out = out.with_task(task);
         }
         Ok(out)
