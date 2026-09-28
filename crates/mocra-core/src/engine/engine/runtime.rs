@@ -71,6 +71,18 @@ impl Engine {
 
         self.downloader_manager.clone().start_background_cleaner();
 
+        if let Some(proxy_manager) = &self.proxy_manager {
+            proxy_manager.start_health_checks();
+            let proxy_manager = Arc::downgrade(proxy_manager);
+            let mut shutdown_rx = self.shutdown_tx.subscribe();
+            tokio::spawn(async move {
+                let _ = shutdown_rx.recv().await;
+                if let Some(proxy_manager) = proxy_manager.upgrade() {
+                    proxy_manager.stop_health_checks().await;
+                }
+            });
+        }
+
         if let Some(event_bus) = &self.event_bus {
             if let Err(e) = event_bus
                 .publish(EventEnvelope::engine(
@@ -246,6 +258,10 @@ impl Engine {
     /// Triggers graceful shutdown for processors and optional event infrastructure.
     pub async fn shutdown(&self) {
         info!("Shutting down Schedule");
+
+        if let Some(proxy_manager) = &self.proxy_manager {
+            proxy_manager.stop_health_checks().await;
+        }
 
         if let Err(e) = self.node_registry.deregister().await {
             warn!("Failed to deregister node: {}", e);

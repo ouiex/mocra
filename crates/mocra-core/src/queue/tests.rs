@@ -251,6 +251,7 @@ fn minimal_config(policy: Option<PolicyConfig>) -> crate::common::model::config:
             cache_ttl: 1,
             wss_timeout: 1,
             pool_size: None,
+            proxy_client_cache_capacity: None,
             max_response_size: None,
         },
         cache: CacheConfig {
@@ -318,6 +319,55 @@ fn test_queue_policy_override_applies_nack_policy() {
 
     assert_eq!(manager.nack_policy.max_retries, 5);
     assert_eq!(manager.nack_policy.backoff_ms, 200);
+}
+
+#[tokio::test]
+async fn queue_codec_is_scoped_to_manager() {
+    let mut json_config = minimal_config(None);
+    json_config.channel_config.queue_codec = Some("json".into());
+    let mut msgpack_config = minimal_config(None);
+    msgpack_config.channel_config.queue_codec = Some("msgpack".into());
+    let json_backend = Arc::new(MockBackend::new());
+    let msgpack_backend = Arc::new(MockBackend::new());
+    let mut json_manager = QueueManager::from_config(&json_config);
+    let mut msgpack_manager = QueueManager::from_config(&msgpack_config);
+    Arc::get_mut(&mut json_manager)
+        .unwrap()
+        .with_backend(json_backend.clone());
+    Arc::get_mut(&mut msgpack_manager)
+        .unwrap()
+        .with_backend(msgpack_backend.clone());
+    json_manager.subscribe();
+    msgpack_manager.subscribe();
+
+    let request = Request::new("http://example.com/codec", "GET");
+    json_manager
+        .get_request_push_channel()
+        .send(QueuedItem::new(request.clone()))
+        .await
+        .unwrap();
+    msgpack_manager
+        .get_request_push_channel()
+        .send(QueuedItem::new(request))
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if !json_backend.messages.lock().unwrap().is_empty()
+                && !msgpack_backend.messages.lock().unwrap().is_empty()
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+
+    let json_payload = json_backend.messages.lock().unwrap()[0].1.clone();
+    let msgpack_payload = msgpack_backend.messages.lock().unwrap()[0].1.clone();
+    assert!(serde_json::from_slice::<Request>(&json_payload).is_ok());
+    assert!(rmps::from_slice::<Request>(&msgpack_payload).is_ok());
 }
 
 #[tokio::test]

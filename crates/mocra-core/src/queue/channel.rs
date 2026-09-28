@@ -108,17 +108,15 @@ impl Clone for Channel {
 
 impl Channel {
     pub fn new(capacity: usize) -> Self {
-        // Optimization: Use a much larger buffer in Single Node Mode to reduce backpressure.
-        // If "capacity" passed is 1000, it's too small for high-throughput single node.
-        // We override or multiply it here locally.
-        let effective_capacity = if capacity < 10000 { 10000 } else { capacity };
+        assert!(capacity > 0, "channel capacity must be positive");
+        let effective_capacity = capacity;
 
         let (task_sender, task_receiver) = channel(effective_capacity);
         let (request_sender, request_receiver) = channel(effective_capacity);
         let (download_request_sender, download_request_receiver) = channel(effective_capacity);
         let (response_sender, response_receiver) = channel(effective_capacity);
         let (error_sender, error_receiver) = channel(effective_capacity);
-        let (log_sender, log_receiver) = channel(10000); // Increased log channel
+        let (log_sender, log_receiver) = channel(effective_capacity);
 
         let (parser_task_sender, parser_task_receiver) = channel(effective_capacity);
 
@@ -162,5 +160,19 @@ impl Channel {
             remote_task_sender,
             remote_task_receiver: Arc::new(Mutex::new(remote_task_receiver)),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Channel;
+
+    #[test]
+    fn configured_capacity_applies_to_all_local_channels() {
+        let channels = Channel::new(3);
+        assert_eq!(channels.task_sender.max_capacity(), 3);
+        assert_eq!(channels.request_sender.max_capacity(), 3);
+        assert_eq!(channels.log_sender.max_capacity(), 3);
+        assert_eq!(channels.remote_task_sender.max_capacity(), 3);
     }
 }

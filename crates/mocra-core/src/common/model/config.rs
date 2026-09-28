@@ -69,6 +69,8 @@ pub struct DownloadConfig {
     pub wss_timeout: u32,
     /// Connection pool size for HTTP client (default: 200)
     pub pool_size: Option<usize>,
+    /// Maximum cached proxy-specific HTTP clients (default: 1000; 0 disables caching).
+    pub proxy_client_cache_capacity: Option<usize>,
     /// Maximum response size in bytes (default: 10MB)
     pub max_response_size: Option<usize>,
 }
@@ -234,9 +236,9 @@ pub struct ChannelConfig {
     pub nats: Option<NatsConfig>,
     /// Minimum ID time (snowflake/uuid related)
     pub minid_time: u64,
-    /// Channel capacity
+    /// Capacity of each local channel, including the log channel. Must be greater than zero.
     pub capacity: usize,
-    /// Queue codec: json | msgpack
+    /// Queue codec: json | msgpack. Defaults to MessagePack, scoped to this queue manager.
     pub queue_codec: Option<String>,
     /// Concurrency limit for batch flushing (default: 10)
     pub batch_concurrency: Option<usize>,

@@ -19,7 +19,6 @@ use futures::StreamExt;
 use futures::future::join_all;
 use log::{error, info};
 use metrics::counter;
-use once_cell::sync::OnceCell;
 use rmp_serde as rmps;
 use serde_path_to_error;
 use std::collections::HashMap;
@@ -59,16 +58,7 @@ enum QueueCodec {
     Msgpack,
 }
 
-static QUEUE_CODEC_OVERRIDE: OnceCell<QueueCodec> = OnceCell::new();
-
-fn queue_codec() -> QueueCodec {
-    if let Some(codec) = QUEUE_CODEC_OVERRIDE.get() {
-        return *codec;
-    }
-    QueueCodec::Msgpack
-}
-
-fn set_queue_codec_from_config(cfg: &Config) {
+fn queue_codec_from_config(cfg: &Config) -> QueueCodec {
     let codec = cfg
         .channel_config
         .queue_codec
@@ -76,13 +66,11 @@ fn set_queue_codec_from_config(cfg: &Config) {
         .unwrap_or("msgpack")
         .to_lowercase();
 
-    let mapped = match codec.as_str() {
+    match codec.as_str() {
         "json" => QueueCodec::Json,
         "msgpack" | "rmp" => QueueCodec::Msgpack,
         _ => QueueCodec::Msgpack,
-    };
-
-    let _ = QUEUE_CODEC_OVERRIDE.set(mapped);
+    }
 }
 
 pub struct QueueManager {
@@ -94,6 +82,7 @@ pub struct QueueManager {
     pub compression_threshold: usize,
     pub nack_policy: NackPolicy,
     pub log_topic: String,
+    queue_codec: QueueCodec,
 }
 
 impl QueueManager {
@@ -107,6 +96,7 @@ impl QueueManager {
             compression_threshold: DEFAULT_COMPRESSION_THRESHOLD,
             nack_policy: NackPolicy::default(),
             log_topic: "log".to_string(),
+            queue_codec: QueueCodec::Msgpack,
         }
     }
 
@@ -115,7 +105,6 @@ impl QueueManager {
     }
 
     pub fn from_config_with_log_topic(cfg: &Config, log_topic: Option<&str>) -> Arc<Self> {
-        set_queue_codec_from_config(cfg);
         let channel_config = &cfg.channel_config;
         #[allow(unused_variables)] // used by queue-kafka / queue-nats backends
         let namespace = &cfg.name;
@@ -193,7 +182,7 @@ impl QueueManager {
             qm
         } else {
             info!("In-Memory Queue initialized (Single Node Mode)");
-            QueueManager::new(None, 10000)
+            QueueManager::new(None, channel_config.capacity)
         };
 
         if let Some(topic) = log_topic {
@@ -201,6 +190,7 @@ impl QueueManager {
         }
 
         queue_manager.nack_policy = nack_policy;
+        queue_manager.queue_codec = queue_codec_from_config(cfg);
 
         if let Some(concurrency) = channel_config.batch_concurrency {
             queue_manager.with_concurrency(concurrency);
@@ -253,6 +243,7 @@ impl QueueManager {
             let blob_storage = self.blob_storage.clone();
             let concurrency = self.batch_concurrency;
             let compression_threshold = self.compression_threshold;
+            let codec = self.queue_codec;
 
             // Define outbound channels (Local -> Remote)
             // format: (topic, receiver_channel)
@@ -314,6 +305,7 @@ impl QueueManager {
                     compensator.clone(),
                     blob_storage.clone(),
                     concurrency,
+                    codec,
                 )
                 .await;
                 Self::subscribe_all_priorities(
@@ -323,6 +315,7 @@ impl QueueManager {
                     compensator.clone(),
                     blob_storage.clone(),
                     concurrency,
+                    codec,
                 )
                 .await;
                 Self::subscribe_all_priorities(
@@ -332,6 +325,7 @@ impl QueueManager {
                     compensator.clone(),
                     blob_storage.clone(),
                     concurrency,
+                    codec,
                 )
                 .await;
                 Self::subscribe_all_priorities(
@@ -341,6 +335,7 @@ impl QueueManager {
                     compensator.clone(),
                     blob_storage.clone(),
                     concurrency,
+                    codec,
                 )
                 .await;
                 Self::subscribe_all_priorities(
@@ -350,6 +345,7 @@ impl QueueManager {
                     compensator.clone(),
                     blob_storage.clone(),
                     concurrency,
+                    codec,
                 )
                 .await;
             });
@@ -363,6 +359,7 @@ impl QueueManager {
         compensator: Option<Arc<dyn Compensator>>,
         blob_storage: Option<Arc<dyn BlobStorage>>,
         concurrency: usize,
+        codec: QueueCodec,
     ) where
         T: serde::de::DeserializeOwned
             + Send
@@ -387,6 +384,7 @@ impl QueueManager {
                         compensator,
                         blob_storage,
                         concurrency,
+                        codec,
                     )
                     .await;
                 }
@@ -401,6 +399,7 @@ impl QueueManager {
         compensator: Option<Arc<dyn Compensator>>,
         blob_storage: Option<Arc<dyn BlobStorage>>,
         concurrency: usize,
+        codec: QueueCodec,
     ) where
         T: serde::de::DeserializeOwned
             + Send
@@ -438,6 +437,7 @@ impl QueueManager {
                         &sender,
                         &compensator,
                         &blob_storage,
+                        codec,
                     )
                     .await;
                 }
@@ -453,6 +453,7 @@ impl QueueManager {
         sender: &Sender<QueuedItem<T>>,
         compensator: &Option<Arc<dyn Compensator>>,
         blob_storage: &Option<Arc<dyn BlobStorage>>,
+        codec: QueueCodec,
     ) where
         T: serde::de::DeserializeOwned
             + Send
@@ -481,7 +482,7 @@ impl QueueManager {
                     .map(|msg| {
                         let payload_slice = msg.payload.as_slice();
                         let decoded_payload = decompress_payload(payload_slice);
-                        let item_res = match queue_codec() {
+                        let item_res = match codec {
                             QueueCodec::Json => {
                                 serde_json::from_slice::<T>(decoded_payload.as_ref()).map_err(|e| {
                                     crate::errors::Error::new(
@@ -509,7 +510,7 @@ impl QueueManager {
                 .map(|msg| {
                     let payload_slice = msg.payload.as_slice();
                     let decoded_payload = decompress_payload(payload_slice);
-                    let item_res = match queue_codec() {
+                    let item_res = match codec {
                         QueueCodec::Json => serde_json::from_slice::<T>(decoded_payload.as_ref())
                             .map_err(|e| {
                                 crate::errors::Error::new(crate::errors::ErrorKind::Queue, Some(e))
@@ -570,7 +571,7 @@ impl QueueManager {
                             }
                             Err(e) => {
                                 let payload_len = msg.payload.len();
-                                let codec = match queue_codec() {
+                                let codec = match codec {
                                     QueueCodec::Json => "json",
                                     QueueCodec::Msgpack => "msgpack",
                                 };
@@ -625,6 +626,7 @@ impl QueueManager {
             blob_storage,
             concurrency,
             compression_threshold,
+            self.queue_codec,
         )
     }
 
@@ -635,6 +637,7 @@ impl QueueManager {
         blob_storage: Option<Arc<dyn BlobStorage>>,
         concurrency: usize,
         compression_threshold: usize,
+        codec: QueueCodec,
     ) where
         T: serde::Serialize + Send + Sync + 'static + Identifiable + Prioritizable + Offloadable,
     {
@@ -660,6 +663,7 @@ impl QueueManager {
                         blob_storage,
                         items,
                         compression_threshold,
+                        codec,
                     )
                     .await;
                 }
@@ -776,6 +780,7 @@ impl QueueManager {
         blob_storage: Option<Arc<dyn BlobStorage>>,
         mut items: Vec<QueuedItem<T>>,
         compression_threshold: usize,
+        codec: QueueCodec,
     ) where
         T: serde::Serialize + Identifiable + Send + Sync + Prioritizable + Offloadable + 'static,
     {
@@ -803,7 +808,7 @@ impl QueueManager {
 
         if all_same_priority {
             let topic = format!("{}-{}", base_topic, first_priority.suffix());
-            Self::flush_batch(topic, backend, items, compression_threshold).await;
+            Self::flush_batch(topic, backend, items, compression_threshold, codec).await;
             return;
         }
 
@@ -814,7 +819,14 @@ impl QueueManager {
 
         for (priority, group_items) in groups {
             let topic = format!("{}-{}", base_topic, priority.suffix());
-            Self::flush_batch(topic, backend.clone(), group_items, compression_threshold).await;
+            Self::flush_batch(
+                topic,
+                backend.clone(),
+                group_items,
+                compression_threshold,
+                codec,
+            )
+            .await;
         }
     }
 
@@ -823,6 +835,7 @@ impl QueueManager {
         backend: Arc<dyn MqBackend>,
         items: Vec<QueuedItem<T>>,
         compression_threshold: usize,
+        codec: QueueCodec,
     ) where
         T: serde::Serialize + Identifiable + Send + Sync + 'static,
     {
@@ -831,10 +844,12 @@ impl QueueManager {
         let use_blocking = items.len() >= 32;
 
         let payloads_result = if use_blocking {
-            tokio::task::spawn_blocking(move || Self::encode_items(&items, compression_threshold))
-                .await
+            tokio::task::spawn_blocking(move || {
+                Self::encode_items(&items, compression_threshold, codec)
+            })
+            .await
         } else {
-            Ok(Self::encode_items(&items, compression_threshold))
+            Ok(Self::encode_items(&items, compression_threshold, codec))
         };
 
         match payloads_result {
@@ -879,6 +894,7 @@ impl QueueManager {
     fn encode_items<T>(
         items: &[QueuedItem<T>],
         compression_threshold: usize,
+        codec: QueueCodec,
     ) -> (
         Vec<(Option<String>, Vec<u8>, HashMap<String, String>)>,
         Option<Vec<String>>,
@@ -903,7 +919,7 @@ impl QueueManager {
             if let Some(id_list) = ids.as_mut() {
                 id_list.push(id.clone());
             }
-            let encoded = match queue_codec() {
+            let encoded = match codec {
                 QueueCodec::Json => serde_json::to_vec(&item.inner).map_err(|e| {
                     crate::errors::Error::new(crate::errors::ErrorKind::Queue, Some(e))
                 }),
@@ -943,7 +959,7 @@ impl QueueManager {
         T: serde::Serialize + Identifiable + Send + Sync,
     {
         if let Some(backend) = &self.backend {
-            let payload = match queue_codec() {
+            let payload = match self.queue_codec {
                 QueueCodec::Json => serde_json::to_vec(item)
                     .map_err(|e| crate::errors::error::QueueError::OperationFailed(Box::new(e)))?,
                 QueueCodec::Msgpack => msgpack_encode(item)
