@@ -1,6 +1,6 @@
 use futures::FutureExt;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
@@ -62,6 +62,7 @@ struct RuntimeState {
     ready_set: HashSet<String>,
     consecutive_failures: HashMap<String, usize>,
     dispatch_started_ms: HashMap<String, u64>,
+    successes_since_checkpoint: usize,
 }
 
 struct PreparedDispatch {
@@ -141,6 +142,7 @@ impl RuntimeState {
             ready_set,
             consecutive_failures: HashMap::new(),
             dispatch_started_ms: HashMap::new(),
+            successes_since_checkpoint: 0,
         }
     }
 
@@ -259,6 +261,7 @@ struct FencingStoreConfig {
 struct RunStateStoreConfig {
     store: Arc<dyn DagRunStateStore>,
     run_key: String,
+    checkpoint_interval: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -360,7 +363,17 @@ impl DagScheduler {
         self.run_state_store = Some(RunStateStoreConfig {
             store,
             run_key: run_key.as_ref().to_string(),
+            checkpoint_interval: 16,
         });
+        self
+    }
+
+    /// Persist a full run-state checkpoint after this many successful nodes.
+    /// A cancelled run may repeat up to `checkpoint_interval - 1` completed nodes.
+    pub fn with_run_state_checkpoint_interval(mut self, interval: usize) -> Self {
+        if let Some(cfg) = self.run_state_store.as_mut() {
+            cfg.checkpoint_interval = interval.max(1);
+        }
         self
     }
 
@@ -816,8 +829,12 @@ impl DagScheduler {
         )?;
 
         if let Some(cfg) = &self.run_state_store {
-            let snapshot = state.snapshot();
-            cfg.store.save(&cfg.run_key, &snapshot).await?;
+            state.successes_since_checkpoint += 1;
+            if state.successes_since_checkpoint >= cfg.checkpoint_interval {
+                let snapshot = state.snapshot();
+                cfg.store.save(&cfg.run_key, &snapshot).await?;
+                state.successes_since_checkpoint = 0;
+            }
         }
 
         Ok(())
@@ -1330,7 +1347,7 @@ impl DagScheduler {
             }
         }
 
-        let renew_failed_reason: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let (renew_failure_tx, mut renew_failure_rx) = tokio::sync::watch::channel(None::<String>);
         let mut renew_stop_tx = None;
         let mut renew_task = None;
 
@@ -1343,7 +1360,7 @@ impl DagScheduler {
             let owner = owner.clone();
             let ttl_ms = cfg.ttl_ms;
             let renew_jitter_pct = cfg.renew_jitter_pct;
-            let failed = renew_failed_reason.clone();
+            let failed = renew_failure_tx.clone();
             renew_stop_tx = Some(tx);
             renew_task = Some(tokio::spawn(async move {
                 loop {
@@ -1358,17 +1375,13 @@ impl DagScheduler {
                                 Ok(false) => {
                                     Self::record_run_guard_latency("renew", false, renew_started.elapsed());
                                     Self::record_run_guard_counter("mocra_dag_run_guard_renew_total", "lost");
-                                    if let Ok(mut slot) = failed.lock() {
-                                        *slot = Some("run guard lock ownership lost during renew".to_string());
-                                    }
+                                    failed.send_replace(Some("run guard lock ownership lost during renew".to_string()));
                                     break;
                                 }
                                 Err(e) => {
                                     Self::record_run_guard_latency("renew", false, renew_started.elapsed());
                                     Self::record_run_guard_counter("mocra_dag_run_guard_renew_total", "error");
-                                    if let Ok(mut slot) = failed.lock() {
-                                        *slot = Some(e.to_string());
-                                    }
+                                    failed.send_replace(Some(e.to_string()));
                                     break;
                                 }
                             }
@@ -1396,13 +1409,15 @@ impl DagScheduler {
             let run_guard_lock_key = run_guard_ctx
                 .as_ref()
                 .map(|(cfg, _, _)| cfg.lock_key.clone());
-            let wait_poll_interval = Duration::from_millis(10);
+            let deadline =
+                run_timeout.map(|timeout| tokio::time::Instant::from_std(started_at + timeout));
 
             let mut join_set: tokio::task::JoinSet<JoinOutput> = tokio::task::JoinSet::new();
 
             while !state.ready_queue.is_empty() || !join_set.is_empty() {
+                let renewal_failure = renew_failure_rx.borrow().clone();
                 if let Some(lock_key) = run_guard_lock_key.as_ref()
-                    && let Some(reason) = renew_failed_reason.lock().ok().and_then(|g| g.clone())
+                    && let Some(reason) = renewal_failure
                 {
                     join_set.abort_all();
                     self.persist_failure_snapshot_if_enabled(&state, "renew_lost")
@@ -1414,7 +1429,7 @@ impl DagScheduler {
                 }
 
                 if let Some(timeout) = run_timeout
-                    && started_at.elapsed() > timeout
+                    && started_at.elapsed() >= timeout
                 {
                     join_set.abort_all();
                     self.persist_failure_snapshot_if_enabled(&state, "run_timeout")
@@ -1437,12 +1452,25 @@ impl DagScheduler {
                         .await?;
                 }
 
-                let Some(joined) = join_set.try_join_next() else {
-                    if !join_set.is_empty() {
-                        tokio::time::sleep(wait_poll_interval).await;
+                if join_set.is_empty() {
+                    break;
+                }
+
+                let joined = tokio::select! {
+                    biased;
+                    _ = renew_failure_rx.changed(), if run_guard_lock_key.is_some() => {
                         continue;
                     }
-                    break;
+                    _ = async {
+                        if let Some(deadline) = deadline {
+                            tokio::time::sleep_until(deadline).await;
+                        } else {
+                            std::future::pending::<()>().await;
+                        }
+                    } => {
+                        continue;
+                    }
+                    joined = join_set.join_next() => joined.expect("join set is nonempty"),
                 };
 
                 let (node_id, layer_index, attempt, result) =
@@ -1495,7 +1523,7 @@ impl DagScheduler {
             let _ = task.await;
         }
 
-        let renew_failed = renew_failed_reason.lock().ok().and_then(|g| g.clone());
+        let renew_failed = renew_failure_rx.borrow().clone();
 
         if let Some((cfg, owner, _token)) = run_guard_ctx {
             let release_started = Instant::now();
@@ -1543,5 +1571,93 @@ impl DagScheduler {
             self.run_guard.is_some(),
         );
         execute_result
+    }
+}
+
+#[cfg(test)]
+mod checkpoint_benchmarks {
+    use std::collections::HashMap;
+    use std::hint::black_box;
+    use std::sync::Arc;
+    use std::time::Instant;
+
+    use crate::graph::Dag;
+    use crate::scheduler::DagScheduler;
+    use crate::types::{DagError, DagNodeTrait, NodeExecutionContext, TaskPayload};
+
+    struct NoopNode;
+
+    #[async_trait::async_trait]
+    impl DagNodeTrait for NoopNode {
+        async fn start(&self, _context: NodeExecutionContext) -> Result<TaskPayload, DagError> {
+            Ok(TaskPayload::from_bytes(Vec::new()))
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "run manually to measure event-driven short-chain latency"]
+    async fn short_chain_workload() {
+        for nodes in [1, 10, 20] {
+            let mut dag = Dag::new();
+            let mut previous = None;
+            for index in 0..nodes {
+                previous = Some(
+                    dag.add_node_with_id(
+                        previous.as_ref().map(std::slice::from_ref),
+                        format!("noop-{index}"),
+                        Arc::new(NoopNode),
+                    )
+                    .unwrap(),
+                );
+            }
+            let scheduler = DagScheduler::new(dag);
+            let mut samples = Vec::new();
+            for _ in 0..5 {
+                let started = Instant::now();
+                scheduler.execute_parallel().await.unwrap();
+                samples.push(started.elapsed().as_micros());
+            }
+            samples.sort_unstable();
+            println!(
+                "dag_chain nodes={nodes} median_us={} samples_us={samples:?}",
+                samples[2]
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "run manually to compare in-memory snapshot copy work"]
+    fn snapshot_copy_workload() {
+        for (nodes, output_bytes) in [(128, 4096), (64, 65_536)] {
+            for strategy in ["full_each_node", "checkpoint_16", "incremental_record"] {
+                let mut samples = Vec::new();
+                for _ in 0..5 {
+                    let mut outputs = HashMap::new();
+                    let started = Instant::now();
+                    for index in 0..nodes {
+                        let payload = TaskPayload::from_bytes(vec![index as u8; output_bytes]);
+                        outputs.insert(index, payload.clone());
+                        match strategy {
+                            "full_each_node" => {
+                                black_box(outputs.clone());
+                            }
+                            "checkpoint_16" if (index + 1) % 16 == 0 => {
+                                black_box(outputs.clone());
+                            }
+                            "incremental_record" => {
+                                black_box(payload.clone());
+                            }
+                            _ => {}
+                        }
+                    }
+                    samples.push(started.elapsed().as_micros());
+                }
+                samples.sort_unstable();
+                println!(
+                    "nodes={nodes} output_bytes={output_bytes} strategy={strategy} median_us={} samples_us={samples:?}",
+                    samples[2]
+                );
+            }
+        }
     }
 }

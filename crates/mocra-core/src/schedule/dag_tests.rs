@@ -197,6 +197,7 @@ struct InMemoryFencingStore {
 #[derive(Default)]
 struct InMemoryRunStateStore {
     snapshots: DashMap<String, DagRunResumeState>,
+    save_count: AtomicUsize,
 }
 
 #[async_trait]
@@ -206,6 +207,7 @@ impl DagRunStateStore for InMemoryRunStateStore {
     }
 
     async fn save(&self, run_key: &str, state: &DagRunResumeState) -> Result<(), DagError> {
+        self.save_count.fetch_add(1, Ordering::SeqCst);
         self.snapshots.insert(run_key.to_string(), state.clone());
         Ok(())
     }
@@ -1863,4 +1865,143 @@ async fn execute_parallel_failure_snapshot_allows_resume_without_rerunning_succe
     assert_eq!(b_runs.load(Ordering::SeqCst), 2);
 
     assert!(store.load("resume-key-fail-1").await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn execute_parallel_checkpoints_every_configured_number_of_successes() {
+    let mut dag = Dag::new();
+    for index in 0..32 {
+        dag.add_node_with_id(
+            None,
+            format!("checkpoint-{index}"),
+            node(|_ctx| async move { Ok(TaskPayload::from_bytes(vec![7; 1024])) }),
+        )
+        .unwrap();
+    }
+    let store = Arc::new(InMemoryRunStateStore::default());
+    let report = DagScheduler::new(dag)
+        .with_run_state_store(store.clone(), "checkpoint-interval")
+        .with_run_state_checkpoint_interval(16)
+        .execute_parallel()
+        .await
+        .unwrap();
+
+    assert_eq!(report.outputs.len(), 34);
+    assert_eq!(store.save_count.load(Ordering::SeqCst), 2);
+    assert!(store.load("checkpoint-interval").await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn execute_parallel_cancelled_run_resumes_from_last_checkpoint() {
+    let mut dag = Dag::new();
+    let first_runs = Arc::new(AtomicUsize::new(0));
+    let second_runs = Arc::new(AtomicUsize::new(0));
+    let second_started = Arc::new(tokio::sync::Notify::new());
+    let first = dag
+        .add_node_with_id(None, "cancel-first", {
+            let first_runs = first_runs.clone();
+            node(move |_ctx| {
+                let first_runs = first_runs.clone();
+                async move {
+                    first_runs.fetch_add(1, Ordering::SeqCst);
+                    Ok(i64_to_payload(1))
+                }
+            })
+        })
+        .unwrap();
+    dag.add_node_with_id(Some(&[first]), "cancel-second", {
+        let second_runs = second_runs.clone();
+        let second_started = second_started.clone();
+        node(move |_ctx| {
+            let second_runs = second_runs.clone();
+            let second_started = second_started.clone();
+            async move {
+                if second_runs.fetch_add(1, Ordering::SeqCst) == 0 {
+                    second_started.notify_one();
+                    std::future::pending::<()>().await;
+                }
+                Ok(i64_to_payload(2))
+            }
+        })
+    })
+    .unwrap();
+
+    let store = Arc::new(InMemoryRunStateStore::default());
+    let first_run = DagScheduler::new(dag.clone())
+        .with_run_state_store(store.clone(), "cancel-resume")
+        .with_run_state_checkpoint_interval(2);
+    let task = tokio::spawn(async move { first_run.execute_parallel().await });
+    tokio::time::timeout(Duration::from_secs(2), second_started.notified())
+        .await
+        .expect("second node should start");
+    task.abort();
+    let _ = task.await;
+
+    let checkpoint = store.load("cancel-resume").await.unwrap().unwrap();
+    assert!(checkpoint.succeeded_outputs.contains_key("cancel-first"));
+    assert!(!checkpoint.succeeded_outputs.contains_key("cancel-second"));
+
+    let report = DagScheduler::new(dag)
+        .with_run_state_store(store.clone(), "cancel-resume")
+        .with_run_state_checkpoint_interval(2)
+        .execute_parallel()
+        .await
+        .unwrap();
+    assert_eq!(payload_to_i64(&report.outputs["cancel-second"]), 2);
+    assert_eq!(first_runs.load(Ordering::SeqCst), 1);
+    assert_eq!(second_runs.load(Ordering::SeqCst), 2);
+    assert!(store.load("cancel-resume").await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn execute_parallel_renewal_loss_saves_latest_success_for_resume() {
+    let mut dag = Dag::new();
+    let first_runs = Arc::new(AtomicUsize::new(0));
+    let second_runs = Arc::new(AtomicUsize::new(0));
+    let first = dag
+        .add_node_with_id(None, "renew-first", {
+            let first_runs = first_runs.clone();
+            node(move |_ctx| {
+                let first_runs = first_runs.clone();
+                async move {
+                    first_runs.fetch_add(1, Ordering::SeqCst);
+                    Ok(i64_to_payload(1))
+                }
+            })
+        })
+        .unwrap();
+    dag.add_node_with_id(Some(&[first]), "renew-second", {
+        let second_runs = second_runs.clone();
+        node(move |_ctx| {
+            let second_runs = second_runs.clone();
+            async move {
+                if second_runs.fetch_add(1, Ordering::SeqCst) == 0 {
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                }
+                Ok(i64_to_payload(2))
+            }
+        })
+    })
+    .unwrap();
+
+    let store = Arc::new(InMemoryRunStateStore::default());
+    let guard = Arc::new(FailAfterNRenewRunGuard::new(1, 0));
+    let first_run = DagScheduler::new(dag.clone())
+        .with_run_guard(guard, "renew-resume-lock", 150)
+        .with_run_guard_heartbeat_ms(Some(40))
+        .with_run_guard_heartbeat_jitter_pct(0)
+        .with_run_state_store(store.clone(), "renew-resume-state");
+    let error = first_run.execute_parallel().await.unwrap_err();
+    assert!(matches!(error, DagError::RunGuardRenewFailed { .. }));
+    let snapshot = store.load("renew-resume-state").await.unwrap().unwrap();
+    assert!(snapshot.succeeded_outputs.contains_key("renew-first"));
+
+    let report = DagScheduler::new(dag)
+        .with_run_state_store(store.clone(), "renew-resume-state")
+        .execute_parallel()
+        .await
+        .unwrap();
+    assert_eq!(payload_to_i64(&report.outputs["renew-second"]), 2);
+    assert_eq!(first_runs.load(Ordering::SeqCst), 1);
+    assert_eq!(second_runs.load(Ordering::SeqCst), 2);
 }
