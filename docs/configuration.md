@@ -165,6 +165,7 @@ is used.** The DB-backed task model (`account × platform × module`) requires t
 | `cache_ttl` | yes | integer | Response cache TTL (seconds). |
 | `wss_timeout` | yes | integer | WebSocket timeout (seconds). |
 | `pool_size` | no | integer | HTTP client connection-pool size (default 200). |
+| `proxy_client_cache_capacity` | no | integer | Maximum cached proxy-specific HTTP clients (default 1000; `0` disables caching). Cache hits, creations, bypasses and evictions have separate metrics. |
 | `max_response_size` | no | integer | Max response body size in bytes (default 10 MB). |
 
 #### `enable_session` behavior
@@ -443,7 +444,8 @@ internally to `http`/`https` proxy channels.
 | `min_size` | no | integer | Minimum pool size (default 5). |
 | `max_size` | no | integer | Maximum pool size (default 50). |
 | `max_errors` | no | integer | Max errors per proxy before eviction (default 3). |
-| `health_check_interval_secs` | no | integer | Health-check interval (seconds, default 300). |
+| `health_check_interval_secs` | no | integer | Health-check interval (seconds, default 300; `0` disables scheduling). The manager starts checks when constructed in a Tokio runtime and cancels them when dropped. |
+| `health_check_concurrency` | no | integer | Maximum simultaneous proxy health probes (default 8; clamped to 1–64). |
 | `refill_threshold` | no | float | Refill trigger ratio (default 0.3). |
 
 ---

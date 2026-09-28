@@ -89,3 +89,7 @@ N=30000 NODES=3 ./run_scrapy.sh   # ~45s at ~710 pages/s
 | `run_mocra.sh` | Runs / aggregates N mocra nodes |
 | `scrapy_spider.py`, `run_scrapy.sh` | scrapy-redis spider + N-worker driver |
 | `requirements.txt` | scrapy / scrapy-redis / redis |
+| `proxy-client-cache.md` | Local HTTP proxy Client cache capacity measurement |
+| `proxy-selection.md` | Concurrent selection policy A/B comparison |
+| `dag-checkpoints.md` | DAG run-state checkpoint and incremental-record comparison |
+| `runtime-acceptance.md` | Stage 5 local HTTP path, overload and canary gate |

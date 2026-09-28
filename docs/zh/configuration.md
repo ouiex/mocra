@@ -148,6 +148,7 @@ capacity = 1000
 | `cache_ttl` | 是 | integer | 响应缓存 TTL(秒)。 |
 | `wss_timeout` | 是 | integer | WebSocket 超时(秒)。 |
 | `pool_size` | 否 | integer | HTTP 客户端连接池大小(默认 200)。 |
+| `proxy_client_cache_capacity` | 否 | integer | 代理专用 HTTP Client 的最大缓存数(默认 1000；`0` 禁用缓存)。命中、新建、跳过缓存和淘汰分别有指标。 |
 | `max_response_size` | 否 | integer | 最大响应体大小(字节,默认 10 MB)。 |
 
 #### `enable_session` 行为说明
@@ -417,7 +418,8 @@ backoff = "None"
 | `min_size` | 否 | integer | 池最小容量(默认 5)。 |
 | `max_size` | 否 | integer | 池最大容量(默认 50)。 |
 | `max_errors` | 否 | integer | 单代理被驱逐前的最大错误数(默认 3)。 |
-| `health_check_interval_secs` | 否 | integer | 健康检查间隔(秒,默认 300)。 |
+| `health_check_interval_secs` | 否 | integer | 健康检查间隔(秒,默认 300；`0` 禁用调度)。管理器在 Tokio 运行时内创建时启动，销毁时取消。 |
+| `health_check_concurrency` | 否 | integer | 同时执行的代理健康探测上限(默认 8；限制在 1–64)。 |
 | `refill_threshold` | 否 | float | 触发补充的比例阈值(默认 0.3)。 |
 
 ---
