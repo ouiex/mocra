@@ -43,26 +43,32 @@ impl DownloaderManager {
         locker: Arc<DistributedLockManager>,
         cache_service: Arc<CacheService>,
     ) -> Self {
-        let (pool_size, max_response_size) = {
+        let (pool_size, max_response_size, proxy_cache_capacity) = {
             let cfg = app_config.read().await;
             (
                 cfg.download_config.pool_size.unwrap_or(200),
                 cfg.download_config
                     .max_response_size
                     .unwrap_or(10 * 1024 * 1024),
+                cfg.download_config
+                    .proxy_client_cache_capacity
+                    .unwrap_or(1000),
             )
         };
 
         DownloaderManager {
             app_config,
             locker: locker.clone(),
-            default_downloader: RwLock::new(Box::new(RequestDownloader::new(
-                Arc::clone(&limiter),
-                Arc::clone(&locker),
-                Arc::clone(&cache_service),
-                pool_size,
-                max_response_size,
-            ))),
+            default_downloader: RwLock::new(Box::new(
+                RequestDownloader::new(
+                    Arc::clone(&limiter),
+                    Arc::clone(&locker),
+                    Arc::clone(&cache_service),
+                    pool_size,
+                    max_response_size,
+                )
+                .with_proxy_cache_capacity(proxy_cache_capacity),
+            )),
             // Downloader factory list.
             downloader: Arc::new(DashMap::new()),
             // Task downloader configuration.

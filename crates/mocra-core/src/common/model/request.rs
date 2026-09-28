@@ -91,6 +91,9 @@ pub struct Request {
     /// Example: `Cache-Control`, `Expires`, `ETag`.
     pub cache_headers: Option<Vec<String>>,
     pub proxy: Option<ProxyEnum>,
+    /// Set only by the engine when the proxy came from its pool.
+    #[serde(skip)]
+    pub(crate) proxy_from_pool: bool,
     /// Rate-limit identifier.
     /// Used to mark requests that belong to the same rate-limit group.
     /// Defaults to `module_id`.
@@ -150,6 +153,7 @@ impl Request {
             timeout: 30, // Default timeout: 30 seconds.
             cache_headers: None,
             proxy: None,
+            proxy_from_pool: false,
             limit_id: "".to_string(),
             use_new_client: false,
             download_middleware: vec![],
@@ -175,6 +179,7 @@ impl Request {
     }
     pub fn use_proxy(&mut self, proxy: ProxyEnum) -> &mut Request {
         self.proxy = Some(proxy);
+        self.proxy_from_pool = false;
         self
     }
     pub fn task_id(&self) -> String {

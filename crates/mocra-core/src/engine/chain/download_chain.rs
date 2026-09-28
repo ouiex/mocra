@@ -10,12 +10,16 @@ use crate::common::status_tracker::ErrorDecision;
 use crate::downloader::DownloaderManager;
 use crate::engine::chain::ConfigProcessor;
 use crate::engine::chain::backpressure::{BackpressureSendState, send_with_backpressure};
+use crate::engine::chain::proxy_attempt::{
+    ProxyAttempt, can_rotate, clear_proxy_failure, is_proxy_failure, mark_proxy_failure,
+    select_retry_proxy,
+};
 use crate::engine::events::{
     DownloadEvent, EventBus, EventEnvelope, EventPhase, EventType, RequestMiddlewareEvent,
     ResponseEvent,
 };
 use crate::engine::processors::event_processor::{EventAwareTypedChain, EventProcessorTrait};
-use crate::errors::{Error, ModuleError, Result};
+use crate::errors::{DownloadError, Error, ModuleError, Result};
 use crate::queue::QueueManager;
 use crate::queue::QueuedItem;
 use async_trait::async_trait;
@@ -33,6 +37,7 @@ use std::time::{Duration, Instant};
 /// executes the request, and maps outcomes into chain semantics.
 pub struct DownloadProcessor {
     pub(crate) downloader_manager: Arc<DownloaderManager>,
+    pub(crate) proxy_manager: Option<Arc<ProxyManager>>,
     pub(crate) state: Arc<PipelineContext>,
     pub(crate) decision_cache: Arc<DashMap<String, (Instant, ErrorDecision)>>,
 }
@@ -53,7 +58,7 @@ impl
         input: (Option<Request>, Option<ModuleConfig>),
         context: ProcessorContext,
     ) -> ProcessorResult<(Option<Response>, Option<ModuleConfig>)> {
-        let request = match input.0 {
+        let mut request = match input.0 {
             Some(request) => request,
             None => return ProcessorResult::Success((None, input.1)),
         };
@@ -200,6 +205,14 @@ impl
             // [LOG_OPTIMIZATION] debug!("[DownloadProcessor] skipping task/module checks for retry: request_id={}", input.0.id);
         }
 
+        select_retry_proxy(
+            &self.proxy_manager,
+            &mut request,
+            &input.1,
+            &context.retry_policy,
+        )
+        .await;
+
         info!("[DownloadProcessor] loading config: request_id={}", _req_id);
         let download_config =
             DownloadConfig::load(&input.1, &self.state.config.read().await.download_config);
@@ -222,9 +235,52 @@ impl
         let url = request.url.clone();
         let account = request.account.clone();
         let platform = request.platform.clone();
+        let used_proxy = request.proxy.clone();
+        let replayable = can_rotate(&request);
+        let mut proxy_attempt = match ProxyAttempt::begin(&self.proxy_manager, &request).await {
+            Ok(attempt) => attempt,
+            Err(error) => {
+                counter!("mocra_proxy_selection_errors_total").increment(1);
+                let mut retry_policy = context.retry_policy.clone().unwrap_or_default();
+                if let Some(proxy) = &used_proxy {
+                    mark_proxy_failure(&mut retry_policy, proxy);
+                }
+                if retry_policy.should_retry() {
+                    return ProcessorResult::RetryableFailure(
+                        retry_policy.with_reason(error.to_string()),
+                    );
+                }
+                return ProcessorResult::FatalFailure(error);
+            }
+        };
+        let proxy_kind = if proxy_attempt.is_some() {
+            "managed"
+        } else if used_proxy.is_some() {
+            "explicit"
+        } else {
+            "none"
+        };
+        counter!("mocra_download_attempts_total", "proxy" => proxy_kind).increment(1);
 
-        match downloader.download(request).await {
+        let download_result = downloader.download(request).await;
+        let proxy_status_failure = if let (Some(manager), Some(proxy), Ok(response)) =
+            (&self.proxy_manager, &used_proxy, &download_result)
+        {
+            response.status_code == 407 || manager.is_retry_code(proxy, response.status_code).await
+        } else {
+            false
+        };
+        let download_result = match download_result {
+            Ok(response) if proxy_status_failure && replayable => {
+                Err(DownloadError::ProxyRetryStatus(response.status_code).into())
+            }
+            other => other,
+        };
+        match download_result {
             Ok(response) => {
+                if let Some(attempt) = proxy_attempt.as_mut() {
+                    attempt.finish(!proxy_status_failure).await;
+                }
                 // [LOG_OPTIMIZATION]
                 // debug!(
                 //     "[DownloadProcessor] download success: status={} content_len={} module_id={}",
@@ -245,21 +301,34 @@ impl
                 );
 
                 // Record request-local success.
-                let state_clone = self.state.clone();
-                let request_id_clone = request_id.to_string();
-                tokio::spawn(async move {
-                    state_clone
-                        .status_tracker
-                        .record_download_success(&request_id_clone)
-                        .await
-                        .ok();
-                });
+                if !proxy_status_failure {
+                    let state_clone = self.state.clone();
+                    let request_id_clone = request_id.to_string();
+                    tokio::spawn(async move {
+                        state_clone
+                            .status_tracker
+                            .record_download_success(&request_id_clone)
+                            .await
+                            .ok();
+                    });
+                }
 
                 ProcessorResult::Success((Some(response), input.1))
             }
             Err(e) => {
+                let proxy_failure = used_proxy.is_some() && is_proxy_failure(&e);
+                if let Some(attempt) = proxy_attempt.as_mut() {
+                    attempt.finish(!proxy_failure).await;
+                }
                 // 1) Local retry first.
-                let retry_policy = context.retry_policy.clone().unwrap_or_default();
+                let mut retry_policy = context.retry_policy.clone().unwrap_or_default();
+                if proxy_failure {
+                    if let Some(proxy) = &used_proxy {
+                        mark_proxy_failure(&mut retry_policy, proxy);
+                    }
+                } else {
+                    clear_proxy_failure(&mut retry_policy);
+                }
                 if retry_policy.should_retry() {
                     debug!(
                         "[DownloadProcessor] download failed, will retry locally: account={} platform={} module={} url={} request_id={} retry={}/{} reason={}",
@@ -715,10 +784,17 @@ impl ProcessorTrait<(Request, Option<ModuleConfig>), (Option<Request>, Option<Mo
             input.0.id,
             input.0.module_id()
         );
+        let original_proxy = input.0.proxy.clone();
         let modified_request = self
             .middleware_manager
             .handle_request(input.0, &input.1)
             .await;
+        let modified_request = modified_request.map(|mut request| {
+            if request.proxy != original_proxy {
+                request.proxy_from_pool = false;
+            }
+            request
+        });
         ProcessorResult::Success((modified_request, input.1))
     }
 }
@@ -952,11 +1028,15 @@ impl ProcessorTrait<(Request, Option<ModuleConfig>), (Request, Option<ModuleConf
             Some(manager) => manager,
             None => return ProcessorResult::Success(input),
         };
-        let proxy = proxy_manager.get_proxy(None).await;
+        if input.0.proxy.is_some() {
+            return ProcessorResult::Success(input);
+        }
+        let proxy = proxy_manager.get_proxy_for_attempt(None).await;
         match proxy {
             Ok(proxy) => {
                 let mut req = input.0;
                 req.proxy = Some(proxy);
+                req.proxy_from_pool = true;
                 debug!(
                     "[ProxyMiddleware] proxy attached for request_id={} module_id={}",
                     req.id,
@@ -965,6 +1045,7 @@ impl ProcessorTrait<(Request, Option<ModuleConfig>), (Request, Option<ModuleConf
                 ProcessorResult::Success((req, input.1))
             }
             Err(e) => {
+                counter!("mocra_proxy_selection_errors_total").increment(1);
                 error!("Failed to get proxy: {e}");
                 warn!(
                     "[ProxyMiddleware] will retry due to proxy error: request_id={} module_id={}",
@@ -1029,6 +1110,7 @@ pub async fn create_download_chain(
 ) -> EventAwareTypedChain<Request, ()> {
     let download_processor = DownloadProcessor {
         downloader_manager,
+        proxy_manager: proxy_manager.clone(),
         state: state.clone(),
         decision_cache: Arc::new(DashMap::new()),
     };
@@ -1052,4 +1134,803 @@ pub async fn create_download_chain(
         .then::<(Option<Response>, Option<ModuleConfig>), _>(download_processor)
         .then_silent::<Option<Response>, _>(response_middleware)
         .then::<(), _>(response_publish)
+}
+
+#[cfg(test)]
+mod rotation_tests {
+    use super::*;
+    use crate::common::config::ConfigProvider;
+    use crate::common::model::Cookies;
+    use crate::common::model::config::Config;
+    use crate::common::state::State;
+    use crate::downloader::Downloader;
+    use mocra_proxy::{DirectProxy, PoolConfig, PoolStats, ProxyConfig};
+    use semver::Version;
+    use std::sync::Mutex;
+    use tokio::sync::watch;
+
+    #[cfg(target_os = "linux")]
+    mod acceptance_workload {
+        use super::*;
+        use crate::queue::batcher::Batcher;
+        use crate::queue::{QueueManager, QueuedItem};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+        use tokio::sync::Semaphore;
+
+        const REQUESTS: usize = 320;
+        const CHANNEL_CAPACITY: usize = 32;
+        const BATCH_SIZE: usize = 8;
+        const MAX_BATCHES: usize = 8;
+
+        struct RoundResult {
+            throughput: f64,
+            p95_us: u128,
+            p99_us: u128,
+            rss_kib: usize,
+            cpu_ticks: u64,
+            queue_peak: usize,
+            batches_peak: usize,
+            ack: usize,
+            nack: usize,
+            bad_attempts: usize,
+            good_attempts: usize,
+            selection_wait_avg_us: f64,
+            selection_wait_max_us: f64,
+            recovery_p95_us: u128,
+            attempts_started: u64,
+            feedback_succeeded: u64,
+            feedback_failed: u64,
+            rate_limited: u64,
+        }
+
+        fn rss_kib() -> usize {
+            std::fs::read_to_string("/proc/self/status")
+                .ok()
+                .and_then(|status| {
+                    status
+                        .lines()
+                        .find(|line| line.starts_with("VmRSS:"))?
+                        .split_whitespace()
+                        .nth(1)?
+                        .parse()
+                        .ok()
+                })
+                .unwrap_or(0)
+        }
+
+        fn cpu_ticks() -> u64 {
+            std::fs::read_to_string("/proc/self/stat")
+                .ok()
+                .and_then(|stat| {
+                    let fields: Vec<_> = stat.rsplit_once(") ")?.1.split_whitespace().collect();
+                    Some(
+                        fields.get(11)?.parse::<u64>().ok()?
+                            + fields.get(12)?.parse::<u64>().ok()?,
+                    )
+                })
+                .unwrap_or(0)
+        }
+
+        async fn start_proxy(
+            status: u16,
+            count: Arc<AtomicUsize>,
+            failure_times: Arc<DashMap<String, Instant>>,
+            recovery_latencies: Arc<Mutex<Vec<u128>>>,
+        ) -> (String, tokio::task::JoinHandle<()>) {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = format!("http://{}", listener.local_addr().unwrap());
+            let task = tokio::spawn(async move {
+                loop {
+                    let Ok((mut socket, _)) = listener.accept().await else {
+                        break;
+                    };
+                    let count = count.clone();
+                    let failure_times = failure_times.clone();
+                    let recovery_latencies = recovery_latencies.clone();
+                    tokio::spawn(async move {
+                        let mut pending = Vec::new();
+                        let mut buffer = [0u8; 4096];
+                        while let Ok(size) = socket.read(&mut buffer).await {
+                            if size == 0 {
+                                break;
+                            }
+                            pending.extend_from_slice(&buffer[..size]);
+                            while let Some(end) =
+                                pending.windows(4).position(|bytes| bytes == b"\r\n\r\n")
+                            {
+                                let request_line = pending[..end]
+                                    .split(|byte| *byte == b'\n')
+                                    .next()
+                                    .and_then(|line| std::str::from_utf8(line).ok())
+                                    .unwrap_or("");
+                                let uri = request_line
+                                    .split_whitespace()
+                                    .nth(1)
+                                    .unwrap_or("")
+                                    .to_string();
+                                if status == 407 {
+                                    failure_times.entry(uri).or_insert_with(Instant::now);
+                                } else if let Some((_, failed_at)) = failure_times.remove(&uri) {
+                                    recovery_latencies
+                                        .lock()
+                                        .unwrap()
+                                        .push(failed_at.elapsed().as_micros());
+                                }
+                                pending.drain(..end + 4);
+                                count.fetch_add(1, Ordering::Relaxed);
+                                let response = if status == 200 {
+                                    b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: keep-alive\r\n\r\nok".as_slice()
+                                } else {
+                                    b"HTTP/1.1 407 Proxy Authentication Required\r\nContent-Length: 0\r\nConnection: keep-alive\r\n\r\n".as_slice()
+                                };
+                                if socket.write_all(response).await.is_err() {
+                                    return;
+                                }
+                            }
+                        }
+                    });
+                }
+            });
+            (address, task)
+        }
+
+        async fn run_round(rotate: bool, bad_proxy_count: usize, requests: usize) -> RoundResult {
+            let good_attempts = Arc::new(AtomicUsize::new(0));
+            let bad_attempts = Arc::new(AtomicUsize::new(0));
+            let failure_times = Arc::new(DashMap::new());
+            let recovery_latencies = Arc::new(Mutex::new(Vec::<u128>::new()));
+            let mut proxy_tasks = Vec::new();
+            let mut direct = Vec::new();
+            for index in 0..8 {
+                let bad = index < bad_proxy_count;
+                let (url, task) = start_proxy(
+                    if bad { 407 } else { 200 },
+                    if bad {
+                        bad_attempts.clone()
+                    } else {
+                        good_attempts.clone()
+                    },
+                    failure_times.clone(),
+                    recovery_latencies.clone(),
+                )
+                .await;
+                proxy_tasks.push(task);
+                direct.push(DirectProxy {
+                    name: Some(format!("proxy-{index}")),
+                    url,
+                    rate_limit: Some(0.0),
+                    expire_time: None,
+                });
+            }
+
+            let mut application_config = config();
+            application_config
+                .download_config
+                .proxy_client_cache_capacity = Some(8);
+            let state = Arc::new(
+                State::try_new_with_provider(Box::new(StaticConfig(application_config)))
+                    .await
+                    .unwrap(),
+            );
+            let downloader_manager = Arc::new(
+                DownloaderManager::new(
+                    state.config.clone(),
+                    state.limiter.clone(),
+                    state.locker.clone(),
+                    state.cache_service.clone(),
+                )
+                .await,
+            );
+            let proxy_manager = Arc::new(
+                ProxyManager::from_proxy_config(&ProxyConfig {
+                    tunnel: None,
+                    direct: Some(direct),
+                    ip_provider: None,
+                    pool_config: Some(PoolConfig {
+                        max_errors: 10_000,
+                        health_check_interval_secs: 0,
+                        ..PoolConfig::default()
+                    }),
+                })
+                .await
+                .unwrap(),
+            );
+
+            let manager = QueueManager::new(None, CHANNEL_CAPACITY);
+            let sender = manager.get_request_push_channel();
+            let receiver = manager.get_request_pop_channel();
+            drop(manager);
+            let acknowledged = Arc::new(AtomicUsize::new(0));
+            let rejected = Arc::new(AtomicUsize::new(0));
+            let active_batches = Arc::new(AtomicUsize::new(0));
+            let peak_batches = Arc::new(AtomicUsize::new(0));
+            let timings = Arc::new(DashMap::<uuid::Uuid, Instant>::new());
+            let latencies = Arc::new(Mutex::new(Vec::<u128>::new()));
+            let processor = {
+                let proxy_manager = proxy_manager.clone();
+                let downloader_manager = downloader_manager.clone();
+                let state = state.clone();
+                let active_batches = active_batches.clone();
+                let peak_batches = peak_batches.clone();
+                let timings = timings.clone();
+                let latencies = latencies.clone();
+                move |items: Vec<QueuedItem<Request>>| {
+                    let proxy_manager = proxy_manager.clone();
+                    let downloader_manager = downloader_manager.clone();
+                    let state = state.clone();
+                    let active_batches = active_batches.clone();
+                    let peak_batches = peak_batches.clone();
+                    let timings = timings.clone();
+                    let latencies = latencies.clone();
+                    async move {
+                        let active = active_batches.fetch_add(1, Ordering::SeqCst) + 1;
+                        peak_batches.fetch_max(active, Ordering::SeqCst);
+                        for item in items {
+                            let (mut request, ack, nack) = item.into_parts();
+                            let request_id = request.id;
+                            let module_config = ModuleConfig {
+                                module_config: json!({"enable_proxy": true}),
+                                ..ModuleConfig::default()
+                            };
+                            let input = if rotate {
+                                match (ProxyMiddlewareProcessor {
+                                    proxy_manager: Some(proxy_manager.clone()),
+                                })
+                                .process(
+                                    (request, Some(module_config)),
+                                    ProcessorContext::default(),
+                                )
+                                .await
+                                {
+                                    ProcessorResult::Success(value) => Some(value),
+                                    _ => None,
+                                }
+                            } else {
+                                request.proxy =
+                                    proxy_manager.get_proxy_for_attempt(None).await.ok();
+                                Some((request, Some(module_config)))
+                            };
+                            let success = if let Some((request, module_config)) = input {
+                                let chain = EventAwareTypedChain::<
+                                    (Option<Request>, Option<ModuleConfig>),
+                                    _,
+                                >::new(None)
+                                .then::<(Option<Response>, Option<ModuleConfig>), _>(
+                                    DownloadProcessor {
+                                        downloader_manager: downloader_manager.clone(),
+                                        proxy_manager: Some(proxy_manager.clone()),
+                                        state: state.pipeline_ctx(),
+                                        decision_cache: Arc::new(DashMap::new()),
+                                    },
+                                );
+                                let policy = RetryPolicy {
+                                    max_retries: 1,
+                                    retry_delay: 1,
+                                    ..RetryPolicy::default()
+                                };
+                                matches!(chain.execute((Some(request), module_config), ProcessorContext::default().with_retry_policy(policy)).await, ProcessorResult::Success((Some(response), _)) if response.status_code == 200)
+                            } else {
+                                false
+                            };
+                            if let Some((_, sent_at)) = timings.remove(&request_id) {
+                                latencies
+                                    .lock()
+                                    .unwrap()
+                                    .push(sent_at.elapsed().as_micros());
+                            }
+                            if success {
+                                if let Some(ack) = ack {
+                                    ack().await.unwrap();
+                                }
+                            } else if let Some(nack) = nack {
+                                nack("download failed".into()).await.unwrap();
+                            }
+                        }
+                        active_batches.fetch_sub(1, Ordering::SeqCst);
+                    }
+                }
+            };
+
+            let worker = tokio::spawn(async move {
+                let mut receiver = receiver.lock().await;
+                Batcher::run(
+                    &mut receiver,
+                    BATCH_SIZE,
+                    1,
+                    Arc::new(Semaphore::new(MAX_BATCHES)),
+                    processor,
+                )
+                .await;
+            });
+            let peak_rss = Arc::new(AtomicUsize::new(rss_kib()));
+            let sampler = {
+                let peak_rss = peak_rss.clone();
+                tokio::spawn(async move {
+                    loop {
+                        peak_rss.fetch_max(rss_kib(), Ordering::Relaxed);
+                        tokio::time::sleep(Duration::from_millis(2)).await;
+                    }
+                })
+            };
+            let cpu_start = cpu_ticks();
+            let started = Instant::now();
+            let mut peak_queue = 0;
+            for index in 0..requests {
+                let mut request = Request::new(format!("http://example.test/item/{index}"), "GET");
+                request.account = "acceptance".into();
+                request.platform = "local".into();
+                request.module = "proxy".into();
+                let request_id = request.id;
+                timings.insert(request_id, Instant::now());
+                let ack_count = acknowledged.clone();
+                let nack_count = rejected.clone();
+                sender
+                    .send(QueuedItem::with_ack(
+                        request,
+                        move || {
+                            Box::pin(async move {
+                                ack_count.fetch_add(1, Ordering::Relaxed);
+                                Ok(())
+                            })
+                        },
+                        move |_| {
+                            Box::pin(async move {
+                                nack_count.fetch_add(1, Ordering::Relaxed);
+                                Ok(())
+                            })
+                        },
+                    ))
+                    .await
+                    .unwrap();
+                peak_queue = peak_queue.max(CHANNEL_CAPACITY - sender.capacity());
+            }
+            drop(sender);
+            tokio::time::timeout(Duration::from_secs(30), worker)
+                .await
+                .unwrap()
+                .unwrap();
+            let wall = started.elapsed().as_secs_f64();
+            let cpu_delta = cpu_ticks().saturating_sub(cpu_start);
+            sampler.abort();
+            for task in proxy_tasks {
+                task.abort();
+            }
+            let mut samples = latencies.lock().unwrap().clone();
+            samples.sort_unstable();
+            assert_eq!(samples.len(), requests);
+            let p95 = samples[(samples.len() * 95 / 100).min(samples.len() - 1)];
+            let p99 = samples[(samples.len() * 99 / 100).min(samples.len() - 1)];
+            let ack = acknowledged.load(Ordering::Relaxed);
+            let nack = rejected.load(Ordering::Relaxed);
+            assert_eq!(ack + nack, requests);
+            assert!(peak_queue <= CHANNEL_CAPACITY);
+            assert!(peak_batches.load(Ordering::SeqCst) <= MAX_BATCHES);
+            let stats = proxy_manager.get_detailed_stats().await;
+            assert_eq!(stats.total_proxies, 8);
+            let lock_wait = proxy_manager.selection_wait_stats();
+            let attempts = proxy_manager.attempt_stats();
+            if rotate {
+                assert_eq!(
+                    attempts.started as usize,
+                    bad_attempts.load(Ordering::Relaxed) + good_attempts.load(Ordering::Relaxed)
+                );
+                assert_eq!(
+                    attempts.succeeded as usize,
+                    good_attempts.load(Ordering::Relaxed)
+                );
+                assert_eq!(
+                    attempts.failed as usize,
+                    bad_attempts.load(Ordering::Relaxed)
+                );
+            } else {
+                assert_eq!(attempts.started, 0);
+            }
+            assert_eq!(attempts.started, attempts.succeeded + attempts.failed);
+            assert_eq!(attempts.rate_limited, 0);
+            let mut recoveries = recovery_latencies.lock().unwrap().clone();
+            recoveries.sort_unstable();
+            RoundResult {
+                throughput: requests as f64 / wall,
+                p95_us: p95,
+                p99_us: p99,
+                rss_kib: peak_rss.load(Ordering::Relaxed),
+                cpu_ticks: cpu_delta,
+                queue_peak: peak_queue,
+                batches_peak: peak_batches.load(Ordering::SeqCst),
+                ack,
+                nack,
+                bad_attempts: bad_attempts.load(Ordering::Relaxed),
+                good_attempts: good_attempts.load(Ordering::Relaxed),
+                selection_wait_avg_us: lock_wait.total_wait_ns as f64
+                    / lock_wait.count.max(1) as f64
+                    / 1000.0,
+                selection_wait_max_us: lock_wait.max_wait_ns as f64 / 1000.0,
+                recovery_p95_us: if recoveries.is_empty() {
+                    0
+                } else {
+                    recoveries[(recoveries.len() * 95 / 100).min(recoveries.len() - 1)]
+                },
+                attempts_started: attempts.started,
+                feedback_succeeded: attempts.succeeded,
+                feedback_failed: attempts.failed,
+                rate_limited: attempts.rate_limited,
+            }
+        }
+
+        #[tokio::test]
+        #[ignore = "local HTTP proxy and bounded queue load workload"]
+        async fn local_full_path_acceptance() {
+            let mut baseline_success = Vec::new();
+            let mut rotation_success = Vec::new();
+            for bad_proxy_count in [0, 4] {
+                for rotate in [false, true] {
+                    for round in 0..5 {
+                        let result = run_round(rotate, bad_proxy_count, REQUESTS).await;
+                        if bad_proxy_count == 4 {
+                            if rotate {
+                                rotation_success.push(result.ack);
+                            } else {
+                                baseline_success.push(result.ack);
+                            }
+                        }
+                        println!(
+                            "ACCEPTANCE bad_proxies={bad_proxy_count} rotate={rotate} round={round} throughput={:.1} p95_us={} p99_us={} rss_kib={} cpu_ticks={} queue_peak={} batches_peak={} ack={} nack={} bad_attempts={} good_attempts={} selection_wait_avg_us={:.3} selection_wait_max_us={:.3} recovery_p95_us={} attempts_started={} feedback_ok={} feedback_failed={} rate_limited={}",
+                            result.throughput,
+                            result.p95_us,
+                            result.p99_us,
+                            result.rss_kib,
+                            result.cpu_ticks,
+                            result.queue_peak,
+                            result.batches_peak,
+                            result.ack,
+                            result.nack,
+                            result.bad_attempts,
+                            result.good_attempts,
+                            result.selection_wait_avg_us,
+                            result.selection_wait_max_us,
+                            result.recovery_p95_us,
+                            result.attempts_started,
+                            result.feedback_succeeded,
+                            result.feedback_failed,
+                            result.rate_limited
+                        );
+                    }
+                }
+            }
+            baseline_success.sort_unstable();
+            rotation_success.sort_unstable();
+            assert!(rotation_success[2] > baseline_success[2] + 100);
+        }
+
+        #[tokio::test]
+        #[ignore = "longer local overload workload"]
+        async fn local_full_path_overload() {
+            let result = run_round(true, 4, 3200).await;
+            println!(
+                "OVERLOAD throughput={:.1} p95_us={} p99_us={} rss_kib={} cpu_ticks={} queue_peak={} batches_peak={} ack={} nack={} selection_wait_avg_us={:.3} selection_wait_max_us={:.3} recovery_p95_us={} attempts_started={} feedback_ok={} feedback_failed={} rate_limited={}",
+                result.throughput,
+                result.p95_us,
+                result.p99_us,
+                result.rss_kib,
+                result.cpu_ticks,
+                result.queue_peak,
+                result.batches_peak,
+                result.ack,
+                result.nack,
+                result.selection_wait_avg_us,
+                result.selection_wait_max_us,
+                result.recovery_p95_us,
+                result.attempts_started,
+                result.feedback_succeeded,
+                result.feedback_failed,
+                result.rate_limited
+            );
+        }
+    }
+
+    struct StaticConfig(Config);
+
+    #[async_trait]
+    impl ConfigProvider for StaticConfig {
+        async fn load_config(&self) -> std::result::Result<Config, String> {
+            Ok(self.0.clone())
+        }
+        async fn watch(&self) -> std::result::Result<watch::Receiver<Config>, String> {
+            Ok(watch::channel(self.0.clone()).1)
+        }
+    }
+
+    #[derive(Clone)]
+    struct FakeDownloader {
+        seen: Arc<Mutex<Vec<String>>>,
+        behavior: FakeBehavior,
+    }
+
+    #[derive(Clone, Copy)]
+    enum FakeBehavior {
+        FailFirst,
+        AlwaysFail,
+        Status(u16),
+        StatusFirst(u16),
+    }
+
+    #[derive(Clone, Copy)]
+    enum ProxyMode {
+        Managed,
+        ManagedSingle,
+        Explicit,
+        None,
+    }
+
+    #[async_trait]
+    impl Downloader for FakeDownloader {
+        async fn set_config(&self, _: &str, _: DownloadConfig) {}
+        async fn set_limit(&self, _: &str, _: f32) {}
+        fn name(&self) -> String {
+            "proxy_probe".into()
+        }
+        fn version(&self) -> Version {
+            Version::new(1, 0, 0)
+        }
+        async fn health_check(&self) -> Result<()> {
+            Ok(())
+        }
+        async fn download(&self, request: Request) -> Result<Response> {
+            let proxy = request
+                .proxy
+                .as_ref()
+                .map(ToString::to_string)
+                .unwrap_or_default();
+            let call = {
+                let mut seen = self.seen.lock().unwrap();
+                seen.push(proxy);
+                seen.len()
+            };
+            if matches!(self.behavior, FakeBehavior::AlwaysFail)
+                || (matches!(self.behavior, FakeBehavior::FailFirst) && call == 1)
+            {
+                return Err(DownloadError::NetworkError("proxy connection refused".into()).into());
+            }
+            Ok(Response {
+                id: request.id,
+                platform: request.platform,
+                account: request.account,
+                module: request.module,
+                status_code: match self.behavior {
+                    FakeBehavior::Status(code) => code,
+                    FakeBehavior::StatusFirst(code) if call == 1 => code,
+                    _ => 200,
+                },
+                cookies: Cookies::default(),
+                content: b"ok".to_vec(),
+                storage_path: None,
+                headers: vec![],
+                task_retry_times: request.task_retry_times,
+                metadata: request.meta,
+                download_middleware: request.download_middleware,
+                data_middleware: request.data_middleware,
+                task_finished: request.task_finished,
+                context: request.context,
+                run_id: request.run_id,
+                prefix_request: request.prefix_request,
+                request_hash: None,
+                priority: request.priority,
+            })
+        }
+    }
+
+    fn config() -> Config {
+        toml::from_str(
+            r#"
+            name = "proxy_rotation_test"
+            [db]
+            database_schema = "public"
+            [download_config]
+            downloader_expire = 3600
+            timeout = 5
+            rate_limit = 0.0
+            enable_session = false
+            enable_locker = false
+            enable_rate_limit = false
+            cache_ttl = 60
+            wss_timeout = 5
+            [cache]
+            ttl = 60
+            [crawler]
+            request_max_retries = 1
+            task_max_errors = 10
+            module_max_errors = 10
+            module_locker_ttl = 5
+            [channel_config]
+            minid_time = 0
+            capacity = 10
+        "#,
+        )
+        .unwrap()
+    }
+
+    async fn run_case(
+        method: &str,
+        mode: ProxyMode,
+        behavior: FakeBehavior,
+    ) -> (
+        ProcessorResult<(Option<Response>, Option<ModuleConfig>)>,
+        Vec<String>,
+        PoolStats,
+    ) {
+        let state = Arc::new(
+            State::try_new_with_provider(Box::new(StaticConfig(config())))
+                .await
+                .unwrap(),
+        );
+        let downloader_manager = Arc::new(
+            DownloaderManager::new(
+                state.config.clone(),
+                state.limiter.clone(),
+                state.locker.clone(),
+                state.cache_service.clone(),
+            )
+            .await,
+        );
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        downloader_manager
+            .set_default_downloader(Box::new(FakeDownloader {
+                seen: seen.clone(),
+                behavior,
+            }))
+            .await;
+        let direct_proxies = vec![
+            DirectProxy {
+                name: Some("a".into()),
+                url: "http://127.0.0.1:8080".into(),
+                rate_limit: Some(10.0),
+                expire_time: None,
+            },
+            DirectProxy {
+                name: Some("b".into()),
+                url: "http://127.0.0.1:8081".into(),
+                rate_limit: Some(10.0),
+                expire_time: None,
+            },
+        ];
+        let proxy_manager = Arc::new(
+            ProxyManager::from_proxy_config(&ProxyConfig {
+                tunnel: None,
+                direct: Some(if matches!(mode, ProxyMode::ManagedSingle) {
+                    direct_proxies.into_iter().take(1).collect()
+                } else {
+                    direct_proxies
+                }),
+                ip_provider: None,
+                pool_config: Some(PoolConfig::default()),
+            })
+            .await
+            .unwrap(),
+        );
+        let mut request = Request::new("http://example.test", method);
+        request.account = "acct".into();
+        request.platform = "site".into();
+        request.module = "probe".into();
+        let (request, module_config) = match mode {
+            ProxyMode::Managed | ProxyMode::ManagedSingle => {
+                let module_config = ModuleConfig {
+                    module_config: json!({"enable_proxy": true}),
+                    ..ModuleConfig::default()
+                };
+                match (ProxyMiddlewareProcessor {
+                    proxy_manager: Some(proxy_manager.clone()),
+                })
+                .process((request, Some(module_config)), ProcessorContext::default())
+                .await
+                {
+                    ProcessorResult::Success(value) => value,
+                    other => panic!("proxy selection failed: {other:?}"),
+                }
+            }
+            ProxyMode::Explicit => {
+                request.proxy = Some(proxy_manager.get_proxy_for_attempt(None).await.unwrap());
+                (request, None)
+            }
+            ProxyMode::None => (request, None),
+        };
+        let processor = DownloadProcessor {
+            downloader_manager,
+            proxy_manager: Some(proxy_manager.clone()),
+            state: state.pipeline_ctx(),
+            decision_cache: Arc::new(DashMap::new()),
+        };
+        let chain = EventAwareTypedChain::<(Option<Request>, Option<ModuleConfig>), _>::new(None)
+            .then::<(Option<Response>, Option<ModuleConfig>), _>(processor);
+        let mut policy = RetryPolicy::default();
+        policy.max_retries = 1;
+        policy.retry_delay = 1;
+        let result = chain
+            .execute(
+                (Some(request), module_config),
+                ProcessorContext::default().with_retry_policy(policy),
+            )
+            .await;
+        let seen = seen.lock().unwrap().clone();
+        let stats = proxy_manager.get_detailed_stats().await;
+        (result, seen, stats)
+    }
+
+    #[tokio::test]
+    async fn managed_proxy_failure_rotates_within_download_retry_budget() {
+        let (result, seen, stats) =
+            run_case("GET", ProxyMode::Managed, FakeBehavior::FailFirst).await;
+        assert!(matches!(result, ProcessorResult::Success((Some(_), _))));
+        assert_eq!(seen.len(), 2);
+        assert_ne!(seen[0], seen[1]);
+        assert_eq!(stats.total_proxies, 2);
+        assert_eq!(stats.avg_success_rate, 0.5);
+    }
+
+    #[tokio::test]
+    async fn exhausted_proxies_use_only_the_existing_retry_budget() {
+        let (result, seen, stats) =
+            run_case("GET", ProxyMode::Managed, FakeBehavior::AlwaysFail).await;
+        assert!(!matches!(result, ProcessorResult::Success((Some(_), _))));
+        assert_eq!(seen.len(), 2);
+        assert_ne!(seen[0], seen[1]);
+        assert_eq!(stats.total_proxies, 2);
+        assert_eq!(stats.avg_success_rate, 0.0);
+    }
+
+    #[tokio::test]
+    async fn single_proxy_retries_without_busy_rotation() {
+        let (result, seen, stats) =
+            run_case("GET", ProxyMode::ManagedSingle, FakeBehavior::AlwaysFail).await;
+        assert!(!matches!(result, ProcessorResult::Success((Some(_), _))));
+        assert_eq!(seen.len(), 2);
+        assert_eq!(seen[0], seen[1]);
+        assert_eq!(stats.total_proxies, 1);
+        assert_eq!(stats.avg_success_rate, 0.0);
+    }
+
+    #[tokio::test]
+    async fn proxy_auth_status_rotates_and_reports_failure() {
+        let (result, seen, stats) =
+            run_case("GET", ProxyMode::Managed, FakeBehavior::StatusFirst(407)).await;
+        assert!(
+            matches!(result, ProcessorResult::Success((Some(response), _)) if response.status_code == 200)
+        );
+        assert_eq!(seen.len(), 2);
+        assert_ne!(seen[0], seen[1]);
+        assert_eq!(stats.avg_success_rate, 0.5);
+    }
+
+    #[tokio::test]
+    async fn target_server_error_does_not_penalize_proxy() {
+        for status in [404, 503] {
+            let (result, seen, stats) =
+                run_case("GET", ProxyMode::Managed, FakeBehavior::Status(status)).await;
+            assert!(
+                matches!(result, ProcessorResult::Success((Some(response), _)) if response.status_code == status)
+            );
+            assert_eq!(seen.len(), 1);
+            assert_eq!(stats.avg_success_rate, 1.0);
+        }
+    }
+
+    #[tokio::test]
+    async fn post_and_explicit_proxy_keep_their_retry_target() {
+        for (method, mode) in [("POST", ProxyMode::Managed), ("GET", ProxyMode::Explicit)] {
+            let (result, seen, _) = run_case(method, mode, FakeBehavior::FailFirst).await;
+            assert!(matches!(result, ProcessorResult::Success((Some(_), _))));
+            assert_eq!(seen.len(), 2);
+            assert_eq!(seen[0], seen[1]);
+        }
+    }
+
+    #[tokio::test]
+    async fn no_proxy_path_keeps_retries_and_has_no_pool_feedback() {
+        let (result, seen, stats) = run_case("GET", ProxyMode::None, FakeBehavior::FailFirst).await;
+        assert!(matches!(result, ProcessorResult::Success((Some(_), _))));
+        assert_eq!(seen, ["", ""]);
+        assert_eq!(stats.total_proxies, 2);
+        assert_eq!(stats.avg_success_rate, 1.0);
+    }
 }

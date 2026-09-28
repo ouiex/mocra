@@ -10,6 +10,7 @@ use crate::utils::lock::DistributedLockManager;
 use dashmap::DashMap;
 use futures::StreamExt;
 use log::{info, warn};
+use metrics::counter;
 use rand::Rng;
 use reqwest::Client;
 use reqwest::Method;
@@ -19,9 +20,31 @@ use semver::Version;
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 use url::Url;
+
+const PROXY_CLIENT_IDLE_TTL: Duration = Duration::from_secs(3600);
+
+#[derive(Default)]
+struct ProxyClientCacheCounters {
+    hits: AtomicU64,
+    misses: AtomicU64,
+    creations: AtomicU64,
+    bypasses: AtomicU64,
+    evictions: AtomicU64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProxyClientCacheStats {
+    pub capacity: usize,
+    pub entries: usize,
+    pub hits: u64,
+    pub misses: u64,
+    pub creations: u64,
+    pub bypasses: u64,
+    pub evictions: u64,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct SessionState {
@@ -57,6 +80,9 @@ pub struct RequestDownloader {
     enable_locker: Arc<AtomicBool>,
     enable_rate_limit: Arc<AtomicBool>,
     proxy_clients: Arc<DashMap<String, (Client, Instant)>>,
+    proxy_client_insert_lock: Arc<tokio::sync::Mutex<()>>,
+    proxy_client_cache_counters: Arc<ProxyClientCacheCounters>,
+    proxy_client_cache_capacity: usize,
     default_client: Client,
     pool_size: usize,
     max_response_size: usize,
@@ -100,16 +126,29 @@ impl RequestDownloader {
             .expect("Failed to create default client");
 
         let proxy_clients = Arc::new(DashMap::new());
-        let proxy_clients_clone = proxy_clients.clone();
+        let weak_proxy_clients = Arc::downgrade(&proxy_clients);
+        let cache_counters = Arc::new(ProxyClientCacheCounters::default());
+        let cleanup_counters = cache_counters.clone();
 
         // Background cleanup task for proxy clients
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(Duration::from_secs(60)).await;
+                let Some(proxy_clients) = weak_proxy_clients.upgrade() else {
+                    break;
+                };
                 let now = Instant::now();
-                proxy_clients_clone.retain(|_, (_, last_access)| {
-                    now.duration_since(*last_access) < Duration::from_secs(3600)
+                let before = proxy_clients.len();
+                proxy_clients.retain(|_, (_, last_access)| {
+                    now.duration_since(*last_access) < PROXY_CLIENT_IDLE_TTL
                 });
+                let evicted = before.saturating_sub(proxy_clients.len());
+                if evicted > 0 {
+                    cleanup_counters
+                        .evictions
+                        .fetch_add(evicted as u64, Ordering::Relaxed);
+                    counter!("mocra_proxy_client_cache_evictions_total").increment(evicted as u64);
+                }
             }
         });
 
@@ -121,9 +160,30 @@ impl RequestDownloader {
             enable_locker: Arc::new(AtomicBool::new(false)),
             enable_rate_limit: Arc::new(AtomicBool::new(true)),
             proxy_clients,
+            proxy_client_insert_lock: Arc::new(tokio::sync::Mutex::new(())),
+            proxy_client_cache_counters: cache_counters,
+            proxy_client_cache_capacity: 1000,
             default_client,
             pool_size,
             max_response_size,
+        }
+    }
+
+    pub fn with_proxy_cache_capacity(mut self, capacity: usize) -> Self {
+        self.proxy_client_cache_capacity = capacity;
+        self
+    }
+
+    pub fn proxy_client_cache_stats(&self) -> ProxyClientCacheStats {
+        let counters = &self.proxy_client_cache_counters;
+        ProxyClientCacheStats {
+            capacity: self.proxy_client_cache_capacity,
+            entries: self.proxy_clients.len(),
+            hits: counters.hits.load(Ordering::Relaxed),
+            misses: counters.misses.load(Ordering::Relaxed),
+            creations: counters.creations.load(Ordering::Relaxed),
+            bypasses: counters.bypasses.load(Ordering::Relaxed),
+            evictions: counters.evictions.load(Ordering::Relaxed),
         }
     }
 
@@ -396,31 +456,79 @@ impl RequestDownloader {
         })
     }
 
+    fn build_proxy_client(&self, proxy_url: &str, bypass: bool) -> Result<Client> {
+        let reqwest_proxy =
+            Proxy::all(proxy_url).map_err(|e| DownloadError::ClientError(e.into()))?;
+        let client = Client::builder()
+            .proxy(reqwest_proxy)
+            .pool_idle_timeout(Duration::from_secs(90))
+            .pool_max_idle_per_host(self.pool_size)
+            .tcp_keepalive(Duration::from_secs(60))
+            .tcp_nodelay(true)
+            .connect_timeout(Duration::from_secs(10))
+            .http2_keep_alive_interval(Some(Duration::from_secs(30)))
+            .build()
+            .map_err(|e| DownloadError::ClientError(e.into()))?;
+        self.proxy_client_cache_counters
+            .misses
+            .fetch_add(1, Ordering::Relaxed);
+        self.proxy_client_cache_counters
+            .creations
+            .fetch_add(1, Ordering::Relaxed);
+        counter!("mocra_proxy_client_cache_access_total", "result" => "miss").increment(1);
+        counter!("mocra_proxy_client_creations_total").increment(1);
+        if bypass {
+            self.proxy_client_cache_counters
+                .bypasses
+                .fetch_add(1, Ordering::Relaxed);
+            counter!("mocra_proxy_client_cache_bypasses_total").increment(1);
+        }
+        Ok(client)
+    }
+
     async fn get_client(&self, proxy: Option<&String>) -> Result<Client> {
         if let Some(proxy_url) = proxy {
-            if let Some(mut entry) = self.proxy_clients.get_mut(proxy_url) {
-                entry.1 = Instant::now();
-                return Ok(entry.0.clone());
+            // Proxy URLs come from the selected ProxyEnum. URL normalization keeps
+            // equivalent spellings under one cache identity.
+            let cache_key = Url::parse(proxy_url)
+                .map_err(|e| DownloadError::InvalidProxy(e.into()))?
+                .to_string();
+            if self.proxy_client_cache_capacity > 0 {
+                if let Some(mut entry) = self.proxy_clients.get_mut(&cache_key) {
+                    entry.1 = Instant::now();
+                    self.proxy_client_cache_counters
+                        .hits
+                        .fetch_add(1, Ordering::Relaxed);
+                    counter!("mocra_proxy_client_cache_access_total", "result" => "hit")
+                        .increment(1);
+                    return Ok(entry.0.clone());
+                }
+            }
+            if self.proxy_clients.len() >= self.proxy_client_cache_capacity {
+                return self.build_proxy_client(proxy_url, true);
             }
 
-            let reqwest_proxy =
-                Proxy::all(proxy_url).map_err(|e| DownloadError::ClientError(e.into()))?;
-            let client = Client::builder()
-                .proxy(reqwest_proxy)
-                .pool_idle_timeout(Duration::from_secs(90))
-                .pool_max_idle_per_host(self.pool_size) // Increased from 32 to 200 for better proxy concurrency
-                .tcp_keepalive(Duration::from_secs(60))
-                .tcp_nodelay(true)
-                .connect_timeout(Duration::from_secs(10))
-                .http2_keep_alive_interval(Some(Duration::from_secs(30)))
-                .build()
-                .map_err(|e| DownloadError::ClientError(e.into()))?;
-
-            // Limit cache size to prevent OOM with high-cardinality dynamic proxies
-            if self.proxy_clients.len() < 1000 {
-                self.proxy_clients
-                    .insert(proxy_url.clone(), (client.clone(), Instant::now()));
+            // Serialize misses so concurrent first uses of one proxy share a Client
+            // and the configured capacity remains a hard upper bound.
+            let _insert_guard = self.proxy_client_insert_lock.lock().await;
+            if self.proxy_client_cache_capacity > 0 {
+                if let Some(mut entry) = self.proxy_clients.get_mut(&cache_key) {
+                    entry.1 = Instant::now();
+                    self.proxy_client_cache_counters
+                        .hits
+                        .fetch_add(1, Ordering::Relaxed);
+                    counter!("mocra_proxy_client_cache_access_total", "result" => "hit")
+                        .increment(1);
+                    return Ok(entry.0.clone());
+                }
             }
+            if self.proxy_clients.len() >= self.proxy_client_cache_capacity {
+                drop(_insert_guard);
+                return self.build_proxy_client(proxy_url, true);
+            }
+            let client = self.build_proxy_client(proxy_url, false)?;
+            self.proxy_clients
+                .insert(cache_key, (client.clone(), Instant::now()));
             Ok(client)
         } else {
             Ok(self.default_client.clone())
@@ -776,6 +884,9 @@ mod tests {
     use super::*;
     use crate::utils::distributed_rate_limit::RateLimitConfig;
     use std::sync::Arc;
+    use std::sync::atomic::AtomicUsize;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
     use uuid::Uuid;
 
     #[tokio::test]
@@ -831,5 +942,144 @@ mod tests {
         let delay = limiter.verify("test_exec").await.unwrap();
         assert!(delay.is_some());
         assert!(delay.unwrap() > 0);
+    }
+
+    #[tokio::test]
+    async fn proxy_client_cache_normalizes_keys_and_bounds_concurrent_misses() {
+        let lock_manager = Arc::new(DistributedLockManager::new("proxy_cache"));
+        let limiter = Arc::new(DistributedSlidingWindowRateLimiter::new(
+            lock_manager.clone(),
+            "proxy_cache",
+            RateLimitConfig::new(10.0),
+        ));
+        let cache_service = Arc::new(CacheService::new("proxy_cache".into(), None, None));
+        let downloader = RequestDownloader::new(limiter, lock_manager, cache_service, 2, 1024)
+            .with_proxy_cache_capacity(2);
+        let first = "http://LOCALHOST:8080".to_string();
+        let same_first = "http://localhost:8080/".to_string();
+        let second = "http://localhost:8081".to_string();
+        let (a, a_again, b) = tokio::join!(
+            downloader.get_client(Some(&first)),
+            downloader.get_client(Some(&same_first)),
+            downloader.get_client(Some(&second))
+        );
+        a.unwrap();
+        a_again.unwrap();
+        b.unwrap();
+        let stats = downloader.proxy_client_cache_stats();
+        assert_eq!(stats.capacity, 2);
+        assert_eq!(stats.entries, 2);
+        assert_eq!(stats.hits, 1);
+        assert_eq!(stats.creations, 2);
+
+        let third = "http://localhost:8082".to_string();
+        for _ in 0..3 {
+            downloader.get_client(Some(&third)).await.unwrap();
+        }
+        let stats = downloader.proxy_client_cache_stats();
+        assert_eq!(stats.entries, 2);
+        assert_eq!(stats.creations, 5);
+        assert_eq!(stats.bypasses, 3);
+    }
+
+    // Run explicitly to compare cache sizes with live local keep-alive proxy sockets:
+    // cargo test -p mocra-core --lib proxy_client_cache_workload -- --ignored --nocapture
+    #[tokio::test]
+    #[ignore = "local proxy client cache measurement"]
+    async fn proxy_client_cache_workload() {
+        const PROXIES: usize = 16;
+        const ROUNDS: usize = 3;
+        struct ConnectionGuard(Arc<AtomicUsize>);
+        impl Drop for ConnectionGuard {
+            fn drop(&mut self) {
+                self.0.fetch_sub(1, Ordering::SeqCst);
+            }
+        }
+
+        let active = Arc::new(AtomicUsize::new(0));
+        let accepted = Arc::new(AtomicUsize::new(0));
+        let mut listeners = Vec::new();
+        let mut proxy_urls = Vec::new();
+        for _ in 0..PROXIES {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            proxy_urls.push(format!("http://{}", listener.local_addr().unwrap()));
+            let active = active.clone();
+            let accepted = accepted.clone();
+            listeners.push(tokio::spawn(async move {
+                loop {
+                    let (mut socket, _) = listener.accept().await.unwrap();
+                    accepted.fetch_add(1, Ordering::SeqCst);
+                    active.fetch_add(1, Ordering::SeqCst);
+                    let active = active.clone();
+                    tokio::spawn(async move {
+                        let _guard = ConnectionGuard(active);
+                        let mut buffer = [0u8; 4096];
+                        while socket.read(&mut buffer).await.unwrap_or(0) > 0 {
+                            if socket
+                                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: keep-alive\r\n\r\n")
+                                .await
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
+                    });
+                }
+            }));
+        }
+
+        for capacity in [0, 8, 16] {
+            let lock_manager = Arc::new(DistributedLockManager::new("cache_workload"));
+            let limiter = Arc::new(DistributedSlidingWindowRateLimiter::new(
+                lock_manager.clone(),
+                "cache_workload",
+                RateLimitConfig::new(1000.0),
+            ));
+            let cache_service = Arc::new(CacheService::new("cache_workload".into(), None, None));
+            let downloader = RequestDownloader::new(limiter, lock_manager, cache_service, 2, 1024)
+                .with_proxy_cache_capacity(capacity);
+            let accepted_before = accepted.load(Ordering::SeqCst);
+            for _ in 0..ROUNDS {
+                for proxy_url in &proxy_urls {
+                    let client = downloader.get_client(Some(proxy_url)).await.unwrap();
+                    client
+                        .get("http://example.invalid/")
+                        .send()
+                        .await
+                        .unwrap()
+                        .error_for_status()
+                        .unwrap()
+                        .bytes()
+                        .await
+                        .unwrap();
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let stats = downloader.proxy_client_cache_stats();
+            let rss_kib = std::fs::read_to_string("/proc/self/status")
+                .ok()
+                .and_then(|status| {
+                    status
+                        .lines()
+                        .find(|line| line.starts_with("VmRSS:"))
+                        .and_then(|line| line.split_whitespace().nth(1))
+                        .and_then(|value| value.parse::<usize>().ok())
+                })
+                .unwrap_or(0);
+            println!(
+                "capacity={capacity} hits={} creations={} bypasses={} entries={} accepted_connections={} open_connections={} rss_kib={rss_kib}",
+                stats.hits,
+                stats.creations,
+                stats.bypasses,
+                stats.entries,
+                accepted.load(Ordering::SeqCst) - accepted_before,
+                active.load(Ordering::SeqCst),
+            );
+            drop(downloader);
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        for task in listeners {
+            task.abort();
+        }
     }
 }

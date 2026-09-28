@@ -9,6 +9,7 @@
 pub mod backpressure;
 pub mod download_chain;
 pub mod parser_chain;
+mod proxy_attempt;
 pub mod stream_chain;
 pub mod task_model_chain;
 

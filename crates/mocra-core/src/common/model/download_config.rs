@@ -82,6 +82,7 @@ mod tests {
             cache_ttl: 60,
             wss_timeout: 30,
             pool_size: Some(10),
+            proxy_client_cache_capacity: None,
             max_response_size: Some(1024),
         };
 
@@ -105,6 +106,7 @@ mod tests {
             cache_ttl: 60,
             wss_timeout: 30,
             pool_size: Some(10),
+            proxy_client_cache_capacity: None,
             max_response_size: Some(1024),
         };
 

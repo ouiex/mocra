@@ -420,6 +420,10 @@ pub enum HeaderError {
 }
 #[derive(Debug, Error)]
 pub enum DownloadError {
+    #[error("proxy handshake status: {0}")]
+    ProxyHandshakeStatus(u16),
+    #[error("proxy retry status: {0}")]
+    ProxyRetryStatus(u16),
     #[error("download failed: {0}")]
     DownloadFailed(#[source] BoxError),
     #[error("params error: {0}")]

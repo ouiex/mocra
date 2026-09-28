@@ -788,6 +788,7 @@ fn default_standalone_config(name: &str) -> Config {
             cache_ttl: 60,
             wss_timeout: 30,
             pool_size: Some(100),
+            proxy_client_cache_capacity: None,
             max_response_size: Some(10 * 1024 * 1024),
         },
         cache: CacheConfig {

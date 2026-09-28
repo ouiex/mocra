@@ -1,5 +1,5 @@
 use crate::common::model::{Request, Response};
-use crate::errors::{Error, Result};
+use crate::errors::{DownloadError, Result};
 use futures_util::{SinkExt, StreamExt};
 use log::{error, info, warn};
 use reqwest::{Client, Proxy};
@@ -196,23 +196,17 @@ impl WebSocketDownloader {
             request.url, module_id
         );
 
-        // Increase active connection count.
-        {
-            let mut count = self.active_connections.lock().await;
-            *count += 1;
-        }
-
         // Create send channel for WebSocket outbound messages.
         let (tx, rx) = mpsc::channel::<Message>(32);
 
         if let Some(proxy_config) = &request.proxy {
             let proxy_url = proxy_config.to_string();
-            let proxy = Proxy::all(&proxy_url)
-                .map_err(|e| Error::download_failed(format!("Invalid proxy: {}", e)))?;
+            let proxy =
+                Proxy::all(&proxy_url).map_err(|e| DownloadError::InvalidProxy(e.into()))?;
             let client = Client::builder()
                 .proxy(proxy)
                 .build()
-                .map_err(|e| Error::download_failed(format!("Client build failed: {}", e)))?;
+                .map_err(|e| DownloadError::ClientError(e.into()))?;
 
             let url = request
                 .url
@@ -226,26 +220,25 @@ impl WebSocketDownloader {
                 .header("Sec-WebSocket-Key", generate_key())
                 .send()
                 .await
-                .map_err(|e| Error::download_failed(format!("Proxy request failed: {}", e)))?;
+                .map_err(|e| DownloadError::DownloadFailed(e.into()))?;
 
             if req.status() != reqwest::StatusCode::SWITCHING_PROTOCOLS {
-                return Err(Error::download_failed(format!(
-                    "Proxy handshake failed: status {}",
-                    req.status()
-                )));
+                return Err(DownloadError::ProxyHandshakeStatus(req.status().as_u16()).into());
             }
 
             let upgraded = req
                 .upgrade()
                 .await
-                .map_err(|e| Error::download_failed(format!("Upgrade failed: {}", e)))?;
+                .map_err(|e| DownloadError::DownloadFailed(e.into()))?;
             let stream = WebSocketStream::from_raw_socket(upgraded, Role::Client, None).await;
 
+            *self.active_connections.lock().await += 1;
             self.spawn_task(stream, module_id.clone(), request.clone(), rx);
         } else {
             let (ws_stream, _) = connect_async(&request.url)
                 .await
-                .map_err(|e| Error::download_failed(format!("WebSocket connect failed: {}", e)))?;
+                .map_err(|e| DownloadError::DownloadFailed(e.into()))?;
+            *self.active_connections.lock().await += 1;
             self.spawn_task(ws_stream, module_id.clone(), request.clone(), rx);
         }
 
@@ -255,9 +248,9 @@ impl WebSocketDownloader {
         // Send initial payload if present.
         if let Some(body) = &request.body {
             let msg = Message::Text(String::from_utf8_lossy(body).to_string().into());
-            tx.send(msg).await.map_err(|e| {
-                Error::download_failed(format!("Failed to send initial message: {}", e))
-            })?;
+            tx.send(msg)
+                .await
+                .map_err(|e| DownloadError::NetworkError(e.into()))?;
         }
 
         Ok(())
