@@ -1,11 +1,14 @@
 use crate::error::ProxyError;
 use crate::error::Result;
 use async_trait::async_trait;
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::cmp::{Ordering, PartialEq};
 use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::fmt::{Display, Formatter};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
@@ -44,13 +47,20 @@ impl RateLimitTracker {
         if rate_limit <= 0.0 {
             return false;
         }
+        // Fractional rates mean one request per multiple seconds.
+        let window = if rate_limit < 1.0 {
+            Duration::from_secs_f64((1.0 / f64::from(rate_limit)).min(365.0 * 24.0 * 3600.0))
+        } else {
+            Duration::from_secs(1)
+        };
+        self.window_duration = window;
         // If the window has elapsed, treat as not limited.
         if self.window_start.elapsed() >= self.window_duration {
             self.requests_in_window = 0;
             self.window_start = Instant::now();
             return false;
         }
-        let cap = rate_limit.floor() as u32;
+        let cap = rate_limit.floor().max(1.0) as u32;
         self.requests_in_window >= cap
     }
 
@@ -301,6 +311,19 @@ impl DirectProxy {
                 rate_limit: self.rate_limit.unwrap_or(10.0),
             },
             rate_limit: self.rate_limit.unwrap_or(10.0),
+            expire_time: self
+                .expire_time
+                .as_ref()
+                .map(|value| {
+                    OffsetDateTime::parse(value, &Rfc3339)
+                        .map(|date| Duration::from_secs(date.unix_timestamp().max(0) as u64))
+                        .map_err(|error| {
+                            ProxyError::InvalidConfig(
+                                format!("invalid direct proxy expiry '{value}': {error}").into(),
+                            )
+                        })
+                })
+                .transpose()?,
         })
     }
 }
@@ -310,11 +333,17 @@ struct StaticIpProxyEntry {
     provider_name: String,
     proxy: IpProxy,
     rate_limit: f32,
+    expire_time: Option<Duration>,
 }
 
 impl StaticIpProxyEntry {
     fn into_proxy_item(self) -> ProxyItem {
-        ProxyItem::new_for_static_ip_proxy(self.proxy, self.provider_name, self.rate_limit)
+        let mut item =
+            ProxyItem::new_for_static_ip_proxy(self.proxy, self.provider_name, self.rate_limit);
+        if let Some(expire_time) = self.expire_time {
+            item.expire_time = expire_time;
+        }
+        item
     }
 }
 
@@ -346,10 +375,18 @@ impl ProxyConfig {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct PoolConfig {
     pub min_size: usize,
+    /// Maximum number of dynamically loaded IP proxies per provider.
     pub max_size: usize,
     pub max_errors: u32,
     pub health_check_interval_secs: u64,
+    /// Maximum simultaneous provider health probes (default 8, capped at 64).
+    #[serde(default = "default_health_check_concurrency")]
+    pub health_check_concurrency: usize,
     pub refill_threshold: f32, // Refill is triggered when the pool falls below this ratio
+}
+
+fn default_health_check_concurrency() -> usize {
+    8
 }
 
 impl Default for PoolConfig {
@@ -359,6 +396,7 @@ impl Default for PoolConfig {
             max_size: 50,
             max_errors: 3,
             health_check_interval_secs: 300,
+            health_check_concurrency: default_health_check_concurrency(),
             refill_threshold: 0.3,
         }
     }
@@ -553,8 +591,6 @@ impl ProxyItem {
                 .unwrap_or_default(),
         );
         self.update_success_rate();
-        // Failures also count toward this window's requests, consistent with selection.
-        self.rate_limit_tracker.record_request();
     }
     fn update_success_rate(&mut self) {
         let total = self.success_count + self.error_count;
@@ -674,19 +710,56 @@ pub struct ProviderStats {
 
 type IpProvidersMap = HashMap<String, Arc<Box<dyn IpProxyLoader>>>;
 
+#[derive(Debug, Clone, Copy)]
+pub struct ProxySelectionWaitStats {
+    pub count: u64,
+    pub total_wait_ns: u64,
+    pub max_wait_ns: u64,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ProxyAttemptStats {
+    pub started: u64,
+    pub succeeded: u64,
+    pub failed: u64,
+    pub rate_limited: u64,
+}
+
 pub struct ProxyPool {
     pub config: PoolConfig,
     pub pools: Arc<RwLock<HashMap<String, Vec<ProxyItem>>>>,
     pub ip_providers: Arc<Mutex<IpProvidersMap>>,
+    refill_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
+    health_check_lock: Mutex<()>,
+    /// Last diagnostics snapshot. Use `get_stats()` for a current snapshot.
     pub stats: Arc<RwLock<PoolStats>>,
+    selection_wait_count: AtomicU64,
+    selection_wait_total_ns: AtomicU64,
+    selection_wait_max_ns: AtomicU64,
+    attempts_started: AtomicU64,
+    attempts_succeeded: AtomicU64,
+    attempts_failed: AtomicU64,
+    attempts_rate_limited: AtomicU64,
 }
 
 impl ProxyPool {
     pub fn new(config: PoolConfig) -> Self {
+        let mut config = config;
+        if config.max_size == 0 || config.min_size > config.max_size {
+            log::warn!(
+                "invalid proxy pool sizes: min_size={}, max_size={}; clamping to a valid range",
+                config.min_size,
+                config.max_size
+            );
+        }
+        config.max_size = config.max_size.max(1);
+        config.min_size = config.min_size.min(config.max_size);
         Self {
             config,
             pools: Arc::new(RwLock::new(HashMap::new())),
             ip_providers: Arc::new(Mutex::new(HashMap::new())),
+            refill_locks: Arc::new(Mutex::new(HashMap::new())),
+            health_check_lock: Mutex::new(()),
             stats: Arc::new(RwLock::new(PoolStats {
                 total_proxies: 0,
                 valid_proxies: 0,
@@ -695,6 +768,32 @@ impl ProxyPool {
                 avg_success_rate: 0.0,
                 providers: HashMap::new(),
             })),
+            selection_wait_count: AtomicU64::new(0),
+            selection_wait_total_ns: AtomicU64::new(0),
+            selection_wait_max_ns: AtomicU64::new(0),
+            attempts_started: AtomicU64::new(0),
+            attempts_succeeded: AtomicU64::new(0),
+            attempts_failed: AtomicU64::new(0),
+            attempts_rate_limited: AtomicU64::new(0),
+        }
+    }
+
+    /// Time spent waiting for the pool write lock during proxy selection.
+    pub fn selection_wait_stats(&self) -> ProxySelectionWaitStats {
+        ProxySelectionWaitStats {
+            count: self.selection_wait_count.load(AtomicOrdering::Relaxed),
+            total_wait_ns: self.selection_wait_total_ns.load(AtomicOrdering::Relaxed),
+            max_wait_ns: self.selection_wait_max_ns.load(AtomicOrdering::Relaxed),
+        }
+    }
+
+    /// Cumulative attempt accounting for this pool instance.
+    pub fn attempt_stats(&self) -> ProxyAttemptStats {
+        ProxyAttemptStats {
+            started: self.attempts_started.load(AtomicOrdering::Relaxed),
+            succeeded: self.attempts_succeeded.load(AtomicOrdering::Relaxed),
+            failed: self.attempts_failed.load(AtomicOrdering::Relaxed),
+            rate_limited: self.attempts_rate_limited.load(AtomicOrdering::Relaxed),
         }
     }
     pub async fn add_tunnel(&self, tunnel: Tunnel) {
@@ -724,166 +823,111 @@ impl ProxyPool {
 
     /// Gets a proxy, with load balancing and failover.
     pub async fn get_proxy(&self, provider_name: Option<&str>) -> Result<ProxyEnum> {
+        self.get_proxy_inner(provider_name, true, None).await
+    }
+
+    /// Selects a candidate for a download attempt without charging its rate window.
+    /// `begin_proxy_attempt` charges the window when the downloader actually starts.
+    pub async fn get_proxy_for_attempt(&self, excluded: Option<&ProxyEnum>) -> Result<ProxyEnum> {
+        self.get_proxy_inner(None, false, excluded).await
+    }
+
+    async fn get_proxy_inner(
+        &self,
+        provider_name: Option<&str>,
+        reserve: bool,
+        excluded: Option<&ProxyEnum>,
+    ) -> Result<ProxyEnum> {
         if let Some(name) = provider_name {
-            return self.get_ip_proxy_from_provider(name).await;
+            return self
+                .get_ip_proxy_from_provider(name, reserve, excluded)
+                .await;
         }
         // First try to get the best tunnel proxy.
-        if let Some(tunnel) = self.get_best_tunnel().await {
+        if let Some(tunnel) = self.get_best_tunnel_inner(reserve, excluded).await {
             return Ok(tunnel);
         }
 
         // Fall back to IP proxies if no tunnel proxy is available.
-        self.get_best_ip_proxy().await
+        self.get_best_ip_proxy(reserve, excluded).await
     }
 
     /// Gets the highest-quality tunnel proxy.
     pub async fn get_best_tunnel(&self) -> Option<ProxyEnum> {
-        // Take the write lock and operate on the pool data directly.
-        let mut pools = self.pools.write().await;
+        self.get_best_tunnel_inner(true, None).await
+    }
 
-        // Collect all tunnel proxies and sort them by quality score.
-        let mut tunnel_items = Vec::new();
-        for pool in pools.values_mut() {
-            for item in pool.iter_mut() {
-                if matches!(item.proxy, ProxyEnum::Tunnel(_)) {
-                    tunnel_items.push(item);
-                }
-            }
+    async fn get_best_tunnel_inner(
+        &self,
+        reserve: bool,
+        excluded: Option<&ProxyEnum>,
+    ) -> Option<ProxyEnum> {
+        let (selected, wait) = self.select_available(None, true, reserve, excluded).await;
+        if selected.is_some() {
+            return selected;
         }
-
-        if tunnel_items.is_empty() {
-            return None;
+        if let Some(wait) = wait {
+            tokio::time::sleep(wait).await;
+            return self.select_available(None, true, reserve, excluded).await.0;
         }
-        tunnel_items.sort();
-        // Sort by quality score (descending).
-        // tunnel_items.sort_by(|a, b| {
-        //     b.quality_score()
-        //         .partial_cmp(&a.quality_score())
-        //         .unwrap_or(std::cmp::Ordering::Equal)
-        // });
-
-        // Try to find the best tunnel proxy that has not hit its rate limit.
-
-        for item in tunnel_items.iter_mut() {
-            if !item.is_rate_limited() {
-                item.rate_limit_tracker.record_request();
-                return Some(item.proxy.clone());
-            }
-        }
-
-        // All are rate limited: wait for the shortest remaining window.
-        if let Some(min_remaining) = tunnel_items
-            .iter()
-            .map(|i| i.rate_limit_tracker.remaining_in_window())
-            .min()
-        {
-            let sleep_dur = if min_remaining > Duration::from_millis(0) {
-                min_remaining
-            } else {
-                Duration::from_millis(50)
-            };
-            tokio::time::sleep(sleep_dur).await;
-            // Retry once (no deep recursion; leave further pacing to the caller).
-            for item in tunnel_items.iter_mut() {
-                if !item.is_rate_limited() {
-                    item.rate_limit_tracker.record_request();
-                    return Some(item.proxy.clone());
-                }
-            }
-        }
-
         None
     }
 
     /// Gets a proxy from a specific provider.
-    async fn get_ip_proxy_from_provider(&self, provider_name: &str) -> Result<ProxyEnum> {
+    async fn get_ip_proxy_from_provider(
+        &self,
+        provider_name: &str,
+        reserve: bool,
+        excluded: Option<&ProxyEnum>,
+    ) -> Result<ProxyEnum> {
         self.ensure_pool_size(provider_name).await?;
-
-        // Copy out of the proxy pool first so the lock is not held across an await.
-        {
-            let mut pools = self.pools.write().await;
-            let pool = pools.get_mut(provider_name).ok_or_else(|| {
-                ProxyError::InvalidConfig(format!("Provider {provider_name} not found").into())
-            })?;
-
-            // Drop expired and invalid proxies.
-            pool.retain(|item| item.is_valid(self.config.max_errors));
-
-            // Sort by quality score.
-            pool.sort();
-            // Try to find the best proxy that has not hit its rate limit.
-            for item in pool.iter_mut() {
-                if !item.is_rate_limited() {
-                    item.rate_limit_tracker.record_request();
-                    return Ok(item.proxy.clone());
-                }
-            }
+        let (selected, _) = self
+            .select_available(Some(provider_name), false, reserve, excluded)
+            .await;
+        if let Some(proxy) = selected {
+            return Ok(proxy);
         }
 
-        // If every proxy is rate limited, try to fetch new ones.
-        self.refill_pool(provider_name).await?;
-
-        {
-            let mut pools = self.pools.write().await;
-            let pool = pools.get_mut(provider_name).ok_or_else(|| {
-                ProxyError::InvalidConfig(format!("Provider {provider_name} not found").into())
-            })?;
-
-            // Drop expired and invalid proxies.
-            pool.retain(|item| item.is_valid(self.config.max_errors));
-
-            // Sort by quality score.
-            pool.sort();
-            // Try to find the best proxy that has not hit its rate limit.
-            for item in pool.iter_mut() {
-                if !item.is_rate_limited() {
-                    item.rate_limit_tracker.record_request();
-                    return Ok(item.proxy.clone());
-                }
-            }
-            // If none are available, wait the shortest remaining window and retry once.
-            if let Some(min_remaining) = pool
-                .iter()
-                .map(|i| i.rate_limit_tracker.remaining_in_window())
-                .min()
+        // Fetch only when there is room. A provider fetch and the subsequent pool update
+        // share a per-provider lock; other providers and feedback remain unblocked.
+        let observed_size = self
+            .pools
+            .read()
+            .await
+            .get(provider_name)
+            .map_or(0, Vec::len);
+        if let Err(error) = self.refill_pool(provider_name, true, observed_size).await {
+            log::warn!("proxy refill failed for {provider_name}: {error}");
+        }
+        let (selected, wait) = self
+            .select_available(Some(provider_name), false, reserve, excluded)
+            .await;
+        if let Some(proxy) = selected {
+            return Ok(proxy);
+        }
+        if let Some(wait) = wait {
+            tokio::time::sleep(wait).await;
+            if let Some(proxy) = self
+                .select_available(Some(provider_name), false, reserve, excluded)
+                .await
+                .0
             {
-                let sleep_dur = if min_remaining > Duration::from_millis(0) {
-                    min_remaining
-                } else {
-                    Duration::from_millis(50)
-                };
-                tokio::time::sleep(sleep_dur).await;
-                for item in pool.iter_mut() {
-                    if !item.is_rate_limited() {
-                        item.rate_limit_tracker.record_request();
-                        return Ok(item.proxy.clone());
-                    }
-                }
+                return Ok(proxy);
             }
         }
-
-        Err(ProxyError::InvalidConfig("No valid proxy available".into()))
+        Err(ProxyError::ProxyNotFound)
     }
 
     /// Gets the best proxy across all providers.
-    async fn get_best_ip_proxy(&self) -> Result<ProxyEnum> {
-        let mut pools = self.pools.write().await;
-        let mut proxy_items = pools
-            .iter_mut()
-            .flat_map(|(_, v)| v)
-            .filter(|x| matches!(x.proxy, ProxyEnum::IpProxy(_)))
-            .collect::<Vec<_>>();
-        proxy_items.sort();
-        for item in proxy_items.iter_mut() {
-            if !item.is_rate_limited() {
-                item.rate_limit_tracker.record_request();
-                return Ok(item.proxy.clone());
-            }
+    async fn get_best_ip_proxy(
+        &self,
+        reserve: bool,
+        excluded: Option<&ProxyEnum>,
+    ) -> Result<ProxyEnum> {
+        let (selected, wait) = self.select_available(None, false, reserve, excluded).await;
+        if let Some(proxy) = selected {
+            return Ok(proxy);
         }
-
-        // If every proxy is rate limited, call self.get_ip_proxy_from_provider on the
-        // highest-weighted IpProvider.
-
         let mut providers: Vec<_> = {
             let providers = self.ip_providers.lock().await;
             providers
@@ -893,32 +937,151 @@ impl ProxyPool {
         };
         providers.sort_by_key(|x| std::cmp::Reverse(x.1)); // Sort by weight, descending
         if let Some((provider_name, _)) = providers.first() {
-            // Compute the global shortest remaining window and wait once.
-            if let Some(min_remaining) = proxy_items
-                .iter()
-                .map(|i| i.rate_limit_tracker.remaining_in_window())
-                .min()
-            {
-                let sleep_dur = if min_remaining > Duration::from_millis(0) {
-                    min_remaining
-                } else {
-                    Duration::from_millis(50)
-                };
-                tokio::time::sleep(sleep_dur).await;
-            }
-            self.get_ip_proxy_from_provider(provider_name).await
-        } else if !proxy_items.is_empty() {
-            // Check once more whether the rate limit has lifted (needs a mutable borrow).
-            let mut_idx = 0usize;
-            if !proxy_items[mut_idx].is_rate_limited() {
-                proxy_items[mut_idx].rate_limit_tracker.record_request();
-                Ok(proxy_items[mut_idx].proxy.clone())
-            } else {
-                Err(ProxyError::InvalidConfig("No valid proxy available".into()))
-            }
+            self.get_ip_proxy_from_provider(provider_name, reserve, excluded)
+                .await
         } else {
-            Err(ProxyError::InvalidConfig("No valid proxy available".into()))
+            if let Some(wait) = wait {
+                tokio::time::sleep(wait).await;
+                if let Some(proxy) = self
+                    .select_available(None, false, reserve, excluded)
+                    .await
+                    .0
+                {
+                    return Ok(proxy);
+                }
+            }
+            Err(ProxyError::ProxyNotFound)
         }
+    }
+
+    /// Select a proxy under one short critical section, optionally reserving its rate slot.
+    async fn select_available(
+        &self,
+        provider_name: Option<&str>,
+        tunnel: bool,
+        reserve: bool,
+        excluded: Option<&ProxyEnum>,
+    ) -> (Option<ProxyEnum>, Option<Duration>) {
+        let lock_started = Instant::now();
+        let mut pools = self.pools.write().await;
+        let wait_ns = lock_started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+        self.selection_wait_count
+            .fetch_add(1, AtomicOrdering::Relaxed);
+        self.selection_wait_total_ns
+            .fetch_add(wait_ns, AtomicOrdering::Relaxed);
+        self.selection_wait_max_ns
+            .fetch_max(wait_ns, AtomicOrdering::Relaxed);
+        // Gather compact indices, sample two distinct eligible proxies, then
+        // score only those two. This avoids random draws and quality scoring
+        // for every proxy while holding the pool lock.
+        let mut rng = rand::rng();
+        let mut candidates = Vec::new();
+        let mut wait: Option<Duration> = None;
+        for (provider_index, (name, pool)) in pools.iter_mut().enumerate() {
+            if provider_name.is_some_and(|requested| requested != name) {
+                continue;
+            }
+            pool.retain(|item| item.is_valid(self.config.max_errors));
+            for (index, item) in pool.iter_mut().enumerate() {
+                if matches!(item.proxy, ProxyEnum::Tunnel(_)) != tunnel {
+                    continue;
+                }
+                if excluded.is_some_and(|excluded| item.proxy == *excluded) {
+                    continue;
+                }
+                if item.is_rate_limited() {
+                    let remaining = item.rate_limit_tracker.remaining_in_window();
+                    wait = Some(wait.map_or(remaining, |current| current.min(remaining)));
+                    continue;
+                }
+                candidates.push((provider_index, index));
+            }
+        }
+        let selected = match candidates.len() {
+            0 => None,
+            1 => Some(candidates[0]),
+            count => {
+                let first = rng.random_range(0..count);
+                let mut second = rng.random_range(0..count - 1);
+                if second >= first {
+                    second += 1;
+                }
+                let first = candidates[first];
+                let second = candidates[second];
+                let score = |(provider, index): (usize, usize)| {
+                    pools
+                        .values()
+                        .nth(provider)
+                        .expect("candidate provider exists")[index]
+                        .quality_score()
+                };
+                let first_score = score(first);
+                let second_score = score(second);
+                if first_score > second_score
+                    || (first_score == second_score && rng.random_bool(0.5))
+                {
+                    Some(first)
+                } else {
+                    Some(second)
+                }
+            }
+        };
+        if let Some((provider, index)) = selected {
+            let item = &mut pools
+                .values_mut()
+                .nth(provider)
+                .expect("selected provider exists")[index];
+            if reserve {
+                item.rate_limit_tracker.record_request();
+            }
+            return (Some(item.proxy.clone()), None);
+        }
+        (None, wait)
+    }
+
+    /// Charges a managed proxy's rate window immediately before a download attempt.
+    pub async fn begin_proxy_attempt(&self, proxy: &ProxyEnum) -> Result<()> {
+        for pass in 0..2 {
+            let wait = {
+                let mut pools = self.pools.write().await;
+                let item = pools
+                    .values_mut()
+                    .flat_map(|pool| pool.iter_mut())
+                    .find(|item| item.proxy == *proxy && item.is_valid(self.config.max_errors))
+                    .ok_or(ProxyError::ProxyNotFound)?;
+                if !item.is_rate_limited() {
+                    item.rate_limit_tracker.record_request();
+                    self.attempts_started.fetch_add(1, AtomicOrdering::Relaxed);
+                    return Ok(());
+                }
+                self.attempts_rate_limited
+                    .fetch_add(1, AtomicOrdering::Relaxed);
+                item.rate_limit_tracker.remaining_in_window()
+            };
+            if pass == 0 {
+                tokio::time::sleep(wait).await;
+            }
+        }
+        Err(ProxyError::ProxyNotFound)
+    }
+
+    /// Whether this provider explicitly treats an HTTP status as a proxy failure.
+    pub async fn is_retry_code(&self, proxy: &ProxyEnum, code: u16) -> bool {
+        let provider_name = {
+            let pools = self.pools.read().await;
+            pools
+                .values()
+                .flat_map(|pool| pool.iter())
+                .find(|item| item.proxy == *proxy)
+                .map(|item| item.provider_name.clone())
+        };
+        let Some(provider_name) = provider_name else {
+            return false;
+        };
+        let providers = self.ip_providers.lock().await;
+        providers
+            .get(&provider_name)
+            .is_some_and(|provider| provider.is_retry_code(&code))
     }
 
     /// Reports the outcome of using a proxy.
@@ -928,7 +1091,7 @@ impl ProxyPool {
         success: bool,
         response_time: Option<Duration>,
     ) -> Result<()> {
-        match proxy {
+        let result = match proxy {
             ProxyEnum::Tunnel(tunnel) => {
                 self.report_tunnel_result(tunnel, success, response_time)
                     .await
@@ -937,7 +1100,16 @@ impl ProxyPool {
                 self.report_ip_proxy_result(ip_proxy, success, response_time)
                     .await
             }
+        };
+        if result.is_ok() {
+            if success {
+                self.attempts_succeeded
+                    .fetch_add(1, AtomicOrdering::Relaxed);
+            } else {
+                self.attempts_failed.fetch_add(1, AtomicOrdering::Relaxed);
+            }
         }
+        result
     }
 
     /// Reports the outcome of using a tunnel proxy.
@@ -950,11 +1122,9 @@ impl ProxyPool {
         let mut found = false;
         {
             let mut pools = self.pools.write().await;
-            for pool in pools.values_mut() {
+            'providers: for pool in pools.values_mut() {
                 for item in pool.iter_mut() {
-                    if let ProxyEnum::Tunnel(ref t) = item.proxy
-                        && t.endpoint == tunnel.endpoint
-                    {
+                    if item.proxy.eq(tunnel) {
                         if success {
                             item.record_success(
                                 response_time.unwrap_or(Duration::from_millis(1000)),
@@ -963,6 +1133,7 @@ impl ProxyPool {
                             item.record_error();
                         }
                         found = true;
+                        break 'providers;
                     }
                 }
             }
@@ -972,8 +1143,6 @@ impl ProxyPool {
                 format!("Tunnel {} not found", tunnel.endpoint).into(),
             ));
         }
-        // Update statistics.
-        self.update_stats().await;
         Ok(())
     }
 
@@ -986,30 +1155,24 @@ impl ProxyPool {
     ) -> Result<()> {
         let mut proxy_found = false;
         {
-            // Scan every provider's pool looking for the proxy.
+            // Find the used proxy, then prune only its own pool. A full-pool
+            // retain here would make every download feedback O(all proxies).
             let mut pools = self.pools.write().await;
             for pool in pools.values_mut() {
-                for item in pool.iter_mut() {
-                    if item.proxy.eq(proxy) {
-                        if success {
-                            item.record_success(
-                                response_time.unwrap_or(Duration::from_millis(1000)),
-                            );
-                        } else {
-                            item.record_error();
-                        }
-                        proxy_found = true;
-                        break;
-                    }
+                let Some(index) = pool.iter().position(|item| item.proxy.eq(proxy)) else {
+                    continue;
+                };
+                let item = &mut pool[index];
+                if success {
+                    item.record_success(response_time.unwrap_or(Duration::from_millis(1000)));
+                } else {
+                    item.record_error();
                 }
-                if proxy_found {
-                    break;
+                if !item.is_valid(self.config.max_errors) {
+                    pool.swap_remove(index);
                 }
-            }
-
-            // Purge invalid proxies from every pool.
-            for pool in pools.values_mut() {
-                pool.retain(|item| item.is_valid(self.config.max_errors));
+                proxy_found = true;
+                break;
             }
         } // End the write-lock scope early
         // Return an error if the proxy was not found.
@@ -1022,8 +1185,6 @@ impl ProxyPool {
                 .into(),
             ));
         }
-        // Update statistics.
-        self.update_stats().await;
         Ok(())
     }
 
@@ -1046,13 +1207,25 @@ impl ProxyPool {
     async fn ensure_pool_size(&self, provider_name: &str) -> Result<()> {
         let current_size = {
             let pools = self.pools.read().await;
-            pools.get(provider_name).map(|p| p.len()).unwrap_or(0)
+            pools
+                .get(provider_name)
+                .map(|p| {
+                    p.iter()
+                        .filter(|item| item.is_valid(self.config.max_errors))
+                        .count()
+                })
+                .unwrap_or(0)
         };
 
         let threshold = (self.config.max_size as f32 * self.config.refill_threshold) as usize;
 
         if current_size < self.config.min_size || current_size < threshold {
-            self.refill_pool(provider_name).await?;
+            if let Err(error) = self.refill_pool(provider_name, false, current_size).await {
+                if current_size == 0 {
+                    return Err(error);
+                }
+                log::warn!("proxy refill failed for {provider_name}: {error}");
+            }
         }
 
         Ok(())
@@ -1060,7 +1233,36 @@ impl ProxyPool {
 
     /// When every proxy IP is over its limit, fetches a fresh batch and adds it; existing
     /// proxies are kept.
-    async fn refill_pool(&self, provider_name: &str) -> Result<()> {
+    async fn refill_pool(
+        &self,
+        provider_name: &str,
+        force: bool,
+        observed_size: usize,
+    ) -> Result<()> {
+        let refill_lock = {
+            let mut locks = self.refill_locks.lock().await;
+            locks
+                .entry(provider_name.to_string())
+                .or_insert_with(|| Arc::new(Mutex::new(())))
+                .clone()
+        };
+        let _refill_guard = refill_lock.lock().await;
+        // A concurrent caller may have filled the pool while we waited for this provider.
+        let current_size = {
+            let mut pools = self.pools.write().await;
+            let pool = pools.get_mut(provider_name).ok_or_else(|| {
+                ProxyError::InvalidConfig(format!("Provider {provider_name} not found").into())
+            })?;
+            pool.retain(|item| item.is_valid(self.config.max_errors));
+            pool.len()
+        };
+        let threshold = (self.config.max_size as f32 * self.config.refill_threshold) as usize;
+        if current_size > observed_size
+            || current_size >= self.config.max_size
+            || (!force && current_size >= self.config.min_size && current_size >= threshold)
+        {
+            return Ok(());
+        }
         // Clone the Arc pointer before awaiting.
         let provider: Arc<Box<dyn IpProxyLoader>> = {
             let providers = self.ip_providers.lock().await;
@@ -1088,9 +1290,19 @@ impl ProxyPool {
         let new_proxies = provider.get_ip_proxies().await?;
         {
             let mut pools = self.pools.write().await;
-            let pool = pools.get_mut(provider_name).unwrap();
+            let pool = pools.get_mut(provider_name).ok_or_else(|| {
+                ProxyError::InvalidConfig(format!("Provider {provider_name} not found").into())
+            })?;
+            pool.retain(|item| item.is_valid(self.config.max_errors));
             for proxy in new_proxies {
-                pool.push(ProxyItem::new_for_ip_proxy(proxy, provider.get_config()));
+                if pool.len() >= self.config.max_size {
+                    break;
+                }
+                let candidate = ProxyItem::new_for_ip_proxy(proxy, provider.get_config());
+                if pool.iter().any(|item| item.proxy == candidate.proxy) {
+                    continue;
+                }
+                pool.push(candidate);
             }
         }
         Ok(())
@@ -1173,43 +1385,606 @@ impl ProxyPool {
 
     /// Gets detailed statistics.
     pub async fn get_stats(&self) -> PoolStats {
+        // Feedback changes one proxy at a time. Rebuild only for a diagnostics read,
+        // so request throughput does not pay for a full-pool scan on every attempt.
+        self.update_stats().await;
         self.stats.read().await.clone()
     }
 
     /// Runs a health check.
     pub async fn health_check(&self) -> Result<()> {
-        let providers: Vec<String> = {
-            let providers = self.ip_providers.lock().await;
-            providers.keys().cloned().collect()
-        };
-        for provider_name in providers {
-            let provider: Option<Arc<Box<dyn IpProxyLoader>>> = {
-                let providers = self.ip_providers.lock().await;
-                providers.get(&provider_name).cloned()
-            };
-            if let Some(provider) = provider {
-                let pool = {
-                    let pools = self.pools.read().await;
-                    pools.get(&provider_name).unwrap_or(&Vec::new()).clone()
-                };
-                let mut healthy_proxies = Vec::new();
-                for item in pool.into_iter() {
-                    if let ProxyEnum::IpProxy(ref proxy) = item.proxy {
-                        // Run the health check.
-                        if provider.health_check(proxy).await {
-                            healthy_proxies.push(item.clone());
+        // Manual and scheduled checks share one budget; overlapping runs would
+        // otherwise multiply the configured number of concurrent probes.
+        let _check_guard = self.health_check_lock.lock().await;
+        let providers = self.ip_providers.lock().await.clone();
+        let mut pending = VecDeque::new();
+        {
+            let pools = self.pools.read().await;
+            for (name, provider) in providers {
+                if let Some(pool) = pools.get(&name) {
+                    for item in pool {
+                        if let ProxyEnum::IpProxy(proxy) = &item.proxy {
+                            pending.push_back((
+                                name.clone(),
+                                provider.clone(),
+                                proxy.clone(),
+                                item.expire_time,
+                            ));
                         }
-                    }
-                }
-                {
-                    let mut pools = self.pools.write().await;
-                    if let Some(pool) = pools.get_mut(&provider_name) {
-                        *pool = healthy_proxies;
                     }
                 }
             }
         }
-        self.update_stats().await;
+
+        let concurrency = self.config.health_check_concurrency.clamp(1, 64);
+        let mut running = tokio::task::JoinSet::new();
+        let mut unhealthy = Vec::new();
+        loop {
+            while running.len() < concurrency {
+                let Some((name, provider, proxy, expiry)) = pending.pop_front() else {
+                    break;
+                };
+                running.spawn(async move {
+                    let timeout = Duration::from_secs(provider.get_config().timeout.max(1));
+                    let healthy = tokio::time::timeout(timeout, provider.health_check(&proxy))
+                        .await
+                        .unwrap_or(false);
+                    (!healthy).then_some((name, ProxyEnum::IpProxy(proxy), expiry))
+                });
+            }
+            match running.join_next().await {
+                Some(Ok(Some(failed))) => unhealthy.push(failed),
+                Some(Ok(None)) => {}
+                Some(Err(error)) => log::warn!("proxy health probe failed: {error}"),
+                None => break,
+            }
+        }
+
+        if !unhealthy.is_empty() {
+            let mut pools = self.pools.write().await;
+            for (name, proxy, expiry) in unhealthy {
+                if let Some(pool) = pools.get_mut(&name) {
+                    pool.retain(|item| item.proxy != proxy || item.expire_time != expiry);
+                }
+            }
+        }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn fractional_rate_uses_multi_second_window() {
+        let mut tracker = RateLimitTracker::new();
+        tracker.record_request();
+        assert!(tracker.is_rate_limited(0.5));
+        assert!(tracker.remaining_in_window() > Duration::from_secs(1));
+    }
+
+    struct FakeLoader {
+        config: IpProvider,
+        calls: Arc<AtomicUsize>,
+    }
+
+    struct SlowHealthLoader {
+        config: IpProvider,
+        entered: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+    }
+
+    struct PeakHealthLoader {
+        config: IpProvider,
+        active: Arc<AtomicUsize>,
+        peak: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl IpProxyLoader for PeakHealthLoader {
+        async fn get_ip_proxies(&self) -> Result<Vec<IpProxy>> {
+            Ok(Vec::new())
+        }
+        fn is_retry_code(&self, _: &u16) -> bool {
+            false
+        }
+        fn get_name(&self) -> String {
+            self.config.name.clone()
+        }
+        fn get_weight(&self) -> u32 {
+            1
+        }
+        fn get_config(&self) -> &IpProvider {
+            &self.config
+        }
+        async fn health_check(&self, _: &IpProxy) -> bool {
+            let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+            self.peak.fetch_max(active, Ordering::SeqCst);
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            self.active.fetch_sub(1, Ordering::SeqCst);
+            true
+        }
+    }
+
+    #[async_trait]
+    impl IpProxyLoader for SlowHealthLoader {
+        async fn get_ip_proxies(&self) -> Result<Vec<IpProxy>> {
+            Ok(Vec::new())
+        }
+        fn is_retry_code(&self, _: &u16) -> bool {
+            false
+        }
+        fn get_name(&self) -> String {
+            self.config.name.clone()
+        }
+        fn get_weight(&self) -> u32 {
+            1
+        }
+        fn get_config(&self) -> &IpProvider {
+            &self.config
+        }
+        async fn health_check(&self, _: &IpProxy) -> bool {
+            self.entered.notify_one();
+            self.release.notified().await;
+            true
+        }
+    }
+
+    #[async_trait]
+    impl IpProxyLoader for FakeLoader {
+        async fn get_ip_proxies(&self) -> Result<Vec<IpProxy>> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            Ok(vec![IpProxy {
+                ip: "127.0.0.1".into(),
+                port: 8080,
+                username: None,
+                password: None,
+                proxy_type: Some("http".into()),
+                rate_limit: 0.0,
+            }])
+        }
+        fn is_retry_code(&self, code: &u16) -> bool {
+            self.config.retry_codes.contains(code)
+        }
+        fn get_name(&self) -> String {
+            self.config.name.clone()
+        }
+        fn get_weight(&self) -> u32 {
+            1
+        }
+        fn get_config(&self) -> &IpProvider {
+            &self.config
+        }
+        async fn health_check(&self, _: &IpProxy) -> bool {
+            true
+        }
+    }
+
+    #[tokio::test]
+    async fn concurrent_empty_pool_fetches_once_without_deadlock() {
+        let pool = Arc::new(ProxyPool::new(PoolConfig::default()));
+        let calls = Arc::new(AtomicUsize::new(0));
+        pool.add_ip_provider(Box::new(FakeLoader {
+            config: IpProvider {
+                name: "fake".into(),
+                url: String::new(),
+                retry_codes: vec![],
+                timeout: 1,
+                rate_limit: 0.0,
+                provider_expire_time: None,
+                proxy_expire_time: 60,
+                weight: None,
+            },
+            calls: calls.clone(),
+        }))
+        .await;
+        tokio::time::timeout(Duration::from_secs(1), async {
+            let (a, b) = tokio::join!(pool.get_proxy(None), pool.get_proxy(None));
+            assert!(a.is_ok());
+            assert!(b.is_ok());
+        })
+        .await
+        .unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(pool.get_pool_status().await["fake"], 1);
+    }
+
+    #[tokio::test]
+    async fn rate_limit_wait_does_not_block_feedback() {
+        let pool = Arc::new(ProxyPool::new(PoolConfig::default()));
+        pool.add_tunnel(Tunnel {
+            name: "tunnel".into(),
+            endpoint: "localhost:8080".into(),
+            username: None,
+            password: None,
+            tunnel_type: "http".into(),
+            expire_time: "2999-01-01T00:00:00Z".into(),
+            rate_limit: 1.0,
+        })
+        .await;
+        let selected = pool.get_best_tunnel().await.unwrap();
+        let waiter = tokio::spawn({
+            let pool = pool.clone();
+            async move { pool.get_best_tunnel().await }
+        });
+        tokio::task::yield_now().await;
+        tokio::time::timeout(
+            Duration::from_millis(200),
+            pool.report_success(&selected, None),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_secs(2), waiter)
+                .await
+                .unwrap()
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn direct_proxy_expiry_is_enforced() {
+        let pool = ProxyPoolBuilder::new(PoolConfig::default())
+            .with_direct_proxies(vec![DirectProxy {
+                name: Some("old".into()),
+                url: "http://127.0.0.1:8080".into(),
+                rate_limit: None,
+                expire_time: Some("2020-01-01T00:00:00Z".into()),
+            }])
+            .build()
+            .await;
+        assert!(pool.get_proxy(None).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn equally_scored_direct_proxies_share_selection() {
+        let pool = ProxyPoolBuilder::new(PoolConfig::default())
+            .with_direct_proxies(vec![
+                DirectProxy {
+                    name: Some("first".into()),
+                    url: "http://127.0.0.1:8080".into(),
+                    rate_limit: Some(10.0),
+                    expire_time: None,
+                },
+                DirectProxy {
+                    name: Some("second".into()),
+                    url: "http://127.0.0.1:8081".into(),
+                    rate_limit: Some(10.0),
+                    expire_time: None,
+                },
+            ])
+            .build()
+            .await;
+        let mut counts = HashMap::new();
+        for _ in 0..256 {
+            let proxy = pool.get_proxy_for_attempt(None).await.unwrap();
+            *counts.entry(proxy.to_string()).or_insert(0usize) += 1;
+        }
+        assert_eq!(counts.len(), 2);
+        assert!(counts.values().all(|count| *count > 70));
+    }
+
+    // Run separately before/after a selection-policy change:
+    // cargo test -p mocra-proxy --lib selection_policy_workload -- --ignored --nocapture
+    #[tokio::test]
+    #[ignore = "local proxy selection policy measurement"]
+    async fn selection_policy_workload() {
+        let proxies = (0..32)
+            .map(|index| DirectProxy {
+                name: Some(format!("p_{index}")),
+                url: format!("http://127.0.0.1:{}", 8100 + index),
+                rate_limit: Some(0.0),
+                expire_time: None,
+            })
+            .collect();
+        let pool = Arc::new(
+            ProxyPoolBuilder::new(PoolConfig::default())
+                .with_direct_proxies(proxies)
+                .build()
+                .await,
+        );
+        {
+            let mut pools = pool.pools.write().await;
+            for item in pools.values_mut().flatten() {
+                let ProxyEnum::IpProxy(proxy) = &item.proxy else {
+                    continue;
+                };
+                item.success_rate = match proxy.port - 8100 {
+                    0..=7 => 0.99,
+                    8..=23 => 0.85,
+                    _ => 0.60,
+                };
+            }
+        }
+        let started = Instant::now();
+        let mut tasks = Vec::new();
+        for _ in 0..8 {
+            let pool = pool.clone();
+            tasks.push(tokio::spawn(async move {
+                let mut samples = Vec::with_capacity(500);
+                for _ in 0..500 {
+                    let started = Instant::now();
+                    let selected = pool.get_proxy_for_attempt(None).await.unwrap();
+                    let ProxyEnum::IpProxy(proxy) = selected else {
+                        panic!("expected direct IP proxy");
+                    };
+                    samples.push((started.elapsed().as_micros(), proxy.port - 8100));
+                }
+                samples
+            }));
+        }
+        let mut latencies = Vec::new();
+        let mut selections = [0usize; 32];
+        for task in tasks {
+            for (latency, index) in task.await.unwrap() {
+                latencies.push(latency);
+                selections[index as usize] += 1;
+            }
+        }
+        latencies.sort_unstable();
+        let high: usize = selections[..8].iter().sum();
+        let medium: usize = selections[8..24].iter().sum();
+        let low: usize = selections[24..].iter().sum();
+        let expected_success =
+            (high as f64 * 0.99 + medium as f64 * 0.85 + low as f64 * 0.60) / 4000.0;
+        let relative_cost = (high * 3 + medium * 2 + low) as f64 / 4000.0;
+        println!(
+            "selection_workload wall_ms={} p95_us={} p99_us={} distinct={} max_share_pct={:.1} high={} medium={} low={} expected_success={:.3} relative_cost={:.3}",
+            started.elapsed().as_millis(),
+            latencies[latencies.len() * 95 / 100],
+            latencies[latencies.len() * 99 / 100],
+            selections.iter().filter(|count| **count > 0).count(),
+            selections.iter().max().copied().unwrap_or(0) as f64 * 100.0 / 4000.0,
+            high,
+            medium,
+            low,
+            expected_success,
+            relative_cost,
+        );
+    }
+
+    #[tokio::test]
+    async fn attempt_selection_only_charges_when_started_and_excludes_failure() {
+        let pool = ProxyPoolBuilder::new(PoolConfig::default())
+            .with_direct_proxies(vec![
+                DirectProxy {
+                    name: Some("a".into()),
+                    url: "http://127.0.0.1:8080".into(),
+                    rate_limit: Some(10.0),
+                    expire_time: None,
+                },
+                DirectProxy {
+                    name: Some("b".into()),
+                    url: "http://127.0.0.1:8081".into(),
+                    rate_limit: Some(10.0),
+                    expire_time: None,
+                },
+            ])
+            .build()
+            .await;
+        let first = pool.get_proxy_for_attempt(None).await.unwrap();
+        assert_eq!(pool.attempt_stats().started, 0);
+        {
+            let pools = pool.pools.read().await;
+            assert!(
+                pools
+                    .values()
+                    .flatten()
+                    .all(|item| item.rate_limit_tracker.current_window_count() == 0)
+            );
+        }
+        pool.begin_proxy_attempt(&first).await.unwrap();
+        let second = pool.get_proxy_for_attempt(Some(&first)).await.unwrap();
+        assert_ne!(first.to_string(), second.to_string());
+        pool.report_failure(&first).await.unwrap();
+        let attempts = pool.attempt_stats();
+        assert_eq!(attempts.started, 1);
+        assert_eq!(attempts.failed, 1);
+        assert_eq!(attempts.succeeded, 0);
+        assert_eq!(attempts.rate_limited, 0);
+        assert!(pool.selection_wait_stats().count >= 2);
+        let pools = pool.pools.read().await;
+        assert_eq!(
+            pools
+                .values()
+                .flatten()
+                .map(|item| item.rate_limit_tracker.current_window_count())
+                .sum::<u32>(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn provider_retry_codes_are_scoped_to_its_proxy() {
+        let pool = ProxyPool::new(PoolConfig::default());
+        pool.add_ip_provider(Box::new(FakeLoader {
+            config: IpProvider {
+                name: "retry_provider".into(),
+                url: String::new(),
+                retry_codes: vec![429],
+                timeout: 1,
+                rate_limit: 0.0,
+                provider_expire_time: None,
+                proxy_expire_time: 60,
+                weight: None,
+            },
+            calls: Arc::new(AtomicUsize::new(0)),
+        }))
+        .await;
+        let proxy = pool.get_proxy_for_attempt(None).await.unwrap();
+        assert!(pool.is_retry_code(&proxy, 429).await);
+        assert!(!pool.is_retry_code(&proxy, 500).await);
+    }
+
+    #[tokio::test]
+    async fn refill_deduplicates_and_respects_provider_capacity() {
+        let pool = ProxyPool::new(PoolConfig {
+            min_size: 2,
+            max_size: 2,
+            ..PoolConfig::default()
+        });
+        let calls = Arc::new(AtomicUsize::new(0));
+        pool.add_ip_provider(Box::new(FakeLoader {
+            config: IpProvider {
+                name: "bounded".into(),
+                url: String::new(),
+                retry_codes: vec![],
+                timeout: 1,
+                rate_limit: 0.0,
+                provider_expire_time: None,
+                proxy_expire_time: 60,
+                weight: None,
+            },
+            calls,
+        }))
+        .await;
+        for _ in 0..3 {
+            assert!(pool.get_proxy(Some("bounded")).await.is_ok());
+        }
+        assert_eq!(pool.get_pool_status().await["bounded"], 1);
+    }
+
+    #[tokio::test]
+    async fn health_check_preserves_concurrent_pool_updates() {
+        let pool = Arc::new(ProxyPool::new(PoolConfig::default()));
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let config = IpProvider {
+            name: "health".into(),
+            url: String::new(),
+            retry_codes: vec![],
+            timeout: 1,
+            rate_limit: 0.0,
+            provider_expire_time: None,
+            proxy_expire_time: 60,
+            weight: None,
+        };
+        pool.add_ip_provider(Box::new(SlowHealthLoader {
+            config: config.clone(),
+            entered: entered.clone(),
+            release: release.clone(),
+        }))
+        .await;
+        let proxy = |port| IpProxy {
+            ip: "127.0.0.1".into(),
+            port,
+            username: None,
+            password: None,
+            proxy_type: Some("http".into()),
+            rate_limit: 0.0,
+        };
+        pool.pools
+            .write()
+            .await
+            .get_mut("health")
+            .unwrap()
+            .push(ProxyItem::new_for_ip_proxy(proxy(8080), &config));
+        let checking = tokio::spawn({
+            let pool = pool.clone();
+            async move { pool.health_check().await }
+        });
+        tokio::time::timeout(Duration::from_secs(1), entered.notified())
+            .await
+            .unwrap();
+        pool.pools
+            .write()
+            .await
+            .get_mut("health")
+            .unwrap()
+            .push(ProxyItem::new_for_ip_proxy(proxy(8081), &config));
+        pool.report_success(&ProxyEnum::IpProxy(proxy(8080)), None)
+            .await
+            .unwrap();
+        release.notify_one();
+        tokio::time::timeout(Duration::from_secs(1), checking)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let pools = pool.pools.read().await;
+        let items = &pools["health"];
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].success_count, 1);
+    }
+
+    #[tokio::test]
+    async fn health_checks_obey_concurrency_limit() {
+        let pool = ProxyPool::new(PoolConfig {
+            health_check_concurrency: 2,
+            ..PoolConfig::default()
+        });
+        let config = IpProvider {
+            name: "bounded_health".into(),
+            url: String::new(),
+            retry_codes: vec![],
+            timeout: 1,
+            rate_limit: 0.0,
+            provider_expire_time: None,
+            proxy_expire_time: 60,
+            weight: None,
+        };
+        let active = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        pool.add_ip_provider(Box::new(PeakHealthLoader {
+            config: config.clone(),
+            active: active.clone(),
+            peak: peak.clone(),
+        }))
+        .await;
+        for port in 8000..8006 {
+            pool.pools
+                .write()
+                .await
+                .get_mut("bounded_health")
+                .unwrap()
+                .push(ProxyItem::new_for_ip_proxy(
+                    IpProxy {
+                        ip: "127.0.0.1".into(),
+                        port,
+                        username: None,
+                        password: None,
+                        proxy_type: Some("http".into()),
+                        rate_limit: 0.0,
+                    },
+                    &config,
+                ));
+        }
+        let (first, second) = tokio::join!(pool.health_check(), pool.health_check());
+        first.unwrap();
+        second.unwrap();
+        assert_eq!(peak.load(Ordering::SeqCst), 2);
+        assert_eq!(active.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn statistics_snapshot_includes_additions_and_feedback() {
+        let pool = ProxyPoolBuilder::new(PoolConfig::default())
+            .with_direct_proxies(vec![
+                DirectProxy {
+                    name: Some("a".into()),
+                    url: "http://127.0.0.1:8080".into(),
+                    rate_limit: None,
+                    expire_time: None,
+                },
+                DirectProxy {
+                    name: Some("b".into()),
+                    url: "http://127.0.0.1:8081".into(),
+                    rate_limit: None,
+                    expire_time: None,
+                },
+            ])
+            .build()
+            .await;
+        assert_eq!(pool.get_stats().await.total_proxies, 2);
+        let failed = pool.get_proxy_for_attempt(None).await.unwrap();
+        pool.report_failure(&failed).await.unwrap();
+        let snapshot = pool.get_stats().await;
+        assert_eq!(snapshot.total_proxies, 2);
+        assert_eq!(snapshot.avg_success_rate, 0.5);
     }
 }
