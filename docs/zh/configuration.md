@@ -255,7 +255,8 @@ Cron 调度。所有字段可选。
 
 事件通道或订阅通道满时会丢弃事件；关闭时会排空总线中已入队的事件。
 同时启用 `[event_bus]` 与 `[logger]` 后，收到的 Started/Completed 事件会以 INFO 级别记录
-JSON payload；重试使用 WARN，失败使用 ERROR。普通 `level = "debug"` 保留项目自身的 DEBUG，
+单行摘要（事件名、请求 ID、模块及状态等）；重试使用 WARN，失败使用 ERROR。完整 payload
+仍可由 EventBus 订阅者或 MQ 事件输出获取。普通 `level = "debug"` 保留项目自身的 DEBUG，
 而转换自 `log` 的记录默认限制在 INFO，以避免 HTML 解析器和 DNS 等依赖产生大量 DEBUG；确需这些详细日志时可
 显式设置 `level = "debug,log=debug"`。
 
