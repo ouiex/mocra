@@ -1,0 +1,29 @@
+name = "quotes_project"
+
+[db]
+
+[download_config]
+downloader_expire = 3600
+timeout = 20
+rate_limit = 2.0
+enable_session = false
+enable_locker = false
+enable_rate_limit = true
+cache_ttl = 60
+wss_timeout = 30
+max_response_size = 1048576
+
+[cache]
+ttl = 60
+
+[crawler]
+request_max_retries = 2
+task_max_errors = 100
+module_max_errors = 100
+module_locker_ttl = 5
+task_concurrency = 4
+idle_stop_secs = 5
+
+[channel_config]
+minid_time = 12
+capacity = 256
