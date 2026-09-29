@@ -24,14 +24,16 @@ in-memory `Spider` facade. It stops after the configured idle period (30 seconds
 starts at the first listing page, follows `Next` links up to **50 listing pages**, and fetches
 each author page once. It stops earlier when the site has no next page. Its download middleware
 sets common request headers; its data middleware normalizes and validates parsed records; its
-store middleware writes `quotes.jsonl` and `authors.jsonl`. The TOML config limits request rate
-and queue capacity. Each run uses a new output directory and prints stage counts on completion.
+store middleware writes `quotes.jsonl` and `authors.jsonl`. The TOML config limits requests to
+8 per second, uses 4 workers, and stops after 2 idle seconds; adjust the rate for the target site.
+Each run uses a new output directory and prints stage counts on completion.
 The `Spider`/`DataSink` facade in `quotes_scraper` is the simpler alternative; typed sink items
 do not pass through the engine's data middleware.
 
 `quotes_project` 是完整的单机 `Engine` 示例：模块从第一页出发，最多抓取 **50 个列表页**，
 没有“下一页”时提前结束，并且每位作者的详情页只请求一次。下载中间件统一设置请求头，数据
-中间件清洗和校验记录，存储中间件输出两个 JSONL 文件；TOML 配置限制请求速率与队列容量。
+中间件清洗和校验记录，存储中间件输出两个 JSONL 文件；TOML 配置将请求限制为每秒 8 次，
+使用 4 个工作并发，并在空闲 2 秒后退出。请按目标站承载能力调整速率。
 每次运行都会生成新的输出目录，并在完成时打印各阶段计数。简易的 `quotes_scraper` 使用
 `Spider`/`DataSink`；其类型化输出不会经过引擎的数据中间件。
 

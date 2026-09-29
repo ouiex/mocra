@@ -5,7 +5,7 @@ name = "quotes_project"
 [download_config]
 downloader_expire = 3600
 timeout = 20
-rate_limit = 2.0
+rate_limit = 8.0
 enable_session = false
 enable_locker = false
 enable_rate_limit = true
@@ -22,7 +22,7 @@ task_max_errors = 100
 module_max_errors = 100
 module_locker_ttl = 5
 task_concurrency = 4
-idle_stop_secs = 5
+idle_stop_secs = 2
 
 [channel_config]
 minid_time = 12
