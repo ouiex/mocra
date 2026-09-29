@@ -276,6 +276,11 @@ Distributed state synchronization. All fields optional.
 | `concurrency` | no | integer | Legacy setting; ignored. The bus uses one dispatch task and bounded subscriber channels. |
 
 When an event or subscriber channel is full, the event is dropped. Shutdown drains events already in the bus queue.
+When both `[event_bus]` and `[logger]` are enabled, received Started/Completed events are logged
+at INFO with their JSON payload; retries use WARN and failures use ERROR. Plain `level = "debug"`
+keeps project DEBUG while defaulting converted `log` records to INFO, avoiding dependency-wide
+parser/DNS debug output. Use an
+explicit filter such as `level = "debug,log=debug"` only when that verbose output is needed.
 
 ### [logger]
 

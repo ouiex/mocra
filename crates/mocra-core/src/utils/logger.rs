@@ -694,8 +694,15 @@ fn normalize_filter_string(filter: &str) -> String {
 }
 
 fn build_allowlist_filter(level: &str) -> String {
+    // Keep INFO records from converted `log` calls (including engine events). Project targets
+    // can still use DEBUG, while dependency-wide DEBUG needs an explicit filter.
+    let log_level = if matches!(level, "debug" | "trace") {
+        "info"
+    } else {
+        level
+    };
     format!(
-        "off,cacheable={level},common={level},downloader={level},engine={level},errors={level},js_v8={level},mocra={level},proxy={level},queue={level},sync={level},utils={level},tests={level},python_mocra={level},sqlx=warn,sea_orm=warn"
+        "off,log={log_level},cacheable={level},common={level},downloader={level},engine={level},errors={level},js_v8={level},mocra={level},mocra_core={level},proxy={level},queue={level},sync={level},utils={level},tests={level},python_mocra={level},sqlx=warn,sea_orm=warn"
     )
 }
 
@@ -837,6 +844,14 @@ mod tests {
 
         assert_eq!(config.level, "debug");
         assert!(!config.outputs.is_empty());
+    }
+
+    #[test]
+    fn plain_debug_sets_info_fallback_for_converted_logs() {
+        assert!(normalize_filter_string("info").contains("log=info"));
+        let debug_filter = normalize_filter_string("debug");
+        assert!(debug_filter.contains("log=info"));
+        assert!(debug_filter.contains("mocra_core=debug"));
     }
 
     #[tokio::test]

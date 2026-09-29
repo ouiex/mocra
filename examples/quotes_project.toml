@@ -27,3 +27,16 @@ idle_stop_secs = 2
 [channel_config]
 minid_time = 12
 capacity = 256
+
+[event_bus]
+capacity = 4096
+
+[logger]
+enabled = true
+level = "info"
+format = "text"
+
+[[logger.outputs]]
+type = "file"
+path = "logs/quotes_project"
+rotation = "daily"

@@ -520,9 +520,7 @@ impl Engine {
                 info!("Logger disabled; skipping EventBus log handlers");
             } else {
                 use crate::common::model::logger_config::LogOutputConfig;
-                use crate::engine::events::handlers::{
-                    console_handler::ConsoleLogHandler, queue_handler::QueueLogHandler,
-                };
+                use crate::engine::events::handlers::queue_handler::QueueLogHandler;
 
                 for output in &log_config.outputs {
                     match output {
@@ -532,17 +530,8 @@ impl Engine {
                                 .await;
                             info!("Registered MQ Logger for EventBus");
                         }
-                        LogOutputConfig::Console => {
-                            let rx = event_bus.subscribe("*".to_string()).await;
-                            let level = log_config
-                                .level
-                                .as_deref()
-                                .and_then(Self::base_level_from_filter)
-                                .unwrap_or("info")
-                                .to_string();
-                            ConsoleLogHandler::start(rx, level).await;
-                            info!("Registered Console Logger for EventBus");
-                        }
+                        // Engine::start installs one event logger for all tracing sinks.
+                        LogOutputConfig::Console => {}
                         LogOutputConfig::File { .. } => {
                             info!(
                                 "Registered File Logger for EventBus (Handled by Global Tracing)"
