@@ -148,7 +148,7 @@ impl Engine {
                             // Always log state every 5 seconds for diagnostics
                             static TICK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
                             let tick = TICK.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            if tick % 5 == 0 {
+                            if tick.is_multiple_of(5) {
                                 info!("[IdleMonitor] tick={} pending=[t={} d={} r={} p={} e={} rt={}] inflight={} cron={}",
                                     tick, task, download, response, parser, error, remote_task, inflight, has_running_cron_tasks);
                             }
@@ -159,7 +159,7 @@ impl Engine {
                             }
 
                             let idle_elapsed = last_active.elapsed().as_secs();
-                            if idle_elapsed > 0 && idle_elapsed % 10 == 0 {
+                            if idle_elapsed > 0 && idle_elapsed.is_multiple_of(10) {
                                 info!("[IdleStop] idle for {}s / {}s (pending={} inflight={} cron={})",
                                     idle_elapsed, idle_stop_secs, pending, inflight, has_running_cron_tasks);
                             }

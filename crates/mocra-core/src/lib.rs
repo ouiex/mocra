@@ -9,12 +9,15 @@
 // Structural clippy lints — deliberate design trade-offs (argument count, type complexity,
 // module inception, error / enum variant size), not bugs. Exempted uniformly to stay consistent
 // with the host crate (these modules used to live there and relied on the same exemptions).
+// The MSRV bump makes Clippy suggest let-chains throughout existing nested branches; keep that
+// stylistic rewrite out of the release fix.
 #![allow(
     clippy::too_many_arguments,
     clippy::type_complexity,
     clippy::module_inception,
     clippy::result_large_err,
-    clippy::large_enum_variant
+    clippy::large_enum_variant,
+    clippy::collapsible_if
 )]
 
 pub mod errors;

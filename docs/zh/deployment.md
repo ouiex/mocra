@@ -85,6 +85,10 @@ Mocra::builder()
 `ClusterConfig::bootstrap(node_id, http_addr, data_dir)` 启动一个新集群；`ClusterConfig::join` 额外
 带上任意已有节点的种子地址。`data_dir` 是 redb 状态机 + Raft 日志目录，因此要给每个节点各自的路径。
 
+`mocra-cluster` 0.5.0 要求持久化的 Raft 状态机元数据。0.4.1 写入的数据目录没有这些元数据，
+尤其在日志清理后无法安全地直接重启。升级前应备份每个节点的目录并迁移状态；新版本会拒绝
+原地启动旧目录，而不会把它当作空集群。0.4.1 不支持滚动升级到此版本。
+
 运行内置示例即可拉起三个节点（三个终端——首个自举，其余通过它加入）：
 
 ```bash

@@ -1,16 +1,19 @@
-//! Raft storage: in-memory log + redb state machine.
+//! Raft storage: in-memory test log + fully persisted redb state machine.
 //!
 //! - [`LogStore`]: the Raft log (currently an **in-memory** implementation; a redb-persisted log
 //!   is a follow-up item).
-//! - [`StateMachineStore`]: wires openraft's state machine to the redb [`StateMachine`] —
-//!   `apply` hands the `Cmd` to redb; a snapshot is a dump/restore of the whole business state.
+//! - [`StateMachineStore`]: wires openraft's state machine to the redb [`StateMachine`] — applied
+//!   progress, membership, snapshots, and application state are persisted together.
+
+// OpenRaft fixes the storage traits' error type to `StorageError` (~224B), so helper methods used
+// by the trait implementations must return it unchanged.
+#![allow(clippy::result_large_err)]
 
 use std::collections::BTreeMap;
 use std::fmt::Debug;
 use std::io::Cursor;
 use std::ops::RangeBounds;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use openraft::storage::{LogFlushed, LogState, RaftLogStorage, RaftStateMachine, Snapshot};
 use openraft::{
@@ -22,9 +25,12 @@ use tokio::sync::Mutex;
 
 use crate::cmd::CmdResult;
 use crate::raft::{Node, NodeId, SnapshotData, TypeConfig};
-use crate::state_machine::StateMachine;
+use crate::state_machine::{StateMachine, StateMachineError};
 
 type StorageResult<T> = Result<T, StorageError<NodeId>>;
+
+const RAFT_META_KEY: &str = "state_machine_meta";
+const RAFT_SNAPSHOT_KEY: &str = "current_snapshot";
 
 // ============ Log storage (in-memory) ============
 
@@ -131,40 +137,82 @@ pub struct StoredSnapshot {
 #[derive(Clone)]
 pub struct StateMachineStore {
     sm: Arc<StateMachine>,
-    meta: Arc<Mutex<SmMeta>>,
-    current_snapshot: Arc<Mutex<Option<StoredSnapshot>>>,
-    snapshot_idx: Arc<AtomicU64>,
+    operation_lock: Arc<Mutex<()>>,
 }
 
-#[derive(Default, Clone)]
+#[derive(Default, Clone, Serialize, Deserialize)]
 struct SmMeta {
     last_applied: Option<LogId<NodeId>>,
     last_membership: StoredMembership<NodeId, Node>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct PersistedSnapshotState {
+    current: StoredSnapshot,
+    snapshot_idx: u64,
 }
 
 impl StateMachineStore {
     pub fn new(sm: Arc<StateMachine>) -> Self {
         Self {
             sm,
-            meta: Arc::new(Mutex::new(SmMeta::default())),
-            current_snapshot: Arc::new(Mutex::new(None)),
-            snapshot_idx: Arc::new(AtomicU64::new(0)),
+            operation_lock: Arc::new(Mutex::new(())),
         }
+    }
+
+    pub(crate) fn has_persisted_meta(&self) -> Result<bool, StateMachineError> {
+        self.sm
+            .raft_state::<SmMeta>(RAFT_META_KEY)
+            .map(|meta| meta.is_some())
+    }
+
+    pub(crate) fn initialize_persisted_meta(&self) -> Result<(), StateMachineError> {
+        self.sm.set_raft_state(RAFT_META_KEY, &SmMeta::default())
+    }
+
+    fn load_meta(&self) -> StorageResult<SmMeta> {
+        let meta = self
+            .sm
+            .raft_state(RAFT_META_KEY)
+            .map_err(|e| StorageIOError::read_state_machine(&e))?;
+        meta.ok_or_else(|| {
+            StorageIOError::read_state_machine(&std::io::Error::other(
+                "missing persisted Raft state-machine metadata",
+            ))
+            .into()
+        })
+    }
+
+    fn store_meta(&self, meta: &SmMeta) -> StorageResult<()> {
+        self.sm
+            .set_raft_state(RAFT_META_KEY, meta)
+            .map_err(|e| StorageIOError::write_state_machine(&e))?;
+        Ok(())
+    }
+
+    fn load_snapshot_state(&self) -> StorageResult<Option<PersistedSnapshotState>> {
+        self.sm
+            .raft_state(RAFT_SNAPSHOT_KEY)
+            .map_err(|e| StorageIOError::read_state_machine(&e).into())
     }
 }
 
 impl RaftSnapshotBuilder<TypeConfig> for StateMachineStore {
     async fn build_snapshot(&mut self) -> Result<Snapshot<TypeConfig>, StorageError<NodeId>> {
-        let (last_applied, last_membership) = {
-            let m = self.meta.lock().await;
-            (m.last_applied, m.last_membership.clone())
-        };
+        let _guard = self.operation_lock.lock().await;
+        let sm_meta = self.load_meta()?;
+        let last_applied = sm_meta.last_applied;
+        let last_membership = sm_meta.last_membership;
         let data = self
             .sm
             .dump()
             .map_err(|e| StorageIOError::read_state_machine(&e))?;
 
-        let idx = self.snapshot_idx.fetch_add(1, Ordering::Relaxed) + 1;
+        let idx = self
+            .load_snapshot_state()?
+            .map(|state| state.snapshot_idx)
+            .unwrap_or(0)
+            + 1;
         let snapshot_id = match last_applied {
             Some(last) => format!("{}-{}-{}", last.leader_id, last.index, idx),
             None => format!("--{}", idx),
@@ -174,10 +222,19 @@ impl RaftSnapshotBuilder<TypeConfig> for StateMachineStore {
             last_membership,
             snapshot_id,
         };
-        *self.current_snapshot.lock().await = Some(StoredSnapshot {
+        let current = StoredSnapshot {
             meta: meta.clone(),
             data: data.clone(),
-        });
+        };
+        self.sm
+            .set_raft_state(
+                RAFT_SNAPSHOT_KEY,
+                &PersistedSnapshotState {
+                    current,
+                    snapshot_idx: idx,
+                },
+            )
+            .map_err(|e| StorageIOError::write_snapshot(Some(meta.signature()), &e))?;
         Ok(Snapshot {
             meta,
             snapshot: Box::new(Cursor::new(data)),
@@ -191,8 +248,9 @@ impl RaftStateMachine<TypeConfig> for StateMachineStore {
     async fn applied_state(
         &mut self,
     ) -> Result<(Option<LogId<NodeId>>, StoredMembership<NodeId, Node>), StorageError<NodeId>> {
-        let m = self.meta.lock().await;
-        Ok((m.last_applied, m.last_membership.clone()))
+        let _guard = self.operation_lock.lock().await;
+        let meta = self.load_meta()?;
+        Ok((meta.last_applied, meta.last_membership))
     }
 
     async fn apply<I>(&mut self, entries: I) -> Result<Vec<CmdResult>, StorageError<NodeId>>
@@ -200,19 +258,24 @@ impl RaftStateMachine<TypeConfig> for StateMachineStore {
         I: IntoIterator<Item = Entry<TypeConfig>> + OptionalSend,
         I::IntoIter: OptionalSend,
     {
+        let _guard = self.operation_lock.lock().await;
         let entries = entries.into_iter();
         let mut replies = Vec::with_capacity(entries.size_hint().0);
-        let mut meta = self.meta.lock().await;
+        let mut meta = self.load_meta()?;
         for ent in entries {
             meta.last_applied = Some(ent.log_id);
             let reply = match ent.payload {
-                EntryPayload::Blank => CmdResult::Ok,
+                EntryPayload::Blank => {
+                    self.store_meta(&meta)?;
+                    CmdResult::Ok
+                }
                 EntryPayload::Normal(cmd) => self
                     .sm
-                    .apply(&cmd)
+                    .apply_with_raft_state(&cmd, RAFT_META_KEY, &meta)
                     .map_err(|e| StorageIOError::write_state_machine(&e))?,
                 EntryPayload::Membership(mem) => {
                     meta.last_membership = StoredMembership::new(Some(ent.log_id), mem);
+                    self.store_meta(&meta)?;
                     CmdResult::Ok
                 }
             };
@@ -236,29 +299,44 @@ impl RaftStateMachine<TypeConfig> for StateMachineStore {
         meta: &SnapshotMeta<NodeId, Node>,
         snapshot: Box<SnapshotData>,
     ) -> Result<(), StorageError<NodeId>> {
+        let _guard = self.operation_lock.lock().await;
         let data = snapshot.into_inner();
+        let sm_meta = SmMeta {
+            last_applied: meta.last_log_id,
+            last_membership: meta.last_membership.clone(),
+        };
+        let snapshot_idx = self
+            .load_snapshot_state()?
+            .map(|state| state.snapshot_idx)
+            .unwrap_or(0)
+            + 1;
+        let snapshot_state = PersistedSnapshotState {
+            current: StoredSnapshot {
+                meta: meta.clone(),
+                data: data.clone(),
+            },
+            snapshot_idx,
+        };
         self.sm
-            .restore(&data)
+            .restore_with_raft_state(
+                &data,
+                RAFT_META_KEY,
+                &sm_meta,
+                RAFT_SNAPSHOT_KEY,
+                &snapshot_state,
+            )
             .map_err(|e| StorageIOError::write_snapshot(Some(meta.signature()), &e))?;
-        {
-            let mut m = self.meta.lock().await;
-            m.last_applied = meta.last_log_id;
-            m.last_membership = meta.last_membership.clone();
-        }
-        *self.current_snapshot.lock().await = Some(StoredSnapshot {
-            meta: meta.clone(),
-            data,
-        });
         Ok(())
     }
 
     async fn get_current_snapshot(
         &mut self,
     ) -> Result<Option<Snapshot<TypeConfig>>, StorageError<NodeId>> {
-        let cur = self.current_snapshot.lock().await;
-        Ok(cur.as_ref().map(|s| Snapshot {
-            meta: s.meta.clone(),
-            snapshot: Box::new(Cursor::new(s.data.clone())),
+        let _guard = self.operation_lock.lock().await;
+        let current = self.load_snapshot_state()?.map(|state| state.current);
+        Ok(current.map(|snapshot| Snapshot {
+            meta: snapshot.meta,
+            snapshot: Box::new(Cursor::new(snapshot.data)),
         }))
     }
 }

@@ -2,7 +2,7 @@
 name = "mocra-proxy"
 version = "0.5.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 description = "Configuration-driven proxy pool / manager for the mocra crawler framework (zero-State, standalone)."
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/ouiex/mocra"

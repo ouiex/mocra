@@ -2,7 +2,7 @@
 name = "mocra-core"
 version = "0.5.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.89"
 description = "The mocra crawler framework runtime: errors, cache, utilities, domain models, downloader, data-plane queue, coordination, scheduler and engine."
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/ouiex/mocra"
@@ -59,7 +59,7 @@ crc32fast = "1.5.0"
 rdkafka = { version = "0.39", features = ["cmake-build"], optional = true }
 async-nats = { version = "0.38", optional = true }
 # sync (coordination integration: embedded Raft backend)
-mocra-cluster = { path = "../mocra-cluster", version = "0.4.1", optional = true }
+mocra-cluster = { path = "../mocra-cluster", version = "0.5.0", optional = true }
 # engine (collection pipeline / processor / scheduling / monitoring); axum is only used by the
 # dashboard's observability HTTP API, so it is gated.
 axum = { version = "0.8", features = ["json"], optional = true }

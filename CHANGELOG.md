@@ -18,6 +18,8 @@ All notable changes to this project are documented here. The format is based on
 
 ### Changed
 
+- The facade and core crate now require Rust 1.89 for Polars/Excel. `mocra-cluster`,
+  `mocra-dag`, and `mocra-proxy` require Rust 1.88 for their current dependencies or syntax.
 - Local channels now honor `channel_config.capacity`, including the log channel. Batch dispatch
   waits for its concurrency permit and drains accepted work on shutdown instead of accumulating
   unbounded waiting tasks.
@@ -31,6 +33,9 @@ All notable changes to this project are documented here. The format is based on
 
 ### Compatibility
 
+- `mocra-cluster` 0.5.0 persists Raft state-machine metadata and snapshots. Existing 0.4.1
+  data directories lack this metadata and must be backed up and migrated before upgrade; an
+  in-place restart now fails explicitly rather than risking incorrect recovery.
 - `PoolConfig` and `BlobStorageConfig` gained public fields. Downstream struct literals must
   account for `health_check_concurrency` and `shared_path`, respectively.
 - File-system blob storage now returns relative keys from `put`; workers using a remote queue
@@ -38,6 +43,8 @@ All notable changes to this project are documented here. The format is based on
 
 ### Fixed
 
+- Embedded Raft nodes can recover after a snapshot and confirmed log purge; snapshot restore
+  preserves the fencing counter.
 - Quickstart examples now label `Response::module_id()` as a module identifier; configuration
   guides link to maintained samples instead of removed test fixtures.
 - Managed proxy attempts report actual success or failure, with best-effort failure feedback for

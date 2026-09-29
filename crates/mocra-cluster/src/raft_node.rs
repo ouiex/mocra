@@ -12,6 +12,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use openraft::Config;
+use openraft::storage::RaftLogStorage;
 
 use crate::cmd::{Cmd, CmdResult};
 use crate::control::{ControlError, ControlPlane};
@@ -27,6 +28,40 @@ fn now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
+}
+
+async fn prepare_raft_state(
+    sm: &StateMachine,
+    log_store: &mut RedbLogStore,
+    sm_store: &StateMachineStore,
+) -> Result<(), ControlError> {
+    if sm_store.has_persisted_meta()? {
+        return Ok(());
+    }
+
+    let log_state = log_store
+        .get_log_state()
+        .await
+        .map_err(|e| ControlError::Raft(e.to_string()))?;
+    let has_vote = log_store
+        .read_vote()
+        .await
+        .map_err(|e| ControlError::Raft(e.to_string()))?
+        .is_some();
+    let has_committed = log_store
+        .read_committed()
+        .await
+        .map_err(|e| ControlError::Raft(e.to_string()))?
+        .is_some();
+    if log_state.last_log_id.is_some() || has_vote || has_committed || sm.has_business_data()? {
+        return Err(ControlError::Raft(
+            "legacy Raft state lacks persisted state-machine metadata; refusing an unsafe restart. Back up the data directory and migrate or recreate the cluster"
+                .into(),
+        ));
+    }
+
+    sm_store.initialize_persisted_meta()?;
+    Ok(())
 }
 
 /// A cluster status snapshot, returned by [`RaftControlPlane::status`] for operational monitoring
@@ -107,9 +142,10 @@ impl RaftControlPlane {
                 .map_err(|e| ControlError::Config(e.to_string()))?,
         );
 
-        let log_store = RedbLogStore::open(dir.join("log.redb"))
+        let mut log_store = RedbLogStore::open(dir.join("log.redb"))
             .map_err(|e| ControlError::Raft(e.to_string()))?;
         let sm_store = StateMachineStore::new(sm.clone());
+        prepare_raft_state(&sm, &mut log_store, &sm_store).await?;
         let raft = MocraRaft::new(node_id, config, StubNetwork, log_store, sm_store)
             .await
             .map_err(|e| ControlError::Raft(e.to_string()))?;
@@ -166,9 +202,10 @@ impl RaftControlPlane {
             .map_err(|e| ControlError::Config(e.to_string()))?,
         );
 
-        let log_store = RedbLogStore::open(dir.join("log.redb"))
+        let mut log_store = RedbLogStore::open(dir.join("log.redb"))
             .map_err(|e| ControlError::Raft(e.to_string()))?;
         let sm_store = StateMachineStore::new(sm.clone());
+        prepare_raft_state(&sm, &mut log_store, &sm_store).await?;
         let raft = MocraRaft::new(node_id, config, HttpNetwork::new(), log_store, sm_store)
             .await
             .map_err(|e| ControlError::Raft(e.to_string()))?;
@@ -625,6 +662,97 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn single_node_recovers_after_confirmed_log_purge() {
+        let dir = tempfile::tempdir().unwrap();
+        let snapshot_index;
+
+        {
+            let cp = RaftControlPlane::start_single_node(1, dir.path())
+                .await
+                .unwrap();
+            cp.wait_leader(Duration::from_secs(10)).await.unwrap();
+            cp.set(b"snapshotted", b"value").await.unwrap();
+            assert_eq!(
+                cp.acquire_lock("before", "owner", 60_000).await.unwrap(),
+                Some(1)
+            );
+            cp.release_lock("before", "owner").await.unwrap();
+
+            cp.raft().trigger().snapshot().await.unwrap();
+            let mut built = None;
+            for _ in 0..50 {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                built = cp.raft().metrics().borrow().snapshot.map(|id| id.index);
+                if built.is_some() {
+                    break;
+                }
+            }
+            snapshot_index = built.expect("snapshot should complete");
+            cp.raft().trigger().purge_log(snapshot_index).await.unwrap();
+            let mut purged = None;
+            for _ in 0..50 {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                purged = cp.raft().metrics().borrow().purged.map(|id| id.index);
+                if purged.is_some_and(|index| index >= snapshot_index) {
+                    break;
+                }
+            }
+            assert!(purged.is_some_and(|index| index >= snapshot_index));
+            cp.shutdown().await.unwrap();
+        }
+
+        let cp = RaftControlPlane::start_single_node(1, dir.path())
+            .await
+            .unwrap();
+        cp.wait_leader(Duration::from_secs(10)).await.unwrap();
+        assert_eq!(
+            cp.get(b"snapshotted").await.unwrap(),
+            Some(b"value".to_vec())
+        );
+        assert!(cp.status().last_applied_index.unwrap_or(0) >= snapshot_index);
+        assert_eq!(
+            cp.acquire_lock("after", "owner", 60_000).await.unwrap(),
+            Some(2)
+        );
+        cp.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn startup_rejects_legacy_state_without_raft_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let sm = StateMachine::open(dir.path().join("sm.redb")).unwrap();
+        sm.apply(&Cmd::Set {
+            key: b"existing".to_vec(),
+            value: b"data".to_vec(),
+        })
+        .unwrap();
+        drop(sm);
+
+        let err = match RaftControlPlane::start_single_node(1, dir.path()).await {
+            Ok(_) => panic!("legacy Raft state must not be started silently"),
+            Err(err) => err,
+        };
+        assert!(err.to_string().contains("legacy Raft state"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn startup_rejects_legacy_log_without_raft_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut log_store = RedbLogStore::open(dir.path().join("log.redb")).unwrap();
+        log_store
+            .save_vote(&openraft::Vote::new(1, 1))
+            .await
+            .unwrap();
+        drop(log_store);
+
+        let err = match RaftControlPlane::start_single_node(1, dir.path()).await {
+            Ok(_) => panic!("legacy Raft log must not be started silently"),
+            Err(err) => err,
+        };
+        assert!(err.to_string().contains("legacy Raft state"), "{err}");
+    }
+
+    #[tokio::test]
     async fn three_node_cluster_replicates_over_http() {
         let d1 = tempfile::tempdir().unwrap();
         let d2 = tempfile::tempdir().unwrap();
@@ -819,7 +947,7 @@ mod tests {
         let mut snap_idx = None;
         for _ in 0..50 {
             tokio::time::sleep(Duration::from_millis(100)).await;
-            if let Some(s) = cp1.raft().metrics().borrow().snapshot.clone() {
+            if let Some(s) = cp1.raft().metrics().borrow().snapshot {
                 snap_idx = Some(s.index);
                 break;
             }
@@ -953,11 +1081,12 @@ mod tests {
             let l2 = cp2.current_leader();
             let l3 = cp3.current_leader();
             // The new leader must be one of the surviving nodes, and both survivors must agree.
-            if let Some(l) = l2 {
-                if l != 1 && Some(l) == l3 {
-                    new_leader = Some(l);
-                    break;
-                }
+            if let Some(l) = l2
+                && l != 1
+                && Some(l) == l3
+            {
+                new_leader = Some(l);
+                break;
             }
         }
         let leader = new_leader.expect("cluster failed to elect a new leader after leader crash");
