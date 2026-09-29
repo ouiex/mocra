@@ -156,3 +156,7 @@ required-features = ["dashboard"]
 [[example]]
 name = "quotes_scraper"
 path = "examples/quotes_scraper.rs"
+
+[[example]]
+name = "quotes_project"
+path = "examples/quotes_project.rs"
