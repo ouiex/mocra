@@ -18,7 +18,7 @@ serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 mocra-proxy = { path = "../mocra-proxy", version = "0.5.0" }
 mocra-dag = { path = "../mocra-dag", version = "0.5.0" }
-mocra-store = { path = "../mocra-store", version = "0.4.1", optional = true }
+mocra-store = { path = "../mocra-store", version = "0.5.0", optional = true }
 polars = { version = "0.52.0", features = ["json", "lazy", "serde", "csv", "timezones", "strings", "ipc", "dtype-decimal"], optional = true }
 # cacheable (cache service: local in-memory backend)
 async-trait = "0.1"
