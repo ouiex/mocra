@@ -1,7 +1,8 @@
 //! Advanced quotes.toscrape.com project: Engine → Module → download/data/store middleware.
 //!
 //! Run from the repository with `cargo run --example quotes_project`. Listing pages stop at the
-//! site's last Next link or page 50, whichever comes first. Unique author pages are fetched too.
+//! site's last Next link or page 50, whichever comes first. A final batch can include empty pages
+//! beyond the site's end. Unique author pages are fetched too.
 //! Each run writes two JSONL files under `data/quotes_project/<run-id>/`, preserving prior runs.
 //! Configuration lives in `examples/quotes_project.toml`; no database or broker is required.
 
@@ -22,13 +23,14 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::collections::HashSet;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock, Mutex as SyncMutex};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex;
 
 const BASE: &str = "https://quotes.toscrape.com";
 const MAX_PAGES: u32 = 50;
+const PAGE_BATCH: u32 = 10;
 const OUTPUT_DIR: &str = "data/quotes_project";
 const MODULE: &str = "quotes_project";
 const DOWNLOAD_MIDDLEWARE: &str = "quotes_headers";
@@ -72,14 +74,27 @@ enum Record {
 #[derive(Default)]
 struct Progress {
     seen_authors: SyncMutex<HashSet<String>>,
-    pages: AtomicUsize,
+    seen_pages: SyncMutex<HashSet<u32>>,
+    last_page: AtomicU32,
     quotes_seen: AtomicUsize,
     authors_queued: AtomicUsize,
     quotes_saved: AtomicUsize,
     authors_saved: AtomicUsize,
     downloads: AtomicUsize,
     normalized: AtomicUsize,
-    finished: AtomicBool,
+}
+
+fn next_batch(page: u32, has_next: bool) -> Vec<u32> {
+    if !has_next || page >= MAX_PAGES {
+        return Vec::new();
+    }
+    if page == 1 {
+        return (2..=PAGE_BATCH.min(MAX_PAGES)).collect();
+    }
+    if page.is_multiple_of(PAGE_BATCH) {
+        return (page + 1..=(page + PAGE_BATCH).min(MAX_PAGES)).collect();
+    }
+    Vec::new()
 }
 
 fn text_of(element: ElementRef<'_>) -> String {
@@ -232,10 +247,10 @@ impl QuotesNode {
         }
 
         if records.is_empty() {
-            return Err(error(
-                ErrorKind::Parser,
-                format!("listing page {page} contained no quotes"),
-            ));
+            // A batch can cross the site's last page; final validation still requires all pages
+            // through the last non-empty page to have completed.
+            println!("[page {page}] no quotes; beyond the available listing pages");
+            return Ok(TaskOutputEvent::default());
         }
         {
             let mut seen = self
@@ -257,25 +272,28 @@ impl QuotesNode {
         self.progress
             .quotes_seen
             .fetch_add(records.len(), Ordering::Relaxed);
-        self.progress.pages.fetch_add(1, Ordering::Relaxed);
-        if page < MAX_PAGES && html.select(&NEXT).next().is_some() {
+        self.progress
+            .seen_pages
+            .lock()
+            .expect("seen_pages poisoned")
+            .insert(page);
+        let has_next = html.select(&NEXT).next().is_some();
+        let next_pages = next_batch(page, has_next);
+        for next_page in &next_pages {
             tasks.push(
                 TaskParserEvent::from(response)
-                    .add_meta("page", page + 1)
+                    .add_meta("page", next_page)
                     .stay_current_step(),
             );
-            println!(
-                "[page {page}] {} quotes; following page {}",
-                records.len(),
-                page + 1
-            );
-        } else {
-            self.progress.finished.store(true, Ordering::Relaxed);
-            println!(
-                "[page {page}] {} quotes; pagination complete",
-                records.len()
-            );
         }
+        if !has_next || page == MAX_PAGES {
+            self.progress.last_page.store(page, Ordering::Relaxed);
+        }
+        println!(
+            "[page {page}] {} quotes; queued {} next-page tasks",
+            records.len(),
+            next_pages.len()
+        );
 
         Ok(TaskOutputEvent::default()
             .with_data(records)
@@ -522,10 +540,13 @@ async fn main() -> Result<()> {
     );
     engine.start().await?;
 
-    let pages = progress.pages.load(Ordering::Relaxed);
+    let last_page = progress.last_page.load(Ordering::Relaxed);
+    let pages = progress.seen_pages.lock().expect("seen_pages poisoned");
     let quotes = progress.quotes_saved.load(Ordering::Relaxed);
     let authors = progress.authors_saved.load(Ordering::Relaxed);
-    if !progress.finished.load(Ordering::Relaxed)
+    if last_page == 0
+        || pages.len() != last_page as usize
+        || !(1..=last_page).all(|page| pages.contains(&page))
         || quotes == 0
         || quotes != progress.quotes_seen.load(Ordering::Relaxed)
         || authors < progress.authors_queued.load(Ordering::Relaxed)
@@ -536,9 +557,76 @@ async fn main() -> Result<()> {
         ));
     }
     println!(
-        "Completed: {pages} listing pages, {quotes} quotes, {authors} authors; {} downloads, {} data transformations",
+        "Completed: {} listing pages, {quotes} quotes, {authors} authors; {} downloads, {} data transformations",
+        pages.len(),
         progress.downloads.load(Ordering::Relaxed),
         progress.normalized.load(Ordering::Relaxed),
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mocra::common::model::meta::MetaData;
+
+    fn response(page: u32) -> Response {
+        Response {
+            id: uuid::Uuid::now_v7(),
+            platform: "quotes.toscrape.com".into(),
+            account: "demo".into(),
+            module: MODULE.into(),
+            status_code: 200,
+            cookies: Cookies::default(),
+            content: Vec::new(),
+            storage_path: None,
+            headers: Vec::new(),
+            task_retry_times: 0,
+            metadata: MetaData::default()
+                .add_trait_config("kind", "listing")
+                .add_trait_config("page", page),
+            download_middleware: Vec::new(),
+            data_middleware: Vec::new(),
+            task_finished: false,
+            context: Default::default(),
+            run_id: uuid::Uuid::now_v7(),
+            prefix_request: uuid::Uuid::nil(),
+            request_hash: None,
+            priority: Default::default(),
+        }
+    }
+
+    #[test]
+    fn listing_parser_queues_independent_page_tasks_and_stops_at_50() {
+        let html = Html::parse_document(
+            r#"<div class="quote"><span class="text">A quote</span><small class="author">Writer</small><a href="/author/Writer">about</a></div><li class="next"><a href="/page/11/">Next</a></li>"#,
+        );
+        for (page, expected) in [
+            (1, (2..=10).collect::<Vec<_>>()),
+            (10, (11..=20).collect()),
+            (50, Vec::new()),
+        ] {
+            let node = QuotesNode {
+                progress: Arc::new(Progress::default()),
+            };
+            let output = node.parse_listing(&response(page), &html).unwrap();
+            let queued: Vec<u64> = output
+                .parser_task
+                .iter()
+                .filter_map(|task| task.metadata.get("page").and_then(Value::as_u64))
+                .collect();
+            assert_eq!(queued, expected);
+        }
+    }
+
+    #[test]
+    fn empty_page_past_the_end_is_ignored() {
+        let node = QuotesNode {
+            progress: Arc::new(Progress::default()),
+        };
+        let html = Html::parse_document("<p>No quotes found!</p>");
+        let output = node.parse_listing(&response(11), &html).unwrap();
+        assert!(output.data.is_empty());
+        assert!(output.parser_task.is_empty());
+    }
 }
