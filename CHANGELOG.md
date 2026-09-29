@@ -18,6 +18,7 @@ All notable changes to this project are documented here. The format is based on
 
 ### Changed
 
+- All six workspace crates now use version 0.5.0, including `mocra-store`.
 - The facade and core crate now require Rust 1.89 for Polars/Excel. `mocra-cluster`,
   `mocra-dag`, and `mocra-proxy` require Rust 1.88 for their current dependencies or syntax.
 - Local channels now honor `channel_config.capacity`, including the log channel. Batch dispatch
