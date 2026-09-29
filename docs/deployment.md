@@ -90,6 +90,11 @@ Mocra::builder()
 adds the seed address of any existing node. `data_dir` is the redb state-machine + Raft log
 directory, so give each node its own path.
 
+`mocra-cluster` 0.5.0 requires persisted Raft state-machine metadata. Data directories written by
+0.4.1 lack it and cannot be reopened safely, especially after log purging. Back up every node's
+directory and migrate its state before upgrading; the new version rejects an in-place restart
+instead of treating old data as an empty cluster. Rolling upgrades from 0.4.1 are unsupported.
+
 Run the bundled example to bring up three nodes (three terminals — the first bootstraps, the rest
 join through it):
 

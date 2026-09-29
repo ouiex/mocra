@@ -4,18 +4,22 @@
 //! This is exactly the state machine Raft replicates: every node calls `apply` once a log entry is
 //! committed and arrives at the same result.
 //!
-//! Tables: `kv` (general-purpose KV), `locks` (distributed locks), `meta` (the fencing counter).
+//! Tables: `kv` (general-purpose KV), `locks` (distributed locks), `meta` (the fencing counter),
+//! and `raft_state` (OpenRaft state-machine progress and the latest snapshot).
 
 use std::path::Path;
 use std::sync::Arc;
 
-use redb::{Database, ReadableTable, TableDefinition};
+use redb::{Database, ReadableTable, TableDefinition, WriteTransaction};
+use serde::Serialize;
+use serde::de::DeserializeOwned;
 
 use crate::cmd::{Cmd, CmdResult, Lock};
 
 const KV: TableDefinition<&[u8], &[u8]> = TableDefinition::new("kv");
 const LOCKS: TableDefinition<&str, &[u8]> = TableDefinition::new("locks");
 const META: TableDefinition<&str, u64> = TableDefinition::new("meta");
+const RAFT_STATE: TableDefinition<&str, &[u8]> = TableDefinition::new("raft_state");
 const FENCING_COUNTER: &str = "fencing_counter";
 
 /// State machine errors.
@@ -39,6 +43,142 @@ fn decode_lock(b: &[u8]) -> Result<Lock, StateMachineError> {
     rmp_serde::from_slice(b).map_err(|e| StateMachineError::Codec(e.to_string()))
 }
 
+fn encode<T: Serialize>(value: &T) -> Result<Vec<u8>, StateMachineError> {
+    rmp_serde::to_vec(value).map_err(|e| StateMachineError::Codec(e.to_string()))
+}
+
+fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, StateMachineError> {
+    rmp_serde::from_slice(bytes).map_err(|e| StateMachineError::Codec(e.to_string()))
+}
+
+fn apply_in_transaction(w: &WriteTransaction, cmd: &Cmd) -> Result<CmdResult, StateMachineError> {
+    let result = match cmd {
+        Cmd::Set { key, value } => {
+            let mut t = w.open_table(KV).map_err(redb_err)?;
+            t.insert(key.as_slice(), value.as_slice())
+                .map_err(redb_err)?;
+            CmdResult::Ok
+        }
+        Cmd::Delete { key } => {
+            let mut t = w.open_table(KV).map_err(redb_err)?;
+            t.remove(key.as_slice()).map_err(redb_err)?;
+            CmdResult::Ok
+        }
+        Cmd::Cas { key, expect, value } => {
+            let mut t = w.open_table(KV).map_err(redb_err)?;
+            let cur = t
+                .get(key.as_slice())
+                .map_err(redb_err)?
+                .map(|g| g.value().to_vec());
+            if cur.as_deref() == expect.as_deref() {
+                t.insert(key.as_slice(), value.as_slice())
+                    .map_err(redb_err)?;
+                CmdResult::Bool(true)
+            } else {
+                CmdResult::Bool(false)
+            }
+        }
+        Cmd::AcquireLock {
+            key,
+            holder,
+            now_ms,
+            ttl_ms,
+        } => {
+            let mut locks = w.open_table(LOCKS).map_err(redb_err)?;
+            let cur = match locks.get(key.as_str()).map_err(redb_err)? {
+                Some(g) => Some(decode_lock(g.value())?),
+                None => None,
+            };
+            let free = match &cur {
+                None => true,
+                Some(l) => l.expire_at_ms <= *now_ms || l.holder == *holder,
+            };
+            if free {
+                let token = {
+                    let mut meta = w.open_table(META).map_err(redb_err)?;
+                    let n = meta
+                        .get(FENCING_COUNTER)
+                        .map_err(redb_err)?
+                        .map(|g| g.value())
+                        .unwrap_or(0)
+                        + 1;
+                    meta.insert(FENCING_COUNTER, n).map_err(redb_err)?;
+                    n
+                };
+                let lock = Lock {
+                    holder: holder.clone(),
+                    expire_at_ms: now_ms + ttl_ms,
+                    fencing_token: token,
+                };
+                locks
+                    .insert(key.as_str(), encode_lock(&lock)?.as_slice())
+                    .map_err(redb_err)?;
+                CmdResult::Fencing(Some(token))
+            } else {
+                CmdResult::Fencing(None)
+            }
+        }
+        Cmd::RenewLock {
+            key,
+            holder,
+            now_ms,
+            ttl_ms,
+        } => {
+            let mut locks = w.open_table(LOCKS).map_err(redb_err)?;
+            let cur = match locks.get(key.as_str()).map_err(redb_err)? {
+                Some(g) => Some(decode_lock(g.value())?),
+                None => None,
+            };
+            match cur {
+                Some(mut l) if l.holder == *holder && l.expire_at_ms > *now_ms => {
+                    l.expire_at_ms = now_ms + ttl_ms;
+                    locks
+                        .insert(key.as_str(), encode_lock(&l)?.as_slice())
+                        .map_err(redb_err)?;
+                    CmdResult::Bool(true)
+                }
+                _ => CmdResult::Bool(false),
+            }
+        }
+        Cmd::ReleaseLock { key, holder } => {
+            let mut locks = w.open_table(LOCKS).map_err(redb_err)?;
+            let held_by_holder = match locks.get(key.as_str()).map_err(redb_err)? {
+                Some(g) => decode_lock(g.value())?.holder == *holder,
+                None => false,
+            };
+            if held_by_holder {
+                locks.remove(key.as_str()).map_err(redb_err)?;
+            }
+            CmdResult::Ok
+        }
+    };
+    Ok(result)
+}
+
+fn restore_in_transaction(w: &WriteTransaction, dump: &SmDump) -> Result<(), StateMachineError> {
+    {
+        let mut t = w.open_table(KV).map_err(redb_err)?;
+        t.retain(|_, _| false).map_err(redb_err)?;
+        for (k, v) in &dump.kv {
+            t.insert(k.as_slice(), v.as_slice()).map_err(redb_err)?;
+        }
+    }
+    {
+        let mut t = w.open_table(LOCKS).map_err(redb_err)?;
+        t.retain(|_, _| false).map_err(redb_err)?;
+        for (k, v) in &dump.locks {
+            t.insert(k.as_str(), v.as_slice()).map_err(redb_err)?;
+        }
+    }
+    {
+        let mut t = w.open_table(META).map_err(redb_err)?;
+        t.retain(|_, _| false).map_err(redb_err)?;
+        t.insert(FENCING_COUNTER, dump.fencing_counter)
+            .map_err(redb_err)?;
+    }
+    Ok(())
+}
+
 /// A redb-backed replicated state machine.
 #[derive(Clone)]
 pub struct StateMachine {
@@ -54,6 +194,7 @@ impl StateMachine {
             w.open_table(KV).map_err(redb_err)?;
             w.open_table(LOCKS).map_err(redb_err)?;
             w.open_table(META).map_err(redb_err)?;
+            w.open_table(RAFT_STATE).map_err(redb_err)?;
         }
         w.commit().map_err(redb_err)?;
         Ok(Self { db: Arc::new(db) })
@@ -62,108 +203,75 @@ impl StateMachine {
     /// Apply a single command deterministically (called by every node once Raft has committed it).
     pub fn apply(&self, cmd: &Cmd) -> Result<CmdResult, StateMachineError> {
         let w = self.db.begin_write().map_err(redb_err)?;
-        let result = match cmd {
-            Cmd::Set { key, value } => {
-                let mut t = w.open_table(KV).map_err(redb_err)?;
-                t.insert(key.as_slice(), value.as_slice())
-                    .map_err(redb_err)?;
-                CmdResult::Ok
-            }
-            Cmd::Delete { key } => {
-                let mut t = w.open_table(KV).map_err(redb_err)?;
-                t.remove(key.as_slice()).map_err(redb_err)?;
-                CmdResult::Ok
-            }
-            Cmd::Cas { key, expect, value } => {
-                let mut t = w.open_table(KV).map_err(redb_err)?;
-                let cur = t
-                    .get(key.as_slice())
-                    .map_err(redb_err)?
-                    .map(|g| g.value().to_vec());
-                if cur.as_deref() == expect.as_deref() {
-                    t.insert(key.as_slice(), value.as_slice())
-                        .map_err(redb_err)?;
-                    CmdResult::Bool(true)
-                } else {
-                    CmdResult::Bool(false)
-                }
-            }
-            Cmd::AcquireLock {
-                key,
-                holder,
-                now_ms,
-                ttl_ms,
-            } => {
-                let mut locks = w.open_table(LOCKS).map_err(redb_err)?;
-                let cur = match locks.get(key.as_str()).map_err(redb_err)? {
-                    Some(g) => Some(decode_lock(g.value())?),
-                    None => None,
-                };
-                let free = match &cur {
-                    None => true,
-                    Some(l) => l.expire_at_ms <= *now_ms || l.holder == *holder,
-                };
-                if free {
-                    let token = {
-                        let mut meta = w.open_table(META).map_err(redb_err)?;
-                        let n = meta
-                            .get(FENCING_COUNTER)
-                            .map_err(redb_err)?
-                            .map(|g| g.value())
-                            .unwrap_or(0)
-                            + 1;
-                        meta.insert(FENCING_COUNTER, n).map_err(redb_err)?;
-                        n
-                    };
-                    let lock = Lock {
-                        holder: holder.clone(),
-                        expire_at_ms: now_ms + ttl_ms,
-                        fencing_token: token,
-                    };
-                    locks
-                        .insert(key.as_str(), encode_lock(&lock)?.as_slice())
-                        .map_err(redb_err)?;
-                    CmdResult::Fencing(Some(token))
-                } else {
-                    CmdResult::Fencing(None)
-                }
-            }
-            Cmd::RenewLock {
-                key,
-                holder,
-                now_ms,
-                ttl_ms,
-            } => {
-                let mut locks = w.open_table(LOCKS).map_err(redb_err)?;
-                let cur = match locks.get(key.as_str()).map_err(redb_err)? {
-                    Some(g) => Some(decode_lock(g.value())?),
-                    None => None,
-                };
-                match cur {
-                    Some(mut l) if l.holder == *holder && l.expire_at_ms > *now_ms => {
-                        l.expire_at_ms = now_ms + ttl_ms;
-                        locks
-                            .insert(key.as_str(), encode_lock(&l)?.as_slice())
-                            .map_err(redb_err)?;
-                        CmdResult::Bool(true)
-                    }
-                    _ => CmdResult::Bool(false),
-                }
-            }
-            Cmd::ReleaseLock { key, holder } => {
-                let mut locks = w.open_table(LOCKS).map_err(redb_err)?;
-                let held_by_holder = match locks.get(key.as_str()).map_err(redb_err)? {
-                    Some(g) => decode_lock(g.value())?.holder == *holder,
-                    None => false,
-                };
-                if held_by_holder {
-                    locks.remove(key.as_str()).map_err(redb_err)?;
-                }
-                CmdResult::Ok
-            }
-        };
+        let result = apply_in_transaction(&w, cmd)?;
         w.commit().map_err(redb_err)?;
         Ok(result)
+    }
+
+    /// Apply a Raft command and persist its state-machine metadata in the same redb transaction.
+    pub(crate) fn apply_with_raft_state<T: Serialize>(
+        &self,
+        cmd: &Cmd,
+        key: &str,
+        state: &T,
+    ) -> Result<CmdResult, StateMachineError> {
+        let state = encode(state)?;
+        let w = self.db.begin_write().map_err(redb_err)?;
+        let result = apply_in_transaction(&w, cmd)?;
+        {
+            let mut t = w.open_table(RAFT_STATE).map_err(redb_err)?;
+            t.insert(key, state.as_slice()).map_err(redb_err)?;
+        }
+        w.commit().map_err(redb_err)?;
+        Ok(result)
+    }
+
+    /// Load a value from the internal persistent Raft state table.
+    pub(crate) fn raft_state<T: DeserializeOwned>(
+        &self,
+        key: &str,
+    ) -> Result<Option<T>, StateMachineError> {
+        let r = self.db.begin_read().map_err(redb_err)?;
+        let t = r.open_table(RAFT_STATE).map_err(redb_err)?;
+        match t.get(key).map_err(redb_err)? {
+            Some(value) => Ok(Some(decode(value.value())?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Store a value in the internal persistent Raft state table.
+    pub(crate) fn set_raft_state<T: Serialize>(
+        &self,
+        key: &str,
+        state: &T,
+    ) -> Result<(), StateMachineError> {
+        let state = encode(state)?;
+        let w = self.db.begin_write().map_err(redb_err)?;
+        {
+            let mut t = w.open_table(RAFT_STATE).map_err(redb_err)?;
+            t.insert(key, state.as_slice()).map_err(redb_err)?;
+        }
+        w.commit().map_err(redb_err)?;
+        Ok(())
+    }
+
+    pub(crate) fn has_business_data(&self) -> Result<bool, StateMachineError> {
+        let r = self.db.begin_read().map_err(redb_err)?;
+        Ok(r.open_table(KV)
+            .map_err(redb_err)?
+            .first()
+            .map_err(redb_err)?
+            .is_some()
+            || r.open_table(LOCKS)
+                .map_err(redb_err)?
+                .first()
+                .map_err(redb_err)?
+                .is_some()
+            || r.open_table(META)
+                .map_err(redb_err)?
+                .get(FENCING_COUNTER)
+                .map_err(redb_err)?
+                .is_some())
     }
 
     /// Read a KV pair (a local read; linearizability is guaranteed by the Raft read-index above).
@@ -173,7 +281,7 @@ impl StateMachine {
         Ok(t.get(key).map_err(redb_err)?.map(|g| g.value().to_vec()))
     }
 
-    /// For snapshots: serialize the entire business state (kv + locks) into bytes.
+    /// For snapshots: serialize the entire replicated business state into bytes.
     pub fn dump(&self) -> Result<Vec<u8>, StateMachineError> {
         let r = self.db.begin_read().map_err(redb_err)?;
         let mut kv = Vec::new();
@@ -192,39 +300,60 @@ impl StateMachine {
                 locks.push((k.value().to_string(), v.value().to_vec()));
             }
         }
-        rmp_serde::to_vec(&SmDump { kv, locks })
-            .map_err(|e| StateMachineError::Codec(e.to_string()))
+        let fencing_counter = r
+            .open_table(META)
+            .map_err(redb_err)?
+            .get(FENCING_COUNTER)
+            .map_err(redb_err)?
+            .map(|g| g.value())
+            .unwrap_or(0);
+        encode(&SmDump {
+            kv,
+            locks,
+            fencing_counter,
+        })
     }
 
     /// Restore from a snapshot: clear kv / locks, then load the contents.
     pub fn restore(&self, bytes: &[u8]) -> Result<(), StateMachineError> {
-        let dump: SmDump =
-            rmp_serde::from_slice(bytes).map_err(|e| StateMachineError::Codec(e.to_string()))?;
+        let dump: SmDump = decode(bytes)?;
         let w = self.db.begin_write().map_err(redb_err)?;
+        restore_in_transaction(&w, &dump)?;
+        w.commit().map_err(redb_err)?;
+        Ok(())
+    }
+
+    /// Install a snapshot and its OpenRaft metadata atomically.
+    pub(crate) fn restore_with_raft_state<M: Serialize, S: Serialize>(
+        &self,
+        bytes: &[u8],
+        meta_key: &str,
+        meta: &M,
+        snapshot_key: &str,
+        snapshot: &S,
+    ) -> Result<(), StateMachineError> {
+        let dump: SmDump = decode(bytes)?;
+        let meta = encode(meta)?;
+        let snapshot = encode(snapshot)?;
+        let w = self.db.begin_write().map_err(redb_err)?;
+        restore_in_transaction(&w, &dump)?;
         {
-            let mut t = w.open_table(KV).map_err(redb_err)?;
-            t.retain(|_, _| false).map_err(redb_err)?;
-            for (k, v) in &dump.kv {
-                t.insert(k.as_slice(), v.as_slice()).map_err(redb_err)?;
-            }
-        }
-        {
-            let mut t = w.open_table(LOCKS).map_err(redb_err)?;
-            t.retain(|_, _| false).map_err(redb_err)?;
-            for (k, v) in &dump.locks {
-                t.insert(k.as_str(), v.as_slice()).map_err(redb_err)?;
-            }
+            let mut t = w.open_table(RAFT_STATE).map_err(redb_err)?;
+            t.insert(meta_key, meta.as_slice()).map_err(redb_err)?;
+            t.insert(snapshot_key, snapshot.as_slice())
+                .map_err(redb_err)?;
         }
         w.commit().map_err(redb_err)?;
         Ok(())
     }
 }
 
-/// The serializable representation of a state machine snapshot (all of kv + locks).
+/// The serializable representation of the complete replicated business state.
 #[derive(serde::Serialize, serde::Deserialize)]
 struct SmDump {
     kv: Vec<(Vec<u8>, Vec<u8>)>,
     locks: Vec<(String, Vec<u8>)>,
+    fencing_counter: u64,
 }
 
 #[cfg(test)]
@@ -345,5 +474,58 @@ mod tests {
             .unwrap(),
             CmdResult::Fencing(Some(3))
         );
+    }
+
+    #[test]
+    fn snapshot_restores_fencing_counter() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = StateMachine::open(dir.path().join("source.redb")).unwrap();
+
+        assert_eq!(
+            source
+                .apply(&Cmd::AcquireLock {
+                    key: "first".into(),
+                    holder: "a".into(),
+                    now_ms: 1,
+                    ttl_ms: 10,
+                })
+                .unwrap(),
+            CmdResult::Fencing(Some(1))
+        );
+        source
+            .apply(&Cmd::ReleaseLock {
+                key: "first".into(),
+                holder: "a".into(),
+            })
+            .unwrap();
+
+        let snapshot = source.dump().unwrap();
+        let restored = StateMachine::open(dir.path().join("restored.redb")).unwrap();
+        restored.restore(&snapshot).unwrap();
+
+        assert_eq!(
+            restored
+                .apply(&Cmd::AcquireLock {
+                    key: "second".into(),
+                    holder: "b".into(),
+                    now_ms: 20,
+                    ttl_ms: 10,
+                })
+                .unwrap(),
+            CmdResult::Fencing(Some(2))
+        );
+    }
+
+    #[test]
+    fn legacy_snapshot_without_fencing_counter_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let sm = sm(&dir);
+        let legacy = rmp_serde::to_vec(&(
+            Vec::<(Vec<u8>, Vec<u8>)>::new(),
+            Vec::<(String, Vec<u8>)>::new(),
+        ))
+        .unwrap();
+
+        assert!(sm.restore(&legacy).is_err());
     }
 }

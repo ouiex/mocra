@@ -2,7 +2,7 @@
 name = "mocra-dag"
 version = "0.5.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 description = "Generic distributed DAG execution engine for the mocra crawler framework (zero crawler coupling)."
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/ouiex/mocra"

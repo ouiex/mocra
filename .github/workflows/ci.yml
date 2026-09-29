@@ -1,12 +1,11 @@
 name: CI
 
-# 仅在推送 tag 时运行 CI(不再对每次 push main / PR 触发)。
-# 想只跑版本 tag,把 '*' 改成 'v*'(如 v0.2.16);想加手动触发,取消 workflow_dispatch 注释。
 on:
   push:
     tags:
       - '*'
-  # workflow_dispatch:   # 取消注释即可在 Actions 页手动 “Run workflow”
+  pull_request:
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
@@ -35,6 +34,13 @@ jobs:
       # curl / ssl / sasl / zlib headers. All harmless when the feature is off.
       - name: Install system deps
         run: sudo apt-get update && sudo apt-get install -y cmake libssl-dev libsasl2-dev libcurl4-openssl-dev zlib1g-dev
+
+      - name: Check minimum supported Rust version
+        run: |
+          rustup toolchain install 1.88.0 --profile minimal
+          cargo +1.88.0 check -p mocra-cluster -p mocra-dag -p mocra-proxy --lib
+          rustup toolchain install 1.89.0 --profile minimal
+          cargo +1.89.0 check -p mocra --lib --features store,dashboard,cluster-embedded,queue-nats,polars,excel
 
       - name: Build (default features)
         run: cargo build --lib
@@ -127,6 +133,6 @@ jobs:
           cargo clippy -p mocra-core --features dashboard -- -D warnings
 
       - name: Docs (workspace crates, deny warnings)
-        run: cargo doc --no-deps -p mocra-cluster -p mocra-proxy -p mocra-dag -p mocra-store -p mocra-core
+        run: cargo doc --no-deps -p mocra-cluster -p mocra-proxy -p mocra-dag -p mocra-store -p mocra-core -p mocra
         env:
           RUSTDOCFLAGS: "-D warnings"

@@ -7,7 +7,7 @@
 [![Crates.io](https://img.shields.io/crates/v/mocra.svg)](https://crates.io/crates/mocra)
 [![docs.rs](https://docs.rs/mocra/badge.svg)](https://docs.rs/mocra)
 [![License](https://img.shields.io/crates/l/mocra.svg)](#许可证)
-[![Rust](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](https://www.rust-lang.org)
+[![Rust](https://img.shields.io/badge/rust-1.89%2B-orange.svg)](https://www.rust-lang.org)
 
 [English](README.md) | 中文
 

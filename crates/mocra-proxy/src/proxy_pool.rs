@@ -1219,13 +1219,13 @@ impl ProxyPool {
 
         let threshold = (self.config.max_size as f32 * self.config.refill_threshold) as usize;
 
-        if current_size < self.config.min_size || current_size < threshold {
-            if let Err(error) = self.refill_pool(provider_name, false, current_size).await {
-                if current_size == 0 {
-                    return Err(error);
-                }
-                log::warn!("proxy refill failed for {provider_name}: {error}");
+        if (current_size < self.config.min_size || current_size < threshold)
+            && let Err(error) = self.refill_pool(provider_name, false, current_size).await
+        {
+            if current_size == 0 {
+                return Err(error);
             }
+            log::warn!("proxy refill failed for {provider_name}: {error}");
         }
 
         Ok(())

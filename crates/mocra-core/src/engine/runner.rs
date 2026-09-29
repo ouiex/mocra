@@ -178,7 +178,7 @@ impl ProcessorRunner {
                             }
 
                             loop_count += items.len() as u64;
-                            if loop_count % 1000 == 0 {
+                            if loop_count.is_multiple_of(1000) {
                                 debug!("Processor {}: processed {} items", self.name, loop_count);
                             }
                             // Diagnostic: log each received item so we can verify delivery

@@ -667,7 +667,7 @@ impl MocraBuilder {
     /// - [`from_toml`](MocraBuilder::from_toml) provided → use that config (may include a DB).
     /// - Not provided → **DB-less / single-node** default config, with one seed task injected
     ///   automatically per spider.
-    /// - [`cluster`](MocraBuilder::cluster) provided → start the embedded Raft control plane and
+    /// - `.cluster(...)` provided → start the embedded Raft control plane and
     ///   route coordination through Raft.
     pub async fn run(self) -> Result<()> {
         let standalone = self.config_path.is_none();
