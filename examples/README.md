@@ -29,6 +29,7 @@ middleware normalizes and validates parsed records; its store middleware writes 
 `authors.jsonl`. The TOML config disables the request
 rate limiter, uses 16 workers, and stops after 2 idle seconds.
 Each run uses a new output directory and prints stage counts on completion.
+INFO-level engine events and processor logs are written to the daily file in `logs/quotes_project*`.
 The `Spider`/`DataSink` facade in `quotes_scraper` is the simpler alternative; typed sink items
 do not pass through the engine's data middleware.
 
@@ -39,6 +40,7 @@ do not pass through the engine's data middleware.
 TOML 配置关闭请求限速，使用 16 个工作并发，并在空闲 2 秒后退出。
 每次运行都会生成新的输出目录，并在完成时打印各阶段计数。简易的 `quotes_scraper` 使用
 `Spider`/`DataSink`；其类型化输出不会经过引擎的数据中间件。
+INFO 级别的引擎事件和处理器日志写入 `logs/quotes_project*` 的每日文件。
 
 `explicit_proxy` sets one request's proxy through `Request::use_proxy`. It stays fixed by default.
 For managed proxy selection in the DB-backed task model, add `[[proxy.direct]]` (or a provider)
