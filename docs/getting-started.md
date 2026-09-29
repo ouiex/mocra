@@ -10,9 +10,9 @@ in-memory, **no database**.
 
 That's it for the quickstart. mocra's default build is single-node with no external services.
 
-> A **database** (PostgreSQL / SQLite) is *optional* — it only comes into play
-> on the advanced, multi-stage and distributed paths (the `store` feature, TOML config, or the
-> embedded `cluster-embedded` control plane). You do **not** need it to follow this guide.
+> A **database** (PostgreSQL / SQLite) is *optional*. It is needed for the DB-backed
+> account × platform × module task model (`store` feature), but not for this guide,
+> TOML configuration by itself, or the embedded `cluster-embedded` control plane.
 
 ## Installation
 
@@ -20,13 +20,13 @@ Add mocra to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-mocra = "0.4"
+mocra = "0.5"
 async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }
 tokio = { version = "1", features = ["full"] }
 
 # Optional: mocra returns the raw HTTP Response — bring your own HTML parser.
-scraper = "0.20"   # CSS selectors, for HTML targets
+scraper = "0.27"   # CSS selectors, for HTML targets
 ```
 
 mocra hands you the raw `Response`; you choose how to parse it (`scraper` for HTML,
@@ -45,7 +45,7 @@ use serde::Serialize;
 
 #[derive(Debug, Serialize)]
 struct Page {
-    url: String,
+    module_id: String,
     status: u16,
 }
 
@@ -67,7 +67,7 @@ impl Spider for Httpbin {
     // Parse one downloaded response; `cx.emit` produces a typed item.
     async fn parse(&self, res: Response, cx: &mut Ctx<Self::Item>) -> Result<()> {
         cx.emit(Page {
-            url: res.module_id(),
+            module_id: res.module_id(),
             status: res.status_code,
         });
         Ok(())
@@ -78,7 +78,7 @@ impl Spider for Httpbin {
 async fn main() -> Result<()> {
     Mocra::builder()
         .spider(Httpbin, on_item(|p: Page| async move {
-            println!("[item] {} -> {}", p.url, p.status);
+            println!("[item] module={} status={}", p.module_id, p.status);
         }))
         .run()
         .await
@@ -102,7 +102,10 @@ queues go idle** — ideal for one-shot scrapes.
   set headers, timeout, etc.); `s.add(Request)` enqueues any method.
 - **`parse(Response, &mut Ctx)`** — `cx.emit(item)` produces one typed item;
   `cx.follow_get(url)` / `cx.follow(Request)` enqueue follow-up requests that re-enter `parse`
-  (pagination, detail pages). Add a stop condition so following terminates.
+  (pagination, detail pages). `follow(Request)` preserves the request method, headers, body,
+  cookies, and explicit proxy. Add a stop condition so following terminates.
+- **`res.module_id()`** identifies the account/platform/module. It is not the fetched URL;
+  use request metadata or response content when you need to identify a source page.
 - **The sink** — `on_item(|item| async move { … })` runs your async closure for every emitted
   item (print, write a file, insert into a DB, send downstream).
 
@@ -173,7 +176,7 @@ Or implement `DataSink<Item>` yourself for full control.
 ## Optional features
 
 All are off by default; enable per need, e.g.
-`mocra = { version = "0.4", features = ["dashboard"] }`.
+`mocra = { version = "0.5", features = ["dashboard"] }`.
 
 | Feature | Unlocks |
 |---|---|
@@ -192,8 +195,15 @@ All are off by default; enable per need, e.g.
   `ModuleNodeTrait` for multi-stage pipelines, login flows, and custom middleware.
 - [DAG Guide](dag-guide.md) — fan-out / fan-in graphs and advance gates.
 - [Configuration](configuration.md) — the full TOML reference (DB, queues, API).
+- [Follow-up Requests](follow-up-requests.md) — preserve POST, headers, cookies, metadata, and proxy through a follow-up.
+- [Proxies and Downloaders](proxies-and-downloaders.md) — fixed vs managed proxies, rotation, and custom downloaders.
+- [Runtime Tuning](runtime-tuning.md) — queue bounds, proxy Client cache, and DAG checkpoints.
 - Runnable examples in [`../examples/`](../examples/):
   - [`spider_quickstart.rs`](../examples/spider_quickstart.rs) — the minimal `Spider` above (no DB).
   - [`custom_downloader.rs`](../examples/custom_downloader.rs) — implement the `Downloader` trait and inject it with `.default_downloader()`.
+  - [`follow_request.rs`](../examples/follow_request.rs) — preserve a POST request through `Ctx::follow` (offline).
+  - [`proxy_pool.rs`](../examples/proxy_pool.rs) — select and report proxy attempts (offline simulation).
+  - [`explicit_proxy.rs`](../examples/explicit_proxy.rs) — use a reachable proxy for a `Spider` request.
+  - [`quotes_scraper.rs`](../examples/quotes_scraper.rs) — pagination and JSONL output from a real site.
   - [`dashboard.rs`](../examples/dashboard.rs) — the built-in observability dashboard (`--features dashboard`).
   - [`cluster_quickstart.rs`](../examples/cluster_quickstart.rs) — a self-organizing embedded cluster (`--features cluster-embedded`).

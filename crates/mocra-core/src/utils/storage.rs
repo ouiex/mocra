@@ -17,6 +17,7 @@ pub trait Offloadable {
     async fn reload(&mut self, storage: &Arc<dyn BlobStorage>) -> Result<()>;
 }
 
+/// Stores blobs under a root directory and returns relative keys suitable for queue messages.
 pub struct FileSystemBlobStorage {
     root_path: std::path::PathBuf,
 }
@@ -37,11 +38,11 @@ impl BlobStorage for FileSystemBlobStorage {
             tokio::fs::create_dir_all(parent).await?;
         }
         tokio::fs::write(&path, data).await?;
-        Ok(path.to_string_lossy().to_string())
+        Ok(key.to_string())
     }
 
     async fn get(&self, key: &str) -> Result<Vec<u8>> {
-        let path = std::path::PathBuf::from(key);
+        let path = self.root_path.join(key);
         let data = tokio::fs::read(path).await?;
         Ok(data)
     }

@@ -3,7 +3,8 @@ use crate::common::model::config::Config;
 use crate::common::model::message::{TaskErrorEvent, TaskEvent, TaskParserEvent};
 use crate::common::model::{Prioritizable, Priority, Request, Response};
 use crate::common::policy::PolicyResolver;
-use crate::errors::ErrorKind;
+use crate::common::storage::file::FileBlobStorage;
+use crate::errors::{Error, ErrorKind};
 use crate::queue::batcher::Batcher;
 use crate::queue::channel::Channel;
 use crate::queue::compensation::{Compensator, Identifiable};
@@ -14,8 +15,6 @@ use crate::queue::kafka::KafkaQueue;
 use crate::queue::nats::NatsQueue;
 use crate::queue::{HEADER_ATTEMPT, HEADER_CREATED_AT, MqBackend, NackPolicy, QueuedItem};
 use crate::utils::logger::LogModel;
-use crate::utils::storage::FileSystemBlobStorage;
-use futures::StreamExt;
 use futures::future::join_all;
 use log::{error, info};
 use metrics::counter;
@@ -58,7 +57,14 @@ enum QueueCodec {
     Msgpack,
 }
 
-fn queue_codec_from_config(cfg: &Config) -> QueueCodec {
+fn queue_config_error(message: impl Into<String>) -> Error {
+    Error::new(
+        ErrorKind::Queue,
+        Some(std::io::Error::other(message.into())),
+    )
+}
+
+fn queue_codec_from_config(cfg: &Config) -> crate::errors::Result<QueueCodec> {
     let codec = cfg
         .channel_config
         .queue_codec
@@ -67,12 +73,15 @@ fn queue_codec_from_config(cfg: &Config) -> QueueCodec {
         .to_lowercase();
 
     match codec.as_str() {
-        "json" => QueueCodec::Json,
-        "msgpack" | "rmp" => QueueCodec::Msgpack,
-        _ => QueueCodec::Msgpack,
+        "json" => Ok(QueueCodec::Json),
+        "msgpack" | "rmp" => Ok(QueueCodec::Msgpack),
+        _ => Err(queue_config_error(format!(
+            "unsupported queue codec: {codec}"
+        ))),
     }
 }
 
+#[derive(Clone)]
 pub struct QueueManager {
     pub channel: Arc<Channel>,
     pub backend: Option<Arc<dyn MqBackend>>,
@@ -105,7 +114,40 @@ impl QueueManager {
     }
 
     pub fn from_config_with_log_topic(cfg: &Config, log_topic: Option<&str>) -> Arc<Self> {
+        let manager = Self::try_from_config_with_log_topic(cfg, log_topic)
+            .expect("invalid queue configuration");
+        manager.subscribe();
+        manager
+    }
+
+    pub fn try_from_config(cfg: &Config) -> crate::errors::Result<Arc<Self>> {
+        Self::try_from_config_with_log_topic(cfg, None)
+    }
+
+    pub fn try_from_config_with_log_topic(
+        cfg: &Config,
+        log_topic: Option<&str>,
+    ) -> crate::errors::Result<Arc<Self>> {
         let channel_config = &cfg.channel_config;
+        if channel_config.capacity == 0 || channel_config.batch_concurrency == Some(0) {
+            return Err(queue_config_error(
+                "queue capacity and batch concurrency must be positive",
+            ));
+        }
+        if channel_config.kafka.is_some() && channel_config.nats.is_some() {
+            return Err(queue_config_error(
+                "configure either Kafka or NATS, not both",
+            ));
+        }
+        if let Some(blob) = &channel_config.blob_storage
+            && let Some(path) = &blob.path
+            && (channel_config.kafka.is_some() || channel_config.nats.is_some())
+            && (!blob.shared_path || !std::path::Path::new(path).is_absolute())
+        {
+            return Err(queue_config_error(
+                "remote queue blob_storage.path requires an absolute shared path and shared_path: true",
+            ));
+        }
         #[allow(unused_variables)] // used by queue-kafka / queue-nats backends
         let namespace = &cfg.name;
 
@@ -128,58 +170,40 @@ impl QueueManager {
 
         let mut queue_manager = if let Some(kafka_config) = &channel_config.kafka {
             #[cfg(feature = "queue-kafka")]
-            let qm = match KafkaQueue::new(
-                kafka_config,
-                channel_config.minid_time,
-                namespace,
-                nack_policy,
-            ) {
-                Ok(kafka_queue) => {
-                    info!("KafkaQueue initialized successfully");
-                    QueueManager::new(Some(Arc::new(kafka_queue)), channel_config.capacity)
-                }
-                Err(e) => {
-                    error!("KafkaQueue init failed, fallback to in-memory queue: {}", e);
-                    QueueManager::new(None, channel_config.capacity)
-                }
-            };
+            {
+                let queue = KafkaQueue::new(
+                    kafka_config,
+                    channel_config.minid_time,
+                    namespace,
+                    nack_policy,
+                )?;
+                QueueManager::new(Some(Arc::new(queue)), channel_config.capacity)
+            }
             #[cfg(not(feature = "queue-kafka"))]
-            let qm = {
+            {
                 let _ = kafka_config;
-                error!(
-                    "channel_config.kafka is set but the `queue-kafka` feature is disabled; \
-                     falling back to in-memory queue"
-                );
-                QueueManager::new(None, channel_config.capacity)
-            };
-            qm
+                return Err(queue_config_error(
+                    "channel_config.kafka requires the `queue-kafka` feature",
+                ));
+            }
         } else if let Some(nats_config) = &channel_config.nats {
             #[cfg(feature = "queue-nats")]
-            let qm = match NatsQueue::new(
-                nats_config,
-                channel_config.minid_time,
-                namespace,
-                nack_policy,
-            ) {
-                Ok(nats_queue) => {
-                    info!("NatsQueue (JetStream) initialized successfully");
-                    QueueManager::new(Some(Arc::new(nats_queue)), channel_config.capacity)
-                }
-                Err(e) => {
-                    error!("NatsQueue init failed, fallback to in-memory queue: {}", e);
-                    QueueManager::new(None, channel_config.capacity)
-                }
-            };
+            {
+                let queue = NatsQueue::new(
+                    nats_config,
+                    channel_config.minid_time,
+                    namespace,
+                    nack_policy,
+                )?;
+                QueueManager::new(Some(Arc::new(queue)), channel_config.capacity)
+            }
             #[cfg(not(feature = "queue-nats"))]
-            let qm = {
+            {
                 let _ = nats_config;
-                error!(
-                    "channel_config.nats is set but the `queue-nats` feature is disabled; \
-                     falling back to in-memory queue"
-                );
-                QueueManager::new(None, channel_config.capacity)
-            };
-            qm
+                return Err(queue_config_error(
+                    "channel_config.nats requires the `queue-nats` feature",
+                ));
+            }
         } else {
             info!("In-Memory Queue initialized (Single Node Mode)");
             QueueManager::new(None, channel_config.capacity)
@@ -190,7 +214,7 @@ impl QueueManager {
         }
 
         queue_manager.nack_policy = nack_policy;
-        queue_manager.queue_codec = queue_codec_from_config(cfg);
+        queue_manager.queue_codec = queue_codec_from_config(cfg)?;
 
         if let Some(concurrency) = channel_config.batch_concurrency {
             queue_manager.with_concurrency(concurrency);
@@ -201,14 +225,13 @@ impl QueueManager {
 
         if let Some(blob_config) = &channel_config.blob_storage {
             if let Some(path) = &blob_config.path {
-                let storage = Arc::new(FileSystemBlobStorage::new(path));
+                let storage = Arc::new(FileBlobStorage::new(path));
                 queue_manager.with_blob_storage(storage);
                 info!("BlobStorage initialized at: {}", path);
             }
         }
 
-        queue_manager.subscribe();
-        Arc::new(queue_manager)
+        Ok(Arc::new(queue_manager))
     }
 
     pub fn with_backend(&mut self, backend: Arc<dyn MqBackend>) {
@@ -235,121 +258,131 @@ impl QueueManager {
         self.log_topic = topic.into();
     }
 
+    /// Compatibility entry point for callers that start queues synchronously.
+    /// Engine startup uses subscribe_checked so subscription failures are returned.
     pub fn subscribe(&self) {
-        if let Some(backend) = &self.backend {
-            let backend = backend.clone();
-            let channel = self.channel.clone();
-            let compensator = self.compensator.clone();
-            let blob_storage = self.blob_storage.clone();
-            let concurrency = self.batch_concurrency;
-            let compression_threshold = self.compression_threshold;
-            let codec = self.queue_codec;
-
-            // Define outbound channels (Local -> Remote)
-            // format: (topic, receiver_channel)
-            self.spawn_forwarder(
-                "task",
-                channel.remote_task_receiver.clone(),
-                backend.clone(),
-                blob_storage.clone(),
-                concurrency,
-                compression_threshold,
-            );
-            self.spawn_forwarder(
-                "request",
-                channel.request_receiver.clone(),
-                backend.clone(),
-                blob_storage.clone(),
-                concurrency,
-                compression_threshold,
-            );
-            self.spawn_forwarder(
-                "response",
-                channel.response_receiver.clone(),
-                backend.clone(),
-                blob_storage.clone(),
-                concurrency,
-                compression_threshold,
-            );
-            self.spawn_forwarder(
-                "parser_task",
-                channel.parser_task_receiver.clone(),
-                backend.clone(),
-                blob_storage.clone(),
-                concurrency,
-                compression_threshold,
-            );
-            self.spawn_forwarder(
-                "error_task",
-                channel.error_receiver.clone(),
-                backend.clone(),
-                blob_storage.clone(),
-                concurrency,
-                compression_threshold,
-            );
-            self.spawn_forwarder(
-                self.log_topic.as_str(),
-                channel.log_receiver.clone(),
-                backend.clone(),
-                blob_storage.clone(),
-                concurrency,
-                compression_threshold,
-            );
-
-            // Define inbound subscriptions (Remote -> Local)
-            tokio::spawn(async move {
-                Self::subscribe_all_priorities(
-                    "task",
-                    channel.task_sender.clone(),
-                    backend.clone(),
-                    compensator.clone(),
-                    blob_storage.clone(),
-                    concurrency,
-                    codec,
-                )
-                .await;
-                Self::subscribe_all_priorities(
-                    "request",
-                    channel.download_request_sender.clone(),
-                    backend.clone(),
-                    compensator.clone(),
-                    blob_storage.clone(),
-                    concurrency,
-                    codec,
-                )
-                .await;
-                Self::subscribe_all_priorities(
-                    "response",
-                    channel.remote_response_sender.clone(),
-                    backend.clone(),
-                    compensator.clone(),
-                    blob_storage.clone(),
-                    concurrency,
-                    codec,
-                )
-                .await;
-                Self::subscribe_all_priorities(
-                    "parser_task",
-                    channel.remote_parser_task_sender.clone(),
-                    backend.clone(),
-                    compensator.clone(),
-                    blob_storage.clone(),
-                    concurrency,
-                    codec,
-                )
-                .await;
-                Self::subscribe_all_priorities(
-                    "error_task",
-                    channel.remote_error_sender.clone(),
-                    backend.clone(),
-                    compensator.clone(),
-                    blob_storage.clone(),
-                    concurrency,
-                    codec,
-                )
-                .await;
-            });
+        if self.backend.is_none() {
+            return;
         }
+        let manager = self.clone();
+        tokio::runtime::Handle::try_current()
+            .expect("QueueManager::subscribe requires a Tokio runtime; use subscribe_checked during async startup")
+            .spawn(async move {
+            if let Err(error) = manager.subscribe_checked().await {
+                error!("Queue subscription failed: {error}");
+            }
+        });
+    }
+
+    /// Registers all remote consumers before accepting outbound work.
+    pub async fn subscribe_checked(&self) -> crate::errors::Result<()> {
+        let Some(backend) = &self.backend else {
+            return Ok(());
+        };
+        let backend = backend.clone();
+        let channel = self.channel.clone();
+        let compensator = self.compensator.clone();
+        let blob_storage = self.blob_storage.clone();
+        let concurrency = self.batch_concurrency;
+        let codec = self.queue_codec;
+
+        tokio::try_join!(
+            Self::subscribe_all_priorities(
+                "task",
+                channel.task_sender.clone(),
+                backend.clone(),
+                compensator.clone(),
+                blob_storage.clone(),
+                concurrency,
+                codec,
+            ),
+            Self::subscribe_all_priorities(
+                "request",
+                channel.download_request_sender.clone(),
+                backend.clone(),
+                compensator.clone(),
+                blob_storage.clone(),
+                concurrency,
+                codec,
+            ),
+            Self::subscribe_all_priorities(
+                "response",
+                channel.remote_response_sender.clone(),
+                backend.clone(),
+                compensator.clone(),
+                blob_storage.clone(),
+                concurrency,
+                codec,
+            ),
+            Self::subscribe_all_priorities(
+                "parser_task",
+                channel.remote_parser_task_sender.clone(),
+                backend.clone(),
+                compensator.clone(),
+                blob_storage.clone(),
+                concurrency,
+                codec,
+            ),
+            Self::subscribe_all_priorities(
+                "error_task",
+                channel.remote_error_sender.clone(),
+                backend.clone(),
+                compensator,
+                blob_storage.clone(),
+                concurrency,
+                codec,
+            ),
+        )?;
+
+        self.spawn_forwarder(
+            "task",
+            channel.remote_task_receiver.clone(),
+            backend.clone(),
+            blob_storage.clone(),
+            concurrency,
+            self.compression_threshold,
+        );
+        self.spawn_forwarder(
+            "request",
+            channel.request_receiver.clone(),
+            backend.clone(),
+            blob_storage.clone(),
+            concurrency,
+            self.compression_threshold,
+        );
+        self.spawn_forwarder(
+            "response",
+            channel.response_receiver.clone(),
+            backend.clone(),
+            blob_storage.clone(),
+            concurrency,
+            self.compression_threshold,
+        );
+        self.spawn_forwarder(
+            "parser_task",
+            channel.parser_task_receiver.clone(),
+            backend.clone(),
+            blob_storage.clone(),
+            concurrency,
+            self.compression_threshold,
+        );
+        self.spawn_forwarder(
+            "error_task",
+            channel.error_receiver.clone(),
+            backend.clone(),
+            blob_storage.clone(),
+            concurrency,
+            self.compression_threshold,
+        );
+        self.spawn_forwarder(
+            self.log_topic.as_str(),
+            channel.log_receiver.clone(),
+            backend,
+            blob_storage,
+            concurrency,
+            self.compression_threshold,
+        );
+        Ok(())
     }
 
     async fn subscribe_all_priorities<T>(
@@ -360,7 +393,8 @@ impl QueueManager {
         blob_storage: Option<Arc<dyn BlobStorage>>,
         concurrency: usize,
         codec: QueueCodec,
-    ) where
+    ) -> crate::errors::Result<()>
+    where
         T: serde::de::DeserializeOwned
             + Send
             + 'static
@@ -369,27 +403,20 @@ impl QueueManager {
             + Offloadable,
     {
         let priorities = [Priority::High, Priority::Normal, Priority::Low];
-        futures::stream::iter(priorities)
-            .for_each_concurrent(None, |priority| {
-                let sender = sender.clone();
-                let backend = backend.clone();
-                let compensator = compensator.clone();
-                let blob_storage = blob_storage.clone();
-                async move {
-                    let topic = format!("{}-{}", topic_base, priority.suffix());
-                    Self::subscribe_topic(
-                        &topic,
-                        sender,
-                        backend,
-                        compensator,
-                        blob_storage,
-                        concurrency,
-                        codec,
-                    )
-                    .await;
-                }
-            })
-            .await;
+        for priority in priorities {
+            let topic = format!("{}-{}", topic_base, priority.suffix());
+            Self::subscribe_topic(
+                &topic,
+                sender.clone(),
+                backend.clone(),
+                compensator.clone(),
+                blob_storage.clone(),
+                concurrency,
+                codec,
+            )
+            .await?;
+        }
+        Ok(())
     }
 
     async fn subscribe_topic<T>(
@@ -400,7 +427,8 @@ impl QueueManager {
         blob_storage: Option<Arc<dyn BlobStorage>>,
         concurrency: usize,
         codec: QueueCodec,
-    ) where
+    ) -> crate::errors::Result<()>
+    where
         T: serde::de::DeserializeOwned
             + Send
             + 'static
@@ -409,10 +437,7 @@ impl QueueManager {
             + Offloadable,
     {
         let (tx, mut rx) = tokio::sync::mpsc::channel(1024);
-        if let Err(e) = backend.subscribe(topic, tx).await {
-            error!("Failed to subscribe to topic {}: {}", topic, e);
-            return;
-        }
+        backend.subscribe(topic, tx).await?;
 
         let topic = topic.to_string();
         // Use semaphore to limit number of concurrent BATCHES roughly
@@ -445,6 +470,7 @@ impl QueueManager {
             .await;
             log::warn!("Topic {} subscription closed", topic);
         });
+        Ok(())
     }
 
     async fn process_batch_messages<T>(
@@ -858,9 +884,28 @@ impl QueueManager {
                     return;
                 }
 
-                if let Err(e) = backend.publish_batch_with_headers(&topic, &payloads).await {
-                    error!("Failed to publish batch to topic {}: {}", topic, e);
-                } else {
+                let mut failures = 0u32;
+                loop {
+                    match backend.publish_batch_with_headers(&topic, &payloads).await {
+                        Ok(()) => break,
+                        Err(error) => {
+                            failures = failures.saturating_add(1);
+                            counter!("mocra_queue_publish_retries_total").increment(1);
+                            if failures == 1 || failures.is_power_of_two() {
+                                error!(
+                                    "Failed to publish batch to topic {} (attempt {}): {}",
+                                    topic, failures, error
+                                );
+                            }
+                            // Keep this batch owned by the forwarder. Its semaphore permit
+                            // holds back later batches until the broker accepts it. A partial
+                            // broker batch may be replayed, so delivery is at least once.
+                            let delay_ms = 100u64.saturating_mul(1u64 << failures.min(6));
+                            tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                        }
+                    }
+                }
+                {
                     log::info!(
                         "[QueueManager] forward_channel published batch: topic={} count={}",
                         topic,

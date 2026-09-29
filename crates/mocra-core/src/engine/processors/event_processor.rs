@@ -165,72 +165,8 @@ where
         Next: Send + Sync + 'static,
         P: ProcessorTrait<Out, Next> + Send + Sync + 'static,
     {
-        struct SilentWrapper<P>(P);
-        #[async_trait]
-        impl<P, Input, Output> ProcessorTrait<Input, Output> for SilentWrapper<P>
-        where
-            P: ProcessorTrait<Input, Output> + Send + Sync,
-            Input: Send + Sync + 'static,
-            Output: Send + Sync + 'static,
-        {
-            fn name(&self) -> &'static str {
-                self.0.name()
-            }
-            async fn process(&self, i: Input, c: ProcessorContext) -> ProcessorResult<Output> {
-                self.0.process(i, c).await
-            }
-            async fn pre_process(&self, i: &Input, c: &ProcessorContext) -> Result<()> {
-                self.0.pre_process(i, c).await
-            }
-            async fn post_process(
-                &self,
-                i: &Input,
-                o: &Output,
-                c: &ProcessorContext,
-            ) -> Result<()> {
-                self.0.post_process(i, o, c).await
-            }
-            async fn handle_error(
-                &self,
-                i: &Input,
-                e: Error,
-                c: &ProcessorContext,
-            ) -> ProcessorResult<Output> {
-                self.0.handle_error(i, e, c).await
-            }
-            async fn should_process(&self, i: &Input, c: &ProcessorContext) -> bool {
-                self.0.should_process(i, c).await
-            }
-        }
-        #[async_trait]
-        impl<P, Input, Output> EventProcessorTrait<Input, Output> for SilentWrapper<P>
-        where
-            P: ProcessorTrait<Input, Output> + Send + Sync,
-            Input: Send + Sync + 'static,
-            Output: Send + Sync + 'static,
-        {
-            fn pre_status(&self, _: &Input) -> Option<EventEnvelope> {
-                None
-            }
-            fn finish_status(&self, _: &Input, _: &Output) -> Option<EventEnvelope> {
-                None
-            }
-            fn working_status(&self, _: &Input) -> Option<EventEnvelope> {
-                None
-            }
-            fn error_status(&self, _: &Input, _: &Error) -> Option<EventEnvelope> {
-                None
-            }
-            fn retry_status(&self, _: &Input, _: &RetryPolicy) -> Option<EventEnvelope> {
-                None
-            }
-        }
-
-        let wrapped = SilentWrapper(processor);
-        let wrapped_event_aware =
-            EventAwareProcessor::new::<Out, Next>(wrapped, self.event_bus.clone());
         EventAwareTypedChain {
-            inner: self.inner.then::<Next, _>(wrapped_event_aware),
+            inner: self.inner.then::<Next, _>(processor),
             event_bus: self.event_bus,
         }
     }
@@ -288,76 +224,11 @@ where
         ElemOut: Send + Sync + 'static,
         P: ProcessorTrait<ElemIn, ElemOut> + Send + Sync + 'static,
     {
-        struct SilentWrapper<P>(P);
-        #[async_trait]
-        impl<P, Input, Output> ProcessorTrait<Input, Output> for SilentWrapper<P>
-        where
-            P: ProcessorTrait<Input, Output> + Send + Sync,
-            Input: Send + Sync + 'static,
-            Output: Send + Sync + 'static,
-        {
-            fn name(&self) -> &'static str {
-                self.0.name()
-            }
-            async fn process(&self, i: Input, c: ProcessorContext) -> ProcessorResult<Output> {
-                self.0.process(i, c).await
-            }
-            async fn pre_process(&self, i: &Input, c: &ProcessorContext) -> Result<()> {
-                self.0.pre_process(i, c).await
-            }
-            async fn post_process(
-                &self,
-                i: &Input,
-                o: &Output,
-                c: &ProcessorContext,
-            ) -> Result<()> {
-                self.0.post_process(i, o, c).await
-            }
-            async fn handle_error(
-                &self,
-                i: &Input,
-                e: Error,
-                c: &ProcessorContext,
-            ) -> ProcessorResult<Output> {
-                self.0.handle_error(i, e, c).await
-            }
-            async fn should_process(&self, i: &Input, c: &ProcessorContext) -> bool {
-                self.0.should_process(i, c).await
-            }
-        }
-        #[async_trait]
-        impl<P, Input, Output> EventProcessorTrait<Input, Output> for SilentWrapper<P>
-        where
-            P: ProcessorTrait<Input, Output> + Send + Sync,
-            Input: Send + Sync + 'static,
-            Output: Send + Sync + 'static,
-        {
-            fn pre_status(&self, _: &Input) -> Option<EventEnvelope> {
-                None
-            }
-            fn finish_status(&self, _: &Input, _: &Output) -> Option<EventEnvelope> {
-                None
-            }
-            fn working_status(&self, _: &Input) -> Option<EventEnvelope> {
-                None
-            }
-            fn error_status(&self, _: &Input, _: &Error) -> Option<EventEnvelope> {
-                None
-            }
-            fn retry_status(&self, _: &Input, _: &RetryPolicy) -> Option<EventEnvelope> {
-                None
-            }
-        }
-
-        let wrapped = SilentWrapper(processor);
-        let wrapped_event_aware =
-            EventAwareProcessor::new::<ElemIn, ElemOut>(wrapped, self.event_bus.clone());
-
         EventAwareTypedChain {
             inner: self
                 .inner
                 .then_map_vec_parallel_with_strategy::<ElemOut, _>(
-                    wrapped_event_aware,
+                    processor,
                     concurrency,
                     strategy,
                 ),

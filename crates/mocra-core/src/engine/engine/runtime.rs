@@ -280,7 +280,7 @@ impl Engine {
                 error!("Failed to publish system shutdown event: {e}");
             }
 
-            event_bus.stop();
+            event_bus.stop_and_wait().await;
         }
 
         info!("Schedule shutdown completed");

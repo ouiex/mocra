@@ -38,8 +38,10 @@ use crate::common::model::message::TaskEvent;
 use crate::queue::QueuedItem;
 use tokio::sync::watch;
 
-/// Metadata key used when `Ctx::follow` feeds a request URL back in (an internal convention).
+/// Legacy metadata key for follow-up tasks queued before full requests were preserved.
 const FOLLOW_URL_KEY: &str = "__mocra_spider_follow_url";
+/// Metadata key used to carry the full follow-up request through the parser task queue.
+const FOLLOW_REQUEST_KEY: &str = "__mocra_spider_follow_request";
 
 /// A unit of collection: defines what to fetch ([`start`](Spider::start)) and how to parse it
 /// ([`parse`](Spider::parse)).
@@ -268,6 +270,16 @@ impl<S: Spider> ModuleNodeTrait for SpiderNode<S> {
         _login_info: Option<LoginInfo>,
     ) -> Result<SyncBoxStream<'static, Request>> {
         // Follow-up request: fed back in through metadata by the previous parse round's follow.
+        if let Some(value) = params.get(FOLLOW_REQUEST_KEY) {
+            let req = serde_json::from_value::<Request>(value.clone()).map_err(|error| {
+                Error::new(
+                    ErrorKind::Service,
+                    Some(format!("invalid Spider follow-up request: {error}")),
+                )
+            })?;
+            return Ok(Box::pin(futures::stream::iter(vec![req])));
+        }
+        // Accept URL-only tasks that were queued by older versions.
         if let Some(url) = params.get(FOLLOW_URL_KEY).and_then(|v| v.as_str()) {
             let req = Request::new(url, RequestMethod::Get);
             return Ok(Box::pin(futures::stream::iter(vec![req])));
@@ -304,10 +316,29 @@ impl<S: Spider> ModuleNodeTrait for SpiderNode<S> {
         // branch, and a leaf node has no successor — so it would be silently dropped (see the leaf
         // branch in `module_dag_processor::execute_parse`), making `Ctx::follow` a no-op.
         let mut out = TaskOutputEvent::default();
-        for req in cx.follows {
-            let task = TaskParserEvent::from(&response)
-                .add_meta(FOLLOW_URL_KEY, req.url)
-                .stay_current_step();
+        for mut req in cx.follows {
+            if let Some(meta) = req.meta.task.as_object_mut() {
+                meta.remove(FOLLOW_URL_KEY);
+                meta.remove(FOLLOW_REQUEST_KEY);
+            }
+            let priority = req.priority;
+            let request_value = serde_json::to_value(req).map_err(|error| {
+                Error::new(
+                    ErrorKind::Service,
+                    Some(format!(
+                        "failed to serialize Spider follow-up request: {error}"
+                    )),
+                )
+            })?;
+            let mut task = TaskParserEvent::from(&response);
+            // TaskParserEvent inherits the previous request's task metadata. Remove the old
+            // follow-up payload before adding the next one to avoid retaining a request chain.
+            task.metadata.remove(FOLLOW_URL_KEY);
+            task.metadata.remove(FOLLOW_REQUEST_KEY);
+            task.metadata
+                .insert(FOLLOW_REQUEST_KEY.to_string(), request_value);
+            task.account_task.priority = priority;
+            let task = task.stay_current_step();
             out = out.with_task(task);
         }
         Ok(out)
@@ -1017,15 +1048,160 @@ mod dashboard_tests {
 }
 
 #[cfg(test)]
+mod follow_request_tests {
+    use super::*;
+    use crate::common::model::meta::MetaData;
+    use crate::engine::runner::StageCounter;
+    use async_trait::async_trait;
+    use futures::StreamExt;
+    use mocra_proxy::{IpProxy, ProxyEnum};
+    use serde_json::json;
+
+    struct FollowSpider;
+
+    #[async_trait]
+    impl Spider for FollowSpider {
+        type Item = ();
+
+        fn name(&self) -> &str {
+            "follow_request_probe"
+        }
+
+        async fn start(&self, _seeds: &mut Seeds) {}
+
+        async fn parse(&self, _response: Response, cx: &mut Ctx<Self::Item>) -> Result<()> {
+            let mut request = Request::new("https://example.test/next", RequestMethod::Post)
+                .with_body(b"payload".to_vec())
+                .add_meta("cursor", 2);
+            request.id = uuid::Uuid::from_u128(42);
+            request.headers =
+                crate::common::model::Headers::new().add("Authorization", "Bearer key");
+            request.cookies.add("session", "cookie", "example.test");
+            request.params = Some(vec![("page".into(), "2".into())]);
+            request.timeout = 17;
+            request.hash_str = Some("page-2".into());
+            request.priority = crate::common::model::Priority::High;
+            request.meta.task = json!({
+                FOLLOW_REQUEST_KEY: "nested previous request",
+                "user_context": "retained",
+            });
+            request.use_proxy(ProxyEnum::IpProxy(IpProxy {
+                ip: "127.0.0.1".into(),
+                port: 8080,
+                username: Some("proxy-user".into()),
+                password: Some("proxy-password".into()),
+                proxy_type: Some("http".into()),
+                rate_limit: 1.0,
+            }));
+            cx.follow(request);
+            Ok(())
+        }
+    }
+
+    fn node() -> SpiderNode<FollowSpider> {
+        SpiderNode {
+            spider: Arc::new(FollowSpider),
+            sink: Arc::new(on_item(|_: ()| async {})),
+            store_outcomes: Arc::new(StageCounter::default()),
+        }
+    }
+
+    fn response() -> Response {
+        Response {
+            id: uuid::Uuid::now_v7(),
+            platform: "platform".into(),
+            account: "account".into(),
+            module: "follow_request_probe".into(),
+            status_code: 200,
+            cookies: Default::default(),
+            content: vec![],
+            storage_path: None,
+            headers: vec![],
+            task_retry_times: 0,
+            metadata: MetaData::default().add_task_config(json!({
+                FOLLOW_REQUEST_KEY: "previous request",
+                "cursor_context": "retained",
+            })),
+            download_middleware: vec![],
+            data_middleware: vec![],
+            task_finished: false,
+            context: Default::default(),
+            run_id: uuid::Uuid::now_v7(),
+            prefix_request: uuid::Uuid::nil(),
+            request_hash: None,
+            priority: Default::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn follow_preserves_request_through_parser_task_serialization() {
+        let node = node();
+        let output = node.parser(response(), None).await.unwrap();
+        assert_eq!(output.parser_task.len(), 1);
+        let task = &output.parser_task[0];
+        assert!(task.context.stay_current_step);
+        assert_eq!(
+            task.account_task.priority,
+            crate::common::model::Priority::High
+        );
+        assert_eq!(task.metadata["cursor_context"], "retained");
+        assert!(task.metadata.get(FOLLOW_URL_KEY).is_none());
+        assert_ne!(task.metadata[FOLLOW_REQUEST_KEY], "previous request");
+
+        let bytes = serde_json::to_vec(task).unwrap();
+        let task: TaskParserEvent = serde_json::from_slice(&bytes).unwrap();
+        let mut requests = node
+            .generate(Arc::new(ModuleConfig::default()), task.metadata, None)
+            .await
+            .unwrap();
+        let request = requests.next().await.unwrap();
+        assert!(requests.next().await.is_none());
+        assert_eq!(request.id, uuid::Uuid::from_u128(42));
+        assert_eq!(request.url, "https://example.test/next");
+        assert_eq!(request.method, "POST");
+        assert_eq!(request.body.as_deref(), Some(b"payload".as_slice()));
+        assert_eq!(
+            request.headers.get("Authorization").as_deref(),
+            Some("Bearer key")
+        );
+        assert_eq!(request.cookies.cookies[0].value, "cookie");
+        assert_eq!(request.params.as_ref().unwrap()[0].1, "2");
+        assert_eq!(request.timeout, 17);
+        assert_eq!(request.hash_str.as_deref(), Some("page-2"));
+        assert_eq!(request.meta.get_trait_config::<i32>("cursor"), Some(2));
+        assert_eq!(request.meta.task["user_context"], "retained");
+        assert!(request.meta.task.get(FOLLOW_REQUEST_KEY).is_none());
+        assert!(
+            matches!(request.proxy, Some(ProxyEnum::IpProxy(proxy)) if proxy.port == 8080 && proxy.username.as_deref() == Some("proxy-user"))
+        );
+    }
+
+    #[tokio::test]
+    async fn legacy_url_only_follow_task_still_generates_get() {
+        let mut params = Map::new();
+        params.insert(FOLLOW_URL_KEY.into(), json!("https://example.test/old"));
+        let mut requests = node()
+            .generate(Arc::new(ModuleConfig::default()), params, None)
+            .await
+            .unwrap();
+        let request = requests.next().await.unwrap();
+        assert_eq!(request.url, "https://example.test/old");
+        assert_eq!(request.method, "GET");
+    }
+}
+
+#[cfg(test)]
 mod downloader_tests {
     use super::{ChannelSink, Ctx, Mocra, Seeds, Spider};
     use async_trait::async_trait;
     use semver::Version;
 
     use crate::common::model::download_config::DownloadConfig;
-    use crate::common::model::{Cookies, Request, Response};
+    use crate::common::model::request::RequestMethod;
+    use crate::common::model::{Cookies, Headers, Request, Response};
     use crate::downloader::Downloader;
     use crate::errors::Result;
+    use mocra_proxy::{IpProxy, ProxyEnum};
 
     /// A custom downloader: ignores the network and returns a fixed response — used to prove the
     /// pipeline really calls it (rather than reqwest).
@@ -1113,5 +1289,92 @@ mod downloader_tests {
             "the custom default downloader should have served this request (status 299 + fake \
              body); None means reqwest was still used"
         );
+    }
+
+    #[derive(Clone)]
+    struct CaptureDownloader {
+        seen: tokio::sync::mpsc::UnboundedSender<Request>,
+    }
+
+    #[async_trait]
+    impl Downloader for CaptureDownloader {
+        async fn set_config(&self, _id: &str, _config: DownloadConfig) {}
+        async fn set_limit(&self, _id: &str, _limit: f32) {}
+        fn name(&self) -> String {
+            "capture_downloader".into()
+        }
+        fn version(&self) -> Version {
+            Version::new(1, 0, 0)
+        }
+        async fn download(&self, request: Request) -> Result<Response> {
+            let _ = self.seen.send(request.clone());
+            let mut response = FakeDownloader.download(request.clone()).await?;
+            response.content = request.url.into_bytes();
+            Ok(response)
+        }
+        async fn health_check(&self) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    struct FollowProbeSpider;
+
+    #[async_trait]
+    impl Spider for FollowProbeSpider {
+        type Item = ();
+        fn name(&self) -> &str {
+            "follow_downloader_probe"
+        }
+        async fn start(&self, seeds: &mut Seeds) {
+            seeds.get("https://example.test/seed");
+        }
+        async fn parse(&self, response: Response, cx: &mut Ctx<Self::Item>) -> Result<()> {
+            if response.text()?.ends_with("/seed") {
+                let mut next = Request::new("https://example.test/next", RequestMethod::Post)
+                    .with_body(b"follow body".to_vec());
+                next.headers = Headers::new().add("X-Follow", "preserved");
+                next.use_proxy(ProxyEnum::IpProxy(IpProxy {
+                    ip: "127.0.0.1".into(),
+                    port: 8080,
+                    username: None,
+                    password: None,
+                    proxy_type: Some("http".into()),
+                    rate_limit: 1.0,
+                }));
+                cx.follow(next);
+            } else {
+                cx.emit(());
+            }
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn follow_request_reaches_downloader_with_method_headers_and_body() {
+        let (seen_tx, mut seen_rx) = tokio::sync::mpsc::unbounded_channel::<Request>();
+        let (item_tx, mut item_rx) = tokio::sync::mpsc::channel::<()>(1);
+        let server = tokio::spawn(async move {
+            let _ = Mocra::builder()
+                .spider(FollowProbeSpider, ChannelSink::new(item_tx))
+                .default_downloader(CaptureDownloader { seen: seen_tx })
+                .run()
+                .await;
+        });
+
+        let completed = tokio::time::timeout(std::time::Duration::from_secs(10), item_rx.recv())
+            .await
+            .ok()
+            .flatten();
+        server.abort();
+        assert_eq!(completed, Some(()));
+
+        let first = seen_rx.recv().await.unwrap();
+        let follow = seen_rx.recv().await.unwrap();
+        assert_eq!(first.method, "GET");
+        assert_eq!(follow.url, "https://example.test/next");
+        assert_eq!(follow.method, "POST");
+        assert_eq!(follow.body.as_deref(), Some(b"follow body".as_slice()));
+        assert_eq!(follow.headers.get("X-Follow").as_deref(), Some("preserved"));
+        assert!(matches!(follow.proxy, Some(ProxyEnum::IpProxy(proxy)) if proxy.port == 8080));
     }
 }

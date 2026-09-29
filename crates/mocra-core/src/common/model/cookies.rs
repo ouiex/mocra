@@ -164,7 +164,7 @@ impl<'de> Deserialize<'de> for CookieItem {
                         "domain" => domain = Some(map.next_value()?),
                         "path" => path = Some(map.next_value()?),
                         "secure" => secure = Some(map.next_value()?),
-                        "httpOnly" => http_only = Some(map.next_value()?),
+                        "httpOnly" => http_only = map.next_value()?,
                         "expires" => expires = Some(map.next_value()?),
                         "expirationDate" => expiration_date = Some(map.next_value()?),
                         "max_age" => max_age = Some(map.next_value()?),

@@ -19,6 +19,7 @@ use crate::common::model::message::{TaskErrorEvent, TaskEvent, TaskOutputEvent, 
 use crate::common::model::module_dag::ModuleDagDefinition;
 use crate::common::model::{ExecutionMark, ModuleConfig, Request, Response};
 use crate::errors::Result;
+use crate::utils::coordination::CoordinationBackend;
 use futures::StreamExt;
 use indexmap::IndexMap;
 use log::{debug, info, warn};
@@ -51,6 +52,13 @@ impl CacheAble for DagStopSignal {
     }
 }
 
+fn coordination_error(message: String) -> crate::errors::Error {
+    crate::errors::Error::new(
+        crate::errors::ErrorKind::Service,
+        Some(std::io::Error::other(message)),
+    )
+}
+
 // ── Processor ───────────────────────────────────────────────────────────────
 
 /// Queue-backed DAG processor that routes execution by `ExecutionMark.node_id`.
@@ -62,8 +70,7 @@ pub struct ModuleDagProcessor {
     module_id: String,
     run_id: Uuid,
     cache: Arc<CacheService>,
-    #[allow(dead_code)]
-    ttl: u64,
+    coordination: Option<Arc<dyn CoordinationBackend>>,
     /// Node registry: preserves definition order so index-based backward-compat lookup works.
     nodes: Arc<RwLock<IndexMap<String, Arc<dyn ModuleNodeTrait>>>>,
     /// Adjacency list: node_id → ordered list of successor node_ids.
@@ -77,14 +84,40 @@ pub struct ModuleDagProcessor {
 impl ModuleDagProcessor {
     /// Creates an empty processor. Call `init_from_definition` before use.
     pub fn new(module_id: String, cache: Arc<CacheService>, run_id: Uuid, ttl: u64) -> Self {
+        Self::new_with_coordination(module_id, cache, run_id, ttl, None)
+    }
+
+    pub fn new_with_coordination(
+        module_id: String,
+        cache: Arc<CacheService>,
+        run_id: Uuid,
+        _ttl: u64,
+        coordination: Option<Arc<dyn CoordinationBackend>>,
+    ) -> Self {
         Self {
             module_id,
             run_id,
             cache,
-            ttl,
+            coordination,
             nodes: Arc::new(RwLock::new(IndexMap::new())),
             successors: Arc::new(RwLock::new(HashMap::new())),
             entry_nodes: Arc::new(RwLock::new(Vec::new())),
+            stop: Arc::new(RwLock::new(false)),
+            last_stop_check: Arc::new(AtomicU64::new(0)),
+        }
+    }
+
+    /// Reuses the compiled topology while giving a task run its own mutable state.
+    /// Cached module templates must never share a stop flag or run-scoped keys.
+    pub(crate) fn for_run(&self, run_id: Uuid) -> Self {
+        Self {
+            module_id: self.module_id.clone(),
+            run_id,
+            cache: self.cache.clone(),
+            coordination: self.coordination.clone(),
+            nodes: self.nodes.clone(),
+            successors: self.successors.clone(),
+            entry_nodes: self.entry_nodes.clone(),
             stop: Arc::new(RwLock::new(false)),
             last_stop_check: Arc::new(AtomicU64::new(0)),
         }
@@ -193,12 +226,15 @@ impl ModuleDagProcessor {
             node_id,
             successor_id,
         );
-        if DagNodeAdvanceGate::sync(&key, &self.cache)
-            .await
-            .map_err(Into::<crate::errors::Error>::into)?
-            .is_some()
-        {
-            return Ok(false);
+        if let Some(coordination) = &self.coordination {
+            if self.shared_stopped(coordination).await? {
+                return Ok(false);
+            }
+            let won = coordination
+                .cas(&self.coordination_key(&key), None, b"1")
+                .await
+                .map_err(coordination_error)?;
+            return Ok(won && !self.shared_stopped(coordination).await?);
         }
         let gate = DagNodeAdvanceGate(true);
         // No TTL — the advance gate is a permanent per-run fact (keyed by UUID run_id).
@@ -210,15 +246,24 @@ impl ModuleDagProcessor {
     }
 
     async fn set_stopped(&self) -> Result<()> {
-        let mut stop = self.stop.write().await;
-        *stop = true;
         let key = chain_key::dag_stop_key(self.run_id, &self.module_id);
-        let signal = DagStopSignal(true);
-        // Use send_persistent (no TTL) so the stop signal outlives cache.ttl.
-        // The gate-key cleanup below deletes all gate keys; if the stop signal
-        // were to expire (e.g. TTL=60s), queued error tasks could re-win the
-        // already-deleted gate and restart the entire DAG fan-out.
-        signal.send_persistent(&key, &self.cache).await.ok();
+        if let Some(coordination) = &self.coordination {
+            coordination
+                .set(&self.coordination_key(&key), b"1")
+                .await
+                .map_err(coordination_error)?;
+        } else {
+            let signal = DagStopSignal(true);
+            // Use send_persistent (no TTL) so the stop signal outlives cache.ttl.
+            // The gate-key cleanup below deletes all gate keys; if the stop signal
+            // were to expire (e.g. TTL=60s), queued error tasks could re-win the
+            // already-deleted gate and restart the entire DAG fan-out.
+            signal
+                .send_persistent(&key, &self.cache)
+                .await
+                .map_err(Into::<crate::errors::Error>::into)?;
+        }
+        *self.stop.write().await = true;
 
         // Clean up all advance gate keys for this run.
         // Successors are already in memory — enumerate every edge and delete its gate key
@@ -234,6 +279,15 @@ impl ModuleDagProcessor {
                 .collect()
         };
         if !gate_keys.is_empty() {
+            if let Some(coordination) = &self.coordination {
+                for key in &gate_keys {
+                    coordination
+                        .delete(&self.coordination_key(key))
+                        .await
+                        .map_err(coordination_error)?;
+                }
+                return Ok(());
+            }
             let refs: Vec<&str> = gate_keys.iter().map(String::as_str).collect();
             if let Err(e) = self.cache.del_batch(&refs).await {
                 debug!(
@@ -257,8 +311,7 @@ impl ModuleDagProcessor {
     }
 
     /// Deletes the persistent session state for the given run.
-    /// Called by Module::parser() with the correctly-patched Module.run_id,
-    /// since self.run_id (processor) may be stale when the task was loaded from factory cache.
+    /// Called by Module::parser() with the run identifier bound by the task factory.
     pub async fn delete_session_for_run(&self, run_id: Uuid) {
         // Key format mirrors CacheAble::cache_id: "{namespace}:session_state:{module_id}:{run_id}"
         let session_key = format!(
@@ -293,12 +346,32 @@ impl ModuleDagProcessor {
         }
         self.last_stop_check.store(now, Ordering::Relaxed);
         let key = chain_key::dag_stop_key(self.run_id, &self.module_id);
+        if let Some(coordination) = &self.coordination {
+            if self.shared_stopped(coordination).await? {
+                *self.stop.write().await = true;
+                return Ok(true);
+            }
+            return Ok(false);
+        }
         if let Ok(Some(DagStopSignal(true))) = DagStopSignal::sync(&key, &self.cache).await {
             let mut stop = self.stop.write().await;
             *stop = true;
             return Ok(true);
         }
         Ok(false)
+    }
+
+    fn coordination_key(&self, key: &str) -> String {
+        format!("{}:{key}", self.cache.namespace())
+    }
+
+    async fn shared_stopped(&self, coordination: &Arc<dyn CoordinationBackend>) -> Result<bool> {
+        let key = chain_key::dag_stop_key(self.run_id, &self.module_id);
+        coordination
+            .get(&self.coordination_key(&key))
+            .await
+            .map(|value| value.as_deref() == Some(b"1"))
+            .map_err(coordination_error)
     }
 
     /// Returns true when a `TaskParserEvent` targets this processor's module.
@@ -653,6 +726,94 @@ mod tests {
     use async_trait::async_trait;
     use serde_json::Map;
     use std::sync::Arc;
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    struct SharedCoordination(Mutex<HashMap<String, Vec<u8>>>);
+
+    #[async_trait]
+    impl CoordinationBackend for SharedCoordination {
+        async fn publish(&self, _topic: &str, _payload: &[u8]) -> std::result::Result<(), String> {
+            Ok(())
+        }
+        async fn subscribe(
+            &self,
+            _topic: &str,
+        ) -> std::result::Result<tokio::sync::mpsc::Receiver<Vec<u8>>, String> {
+            Ok(tokio::sync::mpsc::channel(1).1)
+        }
+        async fn set(&self, key: &str, value: &[u8]) -> std::result::Result<(), String> {
+            self.0.lock().unwrap().insert(key.into(), value.into());
+            Ok(())
+        }
+        async fn get(&self, key: &str) -> std::result::Result<Option<Vec<u8>>, String> {
+            Ok(self.0.lock().unwrap().get(key).cloned())
+        }
+        async fn delete(&self, key: &str) -> std::result::Result<(), String> {
+            self.0.lock().unwrap().remove(key);
+            Ok(())
+        }
+        async fn cas(
+            &self,
+            key: &str,
+            old: Option<&[u8]>,
+            new: &[u8],
+        ) -> std::result::Result<bool, String> {
+            let mut data = self.0.lock().unwrap();
+            if data.get(key).map(Vec::as_slice) == old {
+                data.insert(key.into(), new.into());
+                Ok(true)
+            } else {
+                Ok(false)
+            }
+        }
+        async fn acquire_lock(
+            &self,
+            _key: &str,
+            _value: &[u8],
+            _ttl_ms: u64,
+        ) -> std::result::Result<bool, String> {
+            Ok(true)
+        }
+        async fn renew_lock(
+            &self,
+            _key: &str,
+            _value: &[u8],
+            _ttl_ms: u64,
+        ) -> std::result::Result<bool, String> {
+            Ok(true)
+        }
+    }
+
+    #[tokio::test]
+    async fn distributed_gate_and_stop_are_visible_across_processors() {
+        let run = Uuid::now_v7();
+        let shared: Arc<dyn CoordinationBackend> = Arc::new(SharedCoordination::default());
+        let first = ModuleDagProcessor::new_with_coordination(
+            "mod".into(),
+            make_cache(),
+            run,
+            60,
+            Some(shared.clone()),
+        );
+        let second = ModuleDagProcessor::new_with_coordination(
+            "mod".into(),
+            make_cache(),
+            run,
+            60,
+            Some(shared.clone()),
+        );
+        first
+            .successors
+            .write()
+            .await
+            .insert("a".into(), vec!["b".into()]);
+        assert!(first.try_mark_node_advanced_once("a", "b").await.unwrap());
+        assert!(!second.try_mark_node_advanced_once("a", "b").await.unwrap());
+        first.set_stopped().await.unwrap();
+        assert!(second.check_stop().await.unwrap());
+        assert!(!second.try_mark_node_advanced_once("a", "b").await.unwrap());
+    }
 
     struct DummyNode;
 
@@ -732,6 +893,34 @@ mod tests {
         let ctx = Some(ExecutionMark::default().with_node_id("node_b"));
         let resolved = proc.resolve_node_id(&ctx).await;
         assert_eq!(resolved.as_deref(), Some("node_b"));
+    }
+
+    #[tokio::test]
+    async fn cached_topology_does_not_share_run_state() {
+        let cache = make_cache();
+        let first_run = Uuid::now_v7();
+        let second_run = Uuid::now_v7();
+        let template = ModuleDagProcessor::new("mod".into(), cache, first_run, 60);
+        template
+            .init_from_definition(&make_definition(&[("node_a", "node_b")]))
+            .await;
+
+        assert!(
+            template
+                .try_mark_node_advanced_once("node_a", "node_b")
+                .await
+                .unwrap()
+        );
+        template.set_stopped().await.unwrap();
+
+        let next = template.for_run(second_run);
+        assert_eq!(next.get_successors("node_a").await, vec!["node_b"]);
+        assert!(!next.check_stop().await.unwrap());
+        assert!(
+            next.try_mark_node_advanced_once("node_a", "node_b")
+                .await
+                .unwrap()
+        );
     }
 
     #[tokio::test]

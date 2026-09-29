@@ -324,56 +324,44 @@ impl MqBackend for KafkaQueue {
         let topic = format!("{}-{}", self.namespace, topic);
 
         // Ensure topic exists before subscribing
-        if let Err(e) = self.ensure_topic_exists(&topic).await {
-            warn!(
-                "Failed to ensure topic {} exists before subscribing: {}",
-                topic, e
-            );
-        }
+        self.ensure_topic_exists(&topic).await?;
 
         let dlq_producer = self.producer.clone();
         let nack_policy = self.nack_policy;
 
+        let mut client_config = ClientConfig::new();
+        client_config
+            .set("group.id", &group_id)
+            .set("bootstrap.servers", &bootstrap_servers)
+            .set("enable.partition.eof", "false")
+            .set("session.timeout.ms", "6000")
+            .set("enable.auto.commit", "false")
+            .set("auto.offset.reset", "earliest");
+
+        // Re-apply security config (cannot easily share config from new() due to moving)
+        if let (Some(user), Some(pass)) = (&kafka_config.username, &kafka_config.password) {
+            if kafka_config.tls.unwrap_or(false) {
+                client_config.set("security.protocol", "SASL_SSL");
+            } else {
+                client_config.set("security.protocol", "SASL_PLAINTEXT");
+            }
+            client_config
+                .set("sasl.mechanism", "PLAIN")
+                .set("sasl.username", user)
+                .set("sasl.password", pass);
+        } else if kafka_config.tls.unwrap_or(false) {
+            client_config.set("security.protocol", "SSL");
+        }
+
+        let consumer: StreamConsumer = client_config
+            .create()
+            .map_err(|e| QueueError::OperationFailed(Box::new(e)))?;
+        consumer
+            .subscribe(&[&topic])
+            .map_err(|e| QueueError::OperationFailed(Box::new(e)))?;
+
         tokio::spawn(async move {
             info!("Starting Kafka listener for topic: {}", topic);
-
-            let mut client_config = ClientConfig::new();
-            client_config
-                .set("group.id", &group_id)
-                .set("bootstrap.servers", &bootstrap_servers)
-                .set("enable.partition.eof", "false")
-                .set("session.timeout.ms", "6000")
-                .set("enable.auto.commit", "false")
-                .set("auto.offset.reset", "earliest");
-
-            // Re-apply security config (cannot easily share config from new() due to moving)
-            if let (Some(user), Some(pass)) = (&kafka_config.username, &kafka_config.password) {
-                if kafka_config.tls.unwrap_or(false) {
-                    client_config.set("security.protocol", "SASL_SSL");
-                } else {
-                    client_config.set("security.protocol", "SASL_PLAINTEXT");
-                }
-                client_config
-                    .set("sasl.mechanism", "PLAIN")
-                    .set("sasl.username", user)
-                    .set("sasl.password", pass);
-            } else if kafka_config.tls.unwrap_or(false) {
-                client_config.set("security.protocol", "SSL");
-            }
-
-            let consumer: StreamConsumer = match client_config.create() {
-                Ok(c) => c,
-                Err(e) => {
-                    error!("Failed to create Kafka consumer: {}", e);
-                    return;
-                }
-            };
-
-            if let Err(e) = consumer.subscribe(&[&topic]) {
-                error!("Failed to subscribe to Kafka topic {}: {}", topic, e);
-                return;
-            }
-
             let consumer = Arc::new(consumer);
             let ack_consumer = consumer.clone();
             let (ack_tx, mut ack_rx) = mpsc::channel::<(String, AckAction)>(1000);

@@ -270,9 +270,13 @@ impl Engine {
     }
 
     /// Initializes queue manager with optional log topic derived from logger outputs.
-    fn init_queue_manager(cfg: &crate::common::model::config::Config) -> Arc<QueueManager> {
+    async fn init_queue_manager(
+        cfg: &crate::common::model::config::Config,
+    ) -> crate::errors::Result<Arc<QueueManager>> {
         let log_topic = cfg.logger.as_ref().and_then(Self::first_mq_topic);
-        QueueManager::from_config_with_log_topic(cfg, log_topic.as_deref())
+        let manager = QueueManager::try_from_config_with_log_topic(cfg, log_topic.as_deref())?;
+        manager.subscribe_checked().await?;
+        Ok(manager)
     }
 
     fn first_mq_topic(
@@ -417,7 +421,7 @@ impl Engine {
             .await
             .event_bus
             .as_ref()
-            .map(|conf| Arc::new(EventBus::new(conf.capacity, conf.concurrency)));
+            .map(|conf| Arc::new(EventBus::with_capacity(conf.capacity)));
         // Create global shutdown signal channel.
         let (shutdown_tx, _shutdown_rx) = broadcast::channel(1);
 
@@ -443,7 +447,23 @@ impl Engine {
             loop {
                 tokio::select! {
                     _ = interval.tick() => {
-                        let is_paused = matches!(state_clone.cache_service.get(&pause_key).await, Ok(Some(_)));
+                        let is_paused = if let Some(coordination) = &state_clone.coordination {
+                            match coordination.get(&pause_key).await {
+                                Ok(value) => value.as_deref() == Some(b"1"),
+                                Err(error) => {
+                                    warn!("Engine pause state unavailable: {error}");
+                                    continue;
+                                }
+                            }
+                        } else {
+                            match state_clone.cache_service.get(&pause_key).await {
+                                Ok(value) => value.is_some(),
+                                Err(error) => {
+                                    warn!("Engine pause state unavailable: {error}");
+                                    continue;
+                                }
+                            }
+                        };
 
                         if *pause_tx_clone.borrow() != is_paused {
                             let _ = pause_tx_clone.send(is_paused);
@@ -462,11 +482,12 @@ impl Engine {
             }
         });
 
-        let task_manager = Arc::new(TaskManager::new(
+        let task_manager = Arc::new(TaskManager::new_with_coordination(
             &state.db,
             Arc::clone(&state.cache_service),
             state.cookie_service.clone(),
             Arc::clone(&state.config),
+            state.coordination.clone(),
         ));
         let cfg = state.config.read().await.clone();
         let _channel_config = cfg.channel_config.clone();
@@ -478,7 +499,7 @@ impl Engine {
         let queue_manager = if let Some(qm) = queue_manager {
             qm
         } else {
-            Self::init_queue_manager(&cfg)
+            Self::init_queue_manager(&cfg).await?
         };
 
         if let Some(logger_config) = &cfg.logger {

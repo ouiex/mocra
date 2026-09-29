@@ -2,7 +2,7 @@
 //! external coordinator.
 //!
 //! The control plane (leader election / locks / KV / membership / partition ownership) uses
-//! embedded redb+Raft; the data plane is a pluggable MQ (single-node in-memory here). "Register
+//! embedded redb+Raft; the data plane is a pluggable MQ (per-process in-memory here). "Register
 //! with any node to join the network": every node after the first just needs a seed address.
 //!
 //! Bring up a 3-node cluster (three terminals; the first node bootstraps, the rest join):
@@ -25,7 +25,7 @@ use serde::Serialize;
 
 #[derive(Debug, Serialize)]
 struct Page {
-    url: String,
+    module_id: String,
     status: u16,
 }
 
@@ -45,7 +45,7 @@ impl Spider for Httpbin {
 
     async fn parse(&self, res: Response, cx: &mut Ctx<Self::Item>) -> Result<()> {
         cx.emit(Page {
-            url: res.module_id(),
+            module_id: res.module_id(),
             status: res.status_code,
         });
         Ok(())
@@ -85,7 +85,7 @@ async fn main() -> Result<()> {
         .spider(
             Httpbin,
             on_item(|p: Page| async move {
-                println!("[item] {} -> {}", p.url, p.status);
+                println!("[item] module={} status={}", p.module_id, p.status);
             }),
         )
         .cluster(cluster)

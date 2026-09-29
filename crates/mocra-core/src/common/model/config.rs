@@ -111,13 +111,13 @@ impl Default for SyncConfig {
 pub struct CacheConfig {
     /// Default TTL for cache items
     pub ttl: u64,
-    /// Compression threshold in bytes (payloads larger than this will be compressed)
+    /// Legacy compatibility option; the local cache does not compress values.
     pub compression_threshold: Option<usize>,
-    /// Enable L1 local cache layer (default: false)
+    /// Legacy compatibility option; the cache is already local memory.
     pub enable_l1: Option<bool>,
-    /// L1 cache TTL in seconds (default: 30)
+    /// Legacy compatibility option; ignored.
     pub l1_ttl_secs: Option<u64>,
-    /// L1 cache max entries before eviction (default: 10000)
+    /// Legacy compatibility option; ignored.
     pub l1_max_entries: Option<usize>,
 }
 
@@ -220,8 +220,11 @@ impl fmt::Debug for NatsConfig {
 /// Blob Storage Configuration
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct BlobStorageConfig {
-    /// Local file system path for blob storage
+    /// Absolute path for blob storage. In a remote queue, every worker must mount it at this path.
     pub path: Option<String>,
+    /// Explicitly confirms that all queue workers can read and write the same path.
+    #[serde(default)]
+    pub shared_path: bool,
 }
 
 /// Channel (Queue) Configuration
@@ -257,7 +260,8 @@ use super::logger_config::LoggerConfig;
 pub struct EventBusConfig {
     /// Channel capacity for events (default: 1024)
     pub capacity: usize,
-    /// Concurrency limit for event handlers (default: 64)
+    /// Legacy compatibility option; the event bus now uses one dispatch task.
+    #[serde(default)]
     pub concurrency: usize,
 }
 

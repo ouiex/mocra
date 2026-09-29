@@ -1122,6 +1122,19 @@ impl ProcessorChain {
         Input: Send + 'static,
         Output: Send + 'static,
     {
+        self.execute_impl(input, context, true).await
+    }
+
+    async fn execute_impl<Input, Output>(
+        &self,
+        input: Input,
+        context: ProcessorContext,
+        validate_links: bool,
+    ) -> ProcessorResult<Output>
+    where
+        Input: Send + 'static,
+        Output: Send + 'static,
+    {
         if self.steps.is_empty() {
             return ProcessorResult::FatalFailure(
                 ProcessorChainError::EmptyChain("Empty processor chain".into()).into(),
@@ -1129,8 +1142,10 @@ impl ProcessorChain {
         }
 
         // Fast pre-run type checks: head input, tail output, and link connectivity.
-        if let Err(e) = self.validate_link_types() {
-            return ProcessorResult::FatalFailure(e.into());
+        if validate_links {
+            if let Err(e) = self.validate_link_types() {
+                return ProcessorResult::FatalFailure(e.into());
+            }
         }
 
         let head = &self.steps[0];
@@ -1247,7 +1262,7 @@ impl Default for ProcessorChain {
 /// Statically typed chain wrapper.
 ///
 /// Uses type parameters to enforce adjacent step `Input`/`Output` compatibility at compile
-/// time, while runtime link validation is still performed before execution.
+/// time. The typed path skips repeated runtime link validation.
 pub struct TypedChain<In, Out> {
     inner: ProcessorChain,
     _marker: std::marker::PhantomData<fn(In) -> Out>,
@@ -1279,7 +1294,7 @@ where
         Next: Send + 'static,
         P: ProcessorTrait<Out, Next> + Send + Sync + 'static,
     {
-        // `Out -> Next` is enforced at compile time; runtime link checks still apply.
+        // `Out -> Next` is enforced at compile time.
         TypedChain {
             inner: self.inner.add_processor::<Out, Next, _>(processor),
             _marker: std::marker::PhantomData,
@@ -1287,7 +1302,9 @@ where
     }
 
     pub async fn execute(&self, input: In, context: ProcessorContext) -> ProcessorResult<Out> {
-        self.inner.execute::<In, Out>(input, context).await
+        self.inner
+            .execute_impl::<In, Out>(input, context, false)
+            .await
     }
 
     pub fn then_one_shot<Next, P>(self, processor: P) -> TypedChain<In, Next>

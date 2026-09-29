@@ -18,7 +18,7 @@ Mocra::builder()
     .await?;
 ```
 
-在 `Cargo.toml` 中加入 `mocra = "0.4"`。只有当你需要**进阶 / 分布式**路径时才需要 TOML 文件 —— 数据库驱动的任务模型、Kafka/NATS 数据面队列、dashboard/可观测 HTTP API、Cron 调度、代理池,或自定义错误策略。用以下方式加载:
+在 `Cargo.toml` 中加入 `mocra = "0.5"`。只有当你需要**进阶 / 分布式**路径时才需要 TOML 文件 —— 数据库驱动的任务模型、Kafka/NATS 数据面队列、dashboard/可观测 HTTP API、Cron 调度、代理池,或自定义错误策略。用以下方式加载:
 
 ```rust
 Mocra::builder()
@@ -39,7 +39,7 @@ Mocra::builder()
 
 ## 特性开关 (Feature flags)
 
-除非驱动某配置键的运行时代码被编译进来,否则该键无效。用 `mocra = { version = "0.4", features = ["…"] }` 开启。
+除非驱动某配置键的运行时代码被编译进来,否则该键无效。用 `mocra = { version = "0.5", features = ["…"] }` 开启。
 
 | 特性 | 用于 |
 |---|---|
@@ -51,14 +51,12 @@ Mocra::builder()
 
 ## 最小可用配置
 
-加载器能接受的最小配置(取自 `config.rs` 中的 `test_config_deserialization`)。`name`、`[db]`、`[download_config]`、`[cache]`、`[crawler]`、`[channel_config]` 这些段由 schema 要求必须存在;其余皆为可选。注意 `[db]` 存在但没有 `url`,因此不使用数据库:
+无数据库配置所需的基本段。`name`、`[db]`、`[download_config]`、`[cache]`、`[crawler]`、`[channel_config]` 由 schema 要求必须存在；其余皆为可选。`[db]` 不设 `url`，因此不使用数据库：
 
 ```toml
 name = "test_app"
 
 [db]
-url = "postgres://user:password@localhost:5432/db"
-database_schema = "public"
 
 [download_config]
 downloader_expire = 3600
@@ -120,7 +118,7 @@ capacity = 1000
 | `sync` | 否 | table | 分布式状态同步配置。 |
 | `proxy` | 否 | table | 内联代理池配置。 |
 | `api` | 否 | table | 内置 HTTP API / dashboard(需 `dashboard`)。 |
-| `event_bus` | 否 | table | 事件总线容量与并发。 |
+| `event_bus` | 否 | table | 事件总线容量。 |
 | `logger` | 否 | table | 日志输出(多输出)。 |
 | `policy` | 否 | table | 错误处理策略覆盖。 |
 
@@ -171,7 +169,9 @@ capacity = 1000
 | 键 | 必填 | 类型 | 说明 |
 | --- | --- | --- | --- |
 | `ttl` | 是 | integer | 默认缓存 TTL(秒)。 |
-| `compression_threshold` | 否 | integer | 超过该阈值的缓存载荷将被压缩(字节)。 |
+| `compression_threshold` | 否 | integer | 兼容旧配置；进程内缓存不使用此项。 |
+
+`enable_l1`、`l1_ttl_secs`、`l1_max_entries` 仅为兼容旧配置而保留，不产生效果；缓存本身已经位于本地内存。
 
 ### [crawler]
 
@@ -205,12 +205,12 @@ Cron 调度。所有字段可选。
 | 键 | 必填 | 类型 | 说明 |
 | --- | --- | --- | --- |
 | `minid_time` | 是 | integer | MinID/雪花时间基准,用于生成有序 ID。 |
-| `capacity` | 是 | integer | 本地内存队列容量;过小会引发背压。 |
-| `blob_storage` | 否 | table | 将大载荷落盘(见下)。 |
+| `capacity` | 是 | integer | 每条本地通道（含日志通道）的正整数容量；过小会引发背压。 |
+| `blob_storage` | 否 | table | 使用远端队列时将较大的响应正文写入共享目录(见下)。 |
 | `kafka` | 否 | table | Kafka 队列后端(见 [KafkaConfig](#kafkaconfig-共享))。需 `queue-kafka`。 |
 | `nats` | 否 | table | NATS JetStream 队列后端(见 [NatsConfig](#natsconfig-共享))。需 `queue-nats`。 |
-| `queue_codec` | 否 | string | 远程队列编解码:`json` 或 `msgpack`(须与生产/消费方一致)。 |
-| `batch_concurrency` | 否 | integer | 向远程队列批量刷写的最大并发(默认 10)。 |
+| `queue_codec` | 否 | string | 远程队列编解码：`json` 或 `msgpack`（默认 MessagePack；须与生产/消费方一致）。 |
+| `batch_concurrency` | 否 | integer | 每个主题的批量刷新许可数（默认 50）；分发会等待许可，以保持背压。 |
 | `compression_threshold` | 否 | integer | 超过该阈值的队列载荷将被压缩(字节)。 |
 | `nack_max_retries` | 否 | integer | 进入 DLQ 前的 NACK 最大重试次数(默认 0)。 |
 | `nack_backoff_ms` | 否 | integer | 重试 NACK 前的退避(毫秒,默认 0)。 |
@@ -219,7 +219,12 @@ Cron 调度。所有字段可选。
 
 | 键 | 必填 | 类型 | 说明 |
 | --- | --- | --- | --- |
-| `path` | 否 | string | 大载荷溢写的本地目录。 |
+| `path` | 否 | string | 响应正文溢写目录。 |
+| `shared_path` | 否 | boolean | Kafka 或 NATS 模式须设为 `true`，确认所有节点在相同的绝对路径挂载共享目录。 |
+
+远端队列的 `path` 必须是绝对路径，且 `shared_path = true`；否则启动时报错。队列中的响应只携带相对存储键。所有节点都必须能读写该共享目录。未配置远端队列时，此项不生效。
+
+队列配置无效或订阅失败时，启动会返回错误。批量发布失败时，载荷保留在内存中，按退避重试并施加背压；进程崩溃仍可能丢失尚未发布的内存批次。NATS 重试和死信转发会在替代消息持久化成功后确认原消息。
 
 ### [sync]
 
@@ -246,7 +251,9 @@ Cron 调度。所有字段可选。
 | 键 | 必填 | 类型 | 说明 |
 | --- | --- | --- | --- |
 | `capacity` | 是 | integer | 事件通道容量(默认 1024)。 |
-| `concurrency` | 是 | integer | 事件处理并发(默认 64)。 |
+| `concurrency` | 否 | integer | 兼容旧配置；不生效。事件总线使用单个分发任务及有界订阅通道。 |
+
+事件通道或订阅通道满时会丢弃事件；关闭时会排空总线中已入队的事件。
 
 ### [logger]
 
@@ -367,6 +374,7 @@ backoff = "None"
 ### [proxy]
 
 内联代理池配置(不再依赖外部代理文件)。所有字段可选。
+引擎启动时只构建一次正在使用的代理池；修改被监听的 TOML 文件不会重建它。见[运行中更换代理配置](proxies-and-downloaders.md#运行中更换代理配置)。
 
 | 键 | 必填 | 类型 | 说明 |
 | --- | --- | --- | --- |
@@ -415,12 +423,14 @@ backoff = "None"
 
 | 键 | 必填 | 类型 | 说明 |
 | --- | --- | --- | --- |
-| `min_size` | 否 | integer | 池最小容量(默认 5)。 |
-| `max_size` | 否 | integer | 池最大容量(默认 50)。 |
+| `min_size` | 否 | integer | 每个提供商触发补充前的动态 IP 代理下限（默认 5）。 |
+| `max_size` | 否 | integer | 每个提供商动态加载的 IP 代理上限（默认 50）；静态直连代理另计。 |
 | `max_errors` | 否 | integer | 单代理被驱逐前的最大错误数(默认 3)。 |
 | `health_check_interval_secs` | 否 | integer | 健康检查间隔(秒,默认 300；`0` 禁用调度)。管理器在 Tokio 运行时内创建时启动，销毁时取消。 |
 | `health_check_concurrency` | 否 | integer | 同时执行的代理健康探测上限(默认 8；限制在 1–64)。 |
-| `refill_threshold` | 否 | float | 触发补充的比例阈值(默认 0.3)。 |
+| `refill_threshold` | 否 | float | 每个提供商相对于 `max_size` 的补充比例阈值（默认 0.3）。 |
+
+模块中启用托管代理池、重试轮换及代理 Client 缓存调优见[代理与下载器](proxies-and-downloaders.md)。
 
 ---
 
@@ -452,7 +462,7 @@ backoff = "None"
 
 ## 示例:分布式配置
 
-一份贴近生产形态的配置:PostgreSQL 任务存储、Kafka 数据面队列、dashboard API,以及多路日志。跨节点协调(选主、锁)需在代码中另行开启 —— 启用 `cluster-embedded` 特性并调用 `.cluster(…)`,详见 [部署](deployment.md)。
+一份贴近生产形态的配置:PostgreSQL 任务存储、Kafka 数据面队列、dashboard API,以及多路日志。跨节点协调(选主、锁)需在代码中另行开启 —— 启用 `cluster-embedded` 特性并调用 `.cluster(…)`,详见 [部署](deployment.md)。下方的容量与并发数字仅用于示例；如何确定适合实际负载的上限见[运行时调优](runtime-tuning.md)。
 
 ```toml
 name = "crawler"
@@ -505,7 +515,6 @@ brokers = "127.0.0.1:9092"
 
 [event_bus]
 capacity = 200000
-concurrency = 2000
 
 [logger]
 enabled = true
@@ -519,10 +528,7 @@ type = "console"
 enabled = true
 ```
 
-## 测试配置样例
+## 配置样例
 
-- [tests/config.test.toml](../../tests/config.test.toml)
-- [tests/config.mock.toml](../../tests/config.mock.toml)
-- [tests/config.mock.pure.toml](../../tests/config.mock.pure.toml)
-- [tests/config.mock.pure.engine.toml](../../tests/config.mock.pure.engine.toml)
-- [tests/config.prod_like.toml](../../tests/config.prod_like.toml)
+- [本地监控配置](../../monitoring/local_engine.toml) —— 包含 dashboard 端点与 SQLite URL；部署时按需修改路径及特性开关。
+- [配置反序列化测试](../../crates/mocra-core/src/common/model/config.rs) —— 与模型一起维护的最小 schema 样例。

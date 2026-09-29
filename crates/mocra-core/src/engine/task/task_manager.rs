@@ -10,6 +10,7 @@ use crate::common::model::message::{TaskErrorEvent, TaskEvent, TaskParserEvent};
 use crate::common::model::{Request, Response};
 use crate::common::state::DbHandle;
 use crate::errors::Result;
+use crate::utils::coordination::CoordinationBackend;
 use dashmap::DashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -34,6 +35,16 @@ impl TaskManager {
         cookie_service: Option<Arc<CacheService>>,
         config: Arc<RwLock<Config>>,
     ) -> Self {
+        Self::new_with_coordination(db, cache_service, cookie_service, config, None)
+    }
+
+    pub fn new_with_coordination(
+        db: &DbHandle,
+        cache_service: Arc<CacheService>,
+        cookie_service: Option<Arc<CacheService>>,
+        config: Arc<RwLock<Config>>,
+        coordination: Option<Arc<dyn CoordinationBackend>>,
+    ) -> Self {
         #[cfg(feature = "store")]
         let repository = db
             .as_ref()
@@ -42,12 +53,13 @@ impl TaskManager {
         let repository = ();
 
         let module_assembler = Arc::new(RwLock::new(ModuleAssembler::new()));
-        let factory = TaskFactory::new(
+        let factory = TaskFactory::new_with_coordination(
             repository,
             Arc::clone(&cache_service),
             cookie_service,
             Arc::clone(&module_assembler),
             Arc::clone(&config),
+            coordination,
         );
 
         Self {

@@ -22,7 +22,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use dashmap::DashMap;
 use futures::StreamExt;
-use log::{error, info, warn};
+use log::{info, warn};
 use tokio::sync::mpsc;
 
 use crate::common::model::config::NatsConfig;
@@ -174,39 +174,22 @@ impl MqBackend for NatsQueue {
         let nack_policy = self.nack_policy;
         let topic_log = topic.to_string();
 
+        let stream = js.get_stream(&stream_name).await.map_err(nats_err)?;
+        let consumer = stream
+            .get_or_create_consumer(
+                &durable,
+                async_nats::jetstream::consumer::pull::Config {
+                    durable_name: Some(durable.clone()),
+                    filter_subject: subject.clone(),
+                    ack_policy: async_nats::jetstream::consumer::AckPolicy::Explicit,
+                    ..Default::default()
+                },
+            )
+            .await
+            .map_err(nats_err)?;
+        let mut messages = consumer.messages().await.map_err(nats_err)?;
+
         tokio::spawn(async move {
-            let stream = match js.get_stream(&stream_name).await {
-                Ok(s) => s,
-                Err(e) => {
-                    error!("NatsQueue get_stream failed: {e}");
-                    return;
-                }
-            };
-            let consumer = match stream
-                .get_or_create_consumer(
-                    &durable,
-                    async_nats::jetstream::consumer::pull::Config {
-                        durable_name: Some(durable.clone()),
-                        filter_subject: subject.clone(),
-                        ack_policy: async_nats::jetstream::consumer::AckPolicy::Explicit,
-                        ..Default::default()
-                    },
-                )
-                .await
-            {
-                Ok(c) => c,
-                Err(e) => {
-                    error!("NatsQueue create consumer failed for {topic_log}: {e}");
-                    return;
-                }
-            };
-            let mut messages = match consumer.messages().await {
-                Ok(m) => m,
-                Err(e) => {
-                    error!("NatsQueue messages() failed for {topic_log}: {e}");
-                    return;
-                }
-            };
             info!("NatsQueue listening topic {topic_log} (subject {subject})");
 
             // id (stream sequence) -> owned jetstream message, for the ack processor to pick up
@@ -243,26 +226,46 @@ impl MqBackend for NatsQueue {
                                     nh.insert(HEADER_ATTEMPT.to_string(), next_attempt.to_string());
                                     nh.insert(HEADER_NACK_REASON.to_string(), reason);
                                     let hm = to_header_map(&nh);
-                                    let _ = js_ack
+                                    match js_ack
                                         .publish_with_headers(
                                             subj_retry.clone(),
                                             hm,
                                             payload.to_vec().into(),
                                         )
-                                        .await;
-                                    let _ = msg.ack().await;
+                                        .await
+                                    {
+                                        Ok(ack) => match ack.await {
+                                            Ok(_) => {
+                                                let _ = msg.ack().await;
+                                            }
+                                            Err(error) => {
+                                                warn!("NATS retry persistence failed: {error}")
+                                            }
+                                        },
+                                        Err(error) => warn!("NATS retry publish failed: {error}"),
+                                    }
                                 }
                                 NackDisposition::Dlq => {
                                     let mut hm = async_nats::HeaderMap::new();
                                     hm.insert(HEADER_NACK_REASON, reason.as_str());
-                                    let _ = js_ack
+                                    match js_ack
                                         .publish_with_headers(
                                             dlq_subject.clone(),
                                             hm,
                                             payload.to_vec().into(),
                                         )
-                                        .await;
-                                    let _ = msg.ack().await;
+                                        .await
+                                    {
+                                        Ok(ack) => match ack.await {
+                                            Ok(_) => {
+                                                let _ = msg.ack().await;
+                                            }
+                                            Err(error) => {
+                                                warn!("NATS DLQ persistence failed: {error}")
+                                            }
+                                        },
+                                        Err(error) => warn!("NATS DLQ publish failed: {error}"),
+                                    }
                                 }
                             }
                         }

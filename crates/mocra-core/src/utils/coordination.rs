@@ -37,6 +37,12 @@ pub trait CoordinationBackend: Send + Sync {
     async fn subscribe(&self, topic: &str) -> Result<mpsc::Receiver<Vec<u8>>, String>;
     async fn set(&self, key: &str, value: &[u8]) -> Result<(), String>;
     async fn get(&self, key: &str) -> Result<Option<Vec<u8>>, String>;
+    /// Remove a KV key after a run stops. Backends without deletion may retain
+    /// run-scoped gates; the persistent stop key still prevents reuse.
+    async fn delete(&self, key: &str) -> Result<(), String> {
+        let _ = key;
+        Ok(())
+    }
     // Optimistic Lock (CAS)
     async fn cas(&self, key: &str, old_val: Option<&[u8]>, new_val: &[u8]) -> Result<bool, String>;
     // Distributed Lock

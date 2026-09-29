@@ -26,7 +26,7 @@ Depend on mocra and run a spider — that is the whole deployment:
 
 ```toml
 [dependencies]
-mocra = "0.4"
+mocra = "0.5"
 ```
 
 ```rust
@@ -64,7 +64,7 @@ election, fenced distributed locks, membership, and partition ownership with **n
 coordinator**.
 
 ```toml
-mocra = { version = "0.4", features = ["cluster-embedded"] }
+mocra = { version = "0.5", features = ["cluster-embedded"] }
 ```
 
 ### Registering nodes
@@ -125,17 +125,18 @@ Mocra::builder()
 The embedded cluster is only the control plane. The **queue backend is chosen independently**:
 
 - **In-memory** (default) — the in-process queue does not cross nodes, so seeded work stays on the node that produced it.
-- **Kafka / NATS JetStream** — tasks fan out across nodes, routed by `hash(account)`
-  for consumer affinity (same account → same consumer). Enable `queue-kafka` or `queue-nats` and
-  configure the backend in your TOML (see [Configuration](configuration.md)).
+- **Kafka / NATS JetStream** — broker consumers share tasks across nodes. Enable `queue-kafka`
+  or `queue-nats` and configure the backend in TOML (see [Configuration](configuration.md)).
+  Cross-stage account affinity is not guaranteed; request fallback and sessions still use
+  node-local cache, so workloads that depend on them need an affinity or shared-state design.
 
 ## Cross-node data plane (Kafka / NATS)
 
 The embedded cluster is the control plane; the in-memory queue never leaves the process that
 produced the work. To fan tasks out across nodes, point the **data-plane queue** at a shared
 broker — Kafka (`queue-kafka`) or NATS JetStream (`queue-nats`) — by loading a TOML config with
-`.from_toml(cfg)`. Tasks are routed by `hash(account)` for consumer affinity (same account → same
-consumer):
+`.from_toml(cfg)`. Broker consumers compete for messages; they do not preserve account affinity
+across stages:
 
 ```toml
 # config.toml — Kafka as the data-plane queue
@@ -182,7 +183,7 @@ observability HTTP API **and** a built-in single-file web UI — open the port i
 **metrics / logs / tasks / performance**, no frontend build required:
 
 ```toml
-mocra = { version = "0.4", features = ["dashboard"] }
+mocra = { version = "0.5", features = ["dashboard"] }
 ```
 
 ```rust

@@ -23,7 +23,7 @@ mocra 沿两条相互独立的轴扩展——**控制面**（协调）与**数�
 
 ```toml
 [dependencies]
-mocra = "0.4"
+mocra = "0.5"
 ```
 
 ```rust
@@ -60,7 +60,7 @@ cargo run --release
 成员管理与分区归属，**无需外部协调器**。
 
 ```toml
-mocra = { version = "0.4", features = ["cluster-embedded"] }
+mocra = { version = "0.5", features = ["cluster-embedded"] }
 ```
 
 ### 注册节点
@@ -118,15 +118,15 @@ Mocra::builder()
 内嵌集群只是控制面。**队列后端独立选择**：
 
 - **内存**（默认）——进程内队列不跨节点，播种的工作留在产生它的节点上。
-- **Kafka / NATS JetStream**——任务扇出到各节点，按 `hash(account)` 路由以实现消费者
-  亲和（同一账号 → 同一消费者）。启用 `queue-kafka` 或 `queue-nats`，并在 TOML 中配置该后端
-  （见[配置参考](configuration.md)）。
+- **Kafka / NATS JetStream**——消息代理的消费者在节点之间分担任务。启用 `queue-kafka` 或
+  `queue-nats` 并在 TOML 中配置后端（见[配置参考](configuration.md)）。当前不保证跨阶段的账号亲和；
+  请求回退和会话仍使用节点本地缓存，依赖这些能力的工作负载需要另行设计亲和路由或共享状态。
 
 ## 跨节点数据面（Kafka / NATS）
 
 内嵌集群是控制面，进程内队列永远不会离开产生该工作的进程。要把任务扇出到各节点，请通过
 `.from_toml(cfg)` 加载 TOML 配置，把**数据面队列**指向共享消息代理——Kafka（`queue-kafka`）或
-NATS JetStream（`queue-nats`）。任务按 `hash(account)` 路由以实现消费者亲和（同一账号 → 同一消费者）：
+NATS JetStream（`queue-nats`）。消息代理采用竞争消费，不保证同一账号的不同阶段落在同一节点：
 
 ```toml
 # config.toml —— 用 Kafka 作为数据面队列
@@ -172,7 +172,7 @@ cargo run --release --features "cluster-embedded queue-kafka"
 单文件 Web UI——浏览器打开该端口即见 **指标 / 日志 / 任务 / 性能**，无需任何前端构建：
 
 ```toml
-mocra = { version = "0.4", features = ["dashboard"] }
+mocra = { version = "0.5", features = ["dashboard"] }
 ```
 
 ```rust

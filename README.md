@@ -6,7 +6,7 @@
 
 [![Crates.io](https://img.shields.io/crates/v/mocra.svg)](https://crates.io/crates/mocra)
 [![docs.rs](https://docs.rs/mocra/badge.svg)](https://docs.rs/mocra)
-[![License](https://img.shields.io/crates/l/mocra.svg)](LICENSE)
+[![License](https://img.shields.io/crates/l/mocra.svg)](#license)
 [![Rust](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](https://www.rust-lang.org)
 
 English | [中文](README.zh.md)
@@ -37,7 +37,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-mocra = "0.4"
+mocra = "0.5"
 async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }
 tokio = { version = "1", features = ["full"] }
@@ -51,7 +51,7 @@ use mocra::prelude::*;
 use serde::Serialize;
 
 #[derive(Debug, Serialize)]
-struct Page { url: String, status: u16 }
+struct Page { module_id: String, status: u16 }
 
 struct Httpbin;
 
@@ -65,7 +65,7 @@ impl Spider for Httpbin {
     }
 
     async fn parse(&self, res: Response, cx: &mut Ctx<Self::Item>) -> Result<()> {
-        cx.emit(Page { url: res.module_id(), status: res.status_code });
+        cx.emit(Page { module_id: res.module_id(), status: res.status_code });
         Ok(())
     }
 }
@@ -74,7 +74,7 @@ impl Spider for Httpbin {
 async fn main() -> Result<()> {
     Mocra::builder()
         .spider(Httpbin, on_item(|p: Page| async move {
-            println!("[item] {} -> {}", p.url, p.status);
+            println!("[item] module={} status={}", p.module_id, p.status);
         }))
         .run()
         .await
@@ -92,7 +92,7 @@ cargo run
 Enable `cluster-embedded` and start a **self-organizing Raft cluster** — register any node to any known node to form the network:
 
 ```toml
-mocra = { version = "0.4", features = ["cluster-embedded"] }
+mocra = { version = "0.5", features = ["cluster-embedded"] }
 ```
 
 ```rust
@@ -109,7 +109,7 @@ Mocra::builder()
     .run().await?;
 ```
 
-The **control plane** (leader election, distributed locks, membership, partition ownership) runs on an embedded **redb + Raft** — no external coordinator required. The **data plane** keeps pluggable message queues (Kafka / **NATS JetStream** / in-memory), with task routing by `hash(account)` for consumer affinity.
+The **control plane** (leader election, distributed locks, membership, partition ownership) runs on embedded **redb + Raft**, without an external coordinator. The **data plane** supports Kafka, NATS JetStream, or in-memory queues. Cron ownership uses `hash(account)`; queue consumers do not currently guarantee cross-stage account affinity.
 
 > **Advanced (multi-stage DAG)**: for multi-node pipelines with login, pagination, and custom middleware, implement `ModuleTrait` / `ModuleNodeTrait` directly (enable the `store` feature for the account × platform × module model). See [Module Development](docs/module-development.md).
 
@@ -118,7 +118,7 @@ The **control plane** (leader election, distributed locks, membership, partition
 Enable the `dashboard` feature and call `.dashboard(port)` — the engine hosts a read-only observability API **and** a built-in single-file web UI. Open the port in a browser to see **metrics / logs / tasks / performance**; no frontend build, and no endpoint to type in (the page targets its own engine):
 
 ```toml
-mocra = { version = "0.4", features = ["dashboard"] }
+mocra = { version = "0.5", features = ["dashboard"] }
 ```
 
 ```rust
@@ -147,6 +147,8 @@ Mocra::builder()
     .run().await?;
 ```
 
+The DB-less `Spider` builder currently has no module-config setter for selecting a named downloader. Use `.default_downloader()` there; see [Proxies and Downloaders](docs/proxies-and-downloaders.md) for named routing and proxy behavior.
+
 ## Architecture
 
 ```
@@ -168,7 +170,7 @@ Each stage is decoupled by a message queue. Queues are local Tokio channels in s
 
 ### Workspace crates
 
-mocra is a Cargo workspace. The entire runtime lives in `mocra-core`; the `mocra` crate you depend on is a **thin facade** over it (12 direct dependencies). Reusable subsystems ship as standalone crates with a single, acyclic dependency direction (`mocra → mocra-core → {mocra-cluster, mocra-dag, mocra-proxy, mocra-store}` — the inner crates never depend back):
+mocra is a Cargo workspace. The entire runtime lives in `mocra-core`; the `mocra` crate you depend on is a **thin facade** over it. Reusable subsystems ship as standalone crates with a single, acyclic dependency direction (`mocra → mocra-core → {mocra-cluster, mocra-dag, mocra-proxy, mocra-store}` — the inner crates never depend back):
 
 | Crate | What it is |
 |---|---|
@@ -218,7 +220,7 @@ start ─┤               ├── merge
 | **Queues (data plane)** | Tokio mpsc (in-memory) | Pluggable MQ: Kafka / NATS JetStream / in-memory |
 | **Locks / election** | Local | Raft-consensus (fencing tokens) |
 | **Workers** | 1 process | N nodes, same binary; register any node to any known node |
-| **Work distribution** | — | Cron by `hash(account)` ownership + MQ consumer affinity |
+| **Work distribution** | — | Cron by `hash(account)` ownership + competing MQ consumers |
 | **Code changes** | None | Add `.cluster(ClusterConfig::…)` |
 
 Enable the embedded cluster (no external coordinator required):
@@ -235,7 +237,7 @@ The data plane (message queue) is selected independently of the control plane �
 ## Feature flags
 
 All optional; the default build is single-node with **no DB**. Enable with
-`mocra = { version = "0.4", features = ["…"] }`.
+`mocra = { version = "0.5", features = ["…"] }`.
 
 | Feature | Unlocks |
 |---|---|
@@ -261,13 +263,23 @@ All optional; the default build is single-node with **no DB**. Enable with
 | [Configuration](docs/configuration.md) | Full TOML configuration reference |
 | [API Reference](docs/api-reference.md) | HTTP control plane endpoints |
 | [Deployment](docs/deployment.md) | Single-node, distributed, monitoring |
+| [Follow-up Requests](docs/follow-up-requests.md) | Full request fields through `Ctx::follow` |
+| [Proxies and Downloaders](docs/proxies-and-downloaders.md) | Fixed and managed proxies, retry rotation, custom downloaders |
+| [Runtime Tuning](docs/runtime-tuning.md) | Bounded queues, proxy cache, DAG checkpoints |
+| [Changelog](CHANGELOG.md) | Released versions and pending changes |
+
+The repository includes agent skills for spiders, proxies, downloaders, and runtime changes: [English by default (`$mocra`)](.agents/skills/mocra/SKILL.md) and [中文 (`$mocra-zh`)](.agents/skills/mocra-zh/SKILL.md).
 
 ## Examples
 
-Runnable examples in [`examples/`](examples/):
+Runnable examples and prerequisites are indexed in [`examples/README.md`](examples/README.md):
 
 - [`examples/spider_quickstart.rs`](examples/spider_quickstart.rs) — minimal `Spider` (no DB)
 - [`examples/custom_downloader.rs`](examples/custom_downloader.rs) — implement the `Downloader` trait and inject it with `.default_downloader()` (offline, deterministic)
+- [`examples/follow_request.rs`](examples/follow_request.rs) — preserve POST method, headers, body, and cookie across a follow-up (offline)
+- [`examples/proxy_pool.rs`](examples/proxy_pool.rs) — proxy selection, feedback, and retry exclusion (offline simulation)
+- [`examples/explicit_proxy.rs`](examples/explicit_proxy.rs) — use a reachable proxy for one `Spider` request
+- [`examples/quotes_scraper.rs`](examples/quotes_scraper.rs) — pagination, author pages, and JSONL output
 - [`examples/dashboard.rs`](examples/dashboard.rs) — built-in observability dashboard (`--features dashboard`)
 - [`examples/cluster_quickstart.rs`](examples/cluster_quickstart.rs) — self-organizing embedded cluster (`--features cluster-embedded`)
 
@@ -288,7 +300,7 @@ docker compose -f docker-compose.monitoring.yml up -d
 
 Licensed under either of:
 
-- MIT license
-- Apache License, Version 2.0
+- [MIT license](LICENSE-MIT)
+- [Apache License, Version 2.0](LICENSE-APACHE)
 
 at your option.

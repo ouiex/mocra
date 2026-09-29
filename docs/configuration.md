@@ -20,7 +20,7 @@ Mocra::builder()
     .await?;
 ```
 
-Add `mocra = "0.4"` to `Cargo.toml`. Reach for a TOML file only when you need the **advanced /
+Add `mocra = "0.5"` to `Cargo.toml`. Reach for a TOML file only when you need the **advanced /
 distributed** path — a database-backed task model, Kafka/NATS data-plane queues,
 the dashboard/observability HTTP API, cron scheduling, proxy pools, or custom error policies. Load
 it with:
@@ -51,7 +51,7 @@ means one is.)
 ## Feature flags
 
 Config keys are inert unless the runtime code they drive is compiled in. Enable with
-`mocra = { version = "0.4", features = ["…"] }`.
+`mocra = { version = "0.5", features = ["…"] }`.
 
 | Feature | Needed for |
 |---|---|
@@ -63,17 +63,14 @@ Config keys are inert unless the runtime code they drive is compiled in. Enable 
 
 ## Minimal valid config
 
-The smallest config the loader accepts (from `test_config_deserialization` in `config.rs`). The
-`name`, `[db]`, `[download_config]`, `[cache]`, `[crawler]`, and `[channel_config]` sections are
-required by the schema; everything else is optional. Note `[db]` is present but has no `url`, so no
-database is used:
+The required sections of a DB-less config. The `name`, `[db]`, `[download_config]`, `[cache]`,
+`[crawler]`, and `[channel_config]` sections are required by the schema; everything else is
+optional. `[db]` has no `url`, so no database is used:
 
 ```toml
 name = "test_app"
 
 [db]
-url = "postgres://user:password@localhost:5432/db"
-database_schema = "public"
 
 [download_config]
 downloader_expire = 3600
@@ -136,7 +133,7 @@ Typical layered fields: `enable_session`, `enable_locker`, `enable_rate_limit`, 
 | `sync` | no | table | Distributed state-sync settings. |
 | `proxy` | no | table | Inline proxy-pool config. |
 | `api` | no | table | Built-in HTTP API / dashboard (requires `dashboard`). |
-| `event_bus` | no | table | Event-bus capacity and concurrency. |
+| `event_bus` | no | table | Event-bus capacity. |
 | `logger` | no | table | Logging outputs (multi-sink). |
 | `policy` | no | table | Error-handling policy overrides. |
 
@@ -192,7 +189,9 @@ An in-process, in-memory cache (`CacheService` backed by a local store).
 | Key | Required | Type | Description |
 | --- | --- | --- | --- |
 | `ttl` | yes | integer | Default cache TTL (seconds). |
-| `compression_threshold` | no | integer | Compress cached payloads larger than this (bytes). |
+| `compression_threshold` | no | integer | Legacy setting; ignored by the in-memory cache. |
+
+`enable_l1`, `l1_ttl_secs`, and `l1_max_entries` are accepted for compatibility but have no effect. The cache is already local memory.
 
 ### [crawler]
 
@@ -226,12 +225,12 @@ Cron scheduling. All fields optional.
 | Key | Required | Type | Description |
 | --- | --- | --- | --- |
 | `minid_time` | yes | integer | MinID/snowflake base time for ordered IDs. |
-| `capacity` | yes | integer | Local in-memory queue capacity; too small causes backpressure. |
-| `blob_storage` | no | table | Spill large payloads to disk (see below). |
+| `capacity` | yes | integer | Positive capacity for each local channel, including logs; a small value causes backpressure. |
+| `blob_storage` | no | table | Spill large response bodies to a shared directory when using a remote queue (see below). |
 | `kafka` | no | table | Kafka queue backend (see [KafkaConfig](#kafkaconfig-shared)). Requires `queue-kafka`. |
 | `nats` | no | table | NATS JetStream queue backend (see [NatsConfig](#natsconfig-shared)). Requires `queue-nats`. |
-| `queue_codec` | no | string | Remote-queue codec: `json` or `msgpack` (must match producers/consumers). |
-| `batch_concurrency` | no | integer | Max concurrency for batch flushing to remote queues (default 10). |
+| `queue_codec` | no | string | Remote-queue codec: `json` or `msgpack` (default MessagePack; must match producers/consumers). |
+| `batch_concurrency` | no | integer | Per-topic batch flush permit count (default 50); dispatch waits for a permit, preserving backpressure. |
 | `compression_threshold` | no | integer | Compress queue payloads larger than this (bytes). |
 | `nack_max_retries` | no | integer | Max NACK retries before routing to the DLQ (default 0). |
 | `nack_backoff_ms` | no | integer | Backoff (ms) before retrying a NACK (default 0). |
@@ -240,7 +239,12 @@ Cron scheduling. All fields optional.
 
 | Key | Required | Type | Description |
 | --- | --- | --- | --- |
-| `path` | no | string | Local directory for large-payload spillover. |
+| `path` | no | string | Directory for large response bodies. |
+| `shared_path` | no | boolean | Required as `true` with Kafka or NATS; confirms every worker mounts the same absolute path. |
+
+For a remote queue, `path` must be absolute and `shared_path = true`; startup rejects other combinations. The queued response carries a relative blob key. Ensure all workers can read and write the shared directory. Without a remote queue, this setting has no effect.
+
+Queue startup returns errors for invalid configuration or failed subscriptions. Failed batch publishes keep their payloads in memory and retry with backpressure; a process crash can still lose an unpublished in-memory batch. NATS retry and dead-letter forwarding acknowledge the original only after the replacement is persisted.
 
 ### [sync]
 
@@ -269,7 +273,9 @@ Distributed state synchronization. All fields optional.
 | Key | Required | Type | Description |
 | --- | --- | --- | --- |
 | `capacity` | yes | integer | Event channel capacity (default 1024). |
-| `concurrency` | yes | integer | Event-handler concurrency (default 64). |
+| `concurrency` | no | integer | Legacy setting; ignored. The bus uses one dispatch task and bounded subscriber channels. |
+
+When an event or subscriber channel is full, the event is dropped. Shutdown drains events already in the bus queue.
 
 ### [logger]
 
@@ -392,6 +398,8 @@ backoff = "None"
 ### [proxy]
 
 Inline proxy-pool config (no external proxy file). All fields optional.
+The active pool is built at engine startup; editing this section in a watched TOML file does not
+rebuild it. See [Changing proxy configuration while running](proxies-and-downloaders.md#changing-proxy-configuration-while-running).
 
 | Key | Required | Type | Description |
 | --- | --- | --- | --- |
@@ -441,12 +449,14 @@ internally to `http`/`https` proxy channels.
 
 | Key | Required | Type | Description |
 | --- | --- | --- | --- |
-| `min_size` | no | integer | Minimum pool size (default 5). |
-| `max_size` | no | integer | Maximum pool size (default 50). |
+| `min_size` | no | integer | Minimum dynamically loaded IP proxies per provider before refill (default 5). |
+| `max_size` | no | integer | Maximum dynamically loaded IP proxies per provider (default 50); static direct proxies are separate. |
 | `max_errors` | no | integer | Max errors per proxy before eviction (default 3). |
 | `health_check_interval_secs` | no | integer | Health-check interval (seconds, default 300; `0` disables scheduling). The manager starts checks when constructed in a Tokio runtime and cancels them when dropped. |
 | `health_check_concurrency` | no | integer | Maximum simultaneous proxy health probes (default 8; clamped to 1–64). |
-| `refill_threshold` | no | float | Refill trigger ratio (default 0.3). |
+| `refill_threshold` | no | float | Per-provider refill trigger ratio against `max_size` (default 0.3). |
+
+See [Proxies and Downloaders](proxies-and-downloaders.md) for enabling a managed pool in a module, retry rotation, and proxy Client cache tuning.
 
 ---
 
@@ -482,6 +492,8 @@ internally to `http`/`https` proxy channels.
 A production-shaped config: PostgreSQL task store, Kafka data-plane queue, dashboard API, and
 multi-sink logging. Cross-node coordination (leader election, locks) is enabled separately in code
 with the `cluster-embedded` feature and `.cluster(…)` — see [deployment](deployment.md).
+Capacity and concurrency numbers below are illustrative; use [Runtime Tuning](runtime-tuning.md)
+to choose bounds for your workload.
 
 ```toml
 name = "crawler"
@@ -534,7 +546,6 @@ brokers = "127.0.0.1:9092"
 
 [event_bus]
 capacity = 200000
-concurrency = 2000
 
 [logger]
 enabled = true
@@ -548,10 +559,7 @@ type = "console"
 enabled = true
 ```
 
-## Test config samples
+## Config samples
 
-- [tests/config.test.toml](../tests/config.test.toml)
-- [tests/config.mock.toml](../tests/config.mock.toml)
-- [tests/config.mock.pure.toml](../tests/config.mock.pure.toml)
-- [tests/config.mock.pure.engine.toml](../tests/config.mock.pure.engine.toml)
-- [tests/config.prod_like.toml](../tests/config.prod_like.toml)
+- [Local monitoring config](../monitoring/local_engine.toml) — includes a dashboard endpoint and a SQLite URL; adjust paths and feature flags for your deployment.
+- [Config deserialization tests](../crates/mocra-core/src/common/model/config.rs) — minimal schema examples maintained with the model.

@@ -12,6 +12,7 @@ pub mod logger;
 #[cfg(feature = "polars")]
 pub mod polars_utils;
 pub mod priority;
+#[deprecated(note = "Use distributed_rate_limit; it also supports local mode")]
 pub mod rate_limit;
 pub mod storage;
 pub mod string_case;

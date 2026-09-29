@@ -5,7 +5,7 @@ members = ["crates/mocra-cluster", "crates/mocra-proxy", "crates/mocra-dag", "cr
 
 [package]
 name = "mocra"
-version = "0.4.1"
+version = "0.5.0"
 edition = "2024"
 description = "A distributed, event-driven crawling and data collection framework"
 license = "MIT OR Apache-2.0"
@@ -43,8 +43,8 @@ rustdoc-args = ["--cfg", "docsrs"]
 # (facade + prelude + per-layer shims). So this list keeps only the dependencies the facade/bin
 # use directly, plus feature-gated optional dependencies — everything else (axum, tracing, etc.)
 # is a transitive dependency of mocra-core and is no longer declared here.
-mocra-core = { path = "crates/mocra-core", version = "0.4.1" }
-mocra-proxy = { path = "crates/mocra-proxy", version = "0.4.1" }
+mocra-core = { path = "crates/mocra-core", version = "0.5.0" }
+mocra-proxy = { path = "crates/mocra-proxy", version = "0.5.0" }
 # Dependencies used directly by the facade (src/facade.rs, src/prelude.rs, src/lib.rs, src/bin/).
 async-trait = "0.1"
 tokio = { version = "1", features = ["full"] }
@@ -122,6 +122,21 @@ path = "examples/spider_quickstart.rs"
 [[example]]
 name = "custom_downloader"
 path = "examples/custom_downloader.rs"
+
+# Offline follow-up request example: GET -> POST with headers, body, and cookies.
+[[example]]
+name = "follow_request"
+path = "examples/follow_request.rs"
+
+# Proxy manager lifecycle without external network access.
+[[example]]
+name = "proxy_pool"
+path = "examples/proxy_pool.rs"
+
+# Spider with a request-specific proxy; requires a reachable proxy supplied via env.
+[[example]]
+name = "explicit_proxy"
+path = "examples/explicit_proxy.rs"
 
 # Embedded cluster example: requires cluster-embedded (it uses `ClusterConfig`).
 [[example]]

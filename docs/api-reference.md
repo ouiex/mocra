@@ -14,7 +14,7 @@ A small set of **write / control** endpoints (task injection, pause/resume, node
 Add the feature:
 
 ```toml
-mocra = { version = "0.4", features = ["dashboard"] }
+mocra = { version = "0.5", features = ["dashboard"] }
 ```
 
 Then enable it one of two ways.
@@ -268,7 +268,7 @@ List the active nodes in the cluster.
     "ip": "10.0.0.4",
     "hostname": "worker-1",
     "last_heartbeat": 1720598400,
-    "version": "0.4.0"
+    "version": "0.5.0"
   }
 ]
 ```

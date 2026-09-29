@@ -12,6 +12,7 @@ use crate::queue::{
 };
 use async_trait::async_trait;
 use rmp_serde as rmps;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 use tokio::sync::mpsc as tokio_mpsc;
@@ -25,6 +26,9 @@ struct MockBackend {
     pub messages: Arc<Mutex<Vec<(String, Vec<u8>, std::collections::HashMap<String, String>)>>>,
     /// Captures each message's partition key (verifies account-affinity routing).
     pub keys: Arc<Mutex<Vec<Option<String>>>>,
+    fail_publishes: Arc<AtomicUsize>,
+    publish_attempts: Arc<AtomicUsize>,
+    fail_subscribe: Arc<AtomicBool>,
 }
 
 impl MockBackend {
@@ -32,6 +36,9 @@ impl MockBackend {
         Self {
             messages: Arc::new(Mutex::new(Vec::new())),
             keys: Arc::new(Mutex::new(Vec::new())),
+            fail_publishes: Arc::new(AtomicUsize::new(0)),
+            publish_attempts: Arc::new(AtomicUsize::new(0)),
+            fail_subscribe: Arc::new(AtomicBool::new(false)),
         }
     }
 }
@@ -71,6 +78,17 @@ impl MqBackend for MockBackend {
             std::collections::HashMap<String, String>,
         )],
     ) -> Result<()> {
+        self.publish_attempts.fetch_add(1, Ordering::SeqCst);
+        if self
+            .fail_publishes
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+            .is_ok()
+        {
+            return Err(crate::errors::Error::new(
+                ErrorKind::Queue,
+                Some(std::io::Error::other("injected publish failure")),
+            ));
+        }
         for (key, payload, headers) in items {
             self.publish_with_headers(topic, key.as_deref(), payload, headers)
                 .await?;
@@ -79,6 +97,12 @@ impl MqBackend for MockBackend {
     }
 
     async fn subscribe(&self, _topic: &str, _sender: mpsc::Sender<Message>) -> Result<()> {
+        if self.fail_subscribe.load(Ordering::SeqCst) {
+            return Err(crate::errors::Error::new(
+                ErrorKind::Queue,
+                Some(std::io::Error::other("injected subscribe failure")),
+            ));
+        }
         Ok(())
     }
 
@@ -169,6 +193,78 @@ async fn test_queue_manager_integration() {
         high_msg.is_some(),
         "Should find message with topic 'request-high'"
     );
+}
+
+#[tokio::test]
+async fn transient_publish_failure_retries_the_same_batch() {
+    let backend = Arc::new(MockBackend::new());
+    backend.fail_publishes.store(2, Ordering::SeqCst);
+    let manager = QueueManager::new(Some(backend.clone()), 2);
+    manager.subscribe_checked().await.unwrap();
+
+    manager
+        .get_request_push_channel()
+        .send(QueuedItem::new(Request::new(
+            "https://example.test/retry",
+            "GET",
+        )))
+        .await
+        .unwrap();
+
+    tokio::time::timeout(Duration::from_secs(4), async {
+        loop {
+            if !backend.messages.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("batch should publish after the broker recovers");
+    assert_eq!(backend.publish_attempts.load(Ordering::SeqCst), 3);
+    assert_eq!(backend.messages.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn subscription_failure_is_returned_before_forwarders_start() {
+    let backend = Arc::new(MockBackend::new());
+    backend.fail_subscribe.store(true, Ordering::SeqCst);
+    let manager = QueueManager::new(Some(backend), 2);
+    assert!(manager.subscribe_checked().await.is_err());
+}
+
+#[cfg(not(feature = "queue-nats"))]
+#[test]
+fn configured_nats_without_feature_is_an_error() {
+    let mut config = minimal_config(None);
+    config.channel_config.nats = Some(crate::common::model::config::NatsConfig {
+        url: "nats://127.0.0.1:4222".into(),
+        username: None,
+        password: None,
+        token: None,
+    });
+    assert!(QueueManager::try_from_config(&config).is_err());
+}
+
+#[test]
+fn remote_blob_path_requires_explicit_shared_mount() {
+    let mut config = minimal_config(None);
+    config.channel_config.nats = Some(crate::common::model::config::NatsConfig {
+        url: "nats://127.0.0.1:4222".into(),
+        username: None,
+        password: None,
+        token: None,
+    });
+    config.channel_config.blob_storage = Some(crate::common::model::config::BlobStorageConfig {
+        path: Some("/tmp/worker-only".into()),
+        shared_path: false,
+    });
+    let error = QueueManager::try_from_config(&config).err().unwrap();
+    assert!(error.to_string().contains("shared_path"));
+    let blob = config.channel_config.blob_storage.as_mut().unwrap();
+    blob.shared_path = true;
+    blob.path = Some("worker-relative".into());
+    assert!(QueueManager::try_from_config(&config).is_err());
 }
 
 #[test]

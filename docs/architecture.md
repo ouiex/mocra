@@ -104,8 +104,10 @@ partition) and the **data plane** (the message queue that carries tasks between 
 | **Control plane** | In-process | Embedded **redb + Raft** — elections / fenced locks / membership / partition ownership, with **no external coordinator** |
 | **Data plane (queues)** | Tokio mpsc (in-memory) | Pluggable MQ: Kafka / NATS JetStream / in-memory |
 | **Locks / election** | Local | Raft consensus (fencing tokens) |
+| **DAG gates / stop / global pause** | Local cache | Raft KV/CAS, visible to every node |
+| **General cache / sessions** | Local memory | Local memory on each node |
 | **Workers** | 1 process | N nodes, same binary; register any node to any known node |
-| **Work distribution** | — | Cron by `hash(account)` ownership + MQ consumer affinity |
+| **Work distribution** | — | Cron by `hash(account)` ownership + competing MQ consumers |
 | **Code changes** | None (facade default) | Add `.cluster(ClusterConfig::…)` |
 
 Two concrete topologies:
@@ -120,9 +122,9 @@ Two concrete topologies:
   **redb + Raft** — **no external coordinator**. Any node registers to any known node to form the network.
 
 In every distributed case the **data-plane queue is selected independently** of the control plane —
-in-memory, Kafka (`queue-kafka`), or NATS JetStream (`queue-nats`). With a
-distributed MQ, tasks fan out across nodes with account affinity (`hash(account)`); with the
-in-memory queue, work stays on the seeding node.
+in-memory, Kafka (`queue-kafka`), or NATS JetStream (`queue-nats`). A distributed MQ can deliver
+successive stages of one account to different nodes; the general cache and sessions remain local.
+With the in-memory queue, work stays on the seeding node.
 
 See the [Deployment Guide](deployment.md) for the exact steps and commands for each topology.
 

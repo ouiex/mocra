@@ -95,8 +95,10 @@ Kafka / NATS JetStream——**同一份代码，零改动**。变化的只是边
 | **控制面** | 进程内 | 内嵌 **redb + Raft**——选主 / 带栅栏的锁 / 成员管理 / 分区归属，**无需外部协调器** |
 | **数据面（队列）** | Tokio mpsc（内存） | 可插拔 MQ：Kafka / NATS JetStream / 内存 |
 | **锁 / 选主** | 本地 | Raft 共识（栅栏令牌） |
+| **DAG 门闩 / 停止 / 全局暂停** | 本地缓存 | Raft KV/CAS，所有节点可见 |
+| **通用缓存 / 会话** | 本地内存 | 每个节点各自的本地内存 |
 | **Worker** | 1 个进程 | N 个节点，同一二进制；把任意节点注册到任意已知节点 |
-| **工作分发** | — | 按 `hash(account)` 归属的 cron + MQ 消费者亲和 |
+| **工作分发** | — | 按 `hash(account)` 归属的 cron + MQ 竞争消费 |
 | **代码改动** | 无（门面默认） | 增加 `.cluster(ClusterConfig::…)` |
 
 两种具体拓扑：
@@ -110,8 +112,8 @@ Kafka / NATS JetStream——**同一份代码，零改动**。变化的只是边
   **redb + Raft** 上——**无需外部协调器**。把任意节点注册到任意已知节点即可组网。
 
 在上述所有分布式场景中，**数据面队列都独立于控制面选择**——内存、Kafka
-（`queue-kafka`）或 NATS JetStream（`queue-nats`）。配了分布式 MQ 时，任务按账号亲和
-（`hash(account)`）扇出到各节点；用内存队列时，工作留在播种节点。
+（`queue-kafka`）或 NATS JetStream（`queue-nats`）。分布式 MQ 可能将同一账号的不同阶段交给
+不同节点；通用缓存和会话仍是节点本地的。使用内存队列时，工作留在播种节点。
 
 各拓扑的具体步骤与命令见[部署指南](deployment.md)。
 

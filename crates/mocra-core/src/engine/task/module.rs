@@ -56,6 +56,12 @@ pub struct Module {
     pub bound_login_info: Option<LoginInfo>,
 }
 impl Module {
+    /// Binds a cached module template to one run, including its DAG state.
+    pub(crate) fn bind_run(&mut self, run_id: Uuid) {
+        self.run_id = run_id;
+        self.processor = self.processor.for_run(run_id);
+    }
+
     /// Binds task metadata and optional login context.
     pub fn bind_task_context(
         &mut self,
@@ -216,11 +222,7 @@ impl Module {
             self.module.post_process(cfg_for_post).await?;
         }
 
-        // When the DAG signals an explicit stop, clean up the session using Module.run_id
-        // (the correctly-patched run_id from the task event).
-        // NOTE: ModuleDagProcessor.run_id may be stale when loaded from the factory cache
-        // since factory.load_parser_model / load_error_model update m.run_id but not
-        // m.processor.run_id. Using self.run_id here ensures the correct session key.
+        // Clean up the session for the run bound by the task factory.
         if data.stop.unwrap_or(false) {
             self.processor.delete_session_for_run(self.run_id).await;
         }

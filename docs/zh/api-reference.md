@@ -14,7 +14,7 @@
 添加特性:
 
 ```toml
-mocra = { version = "0.4", features = ["dashboard"] }
+mocra = { version = "0.5", features = ["dashboard"] }
 ```
 
 然后用以下两种方式之一启用。
@@ -268,7 +268,7 @@ mocra_backlog_depth 0
     "ip": "10.0.0.4",
     "hostname": "worker-1",
     "last_heartbeat": 1720598400,
-    "version": "0.4.0"
+    "version": "0.5.0"
   }
 ]
 ```

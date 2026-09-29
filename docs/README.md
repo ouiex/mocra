@@ -2,8 +2,8 @@
 
 mocra is a distributed, event-driven crawling and data-collection framework for Rust. Most
 projects use the **facade**: implement a `Spider`, run it with `Mocra::builder().run()` — a
-single-node, in-memory engine with no database. The same code scales to a
-multi-stage DAG and a distributed cluster when you need it. Start with **Getting Started**; the
+single-node, in-memory engine with no database. The lower-level module API supports multi-stage
+DAGs, and the runtime also supports distributed deployment. Start with **Getting Started**; the
 guides below go deeper into the runtime, the advanced module API, and operations.
 
 > **中文版:** [docs/zh/README.md](zh/README.md)
@@ -20,14 +20,23 @@ guides below go deeper into the runtime, the advanced module API, and operations
 | [Configuration](configuration.md) | Full TOML reference (database, queues, control API) |
 | [API Reference](api-reference.md) | Built-in HTTP control plane and Prometheus metrics endpoints |
 | [Deployment](deployment.md) | Single-node vs distributed, monitoring, and operations |
+| [Follow-up Requests](follow-up-requests.md) | POST, headers, cookies, metadata, and proxies through `Ctx::follow` |
+| [Proxies and Downloaders](proxies-and-downloaders.md) | Fixed and managed proxies, feedback, retry rotation, and custom downloaders |
+| [Runtime Tuning](runtime-tuning.md) | Queue bounds, proxy selection and Client caching, DAG checkpoints, validation |
+
+For agent-assisted implementation, use the repository's [default English mocra skill](../.agents/skills/mocra/SKILL.md) or [Chinese version](../.agents/skills/mocra-zh/SKILL.md).
 
 ## Runnable examples
 
 Prefer to read code? The [`examples/`](../examples/) directory has complete, runnable programs:
+The [example index](../examples/README.md) lists commands and prerequisites.
 
 - [`spider_quickstart.rs`](../examples/spider_quickstart.rs) — the minimal `Spider` (no DB).
 - [`quotes_scraper.rs`](../examples/quotes_scraper.rs) — a real end-to-end crawl of [quotes.toscrape.com](https://quotes.toscrape.com): pagination, detail-page fan-out, dedup, typed items, and a custom `DataSink` writing JSONL.
 - [`custom_downloader.rs`](../examples/custom_downloader.rs) — implement the `Downloader` trait and inject it with `.default_downloader()` (offline, deterministic).
+- [`follow_request.rs`](../examples/follow_request.rs) — verify that a follow-up POST keeps its fields (offline).
+- [`proxy_pool.rs`](../examples/proxy_pool.rs) — proxy selection and simulated feedback (offline).
+- [`explicit_proxy.rs`](../examples/explicit_proxy.rs) — send a request through a reachable proxy.
 - [`dashboard.rs`](../examples/dashboard.rs) — the built-in observability dashboard (`--features dashboard`).
 - [`cluster_quickstart.rs`](../examples/cluster_quickstart.rs) — a self-organizing embedded cluster (`--features cluster-embedded`).
 
@@ -36,3 +45,4 @@ Prefer to read code? The [`examples/`](../examples/) directory has complete, run
 - **Repository:** <https://github.com/ouiex/mocra>
 - **API Docs (docs.rs):** <https://docs.rs/mocra>
 - **Crate (crates.io):** <https://crates.io/crates/mocra>
+- **Changelog:** [released and pending changes](../CHANGELOG.md)

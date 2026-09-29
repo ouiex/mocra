@@ -146,9 +146,9 @@ async fn main() -> Result<()> {
             }),
         )
         // Replace the default reqwest wholesale.
-        // To select per module instead: register with `.downloader(MockDownloader)` and, in
-        // `start`, set `req.downloader = "mock".into();` after `s.get(url)` — unmatched requests
-        // still go through the default downloader.
+        // For a DB-backed module, register with `.downloader(MockDownloader)` and set
+        // `{"downloader":"mock"}` in that module's JSON config. The high-level DB-less
+        // Spider facade has no module-config setter yet, so this example uses the default.
         .default_downloader(MockDownloader)
         .run()
         .await

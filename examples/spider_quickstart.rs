@@ -1,4 +1,4 @@
-//! Minimal Spider example (the refactor Phase 1 facade API).
+//! Minimal Spider example using the public facade API.
 //!
 //! Demonstrates the new high-level entry point: implement a `Spider`, register and run it with
 //! `Mocra::builder()`, and receive typed data through `on_item` — no need to implement
@@ -17,7 +17,7 @@ use serde::Serialize;
 /// The typed item this spider emits.
 #[derive(Debug, Serialize)]
 struct Page {
-    url: String,
+    module_id: String,
     status: u16,
     bytes: usize,
 }
@@ -39,7 +39,7 @@ impl Spider for Httpbin {
 
     async fn parse(&self, res: Response, cx: &mut Ctx<Self::Item>) -> Result<()> {
         cx.emit(Page {
-            url: res.module_id(),
+            module_id: res.module_id(),
             status: res.status_code,
             bytes: res.text().map(|t| t.len()).unwrap_or(0),
         });
@@ -56,8 +56,8 @@ async fn main() -> Result<()> {
             Httpbin,
             on_item(|page: Page| async move {
                 println!(
-                    "[item] {} -> {} ({} bytes)",
-                    page.url, page.status, page.bytes
+                    "[item] module={} status={} ({} bytes)",
+                    page.module_id, page.status, page.bytes
                 );
             }),
         )

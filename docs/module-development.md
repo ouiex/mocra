@@ -12,7 +12,7 @@ Install (advanced features are opt-in):
 
 ```toml
 [dependencies]
-mocra = { version = "0.4", features = ["store"] }   # `store` unlocks the DB-backed model (below)
+mocra = { version = "0.5", features = ["store"] }   # `store` unlocks the DB-backed model (below)
 async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }
 tokio = { version = "1", features = ["full"] }

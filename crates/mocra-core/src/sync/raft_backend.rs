@@ -47,6 +47,13 @@ impl CoordinationBackend for RaftCoordinationBackend {
         self.cp.get(key.as_bytes()).await.map_err(|e| e.to_string())
     }
 
+    async fn delete(&self, key: &str) -> Result<(), String> {
+        self.cp
+            .delete(key.as_bytes())
+            .await
+            .map_err(|e| e.to_string())
+    }
+
     async fn cas(&self, key: &str, old_val: Option<&[u8]>, new_val: &[u8]) -> Result<bool, String> {
         self.cp
             .cas(key.as_bytes(), old_val, new_val)
@@ -230,6 +237,8 @@ mod tests {
         assert!(be.cas("k", Some(b"v"), b"v2").await.unwrap());
         assert!(!be.cas("k", Some(b"v"), b"v3").await.unwrap());
         assert_eq!(be.get("k").await.unwrap(), Some(b"v2".to_vec()));
+        be.delete("k").await.unwrap();
+        assert_eq!(be.get("k").await.unwrap(), None);
 
         // Distributed lock (this is the path LeaderElector takes).
         assert!(be.acquire_lock("L", b"owner1", 5000).await.unwrap());

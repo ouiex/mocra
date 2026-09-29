@@ -6,7 +6,7 @@
 
 [![Crates.io](https://img.shields.io/crates/v/mocra.svg)](https://crates.io/crates/mocra)
 [![docs.rs](https://docs.rs/mocra/badge.svg)](https://docs.rs/mocra)
-[![License](https://img.shields.io/crates/l/mocra.svg)](LICENSE)
+[![License](https://img.shields.io/crates/l/mocra.svg)](#许可证)
 [![Rust](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](https://www.rust-lang.org)
 
 [English](README.md) | 中文
@@ -37,7 +37,7 @@ mocra 是一个 Rust 框架，用于构建可扩展的数据采集流水线。�
 
 ```toml
 [dependencies]
-mocra = "0.4"
+mocra = "0.5"
 async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }
 tokio = { version = "1", features = ["full"] }
@@ -51,7 +51,7 @@ use mocra::prelude::*;
 use serde::Serialize;
 
 #[derive(Debug, Serialize)]
-struct Page { url: String, status: u16 }
+struct Page { module_id: String, status: u16 }
 
 struct Httpbin;
 
@@ -66,7 +66,7 @@ impl Spider for Httpbin {
 
     async fn parse(&self, res: Response, cx: &mut Ctx<Self::Item>) -> Result<()> {
         // 用 res.text()? / res.json()? 解析响应；cx.emit 产出数据；cx.follow 跟进请求。
-        cx.emit(Page { url: res.module_id(), status: res.status_code });
+        cx.emit(Page { module_id: res.module_id(), status: res.status_code });
         Ok(())
     }
 }
@@ -75,7 +75,7 @@ impl Spider for Httpbin {
 async fn main() -> Result<()> {
     Mocra::builder()
         .spider(Httpbin, on_item(|p: Page| async move {
-            println!("[item] {} -> {}", p.url, p.status);
+            println!("[item] module={} status={}", p.module_id, p.status);
         }))
         .run()
         .await
@@ -93,7 +93,7 @@ cargo run
 开启 `cluster-embedded` 特性，启动一个**自组网的 Raft 集群** —— 把任意节点注册到任意已知节点即可组网：
 
 ```toml
-mocra = { version = "0.4", features = ["cluster-embedded"] }
+mocra = { version = "0.5", features = ["cluster-embedded"] }
 ```
 
 ```rust
@@ -110,7 +110,7 @@ Mocra::builder()
     .run().await?;
 ```
 
-**控制面**（选举、分布式锁、成员、分区归属）跑在内嵌的 **redb + Raft** 上，无需外部协调器。**数据面**保留可插拔消息队列（Kafka / **NATS JetStream** / 内存），任务按 `hash(account)` 路由实现消费亲和。
+**控制面**（选举、分布式锁、成员、分区归属）运行于内嵌的 **redb + Raft**，无需外部协调器。**数据面**支持 Kafka、NATS JetStream 或内存队列。Cron 归属使用 `hash(account)`；当前队列消费者不保证跨阶段的账号亲和。
 
 > **进阶（多阶段 DAG）**：需要多节点、登录、翻页、自定义中间件的流水线，可直接实现 `ModuleTrait` / `ModuleNodeTrait`（开启 `store` 特性以启用 account × platform × module 模型）。见[模块开发](docs/zh/module-development.md)。
 
@@ -119,7 +119,7 @@ Mocra::builder()
 开启 `dashboard` 特性并调用 `.dashboard(port)` —— 引擎会托管一套只读可观测 API **以及**一个内置单文件网页面板。浏览器打开该端口即见 **指标 / 日志 / 任务 / 性能**；无需前端构建，也无需手填 endpoint（页面同源自动指向本引擎）：
 
 ```toml
-mocra = { version = "0.4", features = ["dashboard"] }
+mocra = { version = "0.5", features = ["dashboard"] }
 ```
 
 ```rust
@@ -149,6 +149,7 @@ Mocra::builder()
 ```
 
 可运行示例见 [`examples/custom_downloader.rs`](examples/custom_downloader.rs)（离线、确定性）。
+无数据库的 `Spider` builder 目前没有按模块设置具名下载器的配置接口；此模式下使用 `.default_downloader()`。具名路由及代理行为见[代理与下载器](docs/zh/proxies-and-downloaders.md)。
 
 ## 架构
 
@@ -171,7 +172,7 @@ Mocra::builder()
 
 ### Workspace crate
 
-mocra 是一个 Cargo workspace。整个运行时都在 `mocra-core` 里；你依赖的 `mocra` crate 是它之上的**薄门面**（默认仅 12 个直接依赖）。可复用的子系统以独立 crate 发布，依赖单向无环（`mocra → mocra-core → {mocra-cluster, mocra-dag, mocra-proxy, mocra-store}`，内层 crate 从不反依赖）：
+mocra 是一个 Cargo workspace。整个运行时都在 `mocra-core` 里；你依赖的 `mocra` crate 是它之上的**薄门面**。可复用的子系统以独立 crate 发布，依赖单向无环（`mocra → mocra-core → {mocra-cluster, mocra-dag, mocra-proxy, mocra-store}`，内层 crate 从不反依赖）：
 
 | Crate | 说明 |
 |---|---|
@@ -221,7 +222,7 @@ start ─┤               ├── merge
 | **队列（数据面）** | Tokio mpsc（内存） | 可插拔 MQ：Kafka / NATS JetStream / 内存 |
 | **锁 / 选举** | 本地 | Raft 共识（fencing token） |
 | **Worker** | 1 个进程 | N 个节点，同一二进制；任意节点注册到任意已知节点 |
-| **任务分发** | — | Cron 按 `hash(account)` 归属 + MQ 消费亲和 |
+| **任务分发** | — | Cron 按 `hash(account)` 归属 + MQ 竞争消费 |
 | **代码改动** | 无 | 加一行 `.cluster(ClusterConfig::…)` |
 
 开启内嵌集群（无需外部协调器）：
@@ -237,7 +238,7 @@ Mocra::builder()
 
 ## 特性开关
 
-均为可选;默认构建是**单机、无 DB**。用 `mocra = { version = "0.4", features = ["…"] }` 开启。
+均为可选;默认构建是**单机、无 DB**。用 `mocra = { version = "0.5", features = ["…"] }` 开启。
 
 | 特性 | 解锁什么 |
 |---|---|
@@ -263,13 +264,23 @@ Mocra::builder()
 | [配置参考](docs/zh/configuration.md) | TOML 完整配置参考 |
 | [API 参考](docs/zh/api-reference.md) | HTTP 控制面板端点 |
 | [部署指南](docs/zh/deployment.md) | 单节点、分布式、监控 |
+| [后续请求](docs/zh/follow-up-requests.md) | `Ctx::follow` 保留完整请求字段 |
+| [代理与下载器](docs/zh/proxies-and-downloaders.md) | 固定/托管代理、重试轮换与自定义下载器 |
+| [运行时调优](docs/zh/runtime-tuning.md) | 有界队列、代理缓存与 DAG 检查点 |
+| [更新日志](CHANGELOG.md) | 已发布版本与尚未发布的改动 |
+
+仓库提供项目 Skill，按任务介绍 Spider、代理、下载器与运行时修改方法：[默认英文版（`$mocra`）](.agents/skills/mocra/SKILL.md)和[中文版（`$mocra-zh`）](.agents/skills/mocra-zh/SKILL.md)。
 
 ## 示例
 
-可运行示例见 [`examples/`](examples/) 目录：
+运行命令和前置条件见 [`examples/README.md`](examples/README.md)：
 
 - [`examples/spider_quickstart.rs`](examples/spider_quickstart.rs) — 最小 `Spider`（无 DB）
 - [`examples/custom_downloader.rs`](examples/custom_downloader.rs) — 实现 `Downloader` trait 并用 `.default_downloader()` 注入（离线、确定性）
+- [`examples/follow_request.rs`](examples/follow_request.rs) — 后续 POST 请求保留方法、请求头、请求体和 Cookie（离线）
+- [`examples/proxy_pool.rs`](examples/proxy_pool.rs) — 代理池选择、反馈和失败排除（离线模拟）
+- [`examples/explicit_proxy.rs`](examples/explicit_proxy.rs) — 为 `Spider` 请求指定真实代理
+- [`examples/quotes_scraper.rs`](examples/quotes_scraper.rs) — 翻页、作者详情与 JSONL 输出
 - [`examples/dashboard.rs`](examples/dashboard.rs) — 内置可观测 dashboard（`--features dashboard`）
 - [`examples/cluster_quickstart.rs`](examples/cluster_quickstart.rs) — 自组网内嵌集群（`--features cluster-embedded`）
 
@@ -290,7 +301,7 @@ docker compose -f docker-compose.monitoring.yml up -d
 
 双许可，任选其一：
 
-- MIT 许可证
-- Apache 许可证 2.0
+- [MIT 许可证](LICENSE-MIT)
+- [Apache 许可证 2.0](LICENSE-APACHE)
 
 任由你选。

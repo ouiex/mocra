@@ -4,6 +4,75 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project aims to follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## [0.5.0] — 2026-09-29
+
+### Added
+
+- Offline examples for complete `Spider` follow-up requests and the standalone proxy-manager
+  feedback flow, plus an explicit-proxy example that accepts `MOCRA_PROXY_URL`.
+- MIT and Apache-2.0 license text files are now included in the repository.
+- Repository skills in English (`$mocra`) and Chinese (`$mocra-zh`), and bilingual guides for
+  follow-up requests, proxies/downloaders, and runtime tuning.
+
+### Changed
+
+- Local channels now honor `channel_config.capacity`, including the log channel. Batch dispatch
+  waits for its concurrency permit and drains accepted work on shutdown instead of accumulating
+  unbounded waiting tasks.
+- The proxy pool bounds dynamically loaded IPs per provider and selects between two eligible
+  candidates, favoring the higher score. Proxy-specific HTTP clients use a bounded cache
+  (`download_config.proxy_client_cache_capacity`, default 1000; `0` disables it).
+- The standalone `mocra-dag` scheduler waits for completion events and, when run-state storage is
+  enabled, defaults to a full checkpoint every 16 successful nodes. The interval is configurable.
+- DAG execution state is isolated per run; distributed task state uses the coordination backend.
+- File-system blob storage can use a shared path for cluster deployments.
+
+### Compatibility
+
+- `PoolConfig` and `BlobStorageConfig` gained public fields. Downstream struct literals must
+  account for `health_check_concurrency` and `shared_path`, respectively.
+- File-system blob storage now returns relative keys from `put`; workers using a remote queue
+  must share the configured path to read those keys.
+
+### Fixed
+
+- Quickstart examples now label `Response::module_id()` as a module identifier; configuration
+  guides link to maintained samples instead of removed test fixtures.
+- Managed proxy attempts report actual success or failure, with best-effort failure feedback for
+  cancellation while the runtime is active. Within the existing retry budget, replayable requests
+  can rotate away from a failed proxy; explicit proxies remain fixed unless a DB-backed module
+  opts into `auto_rotate_explicit_proxy`.
+- `Ctx::follow(Request)` now preserves the full request across the parser task queue, including
+  method, headers, body, cookies, metadata, explicit proxy, and priority. Previously queued
+  URL-only follow-up tasks still decode as GET requests.
+- Cookie deserialization accepts `httpOnly: null` in a serialized follow-up request.
+- Kafka and NATS queue startup now reports connection failures instead of leaving an unusable
+  backend running.
+
+Local [runtime acceptance results](benchmarks/runtime-acceptance.md) cover bounded queues and
+managed proxy retries against local HTTP proxies. A staging or production canary and real
+Kafka/NATS pressure test have not yet been run.
+
+## [0.4.1] — 2026-07-17 — dashboard and observability
+
+### Added
+
+- Engine observability reports work in flight, per-stage throughput, and success rates alongside
+  queue depth; the dashboard displays these values. Added the end-to-end quotes scraper example.
+
+### Changed
+
+- Removed Redis from the runtime; embedded Raft + redb is the distributed coordination backend.
+  Rewrote the English and Chinese user guides for the 0.4 facade and translated comments and
+  rustdoc to English. The dashboard example uses port 12800 by default.
+
+### Fixed
+
+- A configured API port that cannot be bound now fails startup. The dashboard no longer freezes
+  on a stalled poll, and `Ctx::follow` no longer silently discards follow-up tasks.
+
 ## [0.4.0] — 2026-07-10 — embeddable-library refactor
 
 Breaking, structural refactor turning mocra into a genuinely usable third-party library and a

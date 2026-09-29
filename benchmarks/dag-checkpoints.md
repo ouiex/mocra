@@ -11,8 +11,8 @@ Five release-build runs on the local arm64 host produced the following medians:
 | 10 nodes | 144 ms | 0.058 ms |
 | 20 nodes | 262 ms | 0.103 ms |
 
-The earlier values are from the release-build probe recorded in the remediation
-plan. The new ignored test builds the graph once and times `execute_parallel()`;
+The earlier values are from a release-build probe. The new ignored test builds the
+graph once and times `execute_parallel()`;
 the two harnesses are similar zero-work chains, not an identical A/B executable.
 These figures characterize the standalone DAG component, not crawler throughput.
 

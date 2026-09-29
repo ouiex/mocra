@@ -9,7 +9,7 @@
 //! | Pagination follow | Parse `li.next a` → `cx.follow_get()`, paging through all 10 pages |
 //! | Detail-page fan-out | Each quote's author link → `cx.follow_get()` to fetch the author bio |
 //! | Cross-page deduplication | A `HashSet` remembers queued authors, so one is never fetched twice |
-//! | Content-based routing | `follow` passes only the URL (no custom meta), so page features tell listing / author pages apart |
+//! | Content-based routing | Page features distinguish listing and author pages without extra routing metadata |
 //! | Typed emission | An `Item` enum (quote / author); `#[serde(tag = "kind")]` tags each saved row |
 //! | Custom persistence | Implement `DataSink` to split the two kinds into two JSONL files |
 //! | Observability (optional) | With `--features dashboard`, `.dashboard(12800)` starts the panel |
@@ -139,9 +139,8 @@ impl Spider for QuotesSpider {
         let html = res.text_lossy();
         let doc = Html::parse_document(&html);
 
-        // The facade's `follow` only passes the URL through, without custom meta (see
-        // SpiderNode::generate), so we tell the page types apart by their features rather than by
-        // a marker attached to the request.
+        // Tell page types apart by their HTML structure. `follow(Request)` also preserves
+        // request metadata when an explicit marker is preferable.
         if doc.select(&SEL_AUTHOR_DETAILS).next().is_some() {
             self.parse_author(&doc, cx);
         } else {

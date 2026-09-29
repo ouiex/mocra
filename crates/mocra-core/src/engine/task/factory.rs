@@ -13,6 +13,7 @@ use crate::common::model::scope::{AccountInfo, PlatformInfo};
 use crate::common::model::{ModuleConfig, Response};
 use crate::engine::task::module::Module;
 use crate::engine::task::module_dag_processor::ModuleDagProcessor;
+use crate::utils::coordination::CoordinationBackend;
 use dashmap::DashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -32,6 +33,7 @@ pub struct TaskFactory {
     #[allow(dead_code)]
     repository: MaybeRepository,
     cache_service: Arc<CacheService>,
+    coordination: Option<Arc<dyn CoordinationBackend>>,
     cookie_service: Option<Arc<CacheService>>,
     module_assembler: Arc<tokio::sync::RwLock<ModuleAssembler>>,
     // In-memory cache keyed by task id (account-platform).
@@ -59,9 +61,28 @@ impl TaskFactory {
         module_assembler: Arc<tokio::sync::RwLock<ModuleAssembler>>,
         app_config: Arc<tokio::sync::RwLock<Config>>,
     ) -> Self {
+        Self::new_with_coordination(
+            repository,
+            sync_service,
+            cookie_sync_service,
+            module_assembler,
+            app_config,
+            None,
+        )
+    }
+
+    pub fn new_with_coordination(
+        repository: MaybeRepository,
+        sync_service: Arc<CacheService>,
+        cookie_sync_service: Option<Arc<CacheService>>,
+        module_assembler: Arc<tokio::sync::RwLock<ModuleAssembler>>,
+        app_config: Arc<tokio::sync::RwLock<Config>>,
+        coordination: Option<Arc<dyn CoordinationBackend>>,
+    ) -> Self {
         Self {
             repository,
             cache_service: sync_service,
+            coordination,
             cookie_service: cookie_sync_service,
             module_assembler,
             cache: Arc::new(DashMap::new()),
@@ -109,11 +130,12 @@ impl TaskFactory {
                 module,
                 locker: false,
                 locker_ttl: 0,
-                processor: ModuleDagProcessor::new(
+                processor: ModuleDagProcessor::new_with_coordination(
                     format!("{}-{}-{}", account.name, platform.name, name),
                     self.cache_service.clone(),
                     run_id,
                     cache_ttl,
+                    self.coordination.clone(),
                 ),
                 run_id,
                 prefix_request: Default::default(),
@@ -170,9 +192,9 @@ impl TaskFactory {
             .await?)
             .clone();
         task.run_id = task_model.run_id;
-        task.modules.iter_mut().for_each(|m| {
-            m.run_id = task_model.run_id;
-        });
+        task.modules
+            .iter_mut()
+            .for_each(|m| m.bind_run(task_model.run_id));
         if let Some(names) = &task_model.module
             && !names.is_empty()
         {
@@ -417,11 +439,12 @@ impl TaskFactory {
                 module: module_assembler,
                 locker,
                 locker_ttl: 0,
-                processor: ModuleDagProcessor::new(
+                processor: ModuleDagProcessor::new_with_coordination(
                     format!("{}-{}-{}", account.name, platform.name, module.name),
                     self.cache_service.clone(),
                     run_id,
                     cache_ttl,
+                    self.coordination.clone(),
                 ),
                 run_id,
                 prefix_request: Default::default(),
@@ -511,7 +534,7 @@ impl TaskFactory {
         task.run_id = parser_model.run_id;
         task.modules
             .iter_mut()
-            .for_each(|m| m.run_id = parser_model.run_id);
+            .for_each(|m| m.bind_run(parser_model.run_id));
 
         // Restore historical metadata and parser progression context.
         // task.error_times = self.sync_service.load_task_status(&task.id()).await;
@@ -539,7 +562,7 @@ impl TaskFactory {
         // Ensure run_id strictly inherits from the incoming ErrorTaskModel
         task.run_id = error_model.run_id;
         task.modules.iter_mut().for_each(|m| {
-            m.run_id = error_model.run_id;
+            m.bind_run(error_model.run_id);
             m.prefix_request = error_model.prefix_request;
             // Drive precise retry via ExecutionMark from error context
             m.pending_ctx = Some(error_model.context.clone());
@@ -588,7 +611,13 @@ impl TaskFactory {
             .await
             .map(|t| {
                 let mut t = (*t).clone();
+                t.run_id = response.run_id;
+                t.prefix_request = response.prefix_request;
                 t.modules.retain(|m| m.module.name() == response.module);
+                for module in &mut t.modules {
+                    module.bind_run(response.run_id);
+                    module.prefix_request = response.prefix_request;
+                }
                 t
             })
     }
@@ -607,9 +636,9 @@ impl TaskFactory {
         {
             let mut module = module.clone();
             // The factory cache may have returned a task built for a different run.
-            // Patch run_id from the response (source of truth) so that execute_parse
-            // uses the correct stop-signal key and session cleanup touches the right key.
-            module.run_id = response.run_id;
+            // Bind a fresh run-scoped processor to the response's run identifier.
+            module.bind_run(response.run_id);
+            module.prefix_request = response.prefix_request;
             Ok((Arc::new(module), task.login_info.clone()))
         } else {
             Err(

@@ -9,8 +9,8 @@
 
 快速上手就这一项。mocra 的默认构建是单机模式，不依赖任何外部服务。
 
-> **数据库**（PostgreSQL / SQLite）是*可选*的 —— 它只在进阶的多阶段
-> 与分布式路径上才用到（`store` 特性、TOML 配置，或内嵌 `cluster-embedded` 控制面）。本指南**无需**它。
+> **数据库**（PostgreSQL / SQLite）是*可选*的。数据库驱动的账号 × 平台 × 模块任务模型
+> 需要 `store` 特性；本指南、TOML 配置本身及内嵌 `cluster-embedded` 控制面都不要求数据库。
 
 ## 安装
 
@@ -18,13 +18,13 @@
 
 ```toml
 [dependencies]
-mocra = "0.4"
+mocra = "0.5"
 async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }
 tokio = { version = "1", features = ["full"] }
 
 # 可选：mocra 返回原始 HTTP Response —— 解析器自备。
-scraper = "0.20"   # CSS 选择器，用于 HTML 目标
+scraper = "0.27"   # CSS 选择器，用于 HTML 目标
 ```
 
 mocra 把原始 `Response` 交给你，由你决定如何解析（HTML 用 `scraper`，JSON 接口用
@@ -42,7 +42,7 @@ use serde::Serialize;
 
 #[derive(Debug, Serialize)]
 struct Page {
-    url: String,
+    module_id: String,
     status: u16,
 }
 
@@ -64,7 +64,7 @@ impl Spider for Httpbin {
     // 解析单个下载到的响应；`cx.emit` 产出一条类型化数据。
     async fn parse(&self, res: Response, cx: &mut Ctx<Self::Item>) -> Result<()> {
         cx.emit(Page {
-            url: res.module_id(),
+            module_id: res.module_id(),
             status: res.status_code,
         });
         Ok(())
@@ -75,7 +75,7 @@ impl Spider for Httpbin {
 async fn main() -> Result<()> {
     Mocra::builder()
         .spider(Httpbin, on_item(|p: Page| async move {
-            println!("[item] {} -> {}", p.url, p.status);
+            println!("[item] module={} status={}", p.module_id, p.status);
         }))
         .run()
         .await
@@ -98,7 +98,10 @@ cargo run
   `s.add(Request)` 入队任意方法的请求。
 - **`parse(Response, &mut Ctx)`** —— `cx.emit(item)` 产出一条类型化数据；
   `cx.follow_get(url)` / `cx.follow(Request)` 追加后继请求，其响应会重新进入 `parse`
-  （用于翻页、详情页）。记得加终止条件，让跟进能停下来。
+  （用于翻页、详情页）。`follow(Request)` 会保留请求方法、请求头、请求体、Cookie 和显式代理。
+  记得加终止条件，让跟进能停下来。
+- **`res.module_id()`** 标识账号/平台/模块，并非实际抓取的 URL；需要区分来源页面时，
+  可使用请求元数据或响应内容。
 - **出口（sink）** —— `on_item(|item| async move { … })` 为每条产出的数据运行你的异步闭包
   （打印、写文件、入库、下发下游）。
 
@@ -168,7 +171,7 @@ engine.await.ok();
 ## 可选特性
 
 默认全部关闭，按需开启，例如
-`mocra = { version = "0.4", features = ["dashboard"] }`。
+`mocra = { version = "0.5", features = ["dashboard"] }`。
 
 | 特性 | 解锁 |
 |---|---|
@@ -187,8 +190,15 @@ engine.await.ok();
   构建多阶段流水线、登录流程与自定义中间件。
 - [DAG 执行](dag-guide.md) —— 扇出 / 汇合图与推进门（advance gate）。
 - [配置参考](configuration.md) —— 完整 TOML 参考（数据库、队列、API）。
+- [后续请求](follow-up-requests.md) —— 后续 POST、请求头、Cookie、元数据与代理的保留方式。
+- [代理与下载器](proxies-and-downloaders.md) —— 固定/托管代理、轮换与自定义下载器。
+- [运行时调优](runtime-tuning.md) —— 队列上限、代理 Client 缓存与 DAG 检查点。
 - [`examples/`](../../examples/) 下的可运行示例：
   - [`spider_quickstart.rs`](../../examples/spider_quickstart.rs) —— 上文的最小 `Spider`（无 DB）。
   - [`custom_downloader.rs`](../../examples/custom_downloader.rs) —— 实现 `Downloader` trait 并用 `.default_downloader()` 注入。
+  - [`follow_request.rs`](../../examples/follow_request.rs) —— `Ctx::follow` 保留后续 POST 请求（离线）。
+  - [`proxy_pool.rs`](../../examples/proxy_pool.rs) —— 代理池选择与结果反馈（离线模拟）。
+  - [`explicit_proxy.rs`](../../examples/explicit_proxy.rs) —— 为 `Spider` 请求指定可用代理。
+  - [`quotes_scraper.rs`](../../examples/quotes_scraper.rs) —— 抓取真实站点的翻页与 JSONL 输出。
   - [`dashboard.rs`](../../examples/dashboard.rs) —— 内置可观测 dashboard（`--features dashboard`）。
   - [`cluster_quickstart.rs`](../../examples/cluster_quickstart.rs) —— 自组织内嵌集群（`--features cluster-embedded`）。
