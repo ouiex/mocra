@@ -6,6 +6,23 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.5.1] — 2026-09-30
+
+### Changed
+
+- Upgrade the Polars dependencies from 0.52.0 to 0.54.4 and align all six workspace
+  crates and internal dependency requirements at 0.5.1.
+
+### Compatibility
+
+- Raise the facade/core minimum Rust version to 1.95 for Polars 0.54.4; enable
+  Parquet alongside IPC and migrate Excel DataFrame construction to the new API.
+
+### Fixed
+
+- Restore Polars/Excel documentation builds on recent nightly Rust compilers by
+  using the upstream fix that removes the unstable internal Unicode API dependency.
+
 ## [0.5.0] — 2026-09-29
 
 ### Added

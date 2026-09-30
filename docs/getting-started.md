@@ -6,7 +6,7 @@ in-memory, **no database**.
 
 ## Prerequisites
 
-- **Rust 1.89+** (edition 2024).
+- **Rust 1.95+** (edition 2024).
 
 That's it for the quickstart. mocra's default build is single-node with no external services.
 

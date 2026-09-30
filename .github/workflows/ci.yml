@@ -39,8 +39,8 @@ jobs:
         run: |
           rustup toolchain install 1.88.0 --profile minimal
           cargo +1.88.0 check -p mocra-cluster -p mocra-dag -p mocra-proxy --lib
-          rustup toolchain install 1.89.0 --profile minimal
-          cargo +1.89.0 check -p mocra --lib --features store,dashboard,cluster-embedded,queue-nats,polars,excel
+          rustup toolchain install 1.95.0 --profile minimal
+          cargo +1.95.0 check -p mocra --lib --features store,dashboard,cluster-embedded,queue-nats,polars,excel
 
       - name: Build (default features)
         run: cargo build --lib

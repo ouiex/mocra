@@ -78,9 +78,9 @@ fn sheet_dataframe(
                 let column_name = format!("column_{col_index}");
                 calamine_value_to_series(&column_name, &column_data)
             };
-            res.push(series);
+            res.push(series.into());
         }
     }
-    let df = DataFrame::from_iter(res);
+    let df = DataFrame::new_infer_height(res)?;
     Ok(df)
 }

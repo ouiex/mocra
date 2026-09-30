@@ -5,7 +5,7 @@ members = ["crates/mocra-cluster", "crates/mocra-proxy", "crates/mocra-dag", "cr
 
 [package]
 name = "mocra"
-version = "0.5.0"
+version = "0.5.1"
 edition = "2024"
 description = "A distributed, event-driven crawling and data collection framework"
 license = "MIT OR Apache-2.0"
@@ -13,7 +13,7 @@ repository = "https://github.com/ouiex/mocra"
 homepage = "https://github.com/ouiex/mocra"
 documentation = "https://docs.rs/mocra"
 readme = "README.md"
-rust-version = "1.89"
+rust-version = "1.95"
 keywords = ["crawler", "distributed", "queue", "scraping", "framework"]
 categories = ["network-programming", "asynchronous", "web-programming"]
 exclude = [
@@ -43,8 +43,8 @@ rustdoc-args = ["--cfg", "docsrs"]
 # (facade + prelude + per-layer shims). So this list keeps only the dependencies the facade/bin
 # use directly, plus feature-gated optional dependencies — everything else (axum, tracing, etc.)
 # is a transitive dependency of mocra-core and is no longer declared here.
-mocra-core = { path = "crates/mocra-core", version = "0.5.0" }
-mocra-proxy = { path = "crates/mocra-proxy", version = "0.5.0" }
+mocra-core = { path = "crates/mocra-core", version = "0.5.1" }
+mocra-proxy = { path = "crates/mocra-proxy", version = "0.5.1" }
 # Dependencies used directly by the facade (src/facade.rs, src/prelude.rs, src/lib.rs, src/bin/).
 async-trait = "0.1"
 tokio = { version = "1", features = ["full"] }
@@ -55,15 +55,16 @@ uuid = { version = "1", features = ["serde", "v7", "zerocopy", "v4"] }
 # Global allocator (enabled by the default `mimalloc` feature).
 mimalloc = { version = "0.1", default-features = false, optional = true }
 # Feature-gated optional dependencies.
-mocra-cluster = { path = "crates/mocra-cluster", version = "0.5.0", optional = true } # cluster-embedded: facade ClusterConfig
+mocra-cluster = { path = "crates/mocra-cluster", version = "0.5.1", optional = true } # cluster-embedded: facade ClusterConfig
 v8 = { version = "145", optional = true }                          # js-v8: embedded JS runtime
 tempfile = { version = "3", optional = true }                      # js-v8: worker temp files
 # The polars trio: under the `polars` / `excel` features the host prelude re-exports `::polars::*`
 # (so downstream users of DataFrame-related types stay version-aligned), so the host needs a
 # direct (optional) dependency on them — compiled only when those features are enabled.
-polars = { version = "0.52.0", features = ["json", "lazy", "serde", "csv", "timezones", "strings", "ipc", "dtype-decimal"], optional = true }
-polars-lazy = { version = "0.52.0", features = ["pivot"], optional = true }
-polars-ops = { version = "0.52.0", features = ["pivot"], optional = true }
+# Polars 0.54 IPC streaming also requires its parquet feature.
+polars = { version = "0.54.4", features = ["json", "lazy", "serde", "csv", "timezones", "strings", "ipc", "parquet", "dtype-decimal"], optional = true }
+polars-lazy = { version = "0.54.4", features = ["pivot"], optional = true }
+polars-ops = { version = "0.54.4", features = ["pivot"], optional = true }
 
 [dev-dependencies]
 # Tests / examples only; never enters downstream users' dependency trees.
