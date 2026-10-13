@@ -218,10 +218,14 @@ impl State {
         // Spawn configuration watcher
         if let Ok(mut rx) = watcher_res {
             let config_clone = config_arc.clone();
-            let limiter = limiter.clone();
-            let api_limiter = api_limiter.clone();
+            // Watching configuration must not keep a stopped engine's coordination backend alive.
+            let limiter = Arc::downgrade(&limiter);
+            let api_limiter = api_limiter.as_ref().map(Arc::downgrade);
             tokio::spawn(async move {
                 while rx.changed().await.is_ok() {
+                    let Some(limiter) = limiter.upgrade() else {
+                        break;
+                    };
                     let new_config = rx.borrow().clone();
                     info!("Configuration updated dynamically");
                     {
@@ -232,9 +236,10 @@ impl State {
                     let _ = limiter
                         .set_all_limit(new_config.download_config.rate_limit)
                         .await;
-                    if let (Some(api), Some(api_limiter)) =
-                        (new_config.api.as_ref(), api_limiter.as_ref())
-                        && let Some(limit) = api.rate_limit
+                    if let (Some(api), Some(api_limiter)) = (
+                        new_config.api.as_ref(),
+                        api_limiter.as_ref().and_then(|limiter| limiter.upgrade()),
+                    ) && let Some(limit) = api.rate_limit
                     {
                         let _ = api_limiter.set_all_limit(limit as f32).await;
                     }

@@ -21,7 +21,7 @@ use openraft::{
     StorageError, StorageIOError, StoredMembership, Vote,
 };
 use serde::{Deserialize, Serialize};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, watch};
 
 use crate::cmd::CmdResult;
 use crate::raft::{Node, NodeId, SnapshotData, TypeConfig};
@@ -138,6 +138,9 @@ pub struct StoredSnapshot {
 pub struct StateMachineStore {
     sm: Arc<StateMachine>,
     operation_lock: Arc<Mutex<()>>,
+    // OpenRaft detaches its worker and snapshot builders. Drop this after `sm` so shutdown
+    // can wait for every store clone to release the database.
+    release_tx: watch::Sender<()>,
 }
 
 #[derive(Default, Clone, Serialize, Deserialize)]
@@ -154,10 +157,16 @@ struct PersistedSnapshotState {
 
 impl StateMachineStore {
     pub fn new(sm: Arc<StateMachine>) -> Self {
+        let (release_tx, _) = watch::channel(());
         Self {
             sm,
             operation_lock: Arc::new(Mutex::new(())),
+            release_tx,
         }
+    }
+
+    pub(crate) fn release_receiver(&self) -> watch::Receiver<()> {
+        self.release_tx.subscribe()
     }
 
     pub(crate) fn has_persisted_meta(&self) -> Result<bool, StateMachineError> {

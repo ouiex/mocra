@@ -37,6 +37,8 @@ jobs:
 
       - name: Check minimum supported Rust version
         run: |
+          rustup toolchain install 1.85.0 --profile minimal
+          cargo +1.85.0 check -p mocra-store --lib
           rustup toolchain install 1.88.0 --profile minimal
           cargo +1.88.0 check -p mocra-cluster -p mocra-dag -p mocra-proxy --lib
           rustup toolchain install 1.95.0 --profile minimal
@@ -75,6 +77,9 @@ jobs:
           cargo test --lib --features dashboard
           cargo build --example dashboard --features dashboard
 
+      - name: Test (store / dashboard / cluster shutdown)
+        run: cargo test --lib --features store,dashboard,cluster-embedded
+
       # polars/excel are heavy; compile-check to catch feature-gating regressions.
       - name: Check (polars + excel)
         run: cargo check --lib --features polars,excel
@@ -93,7 +98,9 @@ jobs:
           done
 
       - name: Test (queue-nats integration, real NATS)
-        run: cargo test --lib --features queue-nats -- --ignored nats_
+        run: cargo test -p mocra-core --lib --features queue-nats -- --ignored nats_
+        env:
+          MOCRA_NATS_URL: nats://127.0.0.1:4222
 
       - name: Build examples
         run: cargo build --examples --features cluster-embedded

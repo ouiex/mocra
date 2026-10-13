@@ -24,6 +24,7 @@ use openraft::{Entry, LogId, OptionalSend, RaftLogReader, StorageError, StorageI
 use redb::{Database, ReadableTable, TableDefinition};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
+use tokio::sync::watch;
 
 use crate::raft::{NodeId, TypeConfig};
 
@@ -54,6 +55,8 @@ fn dec<T: DeserializeOwned>(b: &[u8]) -> StorageResult<T> {
 #[derive(Clone)]
 pub struct RedbLogStore {
     db: Arc<Database>,
+    // Replication workers keep reader clones after RaftCore exits. Drop this after `db`.
+    release_tx: watch::Sender<()>,
 }
 
 impl RedbLogStore {
@@ -70,7 +73,15 @@ impl RedbLogStore {
                 .map_err(|e| StateMachineIo(e.to_string()))?;
         }
         w.commit().map_err(|e| StateMachineIo(e.to_string()))?;
-        Ok(Self { db: Arc::new(db) })
+        let (release_tx, _) = watch::channel(());
+        Ok(Self {
+            db: Arc::new(db),
+            release_tx,
+        })
+    }
+
+    pub(crate) fn release_receiver(&self) -> watch::Receiver<()> {
+        self.release_tx.subscribe()
     }
 
     fn get_meta<T: DeserializeOwned>(&self, key: &str) -> StorageResult<Option<T>> {

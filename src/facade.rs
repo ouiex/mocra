@@ -373,6 +373,7 @@ pub struct ClusterConfig {
     pub data_dir: String,
     /// Seed node addresses; empty = this node bootstraps a new cluster (the first core node),
     /// non-empty = join via the seeds.
+    /// An initialized data directory is restored directly without using the seeds.
     pub seeds: Vec<String>,
     /// Optional Raft timing tuning (the defaults suit a LAN; enlarge for WAN / high latency).
     pub raft_tuning: Option<mocra_cluster::RaftTuning>,
@@ -380,7 +381,8 @@ pub struct ClusterConfig {
 
 #[cfg(feature = "cluster-embedded")]
 impl ClusterConfig {
-    /// **Bootstrap** the first core node of a new cluster (`seeds` is empty).
+    /// **Bootstrap** the first core node of a new cluster (`seeds` is empty), or restore its
+    /// initialized data directory on restart.
     ///
     /// ```ignore
     /// Mocra::builder().spider(s, sink)
@@ -486,8 +488,8 @@ impl ClusterConfig {
 /// Start the embedded redb+Raft control plane and return its
 /// [`CoordinationBackend`](crate::sync::CoordinationBackend).
 ///
-/// `seeds` empty → bootstrap a new cluster and wait for leader election; non-empty → join via the
-/// first seed (as a learner).
+/// Restore existing Raft state; otherwise bootstrap when `seeds` is empty, or try the seeds in
+/// order to join as a learner.
 #[cfg(feature = "cluster-embedded")]
 async fn start_embedded_cluster(
     cluster: &ClusterConfig,
@@ -515,27 +517,80 @@ async fn start_embedded_cluster(
         .map_err(svc_err)?,
     };
 
-    if cluster.seeds.is_empty() {
-        let mut init = std::collections::BTreeMap::new();
-        init.insert(cluster.node_id, cluster.http_addr.clone());
-        cp.init_cluster(init).await.map_err(svc_err)?;
-        cp.wait_leader(std::time::Duration::from_secs(10))
-            .await
-            .map_err(svc_err)?;
-        log::info!(
-            "cluster: bootstrapped new Raft cluster as node {} @ {}",
-            cluster.node_id,
-            cluster.http_addr
-        );
-    } else {
-        RaftControlPlane::join_cluster(&cluster.seeds[0], cluster.node_id, &cluster.http_addr)
-            .await
-            .map_err(svc_err)?;
-        log::info!(
-            "cluster: node {} joined via seed {}",
-            cluster.node_id,
-            cluster.seeds[0]
-        );
+    let startup = async {
+        if cp.raft().is_initialized().await.map_err(|e| {
+            Error::new(
+                ErrorKind::Service,
+                Some(format!("read Raft initialization state: {e}")),
+            )
+        })? {
+            cp.wait_ready(std::time::Duration::from_secs(10))
+                .await
+                .map_err(svc_err)?;
+            log::info!(
+                "cluster: restored node {} from {}",
+                cluster.node_id,
+                cluster.data_dir
+            );
+            return Ok(());
+        }
+        if cluster.seeds.is_empty() {
+            let mut init = std::collections::BTreeMap::new();
+            init.insert(cluster.node_id, cluster.http_addr.clone());
+            cp.init_cluster(init).await.map_err(svc_err)?;
+            cp.wait_leader(std::time::Duration::from_secs(10))
+                .await
+                .map_err(svc_err)?;
+            log::info!(
+                "cluster: bootstrapped new Raft cluster as node {} @ {}",
+                cluster.node_id,
+                cluster.http_addr
+            );
+        } else {
+            let mut errors = Vec::new();
+            for seed in &cluster.seeds {
+                match RaftControlPlane::join_cluster(seed, cluster.node_id, &cluster.http_addr)
+                    .await
+                {
+                    Ok(()) => {
+                        let node_id = cluster.node_id;
+                        cp.raft()
+                            .wait(Some(std::time::Duration::from_secs(10)))
+                            .metrics(
+                                move |m| {
+                                    m.membership_config
+                                        .membership()
+                                        .get_node(&node_id)
+                                        .is_some()
+                                        && m.current_leader.is_some()
+                                },
+                                "joined node receives membership",
+                            )
+                            .await
+                            .map_err(|e| Error::new(ErrorKind::Service, Some(e.to_string())))?;
+                        log::info!("cluster: node {} joined via seed {seed}", cluster.node_id);
+                        return Ok(());
+                    }
+                    Err(error) => errors.push(error.to_string()),
+                }
+            }
+            return Err(Error::new(
+                ErrorKind::Service,
+                Some(format!(
+                    "cluster join failed for every seed: {}",
+                    errors.join("; ")
+                )),
+            ));
+        }
+        Ok(())
+    }
+    .await;
+    if let Err(error) = startup {
+        // A failed join must release its listener and storage before callers can retry startup.
+        if let Err(shutdown_error) = cp.shutdown().await {
+            log::warn!("cluster: failed startup cleanup: {shutdown_error}");
+        }
+        return Err(error);
     }
     Ok(Arc::new(RaftCoordinationBackend::new(cp)))
 }
@@ -654,7 +709,8 @@ impl MocraBuilder {
     /// panel has data out of the box.
     ///
     /// It can also be enabled through the `[api]` section of `from_toml`; this method is for
-    /// enabling it programmatically (without TOML).
+    /// enabling it programmatically. When combined with `from_toml`, it overrides only the port,
+    /// preserving the configured API key and rate limit.
     #[cfg(feature = "dashboard")]
     pub fn dashboard(mut self, port: u16) -> Self {
         self.dashboard_port = Some(port);
@@ -695,103 +751,104 @@ impl MocraBuilder {
             }
         };
 
-        let state = State::try_new_with_provider_and_coordination(provider, coordination)
-            .await
-            .map_err(|e| Error::new(ErrorKind::Service, Some(e.to_string())))?;
+        let started = async {
+            let state =
+                State::try_new_with_provider_and_coordination(provider, coordination.clone())
+                    .await
+                    .map_err(|e| Error::new(ErrorKind::Service, Some(e.to_string())))?;
 
-        let state = Arc::new(state);
-        // dashboard: when enabled programmatically, write the port into config.api so the engine
-        // brings up the admin HTTP API from it on start.
-        #[cfg(feature = "dashboard")]
-        if let Some(port) = self.dashboard_port {
-            let mut cfg = state.config.write().await;
-            cfg.api = Some(crate::common::model::config::Api {
-                port,
-                api_key: None,
-                rate_limit: None,
-            });
-            // A dashboard implies "service mode": single-node defaults to stopping after 30s idle,
-            // which would take the monitoring panel down with the process. Enabling the dashboard
-            // programmatically therefore disables single-node idle stop so the observability
-            // endpoints stay up (explicit from_toml config is left untouched).
-            if standalone {
-                cfg.crawler.idle_stop_secs = None;
-                // When logging was not configured explicitly, enable log collection by default so
-                // the dashboard's "logs" panel has data out of the box: LogSinkLayer feeds
-                // log/tracing events into an in-memory ring buffer for `/observability/logs`.
-                if cfg.logger.is_none() {
-                    use crate::common::model::logger_config::{LogOutputConfig, LoggerConfig};
-                    cfg.logger = Some(LoggerConfig {
-                        enabled: Some(true),
-                        level: Some("info".to_string()),
-                        format: None,
-                        include: None,
-                        buffer: None,
-                        flush_interval_ms: None,
-                        outputs: vec![LogOutputConfig::Console],
-                        prometheus: None,
-                    });
+            let state = Arc::new(state);
+            // dashboard: when enabled programmatically, write the port into config.api so the engine
+            // brings up the admin HTTP API from it on start.
+            #[cfg(feature = "dashboard")]
+            if let Some(port) = self.dashboard_port {
+                let mut cfg = state.config.write().await;
+                cfg.api
+                    .get_or_insert(crate::common::model::config::Api {
+                        port,
+                        api_key: None,
+                        rate_limit: None,
+                    })
+                    .port = port;
+                // A dashboard implies "service mode": single-node defaults to stopping after 30s idle,
+                // which would take the monitoring panel down with the process. Enabling the dashboard
+                // programmatically therefore disables single-node idle stop so the observability
+                // endpoints stay up (explicit from_toml config is left untouched).
+                if standalone {
+                    cfg.crawler.idle_stop_secs = None;
+                    // When logging was not configured explicitly, enable log collection by default so
+                    // the dashboard's "logs" panel has data out of the box: LogSinkLayer feeds
+                    // log/tracing events into an in-memory ring buffer for `/observability/logs`.
+                    if cfg.logger.is_none() {
+                        use crate::common::model::logger_config::{LogOutputConfig, LoggerConfig};
+                        cfg.logger = Some(LoggerConfig {
+                            enabled: Some(true),
+                            level: Some("info".to_string()),
+                            format: None,
+                            include: None,
+                            buffer: None,
+                            flush_interval_ms: None,
+                            outputs: vec![LogOutputConfig::Console],
+                            prometheus: None,
+                        });
+                    }
+                }
+                drop(cfg);
+                log::info!("dashboard: admin/observability API on http://127.0.0.1:{port}");
+            }
+            // Seed exactly once in a cluster: only the leader injects, which avoids every node
+            // injecting the same seeds → N× duplicate crawling.
+            let should_seed = coordination.as_ref().map(|c| c.is_leader()).unwrap_or(true);
+            let mut engine = Engine::new(state, None).await?;
+            // Point the engine's store stage at the counter the spiders' sinks already write to, so
+            // both persistence routes (DataSink and DataStoreMiddleware) add up to one number. Must
+            // happen before `start`, which clones this into the parser chain.
+            engine.outcomes.store = self.store_outcomes.clone();
+
+            // User-registered downloaders / default downloader override (wired up before the engine
+            // starts; the chains and the manager share the same Arc).
+            for downloader in self.downloaders {
+                engine.downloader_manager.register(downloader).await;
+            }
+            if let Some(default_downloader) = self.default_downloader {
+                engine
+                    .downloader_manager
+                    .set_default_downloader(default_downloader)
+                    .await;
+            }
+
+            let spider_names: Vec<String> = self.modules.iter().map(|m| m.name()).collect();
+            for module in self.modules {
+                engine.register_module(module).await;
+            }
+
+            // Single-node / cluster leader: inject one seed task per spider (otherwise the engine idles
+            // with nothing to do). Cluster followers skip this to avoid N× duplicate injection. How
+            // seeds spread across nodes depends on the data-plane MQ: with a distributed MQ
+            // (Kafka/NATS) they fan out to every node; with the default in-memory queue they stay on
+            // the leader.
+            if standalone && should_seed {
+                let task_tx = engine.queue_manager.get_task_push_channel();
+                for name in spider_names {
+                    let ev = TaskEvent {
+                        account: "default".to_string(),
+                        platform: "default".to_string(),
+                        module: Some(vec![name]),
+                        priority: Default::default(),
+                        run_id: uuid::Uuid::now_v7(),
+                    };
+                    if let Err(e) = task_tx.send(QueuedItem::new(ev)).await {
+                        log::warn!("failed to inject seed task: {e}");
+                    }
                 }
             }
-            drop(cfg);
-            log::info!("dashboard: admin/observability API on http://127.0.0.1:{port}");
-        }
-        // Capture the coordination backend handle before state moves into the engine: used for the
-        // leader gate that keeps seeding to exactly once, and for graceful shutdown after the
-        // engine stops.
-        let coordination = state.coordination.clone();
-        // Seed exactly once in a cluster: only the leader injects, which avoids every node
-        // injecting the same seeds → N× duplicate crawling.
-        let should_seed = coordination.as_ref().map(|c| c.is_leader()).unwrap_or(true);
-        let mut engine = Engine::new(state, None).await?;
-        // Point the engine's store stage at the counter the spiders' sinks already write to, so
-        // both persistence routes (DataSink and DataStoreMiddleware) add up to one number. Must
-        // happen before `start`, which clones this into the parser chain.
-        engine.outcomes.store = self.store_outcomes.clone();
 
-        // User-registered downloaders / default downloader override (wired up before the engine
-        // starts; the chains and the manager share the same Arc).
-        for downloader in self.downloaders {
-            engine.downloader_manager.register(downloader).await;
+            engine.start().await
         }
-        if let Some(default_downloader) = self.default_downloader {
-            engine
-                .downloader_manager
-                .set_default_downloader(default_downloader)
-                .await;
-        }
-
-        let spider_names: Vec<String> = self.modules.iter().map(|m| m.name()).collect();
-        for module in self.modules {
-            engine.register_module(module).await;
-        }
-
-        // Single-node / cluster leader: inject one seed task per spider (otherwise the engine idles
-        // with nothing to do). Cluster followers skip this to avoid N× duplicate injection. How
-        // seeds spread across nodes depends on the data-plane MQ: with a distributed MQ
-        // (Kafka/NATS) they fan out to every node; with the default in-memory queue they stay on
-        // the leader.
-        if standalone && should_seed {
-            let task_tx = engine.queue_manager.get_task_push_channel();
-            for name in spider_names {
-                let ev = TaskEvent {
-                    account: "default".to_string(),
-                    platform: "default".to_string(),
-                    module: Some(vec![name]),
-                    priority: Default::default(),
-                    run_id: uuid::Uuid::now_v7(),
-                };
-                if let Err(e) = task_tx.send(QueuedItem::new(ev)).await {
-                    log::warn!("failed to inject seed task: {e}");
-                }
-            }
-        }
-
-        let started = engine.start().await;
+        .await;
 
         // Gracefully shut the cluster control plane down after the engine stops (releasing the redb
-        // handle and the Raft background tasks). This runs even when startup failed, so an error
-        // such as an unbindable dashboard port does not strand the redb handle.
+        // handle and the Raft background tasks), including State/Engine initialization errors.
         if let Some(c) = &coordination {
             c.shutdown().await;
         }
@@ -887,9 +944,549 @@ impl ConfigProvider for StaticConfigProvider {
     }
 }
 
+#[cfg(all(test, any(feature = "cluster-embedded", feature = "dashboard")))]
+const TEST_CONFIG_TOML: &str = r#"
+name = "facade_regression"
+[db]
+[download_config]
+downloader_expire = 3600
+timeout = 10
+rate_limit = 0.0
+enable_session = false
+enable_locker = false
+enable_rate_limit = false
+cache_ttl = 60
+wss_timeout = 30
+[cache]
+ttl = 60
+[crawler]
+request_max_retries = 0
+task_max_errors = 5
+module_max_errors = 10
+module_locker_ttl = 5
+idle_stop_secs = 0
+[channel_config]
+minid_time = 0
+capacity = 16
+"#;
+
 #[cfg(all(test, feature = "cluster-embedded"))]
 mod cluster_config_tests {
-    use super::ClusterConfig;
+    use super::*;
+
+    fn unused_addr() -> String {
+        std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .to_string()
+    }
+
+    async fn assert_failed_initialization_releases_cluster(invalid_queue: bool) {
+        let dir = std::env::temp_dir().join(format!("mocra-init-error-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        if invalid_queue {
+            std::fs::write(
+                &path,
+                format!(
+                    "{}\n[api]\nport = 0\napi_key = \"regression-key\"\nrate_limit = 1.0\n",
+                    TEST_CONFIG_TOML.replace("capacity = 16", "capacity = 0")
+                ),
+            )
+            .unwrap();
+        }
+        let expected = if invalid_queue {
+            "queue capacity and batch concurrency must be positive"
+        } else {
+            "load config failed"
+        };
+        let config = ClusterConfig::bootstrap(1, unused_addr(), dir.join("raft").to_string_lossy());
+        for _ in 0..2 {
+            let error = Mocra::builder()
+                .cluster(config.clone())
+                .from_toml(path.to_str().unwrap())
+                .run()
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains(expected), "{error}");
+        }
+        let recovered = start_embedded_cluster(&config).await.unwrap();
+        recovered.set("after-error", b"ready").await.unwrap();
+        recovered.shutdown().await;
+        drop(recovered);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn failed_state_initialization_releases_cluster() {
+        assert_failed_initialization_releases_cluster(false).await;
+    }
+
+    #[tokio::test]
+    async fn failed_engine_initialization_releases_cluster() {
+        assert_failed_initialization_releases_cluster(true).await;
+    }
+
+    async fn assert_normal_stop_releases_cluster(api_port: Option<u16>) {
+        use std::time::Duration;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let dir = std::env::temp_dir().join(format!("mocra-stop-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        let mut toml = TEST_CONFIG_TOML.replace("idle_stop_secs = 0", "idle_stop_secs = 1");
+        if let Some(port) = api_port {
+            toml += &format!("\n[api]\nport = {port}\napi_key = \"regression-key\"\n");
+        }
+        std::fs::write(&path, toml).unwrap();
+        let config = ClusterConfig::bootstrap(1, unused_addr(), dir.join("raft").to_string_lossy());
+        let first_config = config.clone();
+        let first_path = path.clone();
+        let first = tokio::spawn(async move {
+            Mocra::builder()
+                .cluster(first_config)
+                .from_toml(first_path.to_str().unwrap())
+                .run()
+                .await
+        });
+        let mut sockets = Vec::new();
+        if let Some(port) = api_port {
+            let address = format!("127.0.0.1:{port}");
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    if let Ok(response) = reqwest::get(format!("http://{address}/health")).await
+                        && response.status().is_success()
+                    {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .unwrap();
+            for request in [
+                "POST /start_work HTTP/1.1\r\nHost: localhost\r\n",
+                "POST /start_work HTTP/1.1\r\nHost: localhost\r\nx-api-key: regression-key\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n",
+            ] {
+                let mut socket = tokio::net::TcpStream::connect(&address).await.unwrap();
+                socket.write_all(request.as_bytes()).await.unwrap();
+                sockets.push(socket);
+            }
+        }
+        tokio::time::timeout(Duration::from_secs(8), first)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        if let Some(port) = api_port {
+            let rebound = std::net::TcpListener::bind(("127.0.0.1", port)).unwrap();
+            drop(rebound);
+            for mut socket in sockets {
+                let mut received = Vec::new();
+                let _ =
+                    tokio::time::timeout(Duration::from_secs(1), socket.read_to_end(&mut received))
+                        .await
+                        .expect("stopped API must close accepted connections");
+            }
+        }
+        tokio::time::timeout(
+            Duration::from_secs(8),
+            Mocra::builder()
+                .cluster(config)
+                .from_toml(path.to_str().unwrap())
+                .run(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn normal_stop_releases_cluster_without_api() {
+        assert_normal_stop_releases_cluster(None).await;
+    }
+
+    #[cfg(feature = "dashboard")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn normal_stop_releases_api_connections_and_cluster() {
+        let port = unused_addr().rsplit(':').next().unwrap().parse().unwrap();
+        assert_normal_stop_releases_cluster(Some(port)).await;
+    }
+
+    #[cfg(feature = "dashboard")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn explicit_shutdown_finishes_before_start_returns() {
+        use std::time::Duration;
+        use tokio::io::AsyncWriteExt;
+
+        let dir =
+            std::env::temp_dir().join(format!("mocra-explicit-stop-{}", uuid::Uuid::now_v7()));
+        let cluster = ClusterConfig::bootstrap(1, unused_addr(), dir.to_string_lossy());
+        let coordination = start_embedded_cluster(&cluster).await.unwrap();
+        let port = unused_addr().rsplit(':').next().unwrap().parse().unwrap();
+        let mut config = default_standalone_config("explicit_stop");
+        config.crawler.idle_stop_secs = None;
+        config.api = Some(crate::common::model::config::Api {
+            port,
+            api_key: Some("regression-key".into()),
+            rate_limit: None,
+        });
+        let state = State::try_new_with_provider_and_coordination(
+            Box::new(StaticConfigProvider { config }),
+            Some(coordination.clone()),
+        )
+        .await
+        .unwrap();
+        let engine = Arc::new(Engine::new(Arc::new(state), None).await.unwrap());
+        let running_engine = engine.clone();
+        let running = tokio::spawn(async move { running_engine.start().await });
+        let client = reqwest::Client::new();
+        let address = format!("127.0.0.1:{port}");
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Ok(response) = client
+                    .get(format!("http://{address}/nodes"))
+                    .header("x-api-key", "regression-key")
+                    .send()
+                    .await
+                    && response.status().is_success()
+                    && !response
+                        .json::<Vec<serde_json::Value>>()
+                        .await
+                        .unwrap()
+                        .is_empty()
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let mut socket = tokio::net::TcpStream::connect(&address).await.unwrap();
+        socket
+            .write_all(b"POST /start_work HTTP/1.1\r\nHost: localhost\r\nx-api-key: regression-key\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n")
+            .await
+            .unwrap();
+        let stopping_engine = engine.clone();
+        let stopping = tokio::spawn(async move { stopping_engine.shutdown().await });
+        tokio::time::timeout(Duration::from_secs(6), running)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        drop(engine);
+        coordination.shutdown().await;
+        drop(coordination);
+        // No extra await on the concurrent shutdown is needed before reopening storage.
+        let restored = start_embedded_cluster(&cluster).await.unwrap();
+        restored.shutdown().await;
+        drop(restored);
+        stopping.await.unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stopping_active_spider_releases_cluster_storage() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::time::Duration;
+        use tokio::sync::Notify;
+
+        struct ActiveTask(Arc<AtomicBool>);
+
+        impl Drop for ActiveTask {
+            fn drop(&mut self) {
+                self.0.store(false, Ordering::SeqCst);
+            }
+        }
+
+        struct HeldSpider {
+            entered: Arc<Notify>,
+            active: Arc<AtomicBool>,
+        }
+
+        #[async_trait]
+        impl Spider for HeldSpider {
+            type Item = ();
+
+            fn name(&self) -> &str {
+                "active_stop"
+            }
+
+            async fn start(&self, _seeds: &mut Seeds) {
+                self.active.store(true, Ordering::SeqCst);
+                let _active = ActiveTask(self.active.clone());
+                self.entered.notify_one();
+                std::future::pending::<()>().await;
+            }
+
+            async fn parse(&self, _response: Response, _cx: &mut Ctx<()>) -> Result<()> {
+                Ok(())
+            }
+        }
+
+        let dir = std::env::temp_dir().join(format!("mocra-active-stop-{}", uuid::Uuid::now_v7()));
+        let cluster = ClusterConfig::bootstrap(1, unused_addr(), dir.to_string_lossy());
+        let coordination = start_embedded_cluster(&cluster).await.unwrap();
+        let mut config = default_standalone_config("active_stop");
+        config.crawler.idle_stop_secs = None;
+        let state = State::try_new_with_provider_and_coordination(
+            Box::new(StaticConfigProvider { config }),
+            Some(coordination.clone()),
+        )
+        .await
+        .unwrap();
+        let engine = Arc::new(Engine::new(Arc::new(state), None).await.unwrap());
+        let entered = Arc::new(Notify::new());
+        let active = Arc::new(AtomicBool::new(false));
+        let builder = Mocra::builder().spider(
+            HeldSpider {
+                entered: entered.clone(),
+                active: active.clone(),
+            },
+            on_item(|_: ()| async {}),
+        );
+        for module in builder.modules {
+            engine.register_module(module).await;
+        }
+        engine
+            .queue_manager
+            .get_task_push_channel()
+            .send(QueuedItem::new(TaskEvent {
+                account: "default".into(),
+                platform: "default".into(),
+                module: Some(vec!["active_stop".into()]),
+                priority: Default::default(),
+                run_id: uuid::Uuid::now_v7(),
+            }))
+            .await
+            .unwrap();
+        let running_engine = engine.clone();
+        let running = tokio::spawn(async move { running_engine.start().await });
+        tokio::time::timeout(Duration::from_secs(5), entered.notified())
+            .await
+            .expect("the spider must be active before shutdown");
+        assert!(active.load(Ordering::SeqCst));
+
+        tokio::time::timeout(Duration::from_secs(5), engine.shutdown())
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), running)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(
+            !active.load(Ordering::SeqCst),
+            "shutdown must release active spider tasks before start returns"
+        );
+        assert_eq!(engine.inflight.total(), 0);
+        drop(engine);
+        coordination.shutdown().await;
+        drop(coordination);
+
+        let restored = start_embedded_cluster(&cluster).await.unwrap();
+        restored.set("after-active-stop", b"ready").await.unwrap();
+        restored.shutdown().await;
+        drop(restored);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn config_watch_updates_live_limiters() {
+        struct WatchedConfig(tokio::sync::watch::Receiver<Config>);
+        #[async_trait]
+        impl ConfigProvider for WatchedConfig {
+            async fn load_config(&self) -> std::result::Result<Config, String> {
+                Ok(self.0.borrow().clone())
+            }
+            async fn watch(
+                &self,
+            ) -> std::result::Result<tokio::sync::watch::Receiver<Config>, String> {
+                Ok(self.0.clone())
+            }
+        }
+        let mut config = default_standalone_config("config_watch_regression");
+        config.api = Some(crate::common::model::config::Api {
+            port: 0,
+            api_key: Some("regression-key".into()),
+            rate_limit: Some(1.0),
+        });
+        let (tx, rx) = tokio::sync::watch::channel(config.clone());
+        let state = State::try_new_with_provider(Box::new(WatchedConfig(rx)))
+            .await
+            .unwrap();
+        config.download_config.rate_limit = 2.0;
+        config.api.as_mut().unwrap().rate_limit = Some(3.0);
+        tx.send(config).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                let download = state.limiter.get_key_config("test").await.unwrap();
+                let api = state
+                    .api_limiter
+                    .as_ref()
+                    .unwrap()
+                    .get_key_config("test")
+                    .await
+                    .unwrap();
+                if download.max_requests_per_second == 2.0 && api.max_requests_per_second == 3.0 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn embedded_cluster_restore_has_a_leader_before_seed_decision() {
+        use mocra_cluster::{ControlPlane, RaftControlPlane};
+        use std::collections::BTreeMap;
+        use std::time::Duration;
+
+        let dir = std::env::temp_dir().join(format!("mocra-quorum-{}", uuid::Uuid::now_v7()));
+        let configs: Vec<_> = (1..=3)
+            .map(|id| {
+                ClusterConfig::bootstrap(
+                    id,
+                    unused_addr(),
+                    dir.join(id.to_string()).to_string_lossy(),
+                )
+            })
+            .collect();
+        let mut nodes = Vec::new();
+        for config in &configs {
+            nodes.push(
+                RaftControlPlane::start_cluster_node(
+                    config.node_id,
+                    &config.data_dir,
+                    &config.http_addr,
+                )
+                .await
+                .unwrap(),
+            );
+        }
+        nodes[0]
+            .init_cluster(BTreeMap::from([(1, configs[0].http_addr.clone())]))
+            .await
+            .unwrap();
+        nodes[0].wait_leader(Duration::from_secs(5)).await.unwrap();
+        for config in &configs[1..] {
+            nodes[0]
+                .add_learner(config.node_id, &config.http_addr)
+                .await
+                .unwrap();
+        }
+        nodes[0].change_membership([1, 2, 3].into()).await.unwrap();
+        nodes[0].set(b"persist", b"value").await.unwrap();
+        for node in &nodes {
+            node.shutdown().await.unwrap();
+        }
+        drop(nodes);
+
+        let isolated =
+            RaftControlPlane::start_cluster_node(1, &configs[0].data_dir, &configs[0].http_addr)
+                .await
+                .unwrap();
+        assert!(
+            isolated
+                .wait_ready(Duration::from_millis(250))
+                .await
+                .is_err(),
+            "remembering its own leadership does not replace a live quorum"
+        );
+        isolated.shutdown().await.unwrap();
+        drop(isolated);
+
+        // The old leader stays offline. Both remaining voters remember it on restart.
+        let (second, third) = tokio::join!(
+            start_embedded_cluster(&configs[1]),
+            start_embedded_cluster(&configs[2])
+        );
+        let second = second.unwrap();
+        let third = third.unwrap();
+        let seed_count = usize::from(second.is_leader()) + usize::from(third.is_leader());
+        assert_eq!(
+            seed_count, 1,
+            "the facade must inject seeds on the restored leader"
+        );
+        let leader = if second.is_leader() { &second } else { &third };
+        leader.set("after-restart", b"ready").await.unwrap();
+        second.shutdown().await;
+        third.shutdown().await;
+        drop((second, third));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn embedded_cluster_recovers_on_the_same_address() {
+        let dir = std::env::temp_dir().join(format!("mocra-recovery-{}", uuid::Uuid::now_v7()));
+        let config = ClusterConfig::bootstrap(1, unused_addr(), dir.to_string_lossy());
+        let backend = start_embedded_cluster(&config).await.unwrap();
+        backend.set("persist", b"value").await.unwrap();
+        backend.shutdown().await;
+        drop(backend);
+
+        let restored = start_embedded_cluster(&config).await.unwrap();
+        assert_eq!(
+            restored.get("persist").await.unwrap(),
+            Some(b"value".to_vec())
+        );
+        assert_eq!(restored.cluster_size(), 1);
+        restored.shutdown().await;
+        drop(restored);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn embedded_cluster_tries_seeds_and_restores_without_them() {
+        let dir = std::env::temp_dir().join(format!("mocra-join-{}", uuid::Uuid::now_v7()));
+        let boot = ClusterConfig::bootstrap(1, unused_addr(), dir.join("n1").to_string_lossy());
+        let leader = start_embedded_cluster(&boot).await.unwrap();
+        let missing_seed = unused_addr();
+        let mut joined = ClusterConfig::join(
+            2,
+            unused_addr(),
+            dir.join("n2").to_string_lossy(),
+            &missing_seed,
+        );
+        joined.seeds.push(boot.http_addr.clone());
+        let follower = start_embedded_cluster(&joined).await.unwrap();
+        assert_eq!(leader.cluster_size(), 2);
+        follower.shutdown().await;
+        drop(follower);
+
+        joined.seeds = vec![missing_seed.clone()];
+        let restored = start_embedded_cluster(&joined).await.unwrap();
+        restored.set("restored", b"yes").await.unwrap();
+        assert_eq!(leader.get("restored").await.unwrap(), Some(b"yes".to_vec()));
+        restored.shutdown().await;
+        drop(restored);
+
+        let bad = ClusterConfig::join(
+            3,
+            unused_addr(),
+            dir.join("n3").to_string_lossy(),
+            &missing_seed,
+        );
+        let error = match start_embedded_cluster(&bad).await {
+            Ok(_) => panic!("joining an unreachable seed must fail"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains(&missing_seed));
+        // Failed startup must also release the bound HTTP port and data directory.
+        let mut retry = bad;
+        retry.seeds = vec![boot.http_addr.clone()];
+        let recovered = start_embedded_cluster(&retry).await.unwrap();
+        recovered.shutdown().await;
+        drop(recovered);
+        leader.shutdown().await;
+        drop(leader);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn bootstrap_has_no_seeds_join_has_one() {
@@ -954,6 +1551,66 @@ mod dashboard_tests {
         async fn parse(&self, _r: Response, _c: &mut Ctx<Self::Item>) -> Result<()> {
             Ok(())
         }
+    }
+
+    #[tokio::test]
+    async fn dashboard_preserves_configured_api_auth_and_rate_limit() {
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let path = std::env::temp_dir().join(format!("mocra-api-{}.toml", uuid::Uuid::now_v7()));
+        std::fs::write(
+            &path,
+            format!("{TEST_CONFIG_TOML}\n[api]\nport = 0\napi_key = \"regression-key\"\nrate_limit = 1.0\n"),
+        )
+        .unwrap();
+        let config_path = path.clone();
+        let server = tokio::spawn(async move {
+            Mocra::builder()
+                .from_toml(config_path.to_str().unwrap())
+                .dashboard(port)
+                .run()
+                .await
+        });
+        let base = format!("http://127.0.0.1:{port}");
+        let client = reqwest::Client::new();
+        let ready = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if let Ok(response) = client.get(format!("{base}/health")).send().await
+                    && response.status().is_success()
+                {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        let authorized = client
+            .get(format!("{base}/nodes"))
+            .header("x-api-key", "regression-key")
+            .send()
+            .await;
+        let limited = client
+            .get(format!("{base}/nodes"))
+            .header("x-api-key", "regression-key")
+            .send()
+            .await;
+        let unauthorized = client.get(format!("{base}/nodes")).send().await;
+        server.abort();
+        let _ = server.await;
+        std::fs::remove_file(path).unwrap();
+        ready.unwrap();
+        assert_eq!(authorized.unwrap().status(), reqwest::StatusCode::OK);
+        assert_eq!(
+            limited.unwrap().status(),
+            reqwest::StatusCode::TOO_MANY_REQUESTS
+        );
+        assert_eq!(
+            unauthorized.unwrap().status(),
+            reqwest::StatusCode::UNAUTHORIZED
+        );
     }
 
     /// End-to-end: `.dashboard(port)` really does serve the observability HTTP API on that port.

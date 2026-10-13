@@ -3,184 +3,281 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="color-scheme" content="dark" />
 <title>mocra dashboard</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 32 32%27%3E%3Crect width=%2732%27 height=%2732%27 rx=%278%27 fill=%27%23fafafa%27/%3E%3Ctext x=%2716%27 y=%2724%27 font-family=%27Arial%27 font-size=%2723%27 font-weight=%27700%27 text-anchor=%27middle%27 fill=%27%23101214%27%3EM%3C/text%3E%3C/svg%3E" />
 <style>
   :root {
-    --bg: #0d1117; --panel: #161b22; --panel2: #1c2230; --border: #30363d;
-    --text: #e6edf3; --muted: #8b949e; --accent: #58a6ff;
-    --good: #3fb950; --warn: #d29922; --bad: #f85149; --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+    --bg:#222528; --panel:#303438; --panel2:#3b3f44; --border:#45494e;
+    --text:#f2f3f5; --muted:#b0b5bd; --accent:#4975fa;
+    --good:#99edc3; --warn:#e7bd62; --bad:#f29497;
+    --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+    --stage-task:#99edc3; --stage-download:#b59bf5; --stage-response:#9988f5;
+    --stage-parser:#9aaff9; --stage-error:#f29497; --stage-remote:#9dabb9;
   }
-  * { box-sizing: border-box; }
-  body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
-  a { color: var(--accent); }
-  header {
-    position: sticky; top: 0; z-index: 10; background: rgba(13,17,23,.92); backdrop-filter: blur(6px);
-    border-bottom: 1px solid var(--border); padding: 10px 16px; display: flex; gap: 12px; align-items: center; flex-wrap: wrap;
+  * { box-sizing:border-box; }
+  [hidden] { display:none !important; }
+  html { scroll-behavior:smooth; }
+  body { margin:0; background:var(--bg); color:var(--text); font:13px/1.5 Inter,ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif; font-variant-numeric:tabular-nums; }
+  a { color:inherit; text-decoration:none; }
+  button,input,select { font:inherit; color:inherit; }
+  button,select,summary { cursor:pointer; }
+  button,input,select { border:1px solid var(--border); border-radius:9px; background:#303438; min-height:40px; padding:8px 12px; }
+  button:hover,summary:hover { border-color:#68707a; }
+  :focus-visible { outline:2px solid var(--accent); outline-offset:3px; }
+  button.primary { background:var(--accent); border-color:#6085ff; color:#fff; font-weight:550; padding:10px 20px; }
+  button.primary:hover { background:#5b82fb; }
+  input { width:100%; min-width:0; font-family:var(--mono); font-size:12px; }
+  input::placeholder { color:#8c929b; }
+  svg.icon { width:21px; height:21px; flex:none; fill:none; stroke:currentColor; stroke-width:1.6; stroke-linecap:round; stroke-linejoin:round; }
+  .sr-only { position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip:rect(0,0,0,0); white-space:nowrap; border:0; }
+  .svg-defs { position:absolute; width:0; height:0; overflow:hidden; }
+  .sidebar { position:fixed; inset:0 auto 0 0; z-index:30; width:248px; padding:25px 13px 26px; background:#090a0b; display:flex; flex-direction:column; border-right:1px solid #121416; }
+  .brand { display:flex; align-items:center; gap:16px; padding:0 12px; }
+  .brand-mark { display:grid; place-items:center; width:40px; height:40px; border-radius:10px; background:#fafafa; color:#101214; font-size:22px; font-weight:700; box-shadow:0 1px 5px #0005; }
+  .brand-name { font-size:18px; font-weight:650; line-height:1.3; letter-spacing:-.3px; }
+  .workspace { color:var(--muted); font-size:13px; }
+  nav { display:grid; gap:3px; margin-top:30px; }
+  .nav-link { display:flex; align-items:center; gap:18px; min-height:45px; padding:10px 16px; border-radius:9px; color:#c4cbd5; font-size:14px; }
+  .nav-link .icon { width:22px; height:22px; }
+  .nav-link:hover { background:#17191c; }
+  .nav-link.active { background:linear-gradient(115deg,#282c32,#202329); color:#f2f4f8; }
+  .connection-status { margin-top:auto; padding:18px 20px 0; display:flex; align-items:flex-start; gap:17px; font-size:13px; }
+  .connection-status strong { display:block; font-weight:500; }
+  .connection-status small { color:var(--muted); font-size:12px; }
+  .dot { display:inline-block; flex:none; width:13px; height:13px; margin-top:4px; border-radius:50%; background:#858b94; }
+  .dot.on { background:var(--good); }
+  .dot.err { background:var(--bad); }
+  main { margin-left:248px; padding:20px 22px 28px 20px; min-width:0; }
+  .topbar { display:flex; justify-content:space-between; align-items:flex-start; gap:20px; margin-bottom:16px; min-height:56px; }
+  h1 { margin:0; font-size:28px; font-weight:650; line-height:1.25; letter-spacing:-.7px; }
+  .subtitle { margin:4px 0 0; color:var(--muted); font-size:15px; line-height:1.25; }
+  .toolbar { display:flex; align-items:center; gap:12px; padding-top:3px; }
+  .refresh-control { display:flex; align-items:center; gap:8px; border:1px solid var(--border); border-radius:10px; padding-left:12px; background:#2c3034; }
+  .refresh-control select { border:0; background:transparent; padding:9px 9px 9px 0; font-size:13px; }
+  .refresh-control .icon { width:18px; }
+  .connection-settings { position:relative; }
+  .connection-settings summary { list-style:none; display:flex; align-items:center; gap:9px; padding:10px 13px; min-height:42px; border:1px solid var(--border); border-radius:10px; background:#2c3034; }
+  .connection-settings summary::-webkit-details-marker { display:none; }
+  .connection-settings summary .chevron { width:14px; height:14px; margin-left:2px; }
+  .settings-panel { position:absolute; right:0; top:calc(100% + 10px); z-index:40; width:355px; padding:18px; background:#303438; border:1px solid #626971; border-radius:12px; box-shadow:0 16px 45px #0008; }
+  .settings-panel label { display:block; margin-bottom:12px; color:var(--muted); font-size:12px; }
+  .settings-panel input { margin-top:6px; color:var(--text); }
+  .settings-panel .hint { margin:4px 0 0; font-size:11px; }
+  .menu-toggle { display:none; padding:8px; min-width:40px; }
+  .status-strip { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:8px 20px; min-height:44px; padding:10px 24px; margin-bottom:16px; background:linear-gradient(130deg,#303438,#2c3034); border:1px solid var(--border); border-radius:14px; }
+  .row { display:flex; align-items:center; gap:26px; flex-wrap:wrap; min-width:0; max-width:100%; }
+  .badge { display:inline-flex; align-items:center; gap:10px; color:#dce0e5; font-size:12px; min-width:0; max-width:100%; overflow-wrap:anywhere; }
+  .badge.accent { color:#c6ccd5; }
+  .badge.good::before,.badge.warn::before { content:""; width:9px; height:9px; border-radius:50%; background:var(--good); }
+  .badge.warn::before { background:var(--warn); }
+  .meta { color:var(--muted); font-size:11px; }
+  #engineHint:empty { display:none; }
+  #engineHint { margin:0 0 12px; color:var(--muted); overflow-wrap:anywhere; }
+  .summary-strip { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:0; min-height:120px; padding:24px 6px; margin-bottom:18px; background:linear-gradient(135deg,#34383d,#2e3236); border:1px solid var(--border); border-radius:15px; }
+  .summary-item { display:flex; align-items:center; gap:28px; padding:0 26px; min-width:0; border-right:1px solid #545960; }
+  .summary-item:last-child { border:0; }
+  .icon-box { display:grid; place-items:center; width:38px; height:38px; flex:none; border-radius:10px; background:linear-gradient(135deg,#50555b,#3f444a); box-shadow:inset 0 1px 0 #ffffff09; color:#e0e4ea; }
+  .summary-item .icon-box { width:48px; height:48px; border-radius:12px; }
+  .summary-item .icon { width:25px; height:25px; }
+  .summary-label { color:var(--muted); font-size:13px; white-space:nowrap; }
+  .summary-value { margin-top:4px; font-size:28px; font-weight:650; line-height:1.25; letter-spacing:-.4px; }
+  .dashboard-grid { display:grid; grid-template-columns:minmax(0,1.62fr) minmax(0,1fr); gap:18px; align-items:start; }
+  .column { display:grid; gap:18px; min-width:0; }
+  .card { min-width:0; padding:17px 19px 20px; border:1px solid var(--border); border-radius:15px; background:linear-gradient(140deg,#34383c,#2d3135); scroll-margin-top:20px; }
+  .card-head { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:18px; }
+  .panel-title { display:flex; align-items:center; gap:16px; min-width:0; }
+  h2 { margin:0; font-size:15px; font-weight:600; line-height:1.4; letter-spacing:-.15px; }
+  .panel-sub { margin-top:3px; color:var(--muted); font-size:12px; }
+  .total { text-align:right; color:var(--muted); font-size:13px; }
+  .total strong { display:block; color:var(--text); font-size:25px; line-height:1.25; font-weight:650; margin-top:3px; }
+  .tasks-card { min-height:226px; }
+  .pipeline { display:flex; height:28px; gap:2px; overflow:hidden; border-radius:10px; background:#444950; margin-top:26px; }
+  .pipeline span { min-width:0; border-radius:9px; background:var(--stage-color); }
+  .stats { display:grid; grid-template-columns:repeat(6,minmax(0,1fr)); gap:10px; margin-top:25px; }
+  .stat { min-width:0; }
+  .stat .k { display:flex; align-items:center; gap:9px; color:#c4c9d0; font-size:11px; text-transform:capitalize; white-space:nowrap; }
+  .stat .k::before { content:""; flex:none; width:11px; height:11px; border-radius:50%; background:var(--stage-color); }
+  .stat .n { padding-left:20px; margin-top:5px; font-size:18px; font-weight:600; line-height:1.3; }
+  .stat.total { display:none; }
+  .stats .empty { grid-column:1/-1; padding:0 0 10px; }
+  .meter { margin-top:13px; }
+  .meter .lbl { display:flex; align-items:center; justify-content:space-between; gap:10px; font-size:12px; }
+  .meter .lbl b { font-weight:400; text-align:right; }
+  .meter .usage { margin-left:auto; color:var(--muted); font-size:11px; }
+  .meter .track { height:10px; border-radius:8px; background:#474c52; overflow:hidden; margin:4px 70px 0 81px; }
+  .meter .fill { height:100%; width:0; border-radius:8px; background:var(--good); transition:width .35s ease,background .35s ease; }
+  .resources-card { min-height:226px; }
+  .resources-card .card-head { margin-bottom:19px; }
+  .resources-card .meter + .meter { padding-top:4px; margin-top:12px; border-top:1px solid #454a50; }
+  .kv { display:grid; grid-template-columns:auto 1fr; gap:5px 16px; font-size:12px; }
+  .kv .k { color:var(--muted); text-transform:capitalize; }
+  .kv .v { text-align:center; color:#f1f3f7; overflow-wrap:anywhere; }
+  .cluster-card .card-head { margin-bottom:15px; }
+  .logs-card { min-height:482px; padding:16px 8px 0; overflow:hidden; }
+  .logs-card .card-head { padding:0 11px; margin-bottom:14px; flex-wrap:wrap; }
+  .logs-ctl { display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
+  .logs-ctl label { display:flex; align-items:center; gap:8px; }
+  .logs-ctl select { min-height:38px; padding:7px 10px; font-size:12px; }
+  .logs-ctl button { min-height:36px; display:flex; align-items:center; gap:8px; border:0; background:transparent; padding:5px 0; font-size:12px; }
+  .logs-ctl button .icon { width:18px; height:18px; }
+  .logwrap { overflow:auto; max-height:420px; border-radius:12px 12px 0 0; }
+  table { border-collapse:collapse; width:100%; }
+  table.logs { font-size:12px; }
+  table.logs th { position:sticky; top:0; z-index:1; background:#3b4046; padding:13px 12px; text-align:left; color:#bbc1cb; font-weight:400; white-space:nowrap; }
+  table.logs td { padding:11px 12px; border-bottom:1px solid #454b52; white-space:nowrap; vertical-align:middle; }
+  table.logs td.msg { white-space:normal; overflow-wrap:anywhere; min-width:160px; }
+  table.logs td:last-child { font-size:11px; color:#c5cbd4; }
+  table.logs tr:hover td { background:#ffffff04; }
+  .lvl { display:inline-block; padding:4px 8px; border:1px solid #727983; border-radius:14px; font-size:11px; color:#ccd3dc; }
+  .lvl.INFO { color:#d3ffe9; background:#3c6657; border-color:#62aa8e; }
+  .lvl.WARN { color:#fff0c4; background:#79602a; border-color:#c49b32; }
+  .lvl.ERROR { color:#ffdbdf; background:#6d3e44; border-color:#be6c78; }
+  .empty { color:var(--muted); text-align:center; padding:28px; font-size:12px; }
+  .tpwrap { overflow-x:auto; }
+  table.tp { font-size:12px; }
+  table.tp th { text-transform:capitalize; text-align:right; padding:6px 5px; color:var(--muted); font-weight:400; white-space:nowrap; border-bottom:1px solid #454b52; }
+  table.tp th:first-child,table.tp td:first-child { text-align:left; padding-left:0; }
+  table.tp td { text-align:right; padding:4px 5px; border-bottom:1px solid #454b52; white-space:nowrap; }
+  table.tp tr:last-child td { border-bottom:0; }
+  table.tp td.stage { text-transform:capitalize; }
+  table.tp td.ok { color:#e8edf0; }
+  table.tp td.bad { color:var(--bad); }
+  table.tp td.zero { color:#b6bcc5; }
+  table.tp td.rate { color:#c2c8d1; }
+  .hint { color:var(--muted); font-size:11px; margin-top:8px; }
+  @media (max-width:1200px) {
+    .sidebar { width:205px; }
+    main { margin-left:205px; }
+    .summary-item { padding:0 16px; gap:14px; }
+    .summary-label { font-size:11px; }
+    .summary-value { font-size:25px; }
+    .summary-item .icon-box { width:38px; height:38px; }
+    .stats { grid-template-columns:repeat(3,minmax(0,1fr)); gap:15px; }
+    .tasks-card,.resources-card { min-height:255px; }
+    .logs-card .card-head { gap:16px; }
+    .dashboard-grid { grid-template-columns:minmax(0,1.4fr) minmax(0,1fr); }
+    .summary-item { align-items:flex-start; }
+    .meter .track { margin-right:24px; margin-left:50px; }
   }
-  header .brand { font-weight: 700; letter-spacing: .3px; display: flex; align-items: center; gap: 8px; }
-  header .brand .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); box-shadow: 0 0 0 3px rgba(139,148,158,.15); }
-  header .brand .dot.on { background: var(--good); box-shadow: 0 0 0 3px rgba(63,185,80,.18); }
-  header .brand .dot.err { background: var(--bad); box-shadow: 0 0 0 3px rgba(248,81,73,.18); }
-  header input, header select, header button {
-    background: var(--panel); color: var(--text); border: 1px solid var(--border);
-    border-radius: 6px; padding: 6px 10px; font-size: 13px; outline: none;
+  @media (max-width:980px) {
+    .topbar { flex-wrap:wrap; }
+    .toolbar { margin-left:auto; }
+    .summary-item .icon-box { display:none; }
+    .dashboard-grid { grid-template-columns:minmax(0,1fr); }
+    .column { display:contents; }
+    .tasks-card { order:1; }
+    .resources-card { order:2; min-height:226px; }
+    .throughput-card { order:3; }
+    .cluster-card { order:4; }
+    .logs-card { order:5; }
   }
-  header input:focus { border-color: var(--accent); }
-  header input.endpoint { min-width: 240px; font-family: var(--mono); }
-  header input.apikey { min-width: 150px; font-family: var(--mono); }
-  header button { cursor: pointer; }
-  header button.primary { background: var(--accent); border-color: var(--accent); color: #06101f; font-weight: 600; }
-  header .spacer { flex: 1; }
-  header .meta { color: var(--muted); font-size: 12px; font-family: var(--mono); }
-  main { padding: 16px; max-width: 1280px; margin: 0 auto; }
-  .grid { display: grid; grid-template-columns: repeat(12, 1fr); gap: 14px; }
-  .card { grid-column: span 12; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; }
-  @media (min-width: 720px) { .card.half { grid-column: span 6; } .card.third { grid-column: span 4; } }
-  .card h2 { margin: 0 0 12px; font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); font-weight: 600; }
-  .card h2 .sub { text-transform: none; letter-spacing: 0; opacity: .7; font-weight: 400; }
-  .row { display: flex; gap: 10px; flex-wrap: wrap; }
-  .badge { display: inline-flex; align-items: center; gap: 6px; background: var(--panel2); border: 1px solid var(--border); border-radius: 999px; padding: 3px 10px; font-size: 12px; }
-  .badge.good { color: var(--good); border-color: rgba(63,185,80,.4); }
-  .badge.warn { color: var(--warn); border-color: rgba(210,153,34,.4); }
-  .badge.accent { color: var(--accent); border-color: rgba(88,166,255,.4); }
-  .meter { margin: 10px 0; }
-  .meter .lbl { display: flex; justify-content: space-between; gap: 10px; font-size: 12px; color: var(--muted); margin-bottom: 5px; }
-  .meter .lbl span { flex: none; }
-  .meter .lbl b { color: var(--text); font-family: var(--mono); font-weight: 600; text-align: right; }
-  .meter .track { height: 8px; background: var(--panel2); border-radius: 999px; overflow: hidden; }
-  .meter .fill { height: 100%; width: 0; border-radius: 999px; background: var(--good); transition: width .4s ease, background .4s ease; }
-  .stats { display: grid; grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); gap: 10px; }
-  .stat { background: var(--panel2); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; }
-  .stat .n { font-size: 22px; font-weight: 700; font-family: var(--mono); }
-  .stat .k { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; margin-top: 2px; }
-  .stat.total { border-color: rgba(88,166,255,.4); }
-  .stat.total .n { color: var(--accent); }
-  .stat.err .n { color: var(--bad); }
-  .kv { display: grid; grid-template-columns: auto 1fr; gap: 6px 14px; font-size: 13px; }
-  .kv .k { color: var(--muted); }
-  .kv .v { font-family: var(--mono); text-align: right; }
-  .logs-ctl { display: flex; gap: 8px; align-items: center; margin-bottom: 10px; flex-wrap: wrap; }
-  .logs-ctl select, .logs-ctl button { background: var(--panel2); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 4px 8px; font-size: 12px; }
-  .logwrap { overflow: auto; max-height: 420px; border: 1px solid var(--border); border-radius: 8px; }
-  table.logs { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 12px; }
-  table.logs th { position: sticky; top: 0; background: var(--panel2); text-align: left; padding: 7px 10px; color: var(--muted); font-weight: 600; border-bottom: 1px solid var(--border); }
-  table.logs td { padding: 6px 10px; border-bottom: 1px solid rgba(48,54,61,.5); vertical-align: top; white-space: nowrap; }
-  table.logs td.msg { white-space: normal; word-break: break-word; font-family: -apple-system, sans-serif; }
-  table.logs tr:hover td { background: rgba(88,166,255,.05); }
-  .lvl { font-weight: 700; }
-  .lvl.ERROR { color: var(--bad); } .lvl.WARN { color: var(--warn); }
-  .lvl.INFO { color: var(--good); } .lvl.DEBUG, .lvl.TRACE { color: var(--muted); }
-  .empty { color: var(--muted); text-align: center; padding: 28px; font-size: 13px; }
-  .stats .empty { grid-column: 1 / -1; }
-  table.tp { width: 100%; border-collapse: collapse; font-size: 13px; }
-  table.tp th { text-align: right; padding: 6px 10px; color: var(--muted); font-weight: 600; font-size: 11px;
-                text-transform: uppercase; letter-spacing: .04em; border-bottom: 1px solid var(--border); }
-  table.tp th:first-child, table.tp td:first-child { text-align: left; }
-  table.tp td { text-align: right; padding: 8px 10px; font-family: var(--mono); border-bottom: 1px solid rgba(48,54,61,.5); }
-  table.tp td.stage { font-family: inherit; color: var(--muted); }
-  table.tp td.ok { color: var(--good); }
-  table.tp td.bad { color: var(--bad); }
-  table.tp td.zero { color: var(--muted); }
-  table.tp td.rate { color: var(--accent); font-weight: 600; }
-  .hint { color: var(--muted); font-size: 12px; margin-top: 8px; }
+  @media (max-width:760px) {
+    .sidebar { display:none; top:70px; bottom:16px; left:12px; width:220px; border:1px solid var(--border); border-radius:12px; box-shadow:0 15px 70px #000a; }
+    .sidebar.open { display:flex; }
+    main { margin-left:0; padding:18px 14px; }
+    .menu-toggle { display:inline-flex; align-items:center; justify-content:center; }
+    .heading { display:flex; align-items:center; gap:12px; }
+    h1 { font-size:25px; }
+    .subtitle { font-size:12px; }
+    .topbar { gap:14px; }
+    .toolbar { width:100%; justify-content:space-between; gap:6px; padding:0; }
+    .toolbar .icon { width:17px; }
+    .toolbar button.primary { padding:9px 12px; }
+    .connection-settings summary { padding:9px; gap:6px; font-size:12px; }
+    .refresh-control { padding-left:9px; gap:6px; }
+    .refresh-control select { font-size:12px; }
+    .settings-panel { position:fixed; top:136px; left:14px; right:14px; width:auto; }
+    .status-strip { padding:11px 14px; gap:8px; }
+    .status-strip .row { gap:8px 16px; }
+    .summary-strip { grid-template-columns:repeat(2,minmax(0,1fr)); padding:0; }
+    .summary-item { padding:18px; min-height:95px; border-bottom:1px solid var(--border); }
+    .summary-item:nth-child(2) { border-right:0; }
+    .summary-item:nth-child(n+3) { border-bottom:0; }
+    .summary-item:nth-child(3) { border-right:1px solid var(--border); }
+    .summary-item .icon-box { display:grid; width:34px; height:34px; }
+    .summary-item .icon { width:20px; height:20px; }
+    .summary-label { font-size:10px; }
+    .summary-value { font-size:23px; }
+    .card { padding:16px; }
+    .card-head { gap:10px; }
+    .panel-title { gap:12px; }
+    .tasks-card { min-height:275px; }
+    .stats { gap:17px 10px; }
+    .pipeline { margin-top:22px; height:23px; }
+    .logs-card { padding:16px 6px 0; }
+    .logs-card .card-head { padding:0 10px; }
+    .logs-ctl { gap:10px; }
+    .logs-ctl label { gap:6px; }
+    .logs-ctl select { padding:6px 8px; min-height:34px; }
+  }
+  @media (prefers-reduced-motion:reduce) {
+    html { scroll-behavior:auto; }
+    .meter .fill { transition:none; }
+  }
 </style>
 </head>
 <body>
-<header>
-  <span class="brand"><span class="dot" id="statusDot"></span> mocra <span style="color:var(--muted);font-weight:400">dashboard</span></span>
-  <input class="endpoint" id="endpoint" placeholder="http://127.0.0.1:12800" spellcheck="false" />
-  <input class="apikey" id="apikey" placeholder="API key (optional)" spellcheck="false" />
-  <button class="primary" id="connectBtn">Connect</button>
-  <div class="spacer"></div>
-  <label class="meta">Refresh
-    <select id="interval">
-      <option value="1000">1s</option>
-      <option value="2000" selected>2s</option>
-      <option value="5000">5s</option>
-      <option value="10000">10s</option>
-      <option value="0">Paused</option>
-    </select>
-  </label>
-  <span class="meta" id="lastUpdated">—</span>
-</header>
-
-<main>
-  <div class="grid">
-    <!-- Overview / engine -->
-    <section class="card third">
-      <h2>Engine</h2>
-      <div class="row" id="engineBadges"><span class="badge">Not connected</span></div>
-      <div class="hint" id="engineHint">Enter an endpoint, then click "Connect".</div>
-    </section>
-
-    <!-- Performance / host resources -->
-    <section class="card third">
-      <h2>Performance · Host resources</h2>
-      <div class="meter">
-        <div class="lbl"><span>CPU</span><b id="cpuVal">—</b></div>
-        <div class="track"><div class="fill" id="cpuBar"></div></div>
-      </div>
-      <div class="meter">
-        <div class="lbl"><span>Memory</span><b id="memVal">—</b></div>
-        <div class="track"><div class="fill" id="memBar"></div></div>
-      </div>
-      <div class="meter">
-        <div class="lbl"><span>Swap</span><b id="swapVal">—</b></div>
-        <div class="track"><div class="fill" id="swapBar"></div></div>
-      </div>
-    </section>
-
-    <!-- Cluster -->
-    <section class="card third" id="clusterCard" style="display:none">
-      <h2>Cluster · Raft</h2>
-      <div class="kv" id="clusterKv"></div>
-    </section>
-
-    <!-- Tasks / queues -->
-    <section class="card">
-      <h2>Tasks · Active by stage <span class="sub">(running + queued)</span></h2>
-      <div class="stats" id="queueStats"><div class="empty">Not connected</div></div>
-    </section>
-
-    <!-- Throughput -->
-    <section class="card">
-      <h2>Throughput <span class="sub">(cumulative since engine start)</span></h2>
-      <div id="tpWrap"><div class="empty">Not connected</div></div>
-    </section>
-
-    <!-- Logs -->
-    <section class="card">
-      <h2>Logs</h2>
-      <div class="logs-ctl">
-        <label class="meta">Limit
-          <select id="logLimit">
-            <option value="100">100</option>
-            <option value="200" selected>200</option>
-            <option value="500">500</option>
-            <option value="1000">1000</option>
-          </select>
-        </label>
-        <label class="meta">Level
-          <select id="logLevel">
-            <option value="">All</option>
-            <option value="ERROR">ERROR</option>
-            <option value="WARN">WARN+</option>
-            <option value="INFO">INFO+</option>
-          </select>
-        </label>
-        <button id="logPause">⏸ Pause scroll</button>
-        <span class="meta" id="logCount"></span>
-      </div>
-      <div class="logwrap">
-        <table class="logs">
-          <thead><tr><th>Time</th><th>Level</th><th>Module</th><th>Message</th><th>task/trace</th></tr></thead>
-          <tbody id="logBody"><tr><td colspan="5" class="empty">Not connected</td></tr></tbody>
-        </table>
-      </div>
-    </section>
+<svg class="svg-defs" aria-hidden="true"><defs>
+  <symbol id="i-home" viewBox="0 0 24 24"><path d="m3 10 9-7 9 7v11h-6v-7H9v7H3Z"/><path d="m1 11 11-9 11 9"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="m7 12 3 3 7-7"/></symbol>
+  <symbol id="i-chart" viewBox="0 0 24 24"><path d="M3 3v18h18M7 17v-5h3v5m3 0V6h3v11m3 0v-9h3v9"/></symbol>
+  <symbol id="i-activity" viewBox="0 0 24 24"><path d="m3 17 5-9 5 10 7-13"/><circle cx="3" cy="17" r="1.5"/><circle cx="8" cy="8" r="1.5"/><circle cx="13" cy="18" r="1.5"/><circle cx="20" cy="5" r="1.5"/></symbol>
+  <symbol id="i-file" viewBox="0 0 24 24"><path d="M5 2h9l5 5v15H5Z M14 2v6h5 M8 12h8M8 16h8"/></symbol>
+  <symbol id="i-database" viewBox="0 0 24 24"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 4 16 4 16 0V5M4 10c0 4 16 4 16 0M4 15c0 4 16 4 16 0"/></symbol>
+  <symbol id="i-layers" viewBox="0 0 24 24"><path d="m3 7 9-5 9 5-9 5Z M3 12l9 5 9-5M3 17l9 5 9-5"/></symbol>
+  <symbol id="i-arrows" viewBox="0 0 24 24"><path d="M4 7h15m-4-4 4 4-4 4M20 17H5m4-4-4 4 4 4"/></symbol>
+  <symbol id="i-shield" viewBox="0 0 24 24"><path d="m12 2 8 4v6c0 6-8 10-8 10S4 18 4 12V6Z m-4 9 3 3 5-5"/></symbol>
+  <symbol id="i-list" viewBox="0 0 24 24"><path d="M8 6h12M8 12h12M8 18h12"/><circle cx="3" cy="6" r=".8"/><circle cx="3" cy="12" r=".8"/><circle cx="3" cy="18" r=".8"/></symbol>
+  <symbol id="i-server" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="7" rx="2"/><rect x="3" y="14" width="18" height="7" rx="2"/><path d="M7 6.5h9M7 17.5h9"/></symbol>
+  <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M21 8a9 9 0 0 0-15-4L3 7m0-5v5h5M3 16a9 9 0 0 0 15 4l3-3m0 5v-5h-5"/></symbol>
+  <symbol id="i-gear" viewBox="0 0 24 24"><path d="m9 3 1-2h4l1 2 3 1 2 2-1 3 2 1v4l-2 1-1 3-2 2-3-1-1 2h-4l-1-2-3-1-2-2 1-3-2-1v-4l2-1 1-3 2-2Z"/><circle cx="12" cy="11" r="3"/></symbol>
+  <symbol id="i-chevron" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></symbol>
+  <symbol id="i-pause" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M9 8v8M15 8v8"/></symbol>
+  <symbol id="i-play" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="m10 8 6 4-6 4Z"/></symbol>
+  <symbol id="i-menu" viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"/></symbol>
+</defs></svg>
+<aside class="sidebar" id="sidebar">
+  <a class="brand" href="#overview" aria-label="mocra dashboard overview"><span class="brand-mark">M</span><span><span class="brand-name">mocra</span><span class="workspace" style="display:block">Workspace</span></span></a>
+  <nav aria-label="Dashboard sections">
+    <a class="nav-link active" href="#overview" aria-current="location"><svg class="icon" aria-hidden="true"><use href="#i-home"/></svg>Overview</a>
+    <a class="nav-link" href="#tasks"><svg class="icon" aria-hidden="true"><use href="#i-check"/></svg>Tasks</a>
+    <a class="nav-link" href="#throughput"><svg class="icon" aria-hidden="true"><use href="#i-chart"/></svg>Throughput</a>
+    <a class="nav-link" href="#performance"><svg class="icon" aria-hidden="true"><use href="#i-activity"/></svg>Performance</a>
+    <a class="nav-link" href="#logs"><svg class="icon" aria-hidden="true"><use href="#i-file"/></svg>Logs</a>
+    <a class="nav-link" href="#clusterCard" id="clusterNav" hidden><svg class="icon" aria-hidden="true"><use href="#i-database"/></svg>Cluster</a>
+  </nav>
+  <div class="connection-status" aria-live="polite"><span class="dot" id="statusDot"></span><div><strong>Engine connection</strong><small id="connectionState">Not connected</small></div></div>
+</aside>
+<main id="overview">
+  <header class="topbar">
+    <div class="heading"><button class="menu-toggle" id="menuToggle" aria-controls="sidebar" aria-expanded="false" aria-label="Toggle navigation"><svg class="icon" aria-hidden="true"><use href="#i-menu"/></svg></button><div><h1>Overview</h1><p class="subtitle">Crawler activity at a glance</p></div></div>
+    <div class="toolbar">
+      <label class="refresh-control"><svg class="icon" aria-hidden="true"><use href="#i-refresh"/></svg><span class="sr-only">Refresh interval</span><select id="interval"><option value="1000">Refresh 1s</option><option value="2000" selected>Refresh 2s</option><option value="5000">Refresh 5s</option><option value="10000">Refresh 10s</option><option value="0">Paused</option></select></label>
+      <details class="connection-settings" id="connectionSettings"><summary><svg class="icon" aria-hidden="true"><use href="#i-gear"/></svg>Connection<svg class="icon chevron" aria-hidden="true"><use href="#i-chevron"/></svg></summary><div class="settings-panel"><label for="endpoint">Engine endpoint<input class="endpoint" id="endpoint" placeholder="http://127.0.0.1:12800" spellcheck="false" autocomplete="off" /></label><label for="apikey">API key (optional)<input class="apikey" id="apikey" type="password" placeholder="API key (optional)" spellcheck="false" autocomplete="off" /></label><p class="hint">Press Enter or Reconnect to apply.</p></div></details>
+      <button class="primary" id="connectBtn">Reconnect</button>
+    </div>
+  </header>
+  <div class="status-strip"><div class="row" id="engineBadges"><span class="badge">Not connected</span></div><span class="meta" id="lastUpdated">—</span></div>
+  <p class="hint" id="engineHint">Enter an endpoint, then click "Reconnect".</p>
+  <section class="summary-strip" aria-label="Engine overview">
+    <div class="summary-item"><span class="icon-box"><svg class="icon" aria-hidden="true"><use href="#i-layers"/></svg></span><div><div class="summary-label" title="Running plus queued work across all pipeline stages">Active work</div><div class="summary-value" id="summaryActive">—</div></div></div>
+    <div class="summary-item"><span class="icon-box"><svg class="icon" aria-hidden="true"><use href="#i-arrows"/></svg></span><div><div class="summary-label" title="Completed request outcomes since engine start">Requests</div><div class="summary-value" id="summaryRequests">—</div></div></div>
+    <div class="summary-item"><span class="icon-box"><svg class="icon" aria-hidden="true"><use href="#i-file"/></svg></span><div><div class="summary-label" title="Completed response and parser-task outcomes since engine start">Parse outcomes</div><div class="summary-value" id="summaryParsed">—</div></div></div>
+    <div class="summary-item"><span class="icon-box"><svg class="icon" aria-hidden="true"><use href="#i-shield"/></svg></span><div><div class="summary-label">Request success</div><div class="summary-value" id="summarySuccess">—</div></div></div>
+  </section>
+  <div class="dashboard-grid">
+    <div class="column">
+      <section class="card tasks-card" id="tasks"><div class="card-head"><div class="panel-title"><span class="icon-box"><svg class="icon" aria-hidden="true"><use href="#i-list"/></svg></span><div><h2>Tasks</h2><div class="panel-sub">Running + queued</div></div></div><div class="total">Total<strong id="activeTotal">—</strong></div></div><div class="pipeline" id="pipelineBar" role="img" aria-label="No task data"></div><div class="stats" id="queueStats"><div class="empty">Not connected</div></div></section>
+      <section class="card logs-card" id="logs"><div class="card-head"><div class="panel-title"><span class="icon-box"><svg class="icon" aria-hidden="true"><use href="#i-file"/></svg></span><h2>Logs</h2></div><div class="logs-ctl"><label class="meta">Limit<select id="logLimit"><option value="100">100</option><option value="200" selected>200</option><option value="500">500</option><option value="1000">1000</option></select></label><label class="meta">Level<select id="logLevel"><option value="">All</option><option value="ERROR">ERROR</option><option value="WARN">WARN+</option><option value="INFO">INFO+</option></select></label><button id="logPause" aria-pressed="false"><svg class="icon" aria-hidden="true"><use id="logPauseIcon" href="#i-pause"/></svg><span id="logPauseLabel">Pause scroll</span></button><span class="meta" id="logCount"></span></div></div><div class="logwrap" tabindex="0" aria-label="Logs table"><table class="logs"><thead><tr><th>Time</th><th>Level</th><th>Module</th><th>Message</th><th>task/trace</th></tr></thead><tbody id="logBody"><tr><td colspan="5" class="empty">Not connected</td></tr></tbody></table></div></section>
+    </div>
+    <div class="column">
+      <section class="card resources-card" id="performance"><div class="card-head"><div class="panel-title"><span class="icon-box"><svg class="icon" aria-hidden="true"><use href="#i-server"/></svg></span><h2>Host resources</h2></div></div><div class="meter"><div class="lbl"><span>CPU</span><b id="cpuVal">—</b></div><div class="track"><div class="fill" id="cpuBar"></div></div></div><div class="meter"><div class="lbl"><span>Memory</span><span class="usage" id="memUsage">—</span><b id="memVal">—</b></div><div class="track"><div class="fill" id="memBar"></div></div></div><div class="meter"><div class="lbl"><span>Swap</span><span class="usage" id="swapUsage">—</span><b id="swapVal">—</b></div><div class="track"><div class="fill" id="swapBar"></div></div></div></section>
+      <section class="card throughput-card" id="throughput"><div class="card-head"><div class="panel-title"><span class="icon-box"><svg class="icon" aria-hidden="true"><use href="#i-chart"/></svg></span><h2 title="Cumulative since engine start; rates from live samples">Throughput</h2></div></div><div class="tpwrap" id="tpWrap" tabindex="0" aria-label="Throughput table"><div class="empty">Not connected</div></div></section>
+      <section class="card cluster-card" id="clusterCard" style="display:none"><div class="card-head"><div class="panel-title"><span class="icon-box"><svg class="icon" aria-hidden="true"><use href="#i-database"/></svg></span><h2>Cluster · Raft</h2></div></div><div class="kv" id="clusterKv"></div></section>
+    </div>
   </div>
 </main>
-
 <script>
 (function () {
   "use strict";
@@ -206,7 +303,19 @@
 
   var LEVEL_RANK = { TRACE: 0, DEBUG: 1, INFO: 2, WARN: 3, ERROR: 4 };
 
-  function setDot(cls) { $("statusDot").className = "dot" + (cls ? " " + cls : ""); }
+  function setDot(cls) {
+    $("statusDot").className = "dot" + (cls ? " " + cls : "");
+    $("connectionState").textContent = cls === "on" ? "Connected" : cls === "err" ? "Disconnected" : "Connecting…";
+  }
+
+  function fmtCount(n) { return n == null ? "—" : Number(n).toLocaleString("en-US"); }
+  function renderSummary(e) {
+    var tp = e && e.throughput || {}, request = tp.request || {}, parsed = tp.parse || {};
+    $("summaryActive").textContent = fmtCount(e && e.outstanding ? e.outstanding.total : null);
+    $("summaryRequests").textContent = fmtCount(request.total);
+    $("summaryParsed").textContent = fmtCount(parsed.total);
+    $("summarySuccess").textContent = request.success_rate == null ? "—" : (request.success_rate * 100).toFixed(1) + "%";
+  }
 
   function fmtBytes(b) {
     if (b == null) return "—";
@@ -252,7 +361,10 @@
 
   function renderQueues(e) {
     var wrap = $("queueStats");
-    if (!e || !e.outstanding) { wrap.innerHTML = '<div class="empty">No data</div>'; return; }
+    var pipeline = $("pipelineBar");
+    pipeline.innerHTML = "";
+    $("activeTotal").textContent = fmtCount(e && e.outstanding ? e.outstanding.total : null);
+    if (!e || !e.outstanding) { wrap.innerHTML = '<div class="empty">No data</div>'; pipeline.setAttribute("aria-label", "No task data"); return; }
     var o = e.outstanding, f = e.inflight || {}, p = e.pending || {};
     // Each cell is outstanding (= in-flight + queued) for that stage, with the split in the
     // tooltip. Showing queued alone would read 0 for the whole of a healthy run.
@@ -264,27 +376,39 @@
     items.forEach(function (it) {
       var d = document.createElement("div");
       d.className = "stat" + (it[0] === "error" ? " err" : "");
+      d.style.setProperty("--stage-color", "var(--stage-" + it[0] + ")");
       d.title = it[0] + ": " + (f[it[1]] || 0) + " running, " + (p[it[1]] || 0) + " queued";
-      d.innerHTML = '<div class="n">' + (o[it[1]] == null ? "—" : o[it[1]]) + '</div><div class="k">' + it[0] + "</div>";
+      d.innerHTML = '<div class="k">' + it[0] + '</div><div class="n">' + fmtCount(o[it[1]]) + "</div>";
       wrap.appendChild(d);
+      if (Number(o[it[1]]) > 0 && Number(o.total) > 0) {
+        var segment = document.createElement("span");
+        segment.style.width = (Number(o[it[1]]) / Number(o.total) * 100) + "%";
+        segment.style.setProperty("--stage-color", "var(--stage-" + it[0] + ")");
+        segment.title = d.title;
+        pipeline.appendChild(segment);
+      }
     });
     var total = document.createElement("div");
     total.className = "stat total";
     total.title = "total: " + (f.total || 0) + " running, " + (p.total || 0) + " queued";
     total.innerHTML = '<div class="n">' + o.total + '</div><div class="k">total</div>';
     wrap.appendChild(total);
+    pipeline.setAttribute("aria-label", items.map(function (it) { return it[0] + ": " + (o[it[1]] || 0); }).join(", "));
   }
 
   function renderSystem(s) {
-    if (!s) { setMeter("cpuBar", "cpuVal", 0, "—"); setMeter("memBar", "memVal", 0, "—"); setMeter("swapBar", "swapVal", 0, "—"); return; }
+    if (!s) { setMeter("cpuBar", "cpuVal", 0, "—"); setMeter("memBar", "memVal", 0, "—"); setMeter("swapBar", "swapVal", 0, "—"); $("memUsage").textContent = "—"; $("swapUsage").textContent = "—"; return; }
     setMeter("cpuBar", "cpuVal", s.cpu_usage_percent, pct(s.cpu_usage_percent));
-    setMeter("memBar", "memVal", s.memory_usage_percent, pct(s.memory_usage_percent) + " · " + fmtBytes(s.memory_used_bytes) + " / " + fmtBytes(s.memory_total_bytes));
+    setMeter("memBar", "memVal", s.memory_usage_percent, pct(s.memory_usage_percent));
+    $("memUsage").textContent = fmtBytes(s.memory_used_bytes) + " / " + fmtBytes(s.memory_total_bytes);
     var swapPct = s.swap_total_bytes ? (s.swap_used_bytes / s.swap_total_bytes) * 100 : 0;
-    setMeter("swapBar", "swapVal", swapPct, fmtBytes(s.swap_used_bytes) + " / " + fmtBytes(s.swap_total_bytes));
+    setMeter("swapBar", "swapVal", swapPct, pct(swapPct));
+    $("swapUsage").textContent = fmtBytes(s.swap_used_bytes) + " / " + fmtBytes(s.swap_total_bytes);
   }
 
   function renderCluster(c) {
     var card = $("clusterCard");
+    $("clusterNav").hidden = !c;
     if (!c) { card.style.display = "none"; return; }
     card.style.display = "";
     var rows = [
@@ -294,7 +418,7 @@
       ["last applied", c.last_applied_index],
     ];
     $("clusterKv").innerHTML = rows.map(function (r) {
-      return '<div class="k">' + r[0] + '</div><div class="v">' + (r[1] == null ? "—" : r[1]) + "</div>";
+      return '<div class="k">' + r[0] + '</div><div class="v">' + esc(r[1] == null ? "—" : typeof r[1] === "number" ? fmtCount(r[1]) : r[1]) + "</div>";
     }).join("");
   }
 
@@ -318,9 +442,9 @@
       var pct = s.success_rate == null ? "—" : (s.success_rate * 100).toFixed(1) + "%";
       return "<tr>" +
         '<td class="stage">' + st[0] + "</td>" +
-        "<td>" + s.total + "</td>" +
-        '<td class="' + (s.success ? "ok" : "zero") + '">' + s.success + "</td>" +
-        '<td class="' + (s.failure ? "bad" : "zero") + '">' + s.failure + "</td>" +
+        "<td>" + fmtCount(s.total) + "</td>" +
+        '<td class="' + (s.success ? "ok" : "zero") + '">' + fmtCount(s.success) + "</td>" +
+        '<td class="' + (s.failure ? "bad" : "zero") + '">' + fmtCount(s.failure) + "</td>" +
         "<td>" + pct + "</td>" +
         '<td class="rate">' + rate + "</td>" +
         "</tr>";
@@ -335,7 +459,7 @@
     state.prevTp = { at: now, stats: stats };
   }
 
-  function esc(s) { return String(s == null ? "" : s).replace(/[&<>]/g, function (c) { return { "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]; }); }
+  function esc(s) { return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) { return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]; }); }
   function renderLogs(list) {
     var body = $("logBody");
     var minRank = LEVEL_RANK[$("logLevel").value];
@@ -349,9 +473,11 @@
     body.innerHTML = rows.map(function (r) {
       var lvl = (r.level || "").toUpperCase();
       var t = r.time ? String(r.time).replace("T", " ").replace(/\.\d+.*$/, "") : "—";
+      var date = r.time ? new Date(r.time) : null;
+      var displayTime = date && !isNaN(date.getTime()) ? date.toLocaleTimeString(undefined, { hour12: false }) : t;
       var tag = r.task_id || r.trace_id || r.request_id || "";
-      return "<tr><td>" + esc(t) + '</td><td class="lvl ' + esc(lvl) + '">' + esc(lvl || "—") +
-        "</td><td>" + esc(r.module || "—") + '</td><td class="msg">' + esc(r.message || "") +
+      return '<tr><td title="' + esc(t) + '">' + esc(displayTime) + '</td><td><span class="lvl ' + esc(lvl) + '">' + esc(lvl || "—") +
+        "</span></td><td>" + esc(r.module || "—") + '</td><td class="msg">' + esc(r.message || "") +
         "</td><td>" + esc(tag) + "</td></tr>";
     }).join("");
   }
@@ -376,7 +502,7 @@
       // The engine endpoint is the source of truth for "connected or not".
       if (res[0].status !== "fulfilled") { onDisconnect(res[0].reason); return; }
       state.connected = true; setDot("on");
-      renderEngine(engine); renderQueues(engine); renderThroughput(engine);
+      renderEngine(engine); renderSummary(engine); renderQueues(engine); renderThroughput(engine);
       renderSystem(res[1].status === "fulfilled" ? res[1].value : null);
       renderCluster(res[2].status === "fulfilled" ? res[2].value : null);
       if (res[3].status === "fulfilled" && !res[3].value.__skip) renderLogs(res[3].value);
@@ -389,6 +515,7 @@
     // Drop the rate baseline: whatever we reconnect to may be a restarted engine whose counters
     // began again at zero, and a stale baseline would produce a nonsense first rate.
     state.prevTp = null;
+    renderSummary(null);
     $("engineBadges").innerHTML = '<span class="badge warn">connection failed</span>';
     $("engineHint").textContent = "Cannot reach " + state.base + " — " + (err && err.message ? err.message : "check the endpoint / CORS / whether the dashboard feature is enabled");
     $("lastUpdated").textContent = "Connection failed";
@@ -402,6 +529,7 @@
   function connect() {
     state.base = ($("endpoint").value || defaultEndpoint).trim();
     state.apiKey = $("apikey").value.trim();
+    $("connectionSettings").open = false;
     setDot(""); $("engineHint").textContent = "Connecting…";
     poll(); schedule();
   }
@@ -415,7 +543,36 @@
   $("logLimit").addEventListener("change", poll);
   $("logPause").addEventListener("click", function () {
     state.logPaused = !state.logPaused;
-    this.textContent = state.logPaused ? "▶ Resume scroll" : "⏸ Pause scroll";
+    $("logPauseLabel").textContent = state.logPaused ? "Resume scroll" : "Pause scroll";
+    $("logPauseIcon").setAttribute("href", state.logPaused ? "#i-play" : "#i-pause");
+    this.setAttribute("aria-pressed", String(state.logPaused));
+  });
+
+  $("menuToggle").addEventListener("click", function () {
+    var open = $("sidebar").classList.toggle("open");
+    this.setAttribute("aria-expanded", String(open));
+  });
+  document.querySelectorAll(".nav-link").forEach(function (link) {
+    link.addEventListener("click", function () {
+      document.querySelectorAll(".nav-link").forEach(function (other) {
+        other.classList.toggle("active", other === link);
+        if (other === link) other.setAttribute("aria-current", "location");
+        else other.removeAttribute("aria-current");
+      });
+      $("sidebar").classList.remove("open");
+      $("menuToggle").setAttribute("aria-expanded", "false");
+    });
+  });
+  document.querySelector(".brand").addEventListener("click", function (event) {
+    event.preventDefault();
+    document.querySelector('.nav-link[href="#overview"]').click();
+  });
+  document.addEventListener("keydown", function (event) {
+    if (event.key === "Escape") {
+      $("connectionSettings").open = false;
+      $("sidebar").classList.remove("open");
+      $("menuToggle").setAttribute("aria-expanded", "false");
+    }
   });
 
   // Init

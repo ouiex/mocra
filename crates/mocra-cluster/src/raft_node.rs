@@ -17,7 +17,7 @@ use openraft::storage::RaftLogStorage;
 use crate::cmd::{Cmd, CmdResult};
 use crate::control::{ControlError, ControlPlane};
 use crate::raft::{MocraRaft, Node, NodeId};
-use crate::raft_http::{HttpNetwork, JoinRequest, raft_router};
+use crate::raft_http::{HttpNetwork, JoinRequest, ShutdownListener, raft_router};
 use crate::raft_log_store::RedbLogStore;
 use crate::raft_network::StubNetwork;
 use crate::raft_store::StateMachineStore;
@@ -113,8 +113,18 @@ pub struct RaftControlPlane {
     node_id: NodeId,
     raft: MocraRaft,
     sm: Arc<StateMachine>,
+    sm_release_rx: tokio::sync::watch::Receiver<()>,
+    log_release_rx: tokio::sync::watch::Receiver<()>,
     /// A shared HTTP client (reusing the connection pool) for the write-forwarding hot path.
     client: reqwest::Client,
+    /// Shared across clones so shutdown also releases the HTTP listener and its Raft handle.
+    http_server: Option<Arc<tokio::sync::Mutex<Option<HttpServer>>>>,
+}
+
+struct HttpServer {
+    shutdown: tokio::sync::oneshot::Sender<()>,
+    force_shutdown: tokio::sync::watch::Sender<()>,
+    task: tokio::task::JoinHandle<()>,
 }
 
 impl RaftControlPlane {
@@ -146,6 +156,8 @@ impl RaftControlPlane {
             .map_err(|e| ControlError::Raft(e.to_string()))?;
         let sm_store = StateMachineStore::new(sm.clone());
         prepare_raft_state(&sm, &mut log_store, &sm_store).await?;
+        let sm_release_rx = sm_store.release_receiver();
+        let log_release_rx = log_store.release_receiver();
         let raft = MocraRaft::new(node_id, config, StubNetwork, log_store, sm_store)
             .await
             .map_err(|e| ControlError::Raft(e.to_string()))?;
@@ -160,7 +172,10 @@ impl RaftControlPlane {
             node_id,
             raft,
             sm,
+            sm_release_rx,
+            log_release_rx,
             client: reqwest::Client::new(),
+            http_server: None,
         })
     }
 
@@ -206,24 +221,43 @@ impl RaftControlPlane {
             .map_err(|e| ControlError::Raft(e.to_string()))?;
         let sm_store = StateMachineStore::new(sm.clone());
         prepare_raft_state(&sm, &mut log_store, &sm_store).await?;
+        let sm_release_rx = sm_store.release_receiver();
+        let log_release_rx = log_store.release_receiver();
+        let listener = tokio::net::TcpListener::bind(&http_addr)
+            .await
+            .map_err(|e| ControlError::Raft(format!("bind {http_addr}: {e}")))?;
         let raft = MocraRaft::new(node_id, config, HttpNetwork::new(), log_store, sm_store)
             .await
             .map_err(|e| ControlError::Raft(e.to_string()))?;
 
         // Start the HTTP server exposing the Raft RPC + join.
         let router = raft_router(raft.clone());
-        let listener = tokio::net::TcpListener::bind(&http_addr)
-            .await
-            .map_err(|e| ControlError::Raft(format!("bind {http_addr}: {e}")))?;
-        tokio::spawn(async move {
-            let _ = axum::serve(listener, router).await;
+        let (shutdown, shutdown_rx) = tokio::sync::oneshot::channel();
+        let (force_shutdown, force_rx) = tokio::sync::watch::channel(());
+        let listener = ShutdownListener {
+            listener,
+            shutdown: force_rx,
+        };
+        let http_server = tokio::spawn(async move {
+            let _ = axum::serve(listener, router)
+                .with_graceful_shutdown(async {
+                    let _ = shutdown_rx.await;
+                })
+                .await;
         });
 
         Ok(Self {
             node_id,
             raft,
             sm,
+            sm_release_rx,
+            log_release_rx,
             client: reqwest::Client::new(),
+            http_server: Some(Arc::new(tokio::sync::Mutex::new(Some(HttpServer {
+                shutdown,
+                force_shutdown,
+                task: http_server,
+            })))),
         })
     }
 
@@ -270,7 +304,8 @@ impl RaftControlPlane {
     /// Sends a join request from this node to a seed node (adding itself to the cluster as a
     /// learner).
     /// "Register against any node to join": `seed_addr` is the address of any known node in the
-    /// cluster (it should be the current leader).
+    /// cluster; followers redirect to their known leader. Connection attempts are limited to
+    /// 2 seconds, the whole request to 10 seconds, and the redirect chain to 5 hops.
     pub async fn join_cluster(
         seed_addr: &str,
         node_id: NodeId,
@@ -281,18 +316,27 @@ impl RaftControlPlane {
             addr: my_addr.to_string(),
         };
         let body = rmp_serde::to_vec(&req).map_err(|e| ControlError::Raft(e.to_string()))?;
-        let bytes = reqwest::Client::new()
+        let client = reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(2))
+            .timeout(std::time::Duration::from_secs(10))
+            .redirect(reqwest::redirect::Policy::limited(5))
+            .build()
+            .map_err(|e| ControlError::Raft(format!("join via {seed_addr}: {e}")))?;
+        let bytes = client
             .post(format!("http://{seed_addr}/cluster/join"))
             .body(body)
             .send()
             .await
-            .map_err(|e| ControlError::Raft(e.to_string()))?
+            .map_err(|e| ControlError::Raft(format!("join via {seed_addr}: {e}")))?
+            .error_for_status()
+            .map_err(|e| ControlError::Raft(format!("join via {seed_addr}: {e}")))?
             .bytes()
             .await
-            .map_err(|e| ControlError::Raft(e.to_string()))?;
-        let res: Result<(), String> =
-            rmp_serde::from_slice(&bytes).map_err(|e| ControlError::Raft(e.to_string()))?;
-        res.map_err(ControlError::Raft)
+            .map_err(|e| ControlError::Raft(format!("join via {seed_addr}: {e}")))?;
+        let res: Result<(), String> = rmp_serde::from_slice(&bytes).map_err(|e| {
+            ControlError::Raft(format!("join via {seed_addr}: decode response: {e}"))
+        })?;
+        res.map_err(|e| ControlError::Raft(format!("join via {seed_addr}: {e}")))
     }
 
     /// The underlying openraft handle (membership changes / status queries).
@@ -405,12 +449,87 @@ impl RaftControlPlane {
     ///
     /// Call it before crash recovery / restart to make sure the redb database handle is released,
     /// so reopening the same directory no longer reports "Database already open".
+    /// After shutdown returns, drop this handle and its clones before reopening the directory.
     pub async fn shutdown(&self) -> Result<(), ControlError> {
-        self.raft
+        let result = self
+            .raft
             .shutdown()
             .await
-            .map_err(|e| ControlError::Raft(e.to_string()))?;
-        Ok(())
+            .map_err(|e| ControlError::Raft(e.to_string()));
+        if let Some(server) = &self.http_server {
+            let mut server = server.lock().await;
+            if let Some(mut server) = server.take() {
+                let _ = server.shutdown.send(());
+                let grace = std::time::Duration::from_secs(1);
+                let joined = match tokio::time::timeout(grace, &mut server.task).await {
+                    Ok(joined) => joined,
+                    Err(_) => {
+                        let _ = server.force_shutdown.send(());
+                        match tokio::time::timeout(grace, &mut server.task).await {
+                            Ok(joined) => joined,
+                            Err(_) => {
+                                server.task.abort();
+                                let _ = server.task.await;
+                                return Err(ControlError::Raft(
+                                    "HTTP shutdown timed out after closing connections".into(),
+                                ));
+                            }
+                        }
+                    }
+                };
+                joined.map_err(|e| ControlError::Raft(format!("HTTP shutdown: {e}")))?;
+            }
+        }
+        // Raft shutdown joins the core, but its state-machine, snapshot and replication
+        // workers can still own storage. These channels close after their last store drops.
+        let mut sm_release_rx = self.sm_release_rx.clone();
+        let mut log_release_rx = self.log_release_rx.clone();
+        let _ = sm_release_rx.changed().await;
+        let _ = log_release_rx.changed().await;
+        result
+    }
+
+    /// Wait for usable leadership after recovery. A restored vote can name a dead leader:
+    /// leaders must confirm a quorum, and followers must receive a fresh committed vote.
+    pub async fn wait_ready(&self, timeout: std::time::Duration) -> Result<(), ControlError> {
+        let started = tokio::time::Instant::now();
+        tokio::time::timeout(timeout, async {
+            loop {
+                let (leader, following) = self
+                    .raft
+                    .with_raft_state(move |state| {
+                        let following = (state.server_state.is_follower()
+                            || state.server_state.is_learner())
+                            && state.vote_ref().is_committed()
+                            && state
+                                .vote_last_modified()
+                                .is_some_and(|last| last > started);
+                        (state.server_state.is_leader(), following)
+                    })
+                    .await
+                    .map_err(|e| ControlError::Raft(e.to_string()))?;
+                if following {
+                    return Ok(());
+                }
+                if leader {
+                    match self.raft.ensure_linearizable().await {
+                        Ok(_) => return Ok(()),
+                        Err(openraft::error::RaftError::Fatal(error)) => {
+                            return Err(ControlError::Raft(error.to_string()));
+                        }
+                        Err(_) => {}
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .map_err(|_| {
+            ControlError::Raft(format!(
+                "node {}: timed out waiting for live Raft leadership",
+                self.node_id
+            ))
+        })?
     }
 
     /// Waits for this node to become the leader (near-instant on a single node; a multi-node
@@ -579,6 +698,226 @@ impl ControlPlane for RaftControlPlane {
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    fn unused_addr() -> String {
+        std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .to_string()
+    }
+
+    #[tokio::test]
+    async fn cloned_single_node_shutdown_allows_immediate_storage_reuse() {
+        let dir = tempfile::tempdir().unwrap();
+        for value in 0..8u8 {
+            let node = RaftControlPlane::start_single_node(1, dir.path())
+                .await
+                .unwrap();
+            node.wait_leader(Duration::from_secs(5)).await.unwrap();
+            if value > 0 {
+                assert_eq!(node.get(b"value").await.unwrap(), Some(vec![value - 1]));
+            }
+            node.set(b"value", &[value]).await.unwrap();
+            let clone = node.clone();
+            let (first, second) = tokio::join!(node.shutdown(), clone.shutdown());
+            first.unwrap();
+            second.unwrap();
+            drop((node, clone));
+        }
+    }
+
+    #[tokio::test]
+    async fn shutdown_closes_incomplete_http_requests_and_releases_storage() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let dir = tempfile::tempdir().unwrap();
+        let addr = unused_addr();
+        let node = RaftControlPlane::start_cluster_node(1, dir.path(), &addr)
+            .await
+            .unwrap();
+        node.init_cluster(BTreeMap::from([(1, addr.clone())]))
+            .await
+            .unwrap();
+        node.wait_leader(Duration::from_secs(5)).await.unwrap();
+        let mut sockets = Vec::new();
+        for request in [
+            "POST /cluster/join HTTP/1.1\r\nHost: localhost\r\nContent-Length: 10\r\n\r\n",
+            "POST /raft/snapshot HTTP/1.1\r\nHost: localhost\r\n",
+        ] {
+            let mut socket = tokio::net::TcpStream::connect(&addr).await.unwrap();
+            socket.write_all(request.as_bytes()).await.unwrap();
+            sockets.push(socket);
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let result = tokio::time::timeout(Duration::from_secs(3), node.shutdown()).await;
+        assert!(
+            result.is_ok(),
+            "incomplete HTTP requests must not block shutdown"
+        );
+        result.unwrap().unwrap();
+        drop(node);
+        // Keep the client connections open while reopening the same port and redb files.
+        let restored = RaftControlPlane::start_cluster_node(1, dir.path(), &addr)
+            .await
+            .unwrap();
+        for mut socket in sockets {
+            let mut received = Vec::new();
+            let closed =
+                tokio::time::timeout(Duration::from_secs(1), socket.read_to_end(&mut received))
+                    .await;
+            assert!(closed.is_ok(), "shutdown must close accepted sockets");
+        }
+        restored.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn join_rejects_redirect_loops() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let target = format!("http://{addr}/cluster/join");
+        let router = axum::Router::new().route(
+            "/cluster/join",
+            axum::routing::post(move || {
+                let target = target.clone();
+                async move { axum::response::Redirect::temporary(&target) }
+            }),
+        );
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let error = tokio::time::timeout(
+            Duration::from_secs(3),
+            RaftControlPlane::join_cluster(&addr, 1, "127.0.0.1:1"),
+        )
+        .await
+        .unwrap()
+        .unwrap_err();
+        assert!(error.to_string().contains(&addr));
+        server.abort();
+        let _ = server.await;
+    }
+
+    #[tokio::test]
+    async fn join_times_out_if_seed_never_responds() {
+        // An open listener that never accepts produces a connected but unanswered HTTP request.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let error = tokio::time::timeout(
+            Duration::from_secs(12),
+            RaftControlPlane::join_cluster(&addr, 1, "127.0.0.1:1"),
+        )
+        .await
+        .unwrap()
+        .unwrap_err();
+        assert!(error.to_string().contains(&addr));
+    }
+
+    #[tokio::test]
+    async fn join_through_follower_and_after_leader_failure() {
+        let dirs: Vec<_> = (0..4).map(|_| tempfile::tempdir().unwrap()).collect();
+        let addrs: Vec<_> = (0..4).map(|_| unused_addr()).collect();
+        let mut nodes = Vec::new();
+        for i in 0..3 {
+            nodes.push(
+                RaftControlPlane::start_cluster_node(i as u64 + 1, dirs[i].path(), &addrs[i])
+                    .await
+                    .unwrap(),
+            );
+        }
+        nodes[0]
+            .init_cluster(BTreeMap::from([(1, addrs[0].clone())]))
+            .await
+            .unwrap();
+        nodes[0].wait_leader(Duration::from_secs(5)).await.unwrap();
+        RaftControlPlane::join_cluster(&addrs[0], 2, &addrs[1])
+            .await
+            .unwrap();
+        nodes[1]
+            .raft()
+            .wait(Some(Duration::from_secs(5)))
+            .metrics(|m| m.current_leader == Some(1), "follower learns leader")
+            .await
+            .unwrap();
+        RaftControlPlane::join_cluster(&addrs[1], 3, &addrs[2])
+            .await
+            .unwrap();
+        assert_eq!(nodes[0].voter_count(), 1, "joining does not promote voters");
+        nodes[0].change_membership([1, 2, 3].into()).await.unwrap();
+        nodes[0].set(b"before", b"failure").await.unwrap();
+        nodes[0].shutdown().await.unwrap();
+
+        let new_leader = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if let Some(id @ (2 | 3)) = nodes[1].current_leader()
+                    && nodes[2].current_leader() == Some(id)
+                    && nodes[id as usize - 1]
+                        .set(b"after", b"failure")
+                        .await
+                        .is_ok()
+                {
+                    break id;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let fourth = RaftControlPlane::start_cluster_node(4, dirs[3].path(), &addrs[3])
+            .await
+            .unwrap();
+        let follower_index = if new_leader == 2 { 2 } else { 1 };
+        RaftControlPlane::join_cluster(&addrs[follower_index], 4, &addrs[3])
+            .await
+            .unwrap();
+        fourth
+            .raft()
+            .wait(Some(Duration::from_secs(5)))
+            .metrics(
+                |m| {
+                    m.membership_config.membership().nodes().count() == 4
+                        && m.last_applied >= *m.membership_config.log_id()
+                },
+                "new member",
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            fourth.get(b"before").await.unwrap(),
+            Some(b"failure".to_vec())
+        );
+        assert_eq!(
+            fourth.get(b"after").await.unwrap(),
+            Some(b"failure".to_vec())
+        );
+
+        // Reopen the stopped voter on its original address without changing membership.
+        drop(nodes.remove(0));
+        let restored = RaftControlPlane::start_cluster_node(1, dirs[0].path(), &addrs[0])
+            .await
+            .unwrap();
+        assert!(restored.raft().is_initialized().await.unwrap());
+        restored
+            .raft()
+            .wait(Some(Duration::from_secs(5)))
+            .metrics(
+                |m| {
+                    m.membership_config.membership().nodes().count() == 4
+                        && m.last_applied >= *m.membership_config.log_id()
+                },
+                "restarted voter catches up",
+            )
+            .await
+            .unwrap();
+        assert_eq!(restored.voter_count(), 3);
+        assert_eq!(
+            restored.get(b"after").await.unwrap(),
+            Some(b"failure".to_vec())
+        );
+        restored.shutdown().await.unwrap();
+        fourth.shutdown().await.unwrap();
+        for node in &nodes {
+            node.shutdown().await.unwrap();
+        }
+    }
 
     #[tokio::test]
     async fn single_node_raft_applies_commands() {

@@ -39,7 +39,7 @@ use crate::utils::logger::{
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use mocra_proxy::ProxyManager;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::{broadcast, watch};
 use uuid::Uuid;
@@ -82,6 +82,11 @@ pub struct Engine {
     pub state: Arc<State>,
     /// Broadcast shutdown signal consumed by all long-running processor loops.
     shutdown_tx: broadcast::Sender<()>,
+    /// Owned tasks are cancelled and joined before releasing engine state.
+    background_tasks: Mutex<tokio::task::JoinSet<()>>,
+    shutdown_lock: tokio::sync::Mutex<()>,
+    #[cfg(feature = "dashboard")]
+    api_servers: tokio::sync::Mutex<Vec<runtime::ApiServer>>,
     /// Pause switch propagated to workers via watch channel.
     pause_tx: watch::Sender<bool>,
     /// Optional Prometheus exporter handle exposed to API endpoints.
@@ -186,9 +191,20 @@ impl Engine {
                 }
             }
             "dlq" => {
-                let _ = queue_manager.send_to_dlq(topic, item, &reason).await;
+                if let Err(error) = queue_manager.send_to_dlq(topic, item, &reason).await {
+                    error!(
+                        "Failed to write {topic} message {} to DLQ; leaving it unacknowledged: {error}",
+                        item.get_id()
+                    );
+                    return;
+                }
                 if let Some(f) = ack_fn.take() {
-                    let _ = f().await;
+                    if let Err(error) = f().await {
+                        error!(
+                            "Failed to acknowledge {topic} message {} after DLQ write: {error}",
+                            item.get_id()
+                        );
+                    }
                 }
             }
             _ => {
@@ -256,9 +272,20 @@ impl Engine {
                 }
             }
             "dlq" => {
-                let _ = queue_manager.send_to_dlq(topic, item, &reason).await;
+                if let Err(error) = queue_manager.send_to_dlq(topic, item, &reason).await {
+                    error!(
+                        "Failed to write {topic} message {} to DLQ; leaving it unacknowledged: {error}",
+                        item.get_id()
+                    );
+                    return;
+                }
                 if let Some(f) = ack_fn.take() {
-                    let _ = f().await;
+                    if let Err(error) = f().await {
+                        error!(
+                            "Failed to acknowledge {topic} message {} after DLQ write: {error}",
+                            item.get_id()
+                        );
+                    }
                 }
             }
             _ => {
@@ -426,62 +453,6 @@ impl Engine {
         let (shutdown_tx, _shutdown_rx) = broadcast::channel(1);
 
         let (pause_tx, _) = watch::channel(false);
-        // Pause Poller
-        let state_clone = Arc::clone(&state);
-        let pause_tx_clone = pause_tx.clone();
-        let mut shutdown_rx_poller = shutdown_tx.subscribe();
-        let pause_key = {
-            let ns = state_clone.cache_service.namespace();
-            if ns.is_empty() {
-                warn!(
-                    "Cache namespace is empty; set config.name to avoid cross-app pause collisions"
-                );
-                "engine:pause".to_string()
-            } else {
-                format!("{ns}:engine:pause")
-            }
-        };
-
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(5));
-            loop {
-                tokio::select! {
-                    _ = interval.tick() => {
-                        let is_paused = if let Some(coordination) = &state_clone.coordination {
-                            match coordination.get(&pause_key).await {
-                                Ok(value) => value.as_deref() == Some(b"1"),
-                                Err(error) => {
-                                    warn!("Engine pause state unavailable: {error}");
-                                    continue;
-                                }
-                            }
-                        } else {
-                            match state_clone.cache_service.get(&pause_key).await {
-                                Ok(value) => value.is_some(),
-                                Err(error) => {
-                                    warn!("Engine pause state unavailable: {error}");
-                                    continue;
-                                }
-                            }
-                        };
-
-                        if *pause_tx_clone.borrow() != is_paused {
-                            let _ = pause_tx_clone.send(is_paused);
-                            if is_paused {
-                                 info!("Engine paused by global signal");
-                            } else {
-                                 info!("Engine resumed by global signal");
-                            }
-                        }
-                    }
-                    _ = shutdown_rx_poller.recv() => {
-                        info!("Engine pause poller shutting down");
-                        break;
-                    }
-                }
-            }
-        });
-
         let task_manager = Arc::new(TaskManager::new_with_coordination(
             &state.db,
             Arc::clone(&state.cache_service),
@@ -607,6 +578,63 @@ impl Engine {
             .await,
         );
 
+        // Start the pause poller only after fallible initialization has completed.
+        let state_clone = Arc::clone(&state);
+        let pause_tx_clone = pause_tx.clone();
+        let mut shutdown_rx_poller = shutdown_tx.subscribe();
+        let pause_key = {
+            let ns = state_clone.cache_service.namespace();
+            if ns.is_empty() {
+                warn!(
+                    "Cache namespace is empty; set config.name to avoid cross-app pause collisions"
+                );
+                "engine:pause".to_string()
+            } else {
+                format!("{ns}:engine:pause")
+            }
+        };
+
+        let mut background_tasks = tokio::task::JoinSet::new();
+        background_tasks.spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(5));
+            loop {
+                tokio::select! {
+                    _ = interval.tick() => {
+                        let is_paused = if let Some(coordination) = &state_clone.coordination {
+                            match coordination.get(&pause_key).await {
+                                Ok(value) => value.as_deref() == Some(b"1"),
+                                Err(error) => {
+                                    warn!("Engine pause state unavailable: {error}");
+                                    continue;
+                                }
+                            }
+                        } else {
+                            match state_clone.cache_service.get(&pause_key).await {
+                                Ok(value) => value.is_some(),
+                                Err(error) => {
+                                    warn!("Engine pause state unavailable: {error}");
+                                    continue;
+                                }
+                            }
+                        };
+
+                        if *pause_tx_clone.borrow() != is_paused {
+                            let _ = pause_tx_clone.send(is_paused);
+                            if is_paused {
+                                 info!("Engine paused by global signal");
+                            } else {
+                                 info!("Engine resumed by global signal");
+                            }
+                        }
+                    }
+                    _ = shutdown_rx_poller.recv() => {
+                        info!("Engine pause poller shutting down");
+                        break;
+                    }
+                }
+            }
+        });
+
         Ok(Self {
             queue_manager,
             downloader_manager: Arc::new(downloader_manager),
@@ -616,6 +644,10 @@ impl Engine {
             event_bus,
             state,
             shutdown_tx,
+            background_tasks: Mutex::new(background_tasks),
+            shutdown_lock: tokio::sync::Mutex::new(()),
+            #[cfg(feature = "dashboard")]
+            api_servers: tokio::sync::Mutex::new(Vec::new()),
             pause_tx,
             prometheus_handle,
             node_registry,

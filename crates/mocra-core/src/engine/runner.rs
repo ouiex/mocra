@@ -1,8 +1,9 @@
 use crate::queue::Identifiable;
-use log::{debug, info};
+use log::{debug, error, info};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use tokio::sync::{Mutex, Semaphore, broadcast, mpsc, watch};
+use tokio::task::JoinSet;
 use tracing::Instrument;
 
 /// In-flight task counters, one per pipeline stage.
@@ -91,6 +92,19 @@ pub struct StageCounters {
     pub store: Arc<StageCounter>,
 }
 
+// Cancellation and panics must return the counters as well as the semaphore permit.
+struct InflightGuard<'a> {
+    counter: &'a AtomicUsize,
+    stage: &'a str,
+}
+
+impl Drop for InflightGuard<'_> {
+    fn drop(&mut self) {
+        crate::common::metrics::dec_inflight("engine", self.stage, 1.0);
+        self.counter.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
 /// Generic concurrent runner for queue-driven processors.
 ///
 /// The runner coordinates pause/resume state, graceful shutdown, and bounded
@@ -128,6 +142,7 @@ impl ProcessorRunner {
     /// - Pulls one item, then greedily drains a small batch.
     /// - Uses a semaphore permit per spawned task to cap parallelism.
     /// - Reacts to pause/shutdown signals between receives and dispatch.
+    /// - Drains accepted work on channel closure; cancels and joins it on shutdown.
     pub async fn run<T, F, Fut>(mut self, receiver: Arc<Mutex<mpsc::Receiver<T>>>, execute_fn: F)
     where
         T: Identifiable + Send + 'static,
@@ -142,14 +157,25 @@ impl ProcessorRunner {
         let semaphore = Arc::new(Semaphore::new(self.concurrency));
         let metric_label = self.name.to_lowercase();
         let mut rx = receiver.lock().await;
+        let mut tasks = JoinSet::new();
 
         let mut loop_count: u64 = 0;
 
-        loop {
+        let mut cancelled = 'run: loop {
+            while let Some(result) = tasks.try_join_next() {
+                if let Err(error) = result {
+                    error!("{} processor task failed: {error}", self.name);
+                }
+            }
             // Honor pause signal before attempting to receive.
             if *self.pause_rx.borrow() {
-                if self.pause_rx.changed().await.is_err() {
-                    break;
+                tokio::select! {
+                    _ = self.shutdown_rx.recv() => break true,
+                    result = self.pause_rx.changed() => {
+                        if result.is_err() {
+                            break false;
+                        }
+                    }
                 }
                 continue;
             }
@@ -157,7 +183,7 @@ impl ProcessorRunner {
             tokio::select! {
                 _ = self.shutdown_rx.recv() => {
                     info!("{} processor received shutdown signal", self.name);
-                    break;
+                    break true;
                 }
                 _ = self.pause_rx.changed() => {
                     continue;
@@ -196,9 +222,14 @@ impl ProcessorRunner {
                                          tokio::select! {
                                              _ = self.shutdown_rx.recv() => {
                                                  info!("[ProcessorRunner:{}] shutdown while paused, dropping id={}", self.name, item_id);
-                                                 break None;
+                                                 break 'run true;
                                              }
-                                             _ = self.pause_rx.changed() => continue,
+                                             result = self.pause_rx.changed() => {
+                                                 if result.is_err() {
+                                                     break 'run false;
+                                                 }
+                                                 continue;
+                                             }
                                          }
                                     }
 
@@ -206,7 +237,7 @@ impl ProcessorRunner {
                                     tokio::select! {
                                         _ = self.shutdown_rx.recv() => {
                                             info!("[ProcessorRunner:{}] shutdown while acquiring permit, dropping id={}", self.name, item_id);
-                                            break None;
+                                            break 'run true;
                                         }
                                         _ = self.pause_rx.changed() => {
                                             info!("[ProcessorRunner:{}] pause_rx changed while acquiring permit for id={}", self.name, item_id);
@@ -216,20 +247,15 @@ impl ProcessorRunner {
                                             match res {
                                                 Ok(p) => {
                                                     info!("[ProcessorRunner:{}] permit acquired for id={}", self.name, item_id);
-                                                    break Some(p);
+                                                    break p;
                                                 }
                                                 Err(_) => {
                                                     info!("[ProcessorRunner:{}] semaphore closed, dropping id={}", self.name, item_id);
-                                                    break None;
+                                                    break 'run false;
                                                 }
                                             }
                                         }
                                     }
-                                };
-
-                                let permit = match permit {
-                                    Some(p) => p,
-                                    None => break,
                                 };
 
                                 let execute_fn = execute_fn.clone();
@@ -238,20 +264,41 @@ impl ProcessorRunner {
                                 let span_name = format!("{}_processor", metric_label);
                                 let inflight = self.inflight_counter.clone();
 
-                                tokio::spawn(async move {
+                                tasks.spawn(async move {
                                     inflight.fetch_add(1, Ordering::Relaxed);
                                     crate::common::metrics::inc_inflight("engine", &metric_label, 1.0);
+                                    let _inflight = InflightGuard {
+                                        counter: &inflight,
+                                        stage: &metric_label,
+                                    };
                                     let _permit = permit;
                                     execute_fn(item).await;
-                                    crate::common::metrics::dec_inflight("engine", &metric_label, 1.0);
-                                    inflight.fetch_sub(1, Ordering::Relaxed);
                                 }.instrument(tracing::info_span!("processor_execution", processor_type = %span_name, item_id = %task_id)));
                             }
                         }
                         None => {
                             info!("{} channel closed", self.name);
-                            break;
+                            break false;
                         }
+                    }
+                }
+            }
+        };
+
+        if cancelled {
+            tasks.abort_all();
+        }
+        while !tasks.is_empty() {
+            tokio::select! {
+                _ = self.shutdown_rx.recv(), if !cancelled => {
+                    cancelled = true;
+                    tasks.abort_all();
+                }
+                result = tasks.join_next() => {
+                    if let Some(Err(error)) = result
+                        && !error.is_cancelled()
+                    {
+                        error!("{} processor task failed: {error}", self.name);
                     }
                 }
             }
@@ -267,6 +314,179 @@ mod tests {
     use crate::queue::QueuedItem;
     use std::sync::Mutex as StdMutex;
     use tokio::time::{Duration, timeout};
+
+    #[tokio::test]
+    async fn shutdown_cancels_active_work_while_waiting_for_capacity() {
+        let (tx, rx) = mpsc::channel(1);
+        let (shutdown_tx, shutdown_rx) = broadcast::channel(1);
+        let (_pause_tx, pause_rx) = watch::channel(false);
+        let inflight = Arc::new(AtomicUsize::new(0));
+        let resource = Arc::new(());
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let runner = ProcessorRunner::new("Held", shutdown_rx, pause_rx, 1, inflight.clone());
+        let running = tokio::spawn({
+            let resource = resource.clone();
+            let entered = entered.clone();
+            async move {
+                runner
+                    .run(Arc::new(Mutex::new(rx)), move |_: TestItem| {
+                        let resource = resource.clone();
+                        let entered = entered.clone();
+                        async move {
+                            let _resource = resource;
+                            entered.notify_one();
+                            std::future::pending::<()>().await;
+                        }
+                    })
+                    .await;
+            }
+        });
+        tx.send(TestItem {
+            id: "active".into(),
+            should_fail: false,
+        })
+        .await
+        .unwrap();
+        timeout(Duration::from_secs(1), entered.notified())
+            .await
+            .unwrap();
+        tx.send(TestItem {
+            id: "waiting".into(),
+            should_fail: false,
+        })
+        .await
+        .unwrap();
+        // Once the second item leaves the channel, dispatch is waiting for the held permit.
+        timeout(Duration::from_secs(1), async {
+            while tx.capacity() == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        shutdown_tx.send(()).unwrap();
+        timeout(Duration::from_secs(1), running)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            Arc::strong_count(&resource),
+            1,
+            "active work must release its resources"
+        );
+        assert_eq!(inflight.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn shutdown_does_not_wait_for_resume() {
+        let (_tx, rx) = mpsc::channel::<TestItem>(1);
+        let (shutdown_tx, shutdown_rx) = broadcast::channel(1);
+        let (_pause_tx, pause_rx) = watch::channel(true);
+        let runner = ProcessorRunner::new("Paused", shutdown_rx, pause_rx, 1, Arc::default());
+        let running = tokio::spawn(async move {
+            runner.run(Arc::new(Mutex::new(rx)), |_| async {}).await;
+        });
+        shutdown_tx.send(()).unwrap();
+        timeout(Duration::from_secs(1), running)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn panicked_work_releases_capacity_and_inflight_count() {
+        let (tx, rx) = mpsc::channel(2);
+        let (_shutdown_tx, shutdown_rx) = broadcast::channel(1);
+        let (_pause_tx, pause_rx) = watch::channel(false);
+        let inflight = Arc::new(AtomicUsize::new(0));
+        let completed = Arc::new(AtomicUsize::new(0));
+        let runner = ProcessorRunner::new("Panic", shutdown_rx, pause_rx, 1, inflight.clone());
+        for should_fail in [true, false] {
+            tx.send(TestItem {
+                id: "panic-then-success".into(),
+                should_fail,
+            })
+            .await
+            .unwrap();
+        }
+        drop(tx);
+        timeout(
+            Duration::from_secs(1),
+            runner.run(Arc::new(Mutex::new(rx)), {
+                let completed = completed.clone();
+                move |item: TestItem| {
+                    let completed = completed.clone();
+                    async move {
+                        assert!(!item.should_fail, "intentional processing panic");
+                        completed.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(completed.load(Ordering::Relaxed), 1);
+        assert_eq!(inflight.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn closed_channel_drains_work_but_shutdown_can_cancel_it() {
+        for cancel in [false, true] {
+            let (tx, rx) = mpsc::channel(1);
+            let (shutdown_tx, shutdown_rx) = broadcast::channel(1);
+            let (_pause_tx, pause_rx) = watch::channel(false);
+            let inflight = Arc::new(AtomicUsize::new(0));
+            let entered = Arc::new(tokio::sync::Notify::new());
+            let release = Arc::new(tokio::sync::Notify::new());
+            let finished = Arc::new(AtomicUsize::new(0));
+            let runner = ProcessorRunner::new("Drain", shutdown_rx, pause_rx, 1, inflight.clone());
+            let running = tokio::spawn({
+                let entered = entered.clone();
+                let release = release.clone();
+                let finished = finished.clone();
+                async move {
+                    runner
+                        .run(Arc::new(Mutex::new(rx)), move |_: TestItem| {
+                            let entered = entered.clone();
+                            let release = release.clone();
+                            let finished = finished.clone();
+                            async move {
+                                entered.notify_one();
+                                release.notified().await;
+                                finished.fetch_add(1, Ordering::Relaxed);
+                            }
+                        })
+                        .await;
+                }
+            });
+            tx.send(TestItem {
+                id: "last".into(),
+                should_fail: false,
+            })
+            .await
+            .unwrap();
+            timeout(Duration::from_secs(1), entered.notified())
+                .await
+                .unwrap();
+            drop(tx);
+            tokio::task::yield_now().await;
+            assert!(
+                !running.is_finished(),
+                "closing the channel must wait for accepted work"
+            );
+            if cancel {
+                shutdown_tx.send(()).unwrap();
+            } else {
+                release.notify_one();
+            }
+            timeout(Duration::from_secs(1), running)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(finished.load(Ordering::Relaxed), usize::from(!cancel));
+            assert_eq!(inflight.load(Ordering::Relaxed), 0);
+        }
+    }
 
     #[derive(Clone)]
     struct TestItem {

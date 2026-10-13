@@ -9,6 +9,11 @@
 
 此外还提供一小组**写 / 控制**端点（任务注入、暂停/恢复、节点与 DLQ 查看),但这些需要 API key。
 
+Dashboard 通过侧栏进入 Tasks、Throughput、Performance、Logs 和 Cluster。**Connection** 展开
+endpoint/API key 设置，**Reconnect** 应用设置。概览指标与阶段分布读取现有引擎快照：
+**Active work** 是各阶段运行中与排队工作的总和；**Parse outcomes** 是已完成的响应/解析任务
+结果数，不是解析出的数据条数。页面仍为自包含的单文件 HTML，并适配窄屏。
+
 ## 启用
 
 添加特性:
