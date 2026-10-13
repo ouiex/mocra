@@ -10,7 +10,9 @@ use crate::queue::{QueueManager, QueuedItem};
 use chrono::{DateTime, TimeZone, Utc};
 use cron::Schedule;
 use dashmap::DashMap;
-use futures::StreamExt;
+use futures::future::BoxFuture;
+use futures::stream::FuturesUnordered;
+use futures::{FutureExt, StreamExt};
 use log::{error, info, warn};
 #[cfg(feature = "store")]
 use sea_orm::prelude::Expr;
@@ -127,7 +129,7 @@ impl CronScheduler {
         });
     }
 
-    async fn refresh_loop(&self) {
+    pub(crate) async fn refresh_loop(&self) {
         info!("CronScheduler refresh loop started");
         let mut shutdown = self.shutdown_rx.resubscribe();
         loop {
@@ -395,15 +397,18 @@ impl CronScheduler {
     }
 
     /// Main loop that evaluates one scheduler tick per second.
-    async fn run(self: Arc<Self>) {
-        // Start leader election loop.
-        {
-            let elector = self.leader_elector.clone();
-            tokio::spawn(async move {
-                elector.start().await;
-            });
+    pub(crate) async fn run(self: Arc<Self>) {
+        let election = self.leader_elector.clone().start();
+        let scheduling = self.run_loop();
+        tokio::pin!(election, scheduling);
+        tokio::select! {
+            _ = &mut election => scheduling.await,
+            _ = &mut scheduling => {},
         }
+    }
 
+    async fn run_loop(self: Arc<Self>) {
+        let mut jobs: FuturesUnordered<BoxFuture<'static, ()>> = FuturesUnordered::new();
         info!("CronScheduler started (Leader Election Mode)");
         let mut last_tick: Option<DateTime<Utc>> = None;
 
@@ -428,7 +433,7 @@ impl CronScheduler {
                                 );
                                 let mut cursor = last_run + chrono::Duration::seconds(1);
                                 while cursor <= current_second {
-                                    self.clone().process_tick(cursor).await;
+                                    self.clone().process_tick(cursor, &mut jobs).await;
                                     cursor += chrono::Duration::seconds(1);
                                 }
                                 last_tick = Some(current_second);
@@ -438,15 +443,15 @@ impl CronScheduler {
                                     diff, misfire_tolerance
                                 );
                                 last_tick = Some(current_second);
-                                self.clone().process_tick(current_second).await;
+                                self.clone().process_tick(current_second, &mut jobs).await;
                             }
                         } else if diff > 0 {
                             last_tick = Some(current_second);
-                            self.clone().process_tick(current_second).await;
+                            self.clone().process_tick(current_second, &mut jobs).await;
                         }
                     } else {
                         last_tick = Some(current_second);
-                        self.clone().process_tick(current_second).await;
+                        self.clone().process_tick(current_second, &mut jobs).await;
                     }
                 } else {
                     // Keep cursor roughly in sync while follower nodes are idle.
@@ -467,11 +472,16 @@ impl CronScheduler {
                     break;
                 }
                 _ = sleep(sleep_duration + Duration::from_millis(10)) => {}
+                Some(()) = jobs.next(), if !jobs.is_empty() => {}
             }
         }
     }
 
-    async fn process_tick(self: Arc<Self>, current_tick: DateTime<Utc>) {
+    async fn process_tick(
+        self: Arc<Self>,
+        current_tick: DateTime<Utc>,
+        jobs: &mut FuturesUnordered<BoxFuture<'static, ()>>,
+    ) {
         // Gather matches for this tick from the schedule cache.
         let mut tasks = Vec::new();
 
@@ -490,10 +500,13 @@ impl CronScheduler {
         for (module_name, contexts) in tasks {
             let this = self.clone();
             total_triggered += contexts.len();
-            tokio::spawn(async move {
-                this.process_module_contexts(&module_name, &contexts, current_tick)
-                    .await;
-            });
+            jobs.push(
+                async move {
+                    this.process_module_contexts(&module_name, &contexts, current_tick)
+                        .await;
+                }
+                .boxed(),
+            );
         }
 
         let duration = start.elapsed().as_secs_f64();

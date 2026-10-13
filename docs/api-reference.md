@@ -9,6 +9,12 @@ Enabling the `dashboard` feature gives the engine two things on a single port:
 
 A small set of **write / control** endpoints (task injection, pause/resume, node and DLQ inspection) is also served, but these require an API key.
 
+The dashboard has sidebar links to Tasks, Throughput, Performance, Logs and Cluster. **Connection**
+opens the endpoint/API-key settings; **Reconnect** applies them. The overview counters and stage
+distribution use the existing engine snapshot: **Active work** sums running and queued work across
+stages, while **Parse outcomes** counts completed response/parser-task outcomes, not parsed data
+items. The page remains a self-contained HTML file and adapts to narrow screens.
+
 ## Enabling
 
 Add the feature:

@@ -160,12 +160,16 @@ impl DownloaderManager {
     /// Should be called once at startup.
     pub fn start_background_cleaner(self: Arc<Self>) {
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
-            loop {
-                interval.tick().await;
-                self.cleanup_expired_downloader().await;
-            }
+            self.run_background_cleaner().await;
         });
+    }
+
+    pub(crate) async fn run_background_cleaner(&self) {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+        loop {
+            interval.tick().await;
+            self.cleanup_expired_downloader().await;
+        }
     }
 
     /// Get or create a downloader for the given request.

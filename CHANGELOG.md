@@ -6,6 +6,49 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.5.2] — 2026-10-08
+
+### Fixed
+
+- Stop and join owned engine background tasks and the admin API on normal shutdown. API shutdown
+  closes incomplete HTTP requests after a bounded grace period; the same ports and Raft data
+  directory can be reused immediately, including with the `store` feature enabled.
+- Preserve the configured API key and rate limit when `.dashboard(port)` overrides the TOML API
+  port.
+- Await embedded cluster shutdown on State and Engine initialization errors before returning,
+  allowing immediate retries with the same address and data directory.
+- Restore initialized embedded cluster nodes without bootstrapping or joining again. Cluster
+  shutdown and failed startup now release the HTTP listener so the same address and data directory
+  can be reused.
+- Wait for live leadership after recovery before deciding which node injects initial spider
+  tasks, including when the former leader is offline. Remembered votes alone do not mark a node
+  ready; restored leaders confirm a quorum and followers wait for fresh leader contact.
+- Bound HTTP shutdown and close accepted connections after the grace period, preventing
+  incomplete request headers or bodies from retaining sockets and Raft storage handles.
+- Join through follower seeds using HTTP 307 leader redirects. New nodes try configured seeds
+  in order, bound HTTP connection/request time and redirect hops, and wait to receive membership
+  before startup succeeds. Errors identify failed seeds and their causes.
+- Acknowledge messages routed to the DLQ only after the DLQ write succeeds, in both terminal
+  failure and retry-policy paths. Failed DLQ writes leave originals unacknowledged and are logged;
+  acknowledgement failures after successful writes are also logged.
+
+### Changed
+
+- Restyle the embedded dashboard with a charcoal sidebar, compact overview counters, pastel
+  stage distribution, and responsive monitoring panels. Endpoint/API-key settings live under
+  Connection; the existing refresh, throughput, log filtering and cluster views are retained.
+- Align all six workspace crates and internal dependency requirements at 0.5.2.
+- Document recovery, learner/voter roles, broker redelivery, and remaining distributed guarantees
+  in both deployment guides.
+
+### Compatibility
+
+- Public configuration structures, msgpack join request/success response formats, and persisted
+  Raft data formats are unchanged from 0.5.1. The existing rejection of legacy 0.4.1 data remains.
+- Joining still adds learners; the default quickstart has one voter. Durable stage handoffs,
+  partition failover leases, runtime fencing propagation, linearizable control reads, and atomic
+  Raft pub-sub retention remain outside this patch.
+
 ## [0.5.1] — 2026-09-30
 
 ### Changed

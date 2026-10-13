@@ -69,13 +69,16 @@ impl Engine {
             info!("EventBus disabled; skipping setup and start");
         }
 
-        self.downloader_manager.clone().start_background_cleaner();
+        let downloader_manager = self.downloader_manager.clone();
+        self.background_tasks.lock().unwrap().spawn(async move {
+            downloader_manager.run_background_cleaner().await;
+        });
 
         if let Some(proxy_manager) = &self.proxy_manager {
             proxy_manager.start_health_checks();
             let proxy_manager = Arc::downgrade(proxy_manager);
             let mut shutdown_rx = self.shutdown_tx.subscribe();
-            tokio::spawn(async move {
+            self.background_tasks.lock().unwrap().spawn(async move {
                 let _ = shutdown_rx.recv().await;
                 if let Some(proxy_manager) = proxy_manager.upgrade() {
                     proxy_manager.stop_health_checks().await;
@@ -97,7 +100,7 @@ impl Engine {
         }
 
         let shutdown_tx = self.shutdown_tx.clone();
-        tokio::spawn(async move {
+        self.background_tasks.lock().unwrap().spawn(async move {
             if let Ok(()) = tokio::signal::ctrl_c().await {
                 info!("Received Ctrl+C, initiating shutdown...");
                 let _ = shutdown_tx.send(());
@@ -106,11 +109,11 @@ impl Engine {
 
         let state_for_zombie = self.state.clone();
         let compensator_for_zombie = self.queue_manager.compensator.clone();
-        tokio::spawn(async move {
+        self.background_tasks.lock().unwrap().spawn(async move {
             zombie::start_zombie_cleaner(state_for_zombie, 600, compensator_for_zombie).await;
         });
 
-        tokio::spawn(async move {
+        self.background_tasks.lock().unwrap().spawn(async move {
             SystemMonitor::new(15).run().await;
         });
 
@@ -128,7 +131,7 @@ impl Engine {
             let inflight_counter = self.inflight.clone();
             let shutdown_tx = self.shutdown_tx.clone();
             let mut shutdown_rx = self.shutdown_tx.subscribe();
-            tokio::spawn(async move {
+            self.background_tasks.lock().unwrap().spawn(async move {
                 let mut interval = tokio::time::interval(Duration::from_secs(1));
                 let mut last_active = Instant::now();
 
@@ -252,11 +255,14 @@ impl Engine {
             run_processor!("ResponseProcessor", self.start_response_parser_processor()),
             run_processor!("NodeRegistry", self.start_node_registry()),
         );
+        self.shutdown().await;
         Ok(())
     }
 
     /// Triggers graceful shutdown for processors and optional event infrastructure.
     pub async fn shutdown(&self) {
+        // An explicit shutdown can race with start() finishing its processor loops.
+        let _shutdown = self.shutdown_lock.lock().await;
         info!("Shutting down Schedule");
 
         if let Some(proxy_manager) = &self.proxy_manager {
@@ -267,6 +273,16 @@ impl Engine {
             warn!("Failed to deregister node: {}", e);
         }
         let _ = self.shutdown_tx.send(());
+
+        #[cfg(feature = "dashboard")]
+        {
+            let servers = std::mem::take(&mut *self.api_servers.lock().await);
+            for server in servers {
+                server.stop().await;
+            }
+        }
+        let mut tasks = std::mem::take(&mut *self.background_tasks.lock().unwrap());
+        tasks.shutdown().await;
 
         if let Some(event_bus) = &self.event_bus {
             if let Err(e) = event_bus
@@ -303,7 +319,7 @@ impl Engine {
         })
     }
 
-    /// Binds the HTTP API port, then serves it on a detached task.
+    /// Binds the HTTP API port and owns the server until engine shutdown.
     ///
     /// The bind happens here rather than inside the spawned task, so a failure (a port already in
     /// use, most often) reaches the caller instead of being stranded in a detached task while
@@ -323,8 +339,19 @@ impl Engine {
             outcomes: self.outcomes.clone(),
         };
         let app = crate::engine::api::router::router(api_state);
-        tokio::spawn(async move {
-            match axum::serve(listener, app.into_make_service()).await {
+        let (force_shutdown, force_rx) = watch::channel(());
+        let listener = crate::engine::api::listener::ShutdownListener {
+            listener,
+            shutdown: force_rx,
+        };
+        let mut shutdown_rx = self.shutdown_tx.subscribe();
+        let task = tokio::spawn(async move {
+            match axum::serve(listener, app.into_make_service())
+                .with_graceful_shutdown(async move {
+                    let _ = shutdown_rx.recv().await;
+                })
+                .await
+            {
                 Ok(_) => {
                     info!("API server stopped gracefully");
                 }
@@ -333,12 +360,60 @@ impl Engine {
                 }
             }
         });
+        self.api_servers.lock().await.push(ApiServer {
+            task,
+            force_shutdown,
+        });
         Ok(())
     }
 
     /// Starts cron scheduling loop.
     pub fn start_cron_scheduler(&self) {
         info!("Starting cron scheduler");
-        self.cron_scheduler.clone().start();
+        let scheduler = self.cron_scheduler.clone();
+        let refresh = scheduler.clone();
+        let mut tasks = self.background_tasks.lock().unwrap();
+        tasks.spawn(async move { refresh.refresh_loop().await });
+        tasks.spawn(async move { scheduler.run().await });
+    }
+}
+
+#[cfg(feature = "dashboard")]
+pub(super) struct ApiServer {
+    task: tokio::task::JoinHandle<()>,
+    force_shutdown: watch::Sender<()>,
+}
+
+#[cfg(feature = "dashboard")]
+impl ApiServer {
+    async fn stop(mut self) {
+        let grace = Duration::from_secs(1);
+        match tokio::time::timeout(grace, &mut self.task).await {
+            Ok(result) => {
+                if let Err(error) = result {
+                    error!("API server shutdown failed: {error}");
+                }
+                return;
+            }
+            Err(_) => {
+                let _ = self.force_shutdown.send(());
+            }
+        }
+        match tokio::time::timeout(grace, &mut self.task).await {
+            Ok(Err(error)) => error!("API server shutdown failed: {error}"),
+            Ok(Ok(())) => {}
+            Err(_) => {
+                self.task.abort();
+                let _ = (&mut self.task).await;
+                warn!("API server exceeded its shutdown grace period; stopped its server task");
+            }
+        }
+    }
+}
+
+#[cfg(feature = "dashboard")]
+impl Drop for ApiServer {
+    fn drop(&mut self) {
+        self.task.abort();
     }
 }

@@ -90,6 +90,36 @@ Mocra::builder()
 adds the seed address of any existing node. `data_dir` is the redb state-machine + Raft log
 directory, so give each node its own path.
 
+From 0.5.2, restarting with an initialized data directory restores its Raft state without
+initializing or joining again. Keep the same node id and advertised address; configured seeds
+are only needed when the node has not yet initialized. A failed startup, including State or Engine
+initialization errors, closes its HTTP listener and Raft runtime before returning so the same
+address and directory can be retried immediately.
+
+Normal engine shutdown also waits for the admin API and owned background services to stop before
+returning. API shutdown allows one second for requests to finish, then closes accepted connections
+and waits at most one further second, so unfinished headers or bodies cannot retain the API port
+or Raft storage. The downloader and zombie cleaners are stopped with the engine.
+
+Combining `.from_toml(...)` with `.dashboard(port)` overrides only the API port; the configured
+`api_key` and `rate_limit` are preserved.
+
+Recovery waits up to 10 seconds for live leadership before deciding which node injects the
+initial spider tasks. A remembered leader id alone is not sufficient: a restored leader must
+confirm a quorum, while a follower/learner must receive a fresh committed vote from its leader.
+HTTP shutdown allows 1 second for requests to finish, then closes accepted connections and
+waits at most 1 further second. Incomplete HTTP headers or bodies cannot block recovery cleanup.
+
+For a new node, seeds are tried in order. A follower seed redirects the join POST to its known
+leader. Each HTTP join request has a 2-second connection timeout, a 10-second total timeout, and
+at most 5 redirects. After registration, startup waits up to 10 seconds for the joining node to
+receive membership and learn a leader. Failure is reported with the seed addresses and causes.
+
+**Joining adds a learner, not a voter.** The three-process quickstart below has one voter and two
+learners; it cannot elect a replacement if its only voter fails. For leader failover, explicitly
+configure three voters using the lower-level `RaftControlPlane::change_membership` API after
+adding the other nodes as learners. The builder does not promote nodes automatically.
+
 `mocra-cluster` 0.5.0 requires persisted Raft state-machine metadata. Data directories written by
 0.4.1 lack it and cannot be reopened safely, especially after log purging. Back up every node's
 directory and migrate its state before upgrading; the new version rejects an in-place restart
@@ -134,6 +164,18 @@ The embedded cluster is only the control plane. The **queue backend is chosen in
   or `queue-nats` and configure the backend in TOML (see [Configuration](configuration.md)).
   Cross-stage account affinity is not guaranteed; request fallback and sessions still use
   node-local cache, so workloads that depend on them need an affinity or shared-state design.
+
+### Failure handling and current limits
+
+When engine policy routes a message to the DLQ, the original is acknowledged only after the DLQ
+write succeeds. Failed DLQ writes are logged and leave the original unacknowledged: NATS can
+redeliver after its acknowledgement timeout; Kafka retains the uncommitted offset for replay
+when the consumer restarts. This is at-least-once handling, so sinks must tolerate duplicates.
+
+This patch does not make stage handoffs durable: a successful enqueue into a local channel can
+still precede the upstream acknowledgement and broker persistence, leaving a crash-loss window.
+Partition failover leases, runtime fencing-token propagation, linearizable control reads, and
+atomic/retained Raft pub-sub history also remain separate work.
 
 ## Cross-node data plane (Kafka / NATS)
 
