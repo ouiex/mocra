@@ -101,6 +101,14 @@ returning. API shutdown allows one second for requests to finish, then closes ac
 and waits at most one further second, so unfinished headers or bodies cannot retain the API port
 or Raft storage. The downloader and zombie cleaners are stopped with the engine.
 
+An explicit stop (including Ctrl+C) cancels unfinished processor tasks and waits for them to be
+destroyed before the engine run returns. They are not acknowledged; broker redelivery follows
+the queue's existing rules. Closing a processor input channel without a stop signal drains
+accepted work instead. Users of the low-level Engine API must also await `start()` after requesting
+`shutdown()` before reusing the cluster directory.
+Raft shutdown also waits for state-machine, snapshot and log replication workers to release their
+storage handles.
+
 Combining `.from_toml(...)` with `.dashboard(port)` overrides only the API port; the configured
 `api_key` and `rate_limit` are preserved.
 

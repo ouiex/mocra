@@ -1188,6 +1188,112 @@ mod cluster_config_tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stopping_active_spider_releases_cluster_storage() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::time::Duration;
+        use tokio::sync::Notify;
+
+        struct ActiveTask(Arc<AtomicBool>);
+
+        impl Drop for ActiveTask {
+            fn drop(&mut self) {
+                self.0.store(false, Ordering::SeqCst);
+            }
+        }
+
+        struct HeldSpider {
+            entered: Arc<Notify>,
+            active: Arc<AtomicBool>,
+        }
+
+        #[async_trait]
+        impl Spider for HeldSpider {
+            type Item = ();
+
+            fn name(&self) -> &str {
+                "active_stop"
+            }
+
+            async fn start(&self, _seeds: &mut Seeds) {
+                self.active.store(true, Ordering::SeqCst);
+                let _active = ActiveTask(self.active.clone());
+                self.entered.notify_one();
+                std::future::pending::<()>().await;
+            }
+
+            async fn parse(&self, _response: Response, _cx: &mut Ctx<()>) -> Result<()> {
+                Ok(())
+            }
+        }
+
+        let dir = std::env::temp_dir().join(format!("mocra-active-stop-{}", uuid::Uuid::now_v7()));
+        let cluster = ClusterConfig::bootstrap(1, unused_addr(), dir.to_string_lossy());
+        let coordination = start_embedded_cluster(&cluster).await.unwrap();
+        let mut config = default_standalone_config("active_stop");
+        config.crawler.idle_stop_secs = None;
+        let state = State::try_new_with_provider_and_coordination(
+            Box::new(StaticConfigProvider { config }),
+            Some(coordination.clone()),
+        )
+        .await
+        .unwrap();
+        let engine = Arc::new(Engine::new(Arc::new(state), None).await.unwrap());
+        let entered = Arc::new(Notify::new());
+        let active = Arc::new(AtomicBool::new(false));
+        let builder = Mocra::builder().spider(
+            HeldSpider {
+                entered: entered.clone(),
+                active: active.clone(),
+            },
+            on_item(|_: ()| async {}),
+        );
+        for module in builder.modules {
+            engine.register_module(module).await;
+        }
+        engine
+            .queue_manager
+            .get_task_push_channel()
+            .send(QueuedItem::new(TaskEvent {
+                account: "default".into(),
+                platform: "default".into(),
+                module: Some(vec!["active_stop".into()]),
+                priority: Default::default(),
+                run_id: uuid::Uuid::now_v7(),
+            }))
+            .await
+            .unwrap();
+        let running_engine = engine.clone();
+        let running = tokio::spawn(async move { running_engine.start().await });
+        tokio::time::timeout(Duration::from_secs(5), entered.notified())
+            .await
+            .expect("the spider must be active before shutdown");
+        assert!(active.load(Ordering::SeqCst));
+
+        tokio::time::timeout(Duration::from_secs(5), engine.shutdown())
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), running)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(
+            !active.load(Ordering::SeqCst),
+            "shutdown must release active spider tasks before start returns"
+        );
+        assert_eq!(engine.inflight.total(), 0);
+        drop(engine);
+        coordination.shutdown().await;
+        drop(coordination);
+
+        let restored = start_embedded_cluster(&cluster).await.unwrap();
+        restored.set("after-active-stop", b"ready").await.unwrap();
+        restored.shutdown().await;
+        drop(restored);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     #[tokio::test]
     async fn config_watch_updates_live_limiters() {
         struct WatchedConfig(tokio::sync::watch::Receiver<Config>);

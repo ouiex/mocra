@@ -1,6 +1,6 @@
 # workspace: the root package (mocra) + the members under crates/.
 [workspace]
-resolver = "2"
+resolver = "3"
 members = ["crates/mocra-cluster", "crates/mocra-proxy", "crates/mocra-dag", "crates/mocra-store", "crates/mocra-core"]
 
 [package]

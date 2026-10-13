@@ -6,10 +6,18 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
-## [0.5.2] — 2026-10-08
+## [0.5.2] — 2026-10-13
 
 ### Fixed
 
+- Cancel and join active processor tasks before the engine run returns, including while paused
+  or waiting for concurrency capacity. Closing an input channel drains accepted work; explicit
+  shutdown cancels unfinished work without acknowledging it. In-flight counters are released on
+  cancellation and panic.
+- Await embedded Raft state-machine workers and snapshot builders during shutdown so their
+  storage handles cannot race an immediate restart.
+- Use Cargo resolver 3 to select dependencies compatible with the workspace Rust version
+  declarations, and check the store crate on Rust 1.85 in CI.
 - Stop and join owned engine background tasks and the admin API on normal shutdown. API shutdown
   closes incomplete HTTP requests after a bounded grace period; the same ports and Raft data
   directory can be reused immediately, including with the `store` feature enabled.

@@ -113,6 +113,8 @@ pub struct RaftControlPlane {
     node_id: NodeId,
     raft: MocraRaft,
     sm: Arc<StateMachine>,
+    sm_release_rx: tokio::sync::watch::Receiver<()>,
+    log_release_rx: tokio::sync::watch::Receiver<()>,
     /// A shared HTTP client (reusing the connection pool) for the write-forwarding hot path.
     client: reqwest::Client,
     /// Shared across clones so shutdown also releases the HTTP listener and its Raft handle.
@@ -154,6 +156,8 @@ impl RaftControlPlane {
             .map_err(|e| ControlError::Raft(e.to_string()))?;
         let sm_store = StateMachineStore::new(sm.clone());
         prepare_raft_state(&sm, &mut log_store, &sm_store).await?;
+        let sm_release_rx = sm_store.release_receiver();
+        let log_release_rx = log_store.release_receiver();
         let raft = MocraRaft::new(node_id, config, StubNetwork, log_store, sm_store)
             .await
             .map_err(|e| ControlError::Raft(e.to_string()))?;
@@ -168,6 +172,8 @@ impl RaftControlPlane {
             node_id,
             raft,
             sm,
+            sm_release_rx,
+            log_release_rx,
             client: reqwest::Client::new(),
             http_server: None,
         })
@@ -215,6 +221,8 @@ impl RaftControlPlane {
             .map_err(|e| ControlError::Raft(e.to_string()))?;
         let sm_store = StateMachineStore::new(sm.clone());
         prepare_raft_state(&sm, &mut log_store, &sm_store).await?;
+        let sm_release_rx = sm_store.release_receiver();
+        let log_release_rx = log_store.release_receiver();
         let listener = tokio::net::TcpListener::bind(&http_addr)
             .await
             .map_err(|e| ControlError::Raft(format!("bind {http_addr}: {e}")))?;
@@ -242,6 +250,8 @@ impl RaftControlPlane {
             node_id,
             raft,
             sm,
+            sm_release_rx,
+            log_release_rx,
             client: reqwest::Client::new(),
             http_server: Some(Arc::new(tokio::sync::Mutex::new(Some(HttpServer {
                 shutdown,
@@ -439,6 +449,7 @@ impl RaftControlPlane {
     ///
     /// Call it before crash recovery / restart to make sure the redb database handle is released,
     /// so reopening the same directory no longer reports "Database already open".
+    /// After shutdown returns, drop this handle and its clones before reopening the directory.
     pub async fn shutdown(&self) -> Result<(), ControlError> {
         let result = self
             .raft
@@ -469,6 +480,12 @@ impl RaftControlPlane {
                 joined.map_err(|e| ControlError::Raft(format!("HTTP shutdown: {e}")))?;
             }
         }
+        // Raft shutdown joins the core, but its state-machine, snapshot and replication
+        // workers can still own storage. These channels close after their last store drops.
+        let mut sm_release_rx = self.sm_release_rx.clone();
+        let mut log_release_rx = self.log_release_rx.clone();
+        let _ = sm_release_rx.changed().await;
+        let _ = log_release_rx.changed().await;
         result
     }
 
@@ -688,6 +705,26 @@ mod tests {
             .local_addr()
             .unwrap()
             .to_string()
+    }
+
+    #[tokio::test]
+    async fn cloned_single_node_shutdown_allows_immediate_storage_reuse() {
+        let dir = tempfile::tempdir().unwrap();
+        for value in 0..8u8 {
+            let node = RaftControlPlane::start_single_node(1, dir.path())
+                .await
+                .unwrap();
+            node.wait_leader(Duration::from_secs(5)).await.unwrap();
+            if value > 0 {
+                assert_eq!(node.get(b"value").await.unwrap(), Some(vec![value - 1]));
+            }
+            node.set(b"value", &[value]).await.unwrap();
+            let clone = node.clone();
+            let (first, second) = tokio::join!(node.shutdown(), clone.shutdown());
+            first.unwrap();
+            second.unwrap();
+            drop((node, clone));
+        }
     }
 
     #[tokio::test]
