@@ -4,7 +4,18 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project aims to follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.6.0] — Unreleased
+## [0.6.0] — 2026-10-14
+
+### Added
+
+- Add the runnable [`cluster_acceptance`](examples/cluster_acceptance/README.md) example:
+  three embedded Raft voters, a shared NATS JetStream data plane, a public quote crawler,
+  and a controlled HTTP page/detail site. The Python runner, Docker build/Compose files,
+  configuration template, and bilingual instructions live under `examples/`.
+- Automate leader failure, in-flight request redelivery, worker restart, shared-blob loading,
+  and graceful full-cluster recovery checks. Each run uses an isolated Docker project and
+  saves output, request audit records, source hashes, logs, and a JSON report; successful
+  phases require complete unique output and idle engines with drained broker consumers.
 
 ### Changed
 

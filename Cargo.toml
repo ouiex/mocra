@@ -162,6 +162,12 @@ name = "cluster_quickstart"
 path = "examples/cluster_quickstart.rs"
 required-features = ["cluster-embedded"]
 
+# Docker acceptance: three Raft voters and a shared NATS crawling data plane.
+[[example]]
+name = "cluster_acceptance"
+path = "examples/cluster_acceptance.rs"
+required-features = ["cluster-embedded", "queue-nats", "dashboard"]
+
 # Admin dashboard example: requires dashboard (it uses `.dashboard(port)`).
 [[example]]
 name = "dashboard"

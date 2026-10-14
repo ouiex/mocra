@@ -17,6 +17,7 @@ in-memory `Spider` facade. It stops after the configured idle period (30 seconds
 | [quotes_project.rs](quotes_project.rs) + [config](quotes_project.toml) | `cargo run --example quotes_project` | Internet access; writes a new `data/quotes_project/<run-id>/` directory / 外网和本地写入权限 |
 | [dashboard.rs](dashboard.rs) | `cargo run --example dashboard --features dashboard` | Internet access; open `http://127.0.0.1:12800` / 外网与浏览器 |
 | [cluster_quickstart.rs](cluster_quickstart.rs) | `cargo run --example cluster_quickstart --features cluster-embedded -- 1 127.0.0.1:7001` | Internet access, local port, writable `mocra-data/` / 外网、可用端口与数据目录 |
+| [cluster_acceptance.rs](cluster_acceptance.rs) + [Docker test scripts](cluster_acceptance/README.md) | `python3 examples/cluster_acceptance/run.py` | Docker Compose, Python 3.9+, Internet; three Raft voters + NATS / 真实三节点分布式抓取与故障恢复验收 |
 
 ## Advanced quotes project / 进阶引文项目
 

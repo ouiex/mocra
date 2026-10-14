@@ -1,0 +1,70 @@
+x-node: &node
+  image: ${MOCRA_ACCEPTANCE_IMAGE:?Set MOCRA_ACCEPTANCE_IMAGE}
+  build:
+    context: ../..
+    dockerfile: examples/cluster_acceptance/Dockerfile
+  command: ["crawl"]
+  stop_signal: SIGINT
+  stop_grace_period: 20s
+  ports: ["127.0.0.1::12800"]
+
+services:
+  nats:
+    image: ${MOCRA_ACCEPTANCE_NATS_IMAGE:-nats:2.10-alpine}
+    command: ["-js", "-sd", "/data", "-m", "8222"]
+    volumes: ["nats-data:/data"]
+    ports: ["127.0.0.1::8222"]
+  site:
+    image: python:3.11-alpine
+    command: ["python", "/site/site.py"]
+    volumes:
+      - ./site.py:/site/site.py:ro
+      - ${MOCRA_ACCEPTANCE_RUN_DIR:?Set MOCRA_ACCEPTANCE_RUN_DIR}/control:/control:ro
+      - ${MOCRA_ACCEPTANCE_RUN_DIR}/http:/output
+    ports: ["127.0.0.1::8000"]
+  node1:
+    <<: *node
+    environment:
+      MOCRA_NODE_ID: "1"
+      MOCRA_HTTP_ADDR: "node1:7000"
+      MOCRA_DATA_DIR: "/raft"
+      MOCRA_SEEDS: "node1:7000"
+    volumes:
+      - ${MOCRA_ACCEPTANCE_RUN_DIR}/config/node1.toml:/config/node.toml:ro
+      - ${MOCRA_ACCEPTANCE_RUN_DIR}/control:/control:ro
+      - ${MOCRA_ACCEPTANCE_RUN_DIR}/output:/output
+      - node1-raft:/raft
+      - blobs:/blobs
+  node2:
+    <<: *node
+    environment:
+      MOCRA_NODE_ID: "2"
+      MOCRA_HTTP_ADDR: "node2:7000"
+      MOCRA_DATA_DIR: "/raft"
+      MOCRA_SEEDS: "node1:7000"
+    volumes:
+      - ${MOCRA_ACCEPTANCE_RUN_DIR}/config/node2.toml:/config/node.toml:ro
+      - ${MOCRA_ACCEPTANCE_RUN_DIR}/control:/control:ro
+      - ${MOCRA_ACCEPTANCE_RUN_DIR}/output:/output
+      - node2-raft:/raft
+      - blobs:/blobs
+  node3:
+    <<: *node
+    environment:
+      MOCRA_NODE_ID: "3"
+      MOCRA_HTTP_ADDR: "node3:7000"
+      MOCRA_DATA_DIR: "/raft"
+      MOCRA_SEEDS: "node1:7000"
+    volumes:
+      - ${MOCRA_ACCEPTANCE_RUN_DIR}/config/node3.toml:/config/node.toml:ro
+      - ${MOCRA_ACCEPTANCE_RUN_DIR}/control:/control:ro
+      - ${MOCRA_ACCEPTANCE_RUN_DIR}/output:/output
+      - node3-raft:/raft
+      - blobs:/blobs
+
+volumes:
+  nats-data:
+  node1-raft:
+  node2-raft:
+  node3-raft:
+  blobs:
