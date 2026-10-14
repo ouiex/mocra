@@ -1,13 +1,27 @@
-//! DAG scheduling (the `mocra-dag` shim + host adapter) has been extracted into the `schedule`
-//! module of the standalone [`mocra_core`] crate.
-//!
-//! This module remains as a re-export shim so that the existing `crate::schedule::*` and
-//! `crate::schedule::dag::*` paths keep working (zero-change migration); new code can use
-//! `mocra_core::schedule::...` directly.
+//! DAG scheduling and adapters for the cache and distributed sync services.
 
-pub use mocra_core::schedule::*;
+pub mod dag;
+pub use dag::*;
 
-/// Compatibility shim for the old `crate::schedule::dag::*` path.
-pub mod dag {
-    pub use mocra_core::schedule::dag::*;
+use async_trait::async_trait;
+
+use crate::sync::{SyncAble, SyncService};
+
+impl SyncAble for DagNodeSyncState {
+    fn topic() -> String {
+        "dag_node_sync_state".to_string()
+    }
 }
+
+/// Adapts the host's distributed sync service into dag's node status event sink.
+pub struct DagSyncSink(pub SyncService);
+
+#[async_trait]
+impl DagEventSink for DagSyncSink {
+    async fn emit(&self, event: &DagNodeSyncState) -> Result<(), String> {
+        self.0.send(event).await
+    }
+}
+
+#[cfg(test)]
+mod dag_tests;

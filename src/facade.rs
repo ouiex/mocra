@@ -1,4 +1,4 @@
-//! High-level `Spider` facade (refactor Phase 1).
+//! High-level `Spider` facade.
 //!
 //! A simple entry point covering 80% of use cases: implement a [`Spider`], get it running in three
 //! steps with [`Mocra::builder`], and receive typed data through [`DataSink`] / [`on_item`] — no
@@ -7,9 +7,8 @@
 //! The existing [`ModuleTrait`] + DAG remains the advanced path;
 //! a `Spider` is adapted into a single-node module and compiled into the existing engine.
 //!
-//! # Current status (v0)
-//! - `run()` currently reuses `State::try_new(path)` and still requires a config (including
-//!   `db.url`). "DB-less L0" and "programmatic default config" land in refactor Phase 2.
+//! # Runtime
+//! - `run()` uses an in-memory, database-free configuration unless `from_toml` is provided.
 //! - `Ctx::follow` feeds requests back into the same node's `generate` via `TaskParserEvent`
 //!   metadata, which is how pagination / follow-up is implemented.
 
@@ -100,8 +99,7 @@ impl Seeds {
     /// Convenience GET: queues a request and returns a mutable reference so you can go on to set
     /// headers / metadata.
     pub fn get(&mut self, url: impl AsRef<str>) -> &mut Request {
-        self.reqs.push(Request::new(url, RequestMethod::Get));
-        self.reqs.last_mut().expect("just pushed")
+        self.add(Request::new(url, RequestMethod::Get))
     }
 
     /// Queue a request with any method.
@@ -141,7 +139,7 @@ impl<Item> Ctx<Item> {
 
     /// Convenience GET version of [`follow`](Ctx::follow).
     pub fn follow_get(&mut self, url: impl AsRef<str>) {
-        self.follows.push(Request::new(url, RequestMethod::Get));
+        self.follow(Request::new(url, RequestMethod::Get));
     }
 }
 
@@ -376,7 +374,7 @@ pub struct ClusterConfig {
     /// An initialized data directory is restored directly without using the seeds.
     pub seeds: Vec<String>,
     /// Optional Raft timing tuning (the defaults suit a LAN; enlarge for WAN / high latency).
-    pub raft_tuning: Option<mocra_cluster::RaftTuning>,
+    pub raft_tuning: Option<crate::cluster::RaftTuning>,
 }
 
 #[cfg(feature = "cluster-embedded")]
@@ -479,7 +477,7 @@ impl ClusterConfig {
     }
 
     /// Customize the Raft timing (WAN / high-latency clusters); the defaults suit a LAN.
-    pub fn with_raft_tuning(mut self, tuning: mocra_cluster::RaftTuning) -> Self {
+    pub fn with_raft_tuning(mut self, tuning: crate::cluster::RaftTuning) -> Self {
         self.raft_tuning = Some(tuning);
         self
     }
@@ -494,10 +492,10 @@ impl ClusterConfig {
 async fn start_embedded_cluster(
     cluster: &ClusterConfig,
 ) -> Result<Arc<dyn crate::sync::CoordinationBackend>> {
+    use crate::cluster::RaftControlPlane;
     use crate::sync::RaftCoordinationBackend;
-    use mocra_cluster::RaftControlPlane;
     let svc_err =
-        |e: mocra_cluster::ControlError| Error::new(ErrorKind::Service, Some(e.to_string()));
+        |e: crate::cluster::ControlError| Error::new(ErrorKind::Service, Some(e.to_string()));
 
     let cp = match cluster.raft_tuning.clone() {
         Some(tuning) => RaftControlPlane::start_cluster_node_with(
@@ -617,7 +615,7 @@ pub struct MocraBuilder {
 impl MocraBuilder {
     /// Load the config from a TOML file.
     ///
-    /// Required in v0; programmatic default config and DB-less runs land in refactor Phase 2.
+    /// Without this method, the builder uses the single-node, database-free defaults.
     pub fn from_toml(mut self, path: impl Into<String>) -> Self {
         self.config_path = Some(path.into());
         self
@@ -1343,7 +1341,7 @@ mod cluster_config_tests {
 
     #[tokio::test]
     async fn embedded_cluster_restore_has_a_leader_before_seed_decision() {
-        use mocra_cluster::{ControlPlane, RaftControlPlane};
+        use crate::cluster::{ControlPlane, RaftControlPlane};
         use std::collections::BTreeMap;
         use std::time::Duration;
 
@@ -1709,9 +1707,9 @@ mod follow_request_tests {
     use super::*;
     use crate::common::model::meta::MetaData;
     use crate::engine::runner::StageCounter;
+    use crate::proxy::{IpProxy, ProxyEnum};
     use async_trait::async_trait;
     use futures::StreamExt;
-    use mocra_proxy::{IpProxy, ProxyEnum};
     use serde_json::json;
 
     struct FollowSpider;
@@ -1858,7 +1856,7 @@ mod downloader_tests {
     use crate::common::model::{Cookies, Headers, Request, Response};
     use crate::downloader::Downloader;
     use crate::errors::Result;
-    use mocra_proxy::{IpProxy, ProxyEnum};
+    use crate::proxy::{IpProxy, ProxyEnum};
 
     /// A custom downloader: ignores the network and returns a fixed response — used to prove the
     /// pipeline really calls it (rather than reqwest).

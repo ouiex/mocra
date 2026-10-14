@@ -11,8 +11,10 @@ use mocra::prelude::proxy::{DirectProxy, PoolConfig, ProxyConfig, ProxyManager};
 
 #[tokio::main]
 async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
-    let mut pool_config = PoolConfig::default();
-    pool_config.health_check_interval_secs = 0; // No background probes in this offline example.
+    let pool_config = PoolConfig {
+        health_check_interval_secs: 0, // No background probes in this offline example.
+        ..Default::default()
+    };
 
     let config = ProxyConfig {
         direct: Some(vec![

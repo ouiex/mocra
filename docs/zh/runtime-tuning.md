@@ -25,9 +25,9 @@ batch_concurrency = 10
 
 ## 独立 DAG 调度器
 
-`mocra-dag` 调度器等待节点完成事件，而不再轮询。使用 `DagRunStateStore` 时，`.with_run_state_store(store, run_key)` 默认每成功完成 16 个节点保存一次完整检查点。要恢复逐节点保存，在 `.with_run_state_store` **之后**调用 `.with_run_state_checkpoint_interval(1)`。默认间隔下，检查点之间发生进程丢失，最多可能重跑 15 个已成功节点；节点副作用应可安全重复，或改用更短间隔。已处理的错误会保存失败快照。
+`mocra::schedule::dag` 调度器等待节点完成事件，而不再轮询。使用 `DagRunStateStore` 时，`.with_run_state_store(store, run_key)` 默认每成功完成 16 个节点保存一次完整检查点。要恢复逐节点保存，在 `.with_run_state_store` **之后**调用 `.with_run_state_checkpoint_interval(1)`。默认间隔下，检查点之间发生进程丢失，最多可能重跑 15 个已成功节点；节点副作用应可安全重复，或改用更短间隔。已处理的错误会保存失败快照。
 
-这是 `mocra-dag` 调度器设置，**不是** `Spider` 或引擎 TOML 选项。复制开销与恢复取舍见[检查点测量](../../benchmarks/dag-checkpoints.md)；这些微基准不能代表完整爬虫吞吐。
+这是 `mocra::schedule::dag` 调度器设置，**不是** `Spider` 或引擎 TOML 选项。复制开销与恢复取舍见[检查点测量](../../benchmarks/dag-checkpoints.md)；这些微基准不能代表完整爬虫吞吐。
 
 ## 验收边界
 

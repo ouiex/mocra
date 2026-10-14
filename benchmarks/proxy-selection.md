@@ -3,7 +3,7 @@
 Run the local workload with:
 
 ```bash
-cargo test -p mocra-proxy --lib selection_policy_workload -- --ignored --nocapture
+cargo test --lib selection_policy_workload -- --ignored --nocapture
 ```
 
 The debug-build workload selects from 32 static proxies using eight concurrent

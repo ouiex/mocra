@@ -3,7 +3,7 @@
 Run the reproducible Linux workload with:
 
 ```bash
-cargo test -p mocra-core --lib local_full_path -- --ignored --nocapture --test-threads=1
+cargo test --lib local_full_path -- --ignored --nocapture --test-threads=1
 ```
 
 The ignored workload uses a local `QueueManager` channel (capacity 32), `Batcher`

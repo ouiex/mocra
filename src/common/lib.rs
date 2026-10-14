@@ -1,7 +1,19 @@
-//! The shared domain models / runtime context have been extracted into the `common` module of the
-//! standalone [`mocra_core`] crate.
+//! Shared domain models, runtime state, and processing infrastructure.
 //!
-//! This module remains as a re-export shim so that existing `crate::common::*` references keep
-//! working (zero-change migration); new code can use `mocra_core::common::...` directly.
+//! This module centralizes cross-cutting building blocks used by the runtime,
+//! including configuration, storage abstractions, processor chains, and operational
+//! policies.
 
-pub use mocra_core::common::*;
+pub mod config;
+pub mod context;
+pub mod coordination;
+pub mod interface;
+pub mod metrics;
+pub mod model;
+pub mod policy;
+pub mod processors;
+pub mod registry;
+pub mod state;
+pub mod status_tracker;
+pub mod storage;
+pub mod stream_stats;

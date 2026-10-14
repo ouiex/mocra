@@ -1,11 +1,6 @@
-# workspace: the root package (mocra) + the members under crates/.
-[workspace]
-resolver = "3"
-members = ["crates/mocra-cluster", "crates/mocra-proxy", "crates/mocra-dag", "crates/mocra-store", "crates/mocra-core"]
-
 [package]
 name = "mocra"
-version = "0.5.2"
+version = "0.6.0"
 edition = "2024"
 description = "A distributed, event-driven crawling and data collection framework"
 license = "MIT OR Apache-2.0"
@@ -39,28 +34,56 @@ rustdoc-args = ["--cfg", "docsrs"]
 
 
 [dependencies]
-# Runtime: all engine/pipeline logic lives in mocra-core; the host is only a thin facade
-# (facade + prelude + per-layer shims). So this list keeps only the dependencies the facade/bin
-# use directly, plus feature-gated optional dependencies — everything else (axum, tracing, etc.)
-# is a transitive dependency of mocra-core and is no longer declared here.
-mocra-core = { path = "crates/mocra-core", version = "0.5.2" }
-mocra-proxy = { path = "crates/mocra-proxy", version = "0.5.2" }
-# Dependencies used directly by the facade (src/facade.rs, src/prelude.rs, src/lib.rs, src/bin/).
+# Runtime, domain models, proxy pool, and DAG scheduling.
 async-trait = "0.1"
 tokio = { version = "1", features = ["full"] }
 futures = "0.3"
 log = "0.4"
+thiserror = "2"
+serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 uuid = { version = "1", features = ["serde", "v7", "zerocopy", "v4"] }
+dashmap = "6"
+zstd = "0.13"
+flate2 = "1.1.9"
+metrics = "0.24"
+chrono = { version = "0.4.43", features = ["serde"] }
+regex = "1"
+md5 = "0.8"
+reqwest = { version = "0.13", default-features = false, features = ["http2", "charset", "native-tls", "brotli", "form", "cookies", "json", "socks", "gzip", "deflate", "zstd", "hickory-dns", "stream"] }
+tracing = "0.1"
+tracing-appender = "0.2"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "time", "json"] }
+tracing-log = "0.2"
+cron = "0.15"
+indexmap = { version = "2", features = ["serde"] }
+reqwest_cookie_store = { version = "0.10", features = ["serde"] }
+url = "2"
+toml = "0.9"
+rand = "0.9.2"
+semver = { version = "1", features = ["serde"] }
+tokio-tungstenite = { version = "0.28", features = ["native-tls"] }
+dyn-clone = "1"
+rmp-serde = "1.3"
+serde_path_to_error = "0.1"
+crc32fast = "1.5.0"
+bloomfilter = "3"
+metrics-exporter-prometheus = "0.18"
+sysinfo = "0.38"
+time = { version = "0.3", features = ["formatting", "parsing"] }
 # Global allocator (enabled by the default `mimalloc` feature).
 mimalloc = { version = "0.1", default-features = false, optional = true }
 # Feature-gated optional dependencies.
-mocra-cluster = { path = "crates/mocra-cluster", version = "0.5.2", optional = true } # cluster-embedded: facade ClusterConfig
+openraft = { version = "0.9", features = ["serde", "storage-v2"], optional = true }
+redb = { version = "2", optional = true }
+axum = { version = "0.8", features = ["json"], optional = true }
+tower-http = { version = "0.6", features = ["cors"], optional = true }
+sea-orm = { version = "1", features = ["macros", "with-json", "with-chrono", "with-uuid", "postgres-array", "runtime-tokio-native-tls", "sqlx-postgres", "sqlx-sqlite"], optional = true }
+rdkafka = { version = "0.39", features = ["cmake-build"], optional = true }
+async-nats = { version = "0.38", optional = true }
+calamine = { version = "0.33.0", features = ["chrono", "dates"], optional = true }
 v8 = { version = "145", optional = true }                          # js-v8: embedded JS runtime
-tempfile = { version = "3", optional = true }                      # js-v8: worker temp files
-# The polars trio: under the `polars` / `excel` features the host prelude re-exports `::polars::*`
-# (so downstream users of DataFrame-related types stay version-aligned), so the host needs a
-# direct (optional) dependency on them — compiled only when those features are enabled.
+# The prelude re-exports Polars types so downstream versions stay aligned.
 # Polars 0.54 IPC streaming also requires its parquet feature.
 polars = { version = "0.54.4", features = ["json", "lazy", "serde", "csv", "timezones", "strings", "ipc", "parquet", "dtype-decimal"], optional = true }
 polars-lazy = { version = "0.54.4", features = ["pivot"], optional = true }
@@ -68,10 +91,8 @@ polars-ops = { version = "0.54.4", features = ["pivot"], optional = true }
 
 [dev-dependencies]
 # Tests / examples only; never enters downstream users' dependency trees.
-reqwest = { version = "0.13", default-features = false, features = ["json"] } # HTTP client for the dashboard smoke test
 scraper = "0.27"                                 # examples: HTML parsing (CSS selectors)
-semver = "1"                                     # downloader facade tests (Version)
-serde = { version = "1", features = ["derive"] } # examples: derive Serialize for output items
+tempfile = "3"
 
 [profile.release]
 lto = true
@@ -84,31 +105,27 @@ strip = true
 default = ["mimalloc"]
 mimalloc = ["dep:mimalloc"]
 # Embedded JS (v8) runtime: lets the facade/examples run JS parsing scripts alongside Lua.
-js-v8 = ["dep:v8", "dep:tempfile"]
-# The features below merely "forward" the switch to mocra-core — the corresponding runtime code
-# lives there, so the host needs no direct dependency on sea-orm / rdkafka / async-nats / polars /
-# calamine / tower-http.
-# DataFrame support (polars): unlocks `DataFrameStore` / `polars_utils` and re-exports
+js-v8 = ["dep:v8"]
+# DataFrame support (polars): unlocks `DataFrameStore` and re-exports
 # `::polars::*` from the prelude.
-polars = ["dep:polars", "dep:polars-lazy", "dep:polars-ops", "mocra-core/polars"]
-# Excel parsing (calamine → DataFrame); implies polars (including the host's polars re-export).
-excel = ["polars", "mocra-core/excel"]
+polars = ["dep:polars", "dep:polars-lazy", "dep:polars-ops"]
+# Excel parsing (calamine → DataFrame); implies polars.
+excel = ["polars", "dep:calamine"]
 # Data-plane Kafka queue backend (off by default — avoids rdkafka's cmake/C++ build burden).
-queue-kafka = ["mocra-core/queue-kafka"]
+queue-kafka = ["dep:rdkafka"]
 # Data-plane NATS (JetStream) queue backend — lightweight, a good fit for an embedded cluster's
 # data plane.
-queue-nats = ["mocra-core/queue-nats"]
+queue-nats = ["dep:async-nats"]
 # Database / multi-tenant metadata store (sea-orm). Off by default — the DB-less standalone mode
 # does not need it; enabling it unlocks the DB-driven account × platform × module task model.
-store = ["mocra-core/store"]
+store = ["dep:sea-orm"]
 # Admin dashboard: once enabled, the engine exposes the admin + observability HTTP API
 # (task / cluster / metrics monitoring).
-dashboard = ["mocra-core/dashboard"]
+dashboard = ["dep:tower-http", "dep:axum"]
 # Embedded redb+Raft control plane. Once enabled, `RaftCoordinationBackend` implements
 # `CoordinationBackend`, so a self-forming Raft cluster can handle coordination
-# (locks / election / KV). The facade uses `ClusterConfig`, so the host side still needs
-# `dep:mocra-cluster`.
-cluster-embedded = ["dep:mocra-cluster", "mocra-core/cluster-embedded"]
+# (locks / election / KV).
+cluster-embedded = ["dep:openraft", "dep:redb", "dep:axum"]
 
 [lib]
 name = "mocra"

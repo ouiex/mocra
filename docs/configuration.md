@@ -5,8 +5,8 @@
 > For architecture, pipeline internals, and distributed deployment, see [docs/README.md](README.md).
 
 Configuration uses TOML. Every key below is verified against the config structs in
-`crates/mocra-core/src/common/model/config.rs` (plus `logger_config.rs`, `policy.rs`, and
-`mocra-proxy`). Prefer **URL + a few necessary fields** over exhaustively listing every option.
+`src/common/model/config.rs` (plus `logger_config.rs`, `policy.rs`, and
+`mocra::proxy`). Prefer **URL + a few necessary fields** over exhaustively listing every option.
 
 ## When do you need a config file?
 
@@ -20,7 +20,7 @@ Mocra::builder()
     .await?;
 ```
 
-Add `mocra = "0.5"` to `Cargo.toml`. Reach for a TOML file only when you need the **advanced /
+Add `mocra = "0.6"` to `Cargo.toml`. Reach for a TOML file only when you need the **advanced /
 distributed** path — a database-backed task model, Kafka/NATS data-plane queues,
 the dashboard/observability HTTP API, cron scheduling, proxy pools, or custom error policies. Load
 it with:
@@ -51,7 +51,7 @@ means one is.)
 ## Feature flags
 
 Config keys are inert unless the runtime code they drive is compiled in. Enable with
-`mocra = { version = "0.5", features = ["…"] }`.
+`mocra = { version = "0.6", features = ["…"] }`.
 
 | Feature | Needed for |
 |---|---|
@@ -569,4 +569,4 @@ enabled = true
 ## Config samples
 
 - [Local monitoring config](../monitoring/local_engine.toml) — includes a dashboard endpoint and a SQLite URL; adjust paths and feature flags for your deployment.
-- [Config deserialization tests](../crates/mocra-core/src/common/model/config.rs) — minimal schema examples maintained with the model.
+- [Config deserialization tests](../src/common/model/config.rs) — minimal schema examples maintained with the model.

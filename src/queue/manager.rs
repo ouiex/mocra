@@ -1,0 +1,1001 @@
+use crate::common::interface::storage::{BlobStorage, Offloadable};
+use crate::common::model::config::Config;
+use crate::common::model::message::{TaskErrorEvent, TaskEvent, TaskParserEvent};
+use crate::common::model::{Prioritizable, Priority, Request, Response};
+use crate::common::policy::PolicyResolver;
+use crate::common::storage::file::FileBlobStorage;
+use crate::errors::{Error, ErrorKind};
+use crate::queue::batcher::Batcher;
+use crate::queue::channel::Channel;
+use crate::queue::compensation::{Compensator, Identifiable};
+use crate::queue::compression::{compress_payload_owned, decompress_payload};
+#[cfg(feature = "queue-kafka")]
+use crate::queue::kafka::KafkaQueue;
+#[cfg(feature = "queue-nats")]
+use crate::queue::nats::NatsQueue;
+use crate::queue::{HEADER_ATTEMPT, HEADER_CREATED_AT, MqBackend, NackPolicy, QueuedItem};
+use crate::utils::logger::LogModel;
+use futures::future::join_all;
+use log::{error, info};
+use metrics::counter;
+use rmp_serde as rmps;
+use serde_path_to_error;
+use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::sync::mpsc::{Receiver, Sender};
+use tokio::sync::{Mutex, Semaphore};
+
+const DEFAULT_COMPRESSION_THRESHOLD: usize = 1024;
+const BLOCKING_PAYLOAD_BYTES: usize = 64 * 1024;
+
+fn default_headers() -> HashMap<String, String> {
+    let mut headers = HashMap::new();
+    headers.insert(HEADER_ATTEMPT.to_string(), "0".to_string());
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .to_string();
+    headers.insert(HEADER_CREATED_AT.to_string(), now_ms);
+    headers
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::queue::{AckAction, Message};
+
+    #[tokio::test]
+    async fn batch_decoding_preserves_delivery_and_acknowledgements() {
+        for codec in [QueueCodec::Json, QueueCodec::Msgpack] {
+            for (count, body_size) in [(1, 0), (32, 0), (1, BLOCKING_PAYLOAD_BYTES)] {
+                let request = Request::new("http://example.com/queue", "POST")
+                    .with_body(vec![b'a'; body_size]);
+                let payload = Arc::new(match codec {
+                    QueueCodec::Json => serde_json::to_vec(&request).unwrap(),
+                    QueueCodec::Msgpack => rmps::to_vec(&request).unwrap(),
+                });
+                let headers = Arc::new(default_headers());
+                let (ack_tx, mut ack_rx) = tokio::sync::mpsc::channel(count + 1);
+                let mut messages: Vec<Message> = (0..count)
+                    .map(|index| Message {
+                        payload: payload.clone(),
+                        id: index.to_string(),
+                        headers: headers.clone(),
+                        ack_tx: ack_tx.clone(),
+                    })
+                    .collect();
+                let poison_payload = Arc::new(vec![0xff]);
+                messages.push(Message {
+                    payload: poison_payload.clone(),
+                    id: "poison".into(),
+                    headers: headers.clone(),
+                    ack_tx,
+                });
+                let (sender, mut receiver) = tokio::sync::mpsc::channel(count);
+
+                QueueManager::process_batch_messages::<Request>(
+                    messages,
+                    "request-normal",
+                    &sender,
+                    &None,
+                    &None,
+                    codec,
+                )
+                .await;
+
+                let (id, action) = ack_rx.try_recv().unwrap();
+                assert_eq!(id, "poison");
+                let AckAction::Nack(reason, payload, returned_headers) = action else {
+                    panic!("invalid payload must be rejected");
+                };
+                assert_eq!(reason, "Deserialization failed");
+                assert_eq!(payload, poison_payload);
+                assert_eq!(returned_headers, headers);
+
+                for index in 0..count {
+                    let item = receiver.try_recv().unwrap();
+                    assert_eq!(item.id, request.id);
+                    assert_eq!(item.body, request.body);
+                    assert!(
+                        ack_rx.try_recv().is_err(),
+                        "delivery must await explicit ACK"
+                    );
+                    item.ack().await.unwrap();
+                    let (id, action) = ack_rx.try_recv().unwrap();
+                    assert_eq!(id, index.to_string());
+                    assert!(matches!(action, AckAction::Ack));
+                }
+                assert!(receiver.try_recv().is_err());
+            }
+        }
+    }
+}
+
+fn msgpack_decode<T: serde::de::DeserializeOwned>(
+    bytes: &[u8],
+) -> Result<T, serde_path_to_error::Error<rmps::decode::Error>> {
+    let mut deserializer = rmps::Deserializer::new(bytes);
+    serde_path_to_error::deserialize(&mut deserializer)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum QueueCodec {
+    Json,
+    Msgpack,
+}
+
+fn queue_config_error(message: impl Into<String>) -> Error {
+    Error::new(
+        ErrorKind::Queue,
+        Some(std::io::Error::other(message.into())),
+    )
+}
+
+fn queue_codec_from_config(cfg: &Config) -> crate::errors::Result<QueueCodec> {
+    let codec = cfg
+        .channel_config
+        .queue_codec
+        .as_deref()
+        .unwrap_or("msgpack")
+        .to_lowercase();
+
+    match codec.as_str() {
+        "json" => Ok(QueueCodec::Json),
+        "msgpack" | "rmp" => Ok(QueueCodec::Msgpack),
+        _ => Err(queue_config_error(format!(
+            "unsupported queue codec: {codec}"
+        ))),
+    }
+}
+
+#[derive(Clone)]
+pub struct QueueManager {
+    pub channel: Arc<Channel>,
+    pub backend: Option<Arc<dyn MqBackend>>,
+    pub compensator: Option<Arc<dyn Compensator>>,
+    pub blob_storage: Option<Arc<dyn BlobStorage>>,
+    pub batch_concurrency: usize,
+    pub compression_threshold: usize,
+    pub nack_policy: NackPolicy,
+    pub log_topic: String,
+    queue_codec: QueueCodec,
+}
+
+impl QueueManager {
+    pub fn new(backend: Option<Arc<dyn MqBackend>>, capacity: usize) -> Self {
+        QueueManager {
+            channel: Arc::new(Channel::new(capacity)),
+            backend,
+            compensator: None,
+            blob_storage: None,
+            batch_concurrency: 50,
+            compression_threshold: DEFAULT_COMPRESSION_THRESHOLD,
+            nack_policy: NackPolicy::default(),
+            log_topic: "log".to_string(),
+            queue_codec: QueueCodec::Msgpack,
+        }
+    }
+
+    pub fn from_config(cfg: &Config) -> Arc<Self> {
+        Self::from_config_with_log_topic(cfg, None)
+    }
+
+    pub fn from_config_with_log_topic(cfg: &Config, log_topic: Option<&str>) -> Arc<Self> {
+        let manager = Self::try_from_config_with_log_topic(cfg, log_topic)
+            .expect("invalid queue configuration");
+        manager.subscribe();
+        manager
+    }
+
+    pub fn try_from_config(cfg: &Config) -> crate::errors::Result<Arc<Self>> {
+        Self::try_from_config_with_log_topic(cfg, None)
+    }
+
+    pub fn try_from_config_with_log_topic(
+        cfg: &Config,
+        log_topic: Option<&str>,
+    ) -> crate::errors::Result<Arc<Self>> {
+        let channel_config = &cfg.channel_config;
+        if channel_config.capacity == 0 || channel_config.batch_concurrency == Some(0) {
+            return Err(queue_config_error(
+                "queue capacity and batch concurrency must be positive",
+            ));
+        }
+        if channel_config.kafka.is_some() && channel_config.nats.is_some() {
+            return Err(queue_config_error(
+                "configure either Kafka or NATS, not both",
+            ));
+        }
+        if let Some(blob) = &channel_config.blob_storage
+            && let Some(path) = &blob.path
+            && (channel_config.kafka.is_some() || channel_config.nats.is_some())
+            && (!blob.shared_path || !std::path::Path::new(path).is_absolute())
+        {
+            return Err(queue_config_error(
+                "remote queue blob_storage.path requires an absolute shared path and shared_path: true",
+            ));
+        }
+        #[allow(unused_variables)] // used by queue-kafka / queue-nats backends
+        let namespace = &cfg.name;
+
+        let nack_policy = if let Some(policy_cfg) = &cfg.policy
+            && !policy_cfg.overrides.is_empty()
+        {
+            let resolver = PolicyResolver::new(Some(policy_cfg));
+            let decision =
+                resolver.resolve_with_kind("queue", Some("nack"), Some("failed"), ErrorKind::Queue);
+            NackPolicy {
+                max_retries: decision.policy.max_retries,
+                backoff_ms: decision.policy.backoff_ms,
+            }
+        } else {
+            NackPolicy {
+                max_retries: channel_config.nack_max_retries.unwrap_or(0),
+                backoff_ms: channel_config.nack_backoff_ms.unwrap_or(0),
+            }
+        };
+
+        let mut queue_manager = if let Some(kafka_config) = &channel_config.kafka {
+            #[cfg(feature = "queue-kafka")]
+            {
+                let queue = KafkaQueue::new(
+                    kafka_config,
+                    channel_config.minid_time,
+                    namespace,
+                    nack_policy,
+                )?;
+                QueueManager::new(Some(Arc::new(queue)), channel_config.capacity)
+            }
+            #[cfg(not(feature = "queue-kafka"))]
+            {
+                let _ = kafka_config;
+                return Err(queue_config_error(
+                    "channel_config.kafka requires the `queue-kafka` feature",
+                ));
+            }
+        } else if let Some(nats_config) = &channel_config.nats {
+            #[cfg(feature = "queue-nats")]
+            {
+                let queue = NatsQueue::new(
+                    nats_config,
+                    channel_config.minid_time,
+                    namespace,
+                    nack_policy,
+                )?;
+                QueueManager::new(Some(Arc::new(queue)), channel_config.capacity)
+            }
+            #[cfg(not(feature = "queue-nats"))]
+            {
+                let _ = nats_config;
+                return Err(queue_config_error(
+                    "channel_config.nats requires the `queue-nats` feature",
+                ));
+            }
+        } else {
+            info!("In-Memory Queue initialized (Single Node Mode)");
+            QueueManager::new(None, channel_config.capacity)
+        };
+
+        if let Some(topic) = log_topic {
+            queue_manager.log_topic = topic.to_string();
+        }
+
+        queue_manager.nack_policy = nack_policy;
+        queue_manager.queue_codec = queue_codec_from_config(cfg)?;
+
+        if let Some(concurrency) = channel_config.batch_concurrency {
+            queue_manager.with_concurrency(concurrency);
+        }
+        if let Some(threshold) = channel_config.compression_threshold {
+            queue_manager.with_compression_threshold(threshold);
+        }
+
+        if let Some(blob_config) = &channel_config.blob_storage {
+            if let Some(path) = &blob_config.path {
+                let storage = Arc::new(FileBlobStorage::new(path));
+                queue_manager.with_blob_storage(storage);
+                info!("BlobStorage initialized at: {}", path);
+            }
+        }
+
+        Ok(Arc::new(queue_manager))
+    }
+
+    pub fn with_backend(&mut self, backend: Arc<dyn MqBackend>) {
+        self.backend = Some(backend);
+    }
+
+    pub fn with_compensator(&mut self, compensator: Arc<dyn Compensator>) {
+        self.compensator = Some(compensator);
+    }
+
+    pub fn with_blob_storage(&mut self, storage: Arc<dyn BlobStorage>) {
+        self.blob_storage = Some(storage);
+    }
+
+    pub fn with_concurrency(&mut self, concurrency: usize) {
+        self.batch_concurrency = concurrency;
+    }
+
+    pub fn with_compression_threshold(&mut self, threshold: usize) {
+        self.compression_threshold = threshold;
+    }
+
+    pub fn with_log_topic(&mut self, topic: impl Into<String>) {
+        self.log_topic = topic.into();
+    }
+
+    /// Compatibility entry point for callers that start queues synchronously.
+    /// Engine startup uses subscribe_checked so subscription failures are returned.
+    pub fn subscribe(&self) {
+        if self.backend.is_none() {
+            return;
+        }
+        let manager = self.clone();
+        tokio::runtime::Handle::try_current()
+            .expect("QueueManager::subscribe requires a Tokio runtime; use subscribe_checked during async startup")
+            .spawn(async move {
+            if let Err(error) = manager.subscribe_checked().await {
+                error!("Queue subscription failed: {error}");
+            }
+        });
+    }
+
+    /// Registers all remote consumers before accepting outbound work.
+    pub async fn subscribe_checked(&self) -> crate::errors::Result<()> {
+        let Some(backend) = &self.backend else {
+            return Ok(());
+        };
+        let backend = backend.clone();
+        let channel = self.channel.clone();
+        let compensator = self.compensator.clone();
+        let blob_storage = self.blob_storage.clone();
+        let concurrency = self.batch_concurrency;
+        let codec = self.queue_codec;
+
+        tokio::try_join!(
+            Self::subscribe_all_priorities(
+                "task",
+                channel.task_sender.clone(),
+                backend.clone(),
+                compensator.clone(),
+                blob_storage.clone(),
+                concurrency,
+                codec,
+            ),
+            Self::subscribe_all_priorities(
+                "request",
+                channel.download_request_sender.clone(),
+                backend.clone(),
+                compensator.clone(),
+                blob_storage.clone(),
+                concurrency,
+                codec,
+            ),
+            Self::subscribe_all_priorities(
+                "response",
+                channel.remote_response_sender.clone(),
+                backend.clone(),
+                compensator.clone(),
+                blob_storage.clone(),
+                concurrency,
+                codec,
+            ),
+            Self::subscribe_all_priorities(
+                "parser_task",
+                channel.remote_parser_task_sender.clone(),
+                backend.clone(),
+                compensator.clone(),
+                blob_storage.clone(),
+                concurrency,
+                codec,
+            ),
+            Self::subscribe_all_priorities(
+                "error_task",
+                channel.remote_error_sender.clone(),
+                backend.clone(),
+                compensator,
+                blob_storage.clone(),
+                concurrency,
+                codec,
+            ),
+        )?;
+
+        self.spawn_forwarder("task", channel.remote_task_receiver.clone());
+        self.spawn_forwarder("request", channel.request_receiver.clone());
+        self.spawn_forwarder("response", channel.response_receiver.clone());
+        self.spawn_forwarder("parser_task", channel.parser_task_receiver.clone());
+        self.spawn_forwarder("error_task", channel.error_receiver.clone());
+        self.spawn_forwarder(self.log_topic.as_str(), channel.log_receiver.clone());
+        Ok(())
+    }
+
+    async fn subscribe_all_priorities<T>(
+        topic_base: &str,
+        sender: Sender<QueuedItem<T>>,
+        backend: Arc<dyn MqBackend>,
+        compensator: Option<Arc<dyn Compensator>>,
+        blob_storage: Option<Arc<dyn BlobStorage>>,
+        concurrency: usize,
+        codec: QueueCodec,
+    ) -> crate::errors::Result<()>
+    where
+        T: serde::de::DeserializeOwned
+            + Send
+            + 'static
+            + std::fmt::Debug
+            + Identifiable
+            + Offloadable,
+    {
+        let priorities = [Priority::High, Priority::Normal, Priority::Low];
+        for priority in priorities {
+            let topic = format!("{}-{}", topic_base, priority.suffix());
+            Self::subscribe_topic(
+                &topic,
+                sender.clone(),
+                backend.clone(),
+                compensator.clone(),
+                blob_storage.clone(),
+                concurrency,
+                codec,
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
+    async fn subscribe_topic<T>(
+        topic: &str,
+        sender: Sender<QueuedItem<T>>,
+        backend: Arc<dyn MqBackend>,
+        compensator: Option<Arc<dyn Compensator>>,
+        blob_storage: Option<Arc<dyn BlobStorage>>,
+        concurrency: usize,
+        codec: QueueCodec,
+    ) -> crate::errors::Result<()>
+    where
+        T: serde::de::DeserializeOwned
+            + Send
+            + 'static
+            + std::fmt::Debug
+            + Identifiable
+            + Offloadable,
+    {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1024);
+        backend.subscribe(topic, tx).await?;
+
+        let topic = topic.to_string();
+        // Use semaphore to limit number of concurrent BATCHES roughly
+        let batch_concurrency = (concurrency / 50).max(1);
+        let semaphore = Arc::new(Semaphore::new(batch_concurrency));
+
+        tokio::spawn(async move {
+            let topic_clone = topic.clone();
+            let sender_clone = sender.clone();
+            let compensator_clone = compensator.clone();
+            let blob_storage_clone = blob_storage.clone();
+
+            Batcher::run(&mut rx, 50, 5, semaphore, move |items| {
+                let topic = topic_clone.clone();
+                let sender = sender_clone.clone();
+                let compensator = compensator_clone.clone();
+                let blob_storage = blob_storage_clone.clone();
+                async move {
+                    Self::process_batch_messages(
+                        items,
+                        &topic,
+                        &sender,
+                        &compensator,
+                        &blob_storage,
+                        codec,
+                    )
+                    .await;
+                }
+            })
+            .await;
+            log::warn!("Topic {} subscription closed", topic);
+        });
+        Ok(())
+    }
+
+    async fn process_batch_messages<T>(
+        messages: Vec<crate::queue::Message>,
+        topic: &str,
+        sender: &Sender<QueuedItem<T>>,
+        compensator: &Option<Arc<dyn Compensator>>,
+        blob_storage: &Option<Arc<dyn BlobStorage>>,
+        codec: QueueCodec,
+    ) where
+        T: serde::de::DeserializeOwned
+            + Send
+            + 'static
+            + std::fmt::Debug
+            + Identifiable
+            + Offloadable,
+    {
+        // Offload deserialization to blocking thread for larger batches to avoid blocking the async runtime.
+        // For small batches, decode inline to reduce thread switch overhead.
+        let mut use_blocking = messages.len() >= 32;
+        if !use_blocking {
+            let mut total_bytes = 0usize;
+            for msg in &messages {
+                total_bytes += msg.payload.len();
+                if total_bytes >= BLOCKING_PAYLOAD_BYTES {
+                    use_blocking = true;
+                    break;
+                }
+            }
+        }
+        let decode = move || {
+            messages
+                .into_iter()
+                .map(|msg| {
+                    let decoded_payload = decompress_payload(msg.payload.as_slice());
+                    let item_res = match codec {
+                        QueueCodec::Json => serde_json::from_slice::<T>(decoded_payload.as_ref())
+                            .map_err(|e| Error::new(ErrorKind::Queue, Some(e))),
+                        QueueCodec::Msgpack => msgpack_decode::<T>(decoded_payload.as_ref())
+                            .map_err(|e| Error::new(ErrorKind::Queue, Some(e))),
+                    };
+                    (msg, item_res)
+                })
+                .collect::<Vec<_>>()
+        };
+        let results = if use_blocking {
+            tokio::task::spawn_blocking(decode).await
+        } else {
+            Ok(decode())
+        };
+
+        match results {
+            Ok(processed_items) => {
+                let tasks = processed_items.into_iter().map(|(msg, result)| {
+                    let topic = topic.to_string();
+                    let compensator = compensator.clone();
+                    let storage = blob_storage.clone();
+
+                    async move {
+                        match result {
+                            Ok(mut item) => {
+                                // Reload content from blob storage if necessary
+                                if let Some(storage) = storage {
+                                    if let Err(e) = item.reload(&storage).await {
+                                         error!("Failed to reload item content from storage for topic {}: {}", topic, e);
+                                         if let Err(e) = msg.nack("Blob reload failed").await {
+                                             error!("Failed to NACK message: {}", e);
+                                         }
+                                         return None;
+                                    }
+                                }
+
+                                let id = item.get_id();
+
+                                if let Some(comp) = compensator {
+                                     if let Err(e) = comp.add_task(&topic, &id, msg.payload.clone()).await {
+                                        error!(
+                                            "Failed to add task to compensation queue for topic {}: {}",
+                                            topic, e
+                                        );
+                                     }
+                                }
+
+                                let msg_ack = msg.clone();
+                                let msg_nack = msg.clone();
+
+                                let queued_item = QueuedItem::with_ack(
+                                    item,
+                                    move || Box::pin(async move { msg_ack.ack().await }),
+                                    move |reason| Box::pin(async move { msg_nack.nack(reason).await })
+                                );
+
+                                Some((msg, queued_item))
+                            }
+                            Err(e) => {
+                                let payload_len = msg.payload.len();
+                                let codec = match codec {
+                                    QueueCodec::Json => "json",
+                                    QueueCodec::Msgpack => "msgpack",
+                                };
+
+                                error!(
+                                    "Failed to deserialize message from topic {} (codec={}, bytes={}): {}",
+                                    topic,
+                                    codec,
+                                    payload_len,
+                                    e
+                                );
+                                if let Err(e) = msg.nack("Deserialization failed").await {
+                                    error!("Failed to NACK poison message: {}", e);
+                                }
+                                None
+                            }
+                        }
+                    }
+                });
+
+                let results = join_all(tasks).await;
+
+                for (msg, item) in results.into_iter().flatten() {
+                    if let Err(_e) = sender.send(item).await {
+                        let _ = msg.nack("Channel closed").await;
+                    }
+                }
+            }
+            Err(e) => {
+                error!("Batch deserialization task failed: {}", e);
+                // We can't easily NACK here because we lost ownership of msgs inside the closure if it panicked.
+                // But spawn_blocking usually returns JoinError if panicked.
+            }
+        }
+    }
+
+    fn spawn_forwarder<T>(&self, topic: &str, receiver: Arc<Mutex<Receiver<QueuedItem<T>>>>)
+    where
+        T: serde::Serialize + Send + Sync + 'static + Identifiable + Prioritizable + Offloadable,
+    {
+        let backend = self.backend.as_ref().expect("remote queue backend").clone();
+        let blob_storage = self.blob_storage.clone();
+        let concurrency = self.batch_concurrency;
+        let compression_threshold = self.compression_threshold;
+        let codec = self.queue_codec;
+        let topic = topic.to_string();
+        // Concurrency limit for publishing batches
+        let semaphore = Arc::new(Semaphore::new(concurrency));
+
+        tokio::spawn(async move {
+            let mut rx = receiver.lock().await;
+            let topic_clone = topic.clone();
+            let backend_clone = backend;
+
+            Batcher::run(&mut *rx, 500, 5, semaphore, move |items| {
+                let topic = topic_clone.clone();
+                let backend = backend_clone.clone();
+                let blob_storage = blob_storage.clone();
+                async move {
+                    Self::flush_batch_grouped(
+                        topic,
+                        backend,
+                        blob_storage,
+                        items,
+                        compression_threshold,
+                        codec,
+                    )
+                    .await;
+                }
+            })
+            .await;
+        });
+    }
+
+    pub fn get_task_push_channel(&self) -> Sender<QueuedItem<TaskEvent>> {
+        if self.backend.is_none() {
+            return self.channel.task_sender.clone();
+        }
+        self.channel.remote_task_sender.clone()
+    }
+    pub fn get_task_pop_channel(&self) -> Arc<Mutex<Receiver<QueuedItem<TaskEvent>>>> {
+        Arc::clone(&self.channel.task_receiver)
+    }
+    pub fn get_request_pop_channel(&self) -> Arc<Mutex<Receiver<QueuedItem<Request>>>> {
+        self.channel.download_request_receiver.clone()
+    }
+    pub fn get_request_push_channel(&self) -> Sender<QueuedItem<Request>> {
+        if self.backend.is_none() {
+            return self.channel.download_request_sender.clone();
+        }
+        self.channel.request_sender.clone()
+    }
+    pub fn get_response_push_channel(&self) -> Sender<QueuedItem<Response>> {
+        if self.backend.is_none() {
+            return self.channel.remote_response_sender.clone();
+        }
+        self.channel.response_sender.clone()
+    }
+
+    /// Attempts to send directly to local consumers (bypassing the MQ backend).
+    /// Optimization: if local consumers exist and the channel is not full, send
+    /// directly to avoid serialization and network overhead.
+    pub fn try_send_local_response(
+        &self,
+        item: QueuedItem<Response>,
+    ) -> Result<(), tokio::sync::mpsc::error::TrySendError<QueuedItem<Response>>> {
+        self.channel.remote_response_sender.try_send(item)
+    }
+
+    pub fn get_response_pop_channel(&self) -> Arc<Mutex<Receiver<QueuedItem<Response>>>> {
+        Arc::clone(&self.channel.remote_response_receiver)
+    }
+    pub fn get_parser_task_pop_channel(&self) -> Arc<Mutex<Receiver<QueuedItem<TaskParserEvent>>>> {
+        self.channel.remote_parser_task_receiver.clone()
+    }
+    pub fn get_parser_task_push_channel(&self) -> Sender<QueuedItem<TaskParserEvent>> {
+        if self.backend.is_none() {
+            return self.channel.remote_parser_task_sender.clone();
+        }
+        self.channel.parser_task_sender.clone()
+    }
+    pub fn get_error_pop_channel(&self) -> Arc<Mutex<Receiver<QueuedItem<TaskErrorEvent>>>> {
+        Arc::clone(&self.channel.remote_error_receiver)
+    }
+    pub fn get_error_push_channel(&self) -> Sender<QueuedItem<TaskErrorEvent>> {
+        if self.backend.is_none() {
+            return self.channel.remote_error_sender.clone();
+        }
+        self.channel.error_sender.clone()
+    }
+    pub fn get_log_push_channel(&self) -> Sender<QueuedItem<LogModel>> {
+        self.channel.log_sender.clone()
+    }
+
+    /// Local pending message count across processor queues
+    pub async fn local_pending_count(&self) -> usize {
+        let (task, download, response, parser, error, remote_task) =
+            self.local_pending_breakdown().await;
+        task + download + response + parser + error + remote_task
+    }
+
+    pub async fn local_pending_breakdown(&self) -> (usize, usize, usize, usize, usize, usize) {
+        let task = self
+            .channel
+            .task_sender
+            .max_capacity()
+            .saturating_sub(self.channel.task_sender.capacity());
+        let download = self
+            .channel
+            .download_request_sender
+            .max_capacity()
+            .saturating_sub(self.channel.download_request_sender.capacity());
+        let response = self
+            .channel
+            .remote_response_sender
+            .max_capacity()
+            .saturating_sub(self.channel.remote_response_sender.capacity());
+        let parser = self
+            .channel
+            .remote_parser_task_sender
+            .max_capacity()
+            .saturating_sub(self.channel.remote_parser_task_sender.capacity());
+        let error = self
+            .channel
+            .remote_error_sender
+            .max_capacity()
+            .saturating_sub(self.channel.remote_error_sender.capacity());
+        let remote_task = self
+            .channel
+            .remote_task_sender
+            .max_capacity()
+            .saturating_sub(self.channel.remote_task_sender.capacity());
+
+        (task, download, response, parser, error, remote_task)
+    }
+
+    async fn flush_batch_grouped<T>(
+        base_topic: String,
+        backend: Arc<dyn MqBackend>,
+        blob_storage: Option<Arc<dyn BlobStorage>>,
+        mut items: Vec<QueuedItem<T>>,
+        compression_threshold: usize,
+        codec: QueueCodec,
+    ) where
+        T: serde::Serialize + Identifiable + Send + Sync + Prioritizable + Offloadable + 'static,
+    {
+        // Try offloading large payloads if storage is configured
+        if let Some(storage) = &blob_storage {
+            // We iterate mutably to potentially modify items (offload content)
+            for item in &mut items {
+                if item.inner.should_offload(BLOCKING_PAYLOAD_BYTES) {
+                    if let Err(e) = item.inner.offload(storage).await {
+                        error!("Failed to offload item payload to blob storage: {}", e);
+                        // Continue, hoping it might still pass or fail later
+                    }
+                }
+            }
+        }
+
+        // Optimization: Fast path if all items have same priority (likely normal)
+        // or if items is empty
+        if items.is_empty() {
+            return;
+        }
+
+        let first_priority = items[0].get_priority();
+        let all_same_priority = items.iter().all(|i| i.get_priority() == first_priority);
+
+        if all_same_priority {
+            let topic = format!("{}-{}", base_topic, first_priority.suffix());
+            Self::flush_batch(topic, backend, items, compression_threshold, codec).await;
+            return;
+        }
+
+        let mut groups: HashMap<Priority, Vec<QueuedItem<T>>> = HashMap::new();
+        for item in items {
+            groups.entry(item.get_priority()).or_default().push(item);
+        }
+
+        for (priority, group_items) in groups {
+            let topic = format!("{}-{}", base_topic, priority.suffix());
+            Self::flush_batch(
+                topic,
+                backend.clone(),
+                group_items,
+                compression_threshold,
+                codec,
+            )
+            .await;
+        }
+    }
+
+    async fn flush_batch<T>(
+        topic: String,
+        backend: Arc<dyn MqBackend>,
+        items: Vec<QueuedItem<T>>,
+        compression_threshold: usize,
+        codec: QueueCodec,
+    ) where
+        T: serde::Serialize + Identifiable + Send + Sync + 'static,
+    {
+        // Serialize all items once. Decide blocking vs inline based on item count alone
+        // to avoid the previous double-serialization (once to estimate size, once to encode).
+        let use_blocking = items.len() >= 32;
+
+        let payloads_result = if use_blocking {
+            tokio::task::spawn_blocking(move || {
+                Self::encode_items(&items, compression_threshold, codec)
+            })
+            .await
+        } else {
+            Ok(Self::encode_items(&items, compression_threshold, codec))
+        };
+
+        match payloads_result {
+            Ok((payloads, ids, count)) => {
+                if payloads.is_empty() {
+                    return;
+                }
+
+                let mut failures = 0u32;
+                loop {
+                    match backend.publish_batch_with_headers(&topic, &payloads).await {
+                        Ok(()) => break,
+                        Err(error) => {
+                            failures = failures.saturating_add(1);
+                            counter!("mocra_queue_publish_retries_total").increment(1);
+                            if failures == 1 || failures.is_power_of_two() {
+                                error!(
+                                    "Failed to publish batch to topic {} (attempt {}): {}",
+                                    topic, failures, error
+                                );
+                            }
+                            // Keep this batch owned by the forwarder. Its semaphore permit
+                            // holds back later batches until the broker accepts it. A partial
+                            // broker batch may be replayed, so delivery is at least once.
+                            let delay_ms = 100u64.saturating_mul(1u64 << failures.min(6));
+                            tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                        }
+                    }
+                }
+                {
+                    log::info!(
+                        "[QueueManager] forward_channel published batch: topic={} count={}",
+                        topic,
+                        count
+                    );
+                    if let Some(id_list) = ids {
+                        for id in id_list {
+                            log::debug!(
+                                "[QueueManager] forward_channel published: topic={} id={}",
+                                topic,
+                                id
+                            );
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                error!("Serialization task join error: {}", e);
+            }
+        }
+    }
+
+    pub async fn clean_storage(&self) -> crate::errors::Result<()> {
+        if let Some(backend) = &self.backend {
+            backend.clean_storage().await?;
+        }
+        Ok(())
+    }
+
+    /// Encode items into publish-ready payloads (serialize once + compress).
+    fn encode_items<T>(
+        items: &[QueuedItem<T>],
+        compression_threshold: usize,
+        codec: QueueCodec,
+    ) -> (
+        Vec<(Option<String>, Vec<u8>, HashMap<String, String>)>,
+        Option<Vec<String>>,
+        usize,
+    )
+    where
+        T: serde::Serialize + Identifiable,
+    {
+        let mut payloads: Vec<(Option<String>, Vec<u8>, HashMap<String, String>)> =
+            Vec::with_capacity(items.len());
+        let mut ids = if log::log_enabled!(log::Level::Debug) {
+            Some(Vec::with_capacity(items.len()))
+        } else {
+            None
+        };
+
+        for item in items {
+            let id = item.get_id();
+            // The partition key drives MQ routing / sharding (account affinity); it is
+            // independent of the id used for deduplication / logging.
+            let partition_key = item.partition_key();
+            if let Some(id_list) = ids.as_mut() {
+                id_list.push(id.clone());
+            }
+            let encoded = match codec {
+                QueueCodec::Json => serde_json::to_vec(&item.inner).map_err(|e| {
+                    crate::errors::Error::new(crate::errors::ErrorKind::Queue, Some(e))
+                }),
+                QueueCodec::Msgpack => rmps::to_vec(&item.inner).map_err(|e| {
+                    crate::errors::Error::new(crate::errors::ErrorKind::Queue, Some(e))
+                }),
+            };
+            match encoded {
+                Ok(p) => {
+                    let final_payload = compress_payload_owned(p, compression_threshold);
+                    let headers = default_headers();
+                    payloads.push((Some(partition_key), final_payload, headers));
+                }
+                Err(e) => {
+                    error!(
+                        "Failed to serialize item id={}: {}. Item will be skipped (unrecoverable).",
+                        id, e
+                    );
+                    counter!("mocra_queue_encode_errors_total").increment(1);
+                }
+            }
+        }
+        (payloads, ids, items.len())
+    }
+
+    /// Send a message to the Dead Letter Queue (DLQ) manually.
+    ///
+    /// This is useful when the application logic decides a message cannot be processed
+    /// even if the message delivery itself was successful (e.g., max logic retries exceeded).
+    pub async fn send_to_dlq<T>(
+        &self,
+        topic: &str,
+        item: &T,
+        reason: &str,
+    ) -> crate::errors::Result<()>
+    where
+        T: serde::Serialize + Identifiable + Send + Sync,
+    {
+        if let Some(backend) = &self.backend {
+            let payload = match self.queue_codec {
+                QueueCodec::Json => serde_json::to_vec(item)
+                    .map_err(|e| crate::errors::error::QueueError::OperationFailed(Box::new(e)))?,
+                QueueCodec::Msgpack => rmps::to_vec(item)
+                    .map_err(|e| crate::errors::error::QueueError::OperationFailed(Box::new(e)))?,
+            };
+            backend
+                .send_to_dlq(topic, &item.get_id(), &payload, reason)
+                .await?;
+        }
+        Ok(())
+    }
+
+    pub async fn read_dlq(
+        &self,
+        topic: &str,
+        count: usize,
+    ) -> crate::errors::Result<Vec<(String, Vec<u8>, String, String)>> {
+        if let Some(backend) = &self.backend {
+            backend.read_dlq(topic, count).await
+        } else {
+            Ok(Vec::new())
+        }
+    }
+}

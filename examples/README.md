@@ -2,7 +2,7 @@
 
 Run commands from the repository root. Most examples without a feature flag use the single-node,
 in-memory `Spider` facade. It stops after the configured idle period (30 seconds by default).
-`proxy_pool` demonstrates the standalone `ProxyManager` API.
+`proxy_pool` demonstrates the `mocra::proxy::ProxyManager` API.
 
 从仓库根目录运行。无需特性开关的 `Spider` 示例使用单机内存模式；默认在队列空闲 30 秒后退出。
 

@@ -6,7 +6,7 @@
 //! - call a named global function with basic Rust arguments
 //! - surface JS exceptions as Rust errors with message + stack
 //!
-//! The API keeps things simple and avoids lifetime hassles by storing a Global<Context>.
+//! The API keeps things simple and avoids lifetime hassles by storing a `Global<Context>`.
 #![allow(unused)]
 use serde_json::Value as JsonValue;
 use std::collections::HashMap;
@@ -204,6 +204,88 @@ pub enum JsReturn {
     Json(JsonValue),
     /// Raw bytes (ArrayBuffer or Uint8Array)
     Bytes(Vec<u8>),
+}
+
+fn call_arguments<'s, T: Into<JsValue> + Clone>(
+    scope: &mut v8::PinScope<'s, '_>,
+    args: &[T],
+) -> Result<Vec<v8::Local<'s, v8::Value>>, Box<dyn std::error::Error>> {
+    let mut argv: Vec<v8::Local<v8::Value>> = Vec::with_capacity(args.len());
+    for a in args.iter().cloned() {
+        match a.into() {
+            JsValue::Str(s) => {
+                let v = v8::String::new(scope, &s).ok_or_else(|| {
+                    std::io::Error::new(std::io::ErrorKind::Other, "arg to v8 string failed")
+                })?;
+                argv.push(v.into());
+            }
+            JsValue::Number(n) => argv.push(v8::Number::new(scope, n).into()),
+            JsValue::Bool(b) => argv.push(v8::Boolean::new(scope, b).into()),
+        }
+    }
+    Ok(argv)
+}
+
+fn decode_return<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    result: v8::Local<'s, v8::Value>,
+    to_string_error: &'static str,
+) -> Result<JsReturn, Box<dyn std::error::Error>> {
+    if result.is_boolean() {
+        return Ok(JsReturn::Bool(result.boolean_value(scope)));
+    }
+    if result.is_number() {
+        let n = result
+            .number_value(scope)
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "number_value failed"))?;
+        return Ok(JsReturn::Number(n));
+    }
+    if result.is_uint8_array() {
+        let arr = v8::Local::<v8::Uint8Array>::try_from(result).map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::Other, "failed to cast to Uint8Array")
+        })?;
+        let offset = arr.byte_offset();
+        let len = arr.byte_length();
+        let buf = arr.buffer(scope).ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::Other, "Uint8Array.buffer() failed")
+        })?;
+        let bs = buf.get_backing_store();
+        let base = bs.data().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::Other, "backing store no data")
+        })?;
+        unsafe {
+            let src = std::slice::from_raw_parts(base.as_ptr().add(offset) as *const u8, len);
+            return Ok(JsReturn::Bytes(src.to_vec()));
+        }
+    }
+    if result.is_array_buffer() {
+        let ab = v8::Local::<v8::ArrayBuffer>::try_from(result).map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::Other, "failed to cast to ArrayBuffer")
+        })?;
+        let len = ab.byte_length();
+        let bs = ab.get_backing_store();
+        let ptr = bs.data().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::Other, "backing store no data")
+        })?;
+        unsafe {
+            let src = std::slice::from_raw_parts(ptr.as_ptr() as *const u8, len);
+            return Ok(JsReturn::Bytes(src.to_vec()));
+        }
+    }
+    if result.is_object() || result.is_array() {
+        if let Some(s) = v8::json::stringify(scope, result) {
+            let json_str = s.to_rust_string_lossy(scope);
+            return if let Ok(v) = serde_json::from_str::<JsonValue>(&json_str) {
+                Ok(JsReturn::Json(v))
+            } else {
+                Ok(JsReturn::Text(json_str))
+            };
+        }
+    }
+    let s = result
+        .to_string(scope)
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, to_string_error))?;
+    Ok(JsReturn::Text(s.to_rust_string_lossy(scope)))
 }
 
 pub struct V8Engine {
@@ -452,80 +534,14 @@ impl V8Engine {
         })?;
 
         // argv
-        let mut argv: Vec<v8::Local<v8::Value>> = Vec::with_capacity(args.len());
-        for a in args.iter().cloned() {
-            match a.into() {
-                JsValue::Str(s) => {
-                    let v = v8::String::new(tc, &s).ok_or_else(|| {
-                        std::io::Error::new(std::io::ErrorKind::Other, "arg to v8 string failed")
-                    })?;
-                    argv.push(v.into());
-                }
-                JsValue::Number(n) => argv.push(v8::Number::new(tc, n).into()),
-                JsValue::Bool(b) => argv.push(v8::Boolean::new(tc, b).into()),
-            }
-        }
+        let argv = call_arguments(tc, args)?;
 
         let recv = v8::undefined(tc).into();
         let result = func.call(tc, recv, &argv).ok_or_else(|| {
             std::io::Error::new(std::io::ErrorKind::Other, "wasm export call failed")
         })?;
 
-        if result.is_boolean() {
-            return Ok(JsReturn::Bool(result.boolean_value(tc)));
-        }
-        if result.is_number() {
-            let n = result.number_value(tc).ok_or_else(|| {
-                std::io::Error::new(std::io::ErrorKind::Other, "number_value failed")
-            })?;
-            return Ok(JsReturn::Number(n));
-        }
-        if result.is_uint8_array() {
-            let arr = v8::Local::<v8::Uint8Array>::try_from(result).map_err(|_| {
-                std::io::Error::new(std::io::ErrorKind::Other, "failed to cast to Uint8Array")
-            })?;
-            let offset = arr.byte_offset();
-            let len = arr.byte_length();
-            let buf = arr.buffer(tc).ok_or_else(|| {
-                std::io::Error::new(std::io::ErrorKind::Other, "Uint8Array.buffer() failed")
-            })?;
-            let bs = buf.get_backing_store();
-            let base = bs.data().ok_or_else(|| {
-                std::io::Error::new(std::io::ErrorKind::Other, "backing store no data")
-            })?;
-            unsafe {
-                let src = std::slice::from_raw_parts(base.as_ptr().add(offset) as *const u8, len);
-                return Ok(JsReturn::Bytes(src.to_vec()));
-            }
-        }
-        if result.is_array_buffer() {
-            let ab = v8::Local::<v8::ArrayBuffer>::try_from(result).map_err(|_| {
-                std::io::Error::new(std::io::ErrorKind::Other, "failed to cast to ArrayBuffer")
-            })?;
-            let len = ab.byte_length();
-            let bs = ab.get_backing_store();
-            let ptr = bs.data().ok_or_else(|| {
-                std::io::Error::new(std::io::ErrorKind::Other, "backing store no data")
-            })?;
-            unsafe {
-                let src = std::slice::from_raw_parts(ptr.as_ptr() as *const u8, len);
-                return Ok(JsReturn::Bytes(src.to_vec()));
-            }
-        }
-        if result.is_object() || result.is_array() {
-            if let Some(s) = v8::json::stringify(tc, result) {
-                let json_str = s.to_rust_string_lossy(tc);
-                return if let Ok(v) = serde_json::from_str::<JsonValue>(&json_str) {
-                    Ok(JsReturn::Json(v))
-                } else {
-                    Ok(JsReturn::Text(json_str))
-                };
-            }
-        }
-        let s = result.to_string(tc).ok_or_else(|| {
-            std::io::Error::new(std::io::ErrorKind::Other, "export result.toString failed")
-        })?;
-        Ok(JsReturn::Text(s.to_rust_string_lossy(tc)))
+        decode_return(tc, result, "export result.toString failed")
     }
     /// Call a global function with basic arguments.
     pub fn call_function<T: Into<JsValue> + Clone>(
@@ -566,85 +582,14 @@ impl V8Engine {
             )
         })?;
 
-        let mut argv: Vec<v8::Local<v8::Value>> = Vec::with_capacity(args.len());
-        for a in args.iter().cloned() {
-            match a.into() {
-                JsValue::Str(s) => {
-                    let v = v8::String::new(tc, &s).ok_or_else(|| {
-                        std::io::Error::new(std::io::ErrorKind::Other, "arg to v8 string failed")
-                    })?;
-                    argv.push(v.into());
-                }
-                JsValue::Number(n) => {
-                    argv.push(v8::Number::new(tc, n).into());
-                }
-                JsValue::Bool(b) => {
-                    argv.push(v8::Boolean::new(tc, b).into());
-                }
-            }
-        }
+        let argv = call_arguments(tc, args)?;
 
         let recv = global.into();
         let result = func.call(tc, recv, &argv).ok_or_else(|| {
             std::io::Error::new(std::io::ErrorKind::Other, "function call failed")
         })?;
 
-        // Map V8 value to JsReturn
-        if result.is_boolean() {
-            return Ok(JsReturn::Bool(result.boolean_value(tc)));
-        }
-        if result.is_number() {
-            let n = result.number_value(tc).ok_or_else(|| {
-                std::io::Error::new(std::io::ErrorKind::Other, "number_value failed")
-            })?;
-            return Ok(JsReturn::Number(n));
-        }
-        if result.is_uint8_array() {
-            let arr = v8::Local::<v8::Uint8Array>::try_from(result).map_err(|_| {
-                std::io::Error::new(std::io::ErrorKind::Other, "failed to cast to Uint8Array")
-            })?;
-            let offset = arr.byte_offset();
-            let len = arr.byte_length();
-            let buf = arr.buffer(tc).ok_or_else(|| {
-                std::io::Error::new(std::io::ErrorKind::Other, "Uint8Array.buffer() failed")
-            })?;
-            let bs = buf.get_backing_store();
-            let base = bs.data().ok_or_else(|| {
-                std::io::Error::new(std::io::ErrorKind::Other, "backing store no data")
-            })?;
-            unsafe {
-                let src = std::slice::from_raw_parts(base.as_ptr().add(offset) as *const u8, len);
-                return Ok(JsReturn::Bytes(src.to_vec()));
-            }
-        }
-        if result.is_array_buffer() {
-            let ab = v8::Local::<v8::ArrayBuffer>::try_from(result).map_err(|_| {
-                std::io::Error::new(std::io::ErrorKind::Other, "failed to cast to ArrayBuffer")
-            })?;
-            let len = ab.byte_length();
-            let bs = ab.get_backing_store();
-            let ptr = bs.data().ok_or_else(|| {
-                std::io::Error::new(std::io::ErrorKind::Other, "backing store no data")
-            })?;
-            unsafe {
-                let src = std::slice::from_raw_parts(ptr.as_ptr() as *const u8, len);
-                return Ok(JsReturn::Bytes(src.to_vec()));
-            }
-        }
-        if result.is_object() || result.is_array() {
-            if let Some(s) = v8::json::stringify(tc, result) {
-                let json_str = s.to_rust_string_lossy(tc);
-                return if let Ok(v) = serde_json::from_str::<JsonValue>(&json_str) {
-                    Ok(JsReturn::Json(v))
-                } else {
-                    Ok(JsReturn::Text(json_str))
-                };
-            }
-        }
-        let s = result.to_string(tc).ok_or_else(|| {
-            std::io::Error::new(std::io::ErrorKind::Other, "result.toString failed")
-        })?;
-        Ok(JsReturn::Text(s.to_rust_string_lossy(tc)))
+        decode_return(tc, result, "result.toString failed")
     }
 }
 
@@ -652,7 +597,133 @@ impl V8Engine {
 mod tests {
     use std::fs;
 
-    use super::{JsReturn, V8Engine};
+    use super::{JsReturn, JsValue, V8Engine};
+
+    #[test]
+    fn global_and_export_calls_preserve_typed_values_and_receivers() {
+        let mut engine = V8Engine::new().unwrap();
+        engine
+            .exec_script(
+                r#"
+                function text() { return "hello"; }
+                function number() { return 12.5; }
+                function boolean() { return true; }
+                function json() { return {values: [1, "two", null]}; }
+                function bytes() { return new Uint8Array([7, 11, 13, 17]).subarray(1, 3); }
+                function buffer() { return new Uint8Array([19, 23]).buffer; }
+                function args(a, b, c) { return [a, b, c]; }
+                function receiver() { "use strict"; return this === globalThis; }
+                globalThis.instance = {
+                    exports: {text, number, boolean, json, bytes, buffer, args, receiver}
+                };
+                "#,
+                None,
+            )
+            .unwrap();
+
+        for export in [false, true] {
+            for (name, expected) in [
+                ("text", JsReturn::Text("hello".into())),
+                ("number", JsReturn::Number(12.5)),
+                ("boolean", JsReturn::Bool(true)),
+                (
+                    "json",
+                    JsReturn::Json(serde_json::json!({"values": [1, "two", null]})),
+                ),
+                ("bytes", JsReturn::Bytes(vec![11, 13])),
+                ("buffer", JsReturn::Bytes(vec![19, 23])),
+                ("receiver", JsReturn::Bool(!export)),
+            ] {
+                let actual = if export {
+                    engine.call_wasm_export::<JsValue>("instance", name, &[])
+                } else {
+                    engine.call_function::<JsValue>(name, &[])
+                }
+                .unwrap();
+                match (actual, expected) {
+                    (JsReturn::Text(actual), JsReturn::Text(expected)) => {
+                        assert_eq!(actual, expected)
+                    }
+                    (JsReturn::Number(actual), JsReturn::Number(expected)) => {
+                        assert_eq!(actual, expected)
+                    }
+                    (JsReturn::Bool(actual), JsReturn::Bool(expected)) => {
+                        assert_eq!(actual, expected)
+                    }
+                    (JsReturn::Json(actual), JsReturn::Json(expected)) => {
+                        assert_eq!(actual, expected)
+                    }
+                    (JsReturn::Bytes(actual), JsReturn::Bytes(expected)) => {
+                        assert_eq!(actual, expected)
+                    }
+                    (actual, expected) => panic!("{name}: got {actual:?}, expected {expected:?}"),
+                }
+            }
+            let args = [
+                JsValue::from("value"),
+                JsValue::from(3.5),
+                JsValue::from(false),
+            ];
+            let result = if export {
+                engine.call_wasm_export("instance", "args", &args)
+            } else {
+                engine.call_function("args", &args)
+            }
+            .unwrap();
+            let JsReturn::Json(actual) = result else {
+                panic!("argument types must survive the call");
+            };
+            assert_eq!(actual, serde_json::json!(["value", 3.5, false]));
+        }
+    }
+
+    #[test]
+    fn global_and_export_calls_preserve_error_messages() {
+        let mut engine = V8Engine::new().unwrap();
+        engine
+            .exec_script(
+                r#"
+                function fail() { throw new Error("call failed"); }
+                function badString() {
+                    const result = {};
+                    result.self = result;
+                    result.toString = function() { throw new Error("conversion failed"); };
+                    return result;
+                }
+                globalThis.instance = {exports: {fail, badString}};
+                "#,
+                None,
+            )
+            .unwrap();
+        assert_eq!(
+            engine
+                .call_function::<JsValue>("fail", &[])
+                .unwrap_err()
+                .to_string(),
+            "function call failed"
+        );
+        assert_eq!(
+            engine
+                .call_wasm_export::<JsValue>("instance", "fail", &[])
+                .unwrap_err()
+                .to_string(),
+            "wasm export call failed"
+        );
+        assert_eq!(
+            engine
+                .call_function::<JsValue>("badString", &[])
+                .unwrap_err()
+                .to_string(),
+            "result.toString failed"
+        );
+        assert_eq!(
+            engine
+                .call_wasm_export::<JsValue>("instance", "badString", &[])
+                .unwrap_err()
+                .to_string(),
+            "export result.toString failed"
+        );
+    }
 
     #[test]
     #[ignore = "requires local bdms.js and wasm assets"]

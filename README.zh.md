@@ -37,7 +37,7 @@ mocra 是一个 Rust 框架，用于构建可扩展的数据采集流水线。�
 
 ```toml
 [dependencies]
-mocra = "0.5"
+mocra = "0.6"
 async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }
 tokio = { version = "1", features = ["full"] }
@@ -93,7 +93,7 @@ cargo run
 开启 `cluster-embedded` 特性，启动一个**自组网的 Raft 集群** —— 把任意节点注册到任意已知节点即可组网：
 
 ```toml
-mocra = { version = "0.5", features = ["cluster-embedded"] }
+mocra = { version = "0.6", features = ["cluster-embedded"] }
 ```
 
 ```rust
@@ -119,7 +119,7 @@ Mocra::builder()
 开启 `dashboard` 特性并调用 `.dashboard(port)` —— 引擎会托管一套只读可观测 API **以及**一个内置单文件网页面板。浏览器打开该端口即见 **指标 / 日志 / 任务 / 性能**；无需前端构建，也无需手填 endpoint（页面同源自动指向本引擎）：
 
 ```toml
-mocra = { version = "0.5", features = ["dashboard"] }
+mocra = { version = "0.6", features = ["dashboard"] }
 ```
 
 ```rust
@@ -170,18 +170,18 @@ Mocra::builder()
 
 每个阶段通过消息队列解耦。单节点模式使用本地 Tokio 通道，分布式模式使用 Kafka / NATS(JetStream) —— **同一代码，零改动**。
 
-### Workspace crate
+### 单包结构
 
-mocra 是一个 Cargo workspace。整个运行时都在 `mocra-core` 里；你依赖的 `mocra` crate 是它之上的**薄门面**。可复用的子系统以独立 crate 发布，依赖单向无环（`mocra → mocra-core → {mocra-cluster, mocra-dag, mocra-proxy, mocra-store}`，内层 crate 从不反依赖）：
+mocra 是一个 Cargo 单包。`Spider` 门面、运行时和各子系统统一位于 `src/` 下，随 `mocra` 一起发布。已有的 `mocra` 导入路径与特性名称保持不变，各子系统通过模块使用：
 
-| Crate | 说明 |
+| 模块 | 说明 |
 |---|---|
-| [`mocra`](.) | **薄门面** —— `Spider` trait、`Mocra` 构建器、prelude、默认 sink。多数用户唯一需要 import 的 crate。 |
-| [`mocra-core`](crates/mocra-core) | 完整运行时：领域模型、下载器、队列、协调/同步、调度器、引擎 + 可观测/管理 API。 |
-| [`mocra-cluster`](crates/mocra-cluster) | 内嵌控制面：Raft + redb（选举、带 fencing 的分布式锁、成员、分区归属）—— 无需外部协调器。 |
-| [`mocra-dag`](crates/mocra-dag) | 通用分布式 DAG 执行引擎（零爬虫耦合）。 |
-| [`mocra-proxy`](crates/mocra-proxy) | 配置驱动的代理池 / 管理器（独立可用）。 |
-| [`mocra-store`](crates/mocra-store) | 多租户 sea-orm 实体模型（`store` 特性）。 |
+| [`mocra::facade`](src/facade.rs) / [`mocra::prelude`](src/prelude.rs) | `Spider` trait、`Mocra` 构建器、prelude、默认 sink。 |
+| [`mocra::engine`](src/engine) 等运行时模块 | 领域模型、下载器、队列、协调/同步、调度器、引擎 + 可观测/管理 API。 |
+| [`mocra::cluster`](src/cluster) | 内嵌控制面：Raft + redb（选举、带 fencing 的分布式锁、成员、分区归属），由 `cluster-embedded` 特性启用。 |
+| [`mocra::schedule::dag`](src/schedule/dag) | 通用分布式 DAG 执行引擎，也由 `mocra::schedule` 重导出。 |
+| [`mocra::proxy`](src/proxy) | 配置驱动的代理池 / 管理器。 |
+| [`mocra::common::model::entity`](src/common/model/entity) | 多租户 sea-orm 实体模型（`store` 特性）。 |
 
 ## DAG 执行
 
@@ -238,7 +238,7 @@ Mocra::builder()
 
 ## 特性开关
 
-均为可选;默认构建是**单机、无 DB**。用 `mocra = { version = "0.5", features = ["…"] }` 开启。
+均为可选;默认构建是**单机、无 DB**。用 `mocra = { version = "0.6", features = ["…"] }` 开启。
 
 | 特性 | 解锁什么 |
 |---|---|
@@ -247,7 +247,7 @@ Mocra::builder()
 | `store` | DB 驱动的 account × platform × module 模型(sea-orm) |
 | `queue-kafka` | Kafka 数据面队列后端 |
 | `queue-nats` | NATS JetStream 数据面队列后端 |
-| `polars` | DataFrame 支持(`DataFrameStore`、`polars_utils`) |
+| `polars` | DataFrame 支持（`DataFrameStore` 与 Polars 类型导出） |
 | `excel` | Excel 解析(calamine → DataFrame),隐含开启 `polars` |
 | `js-v8` | 内嵌 V8 JS 运行时,用于解析脚本 |
 | `mimalloc` | mimalloc 全局分配器(**默认开启**) |

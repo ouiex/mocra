@@ -71,7 +71,8 @@
     clippy::type_complexity,
     clippy::module_inception,
     clippy::result_large_err,
-    clippy::large_enum_variant
+    clippy::large_enum_variant,
+    clippy::collapsible_if
 )]
 
 pub mod prelude;
@@ -84,13 +85,15 @@ pub mod facade;
 
 #[path = "cacheable/lib.rs"]
 pub mod cacheable;
+#[cfg(feature = "cluster-embedded")]
+pub mod cluster;
 #[path = "common/lib.rs"]
 pub mod common;
 #[path = "downloader/lib.rs"]
 pub mod downloader;
 #[path = "engine/lib.rs"]
 pub mod engine;
-#[path = "errors/lib.rs"]
+#[path = "errors/mod.rs"]
 pub mod errors;
 #[path = "proxy/lib.rs"]
 pub mod proxy;

@@ -37,7 +37,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-mocra = "0.5"
+mocra = "0.6"
 async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }
 tokio = { version = "1", features = ["full"] }
@@ -92,7 +92,7 @@ cargo run
 Enable `cluster-embedded` and start a **self-organizing Raft cluster** — register any node to any known node to form the network:
 
 ```toml
-mocra = { version = "0.5", features = ["cluster-embedded"] }
+mocra = { version = "0.6", features = ["cluster-embedded"] }
 ```
 
 ```rust
@@ -118,7 +118,7 @@ The **control plane** (leader election, distributed locks, membership, partition
 Enable the `dashboard` feature and call `.dashboard(port)` — the engine hosts a read-only observability API **and** a built-in single-file web UI. Open the port in a browser to see **metrics / logs / tasks / performance**; no frontend build, and no endpoint to type in (the page targets its own engine):
 
 ```toml
-mocra = { version = "0.5", features = ["dashboard"] }
+mocra = { version = "0.6", features = ["dashboard"] }
 ```
 
 ```rust
@@ -168,18 +168,18 @@ The DB-less `Spider` builder currently has no module-config setter for selecting
 
 Each stage is decoupled by a message queue. Queues are local Tokio channels in single-node mode, or Kafka / NATS (JetStream) in distributed mode — **same code, zero changes**.
 
-### Workspace crates
+### Single package
 
-mocra is a Cargo workspace. The entire runtime lives in `mocra-core`; the `mocra` crate you depend on is a **thin facade** over it. Reusable subsystems ship as standalone crates with a single, acyclic dependency direction (`mocra → mocra-core → {mocra-cluster, mocra-dag, mocra-proxy, mocra-store}` — the inner crates never depend back):
+mocra is a single Cargo package. The `Spider` facade, runtime, and subsystems live under `src/` and are published together as `mocra`. Existing `mocra` imports and feature names are preserved; subsystems are available as modules:
 
-| Crate | What it is |
+| Module | What it is |
 |---|---|
-| [`mocra`](.) | **Thin facade** — `Spider` trait, `Mocra` builder, prelude, default sinks. The only crate most users import. |
-| [`mocra-core`](crates/mocra-core) | The full runtime: domain models, downloader, queue, sync, scheduler, engine + observability/admin API. |
-| [`mocra-cluster`](crates/mocra-cluster) | Embedded control plane: Raft + redb (election, fenced locks, membership, partition ownership) — no external coordinator. |
-| [`mocra-dag`](crates/mocra-dag) | Generic distributed DAG execution engine (zero crawler coupling). |
-| [`mocra-proxy`](crates/mocra-proxy) | Configuration-driven proxy pool / manager (standalone). |
-| [`mocra-store`](crates/mocra-store) | Multi-tenant sea-orm entity models (behind the `store` feature). |
+| [`mocra::facade`](src/facade.rs) / [`mocra::prelude`](src/prelude.rs) | `Spider` trait, `Mocra` builder, prelude, default sinks. |
+| [`mocra::engine`](src/engine) and other runtime modules | Domain models, downloader, queue, sync, scheduler, engine + observability/admin API. |
+| [`mocra::cluster`](src/cluster) | Embedded control plane: Raft + redb (election, fenced locks, membership, partition ownership), behind `cluster-embedded`. |
+| [`mocra::schedule::dag`](src/schedule/dag) | Generic distributed DAG execution engine, also re-exported by `mocra::schedule`. |
+| [`mocra::proxy`](src/proxy) | Configuration-driven proxy pool / manager. |
+| [`mocra::common::model::entity`](src/common/model/entity) | Multi-tenant sea-orm entity models (behind `store`). |
 
 ## DAG Execution
 
@@ -237,7 +237,7 @@ The data plane (message queue) is selected independently of the control plane �
 ## Feature flags
 
 All optional; the default build is single-node with **no DB**. Enable with
-`mocra = { version = "0.5", features = ["…"] }`.
+`mocra = { version = "0.6", features = ["…"] }`.
 
 | Feature | Unlocks |
 |---|---|
@@ -246,7 +246,7 @@ All optional; the default build is single-node with **no DB**. Enable with
 | `store` | DB-backed account × platform × module model (sea-orm) |
 | `queue-kafka` | Kafka data-plane queue backend |
 | `queue-nats` | NATS JetStream data-plane queue backend |
-| `polars` | DataFrame support (`DataFrameStore`, `polars_utils`) |
+| `polars` | DataFrame support (`DataFrameStore` and Polars type re-exports) |
 | `excel` | Excel parsing (calamine → DataFrame); implies `polars` |
 | `js-v8` | Embedded V8 JS runtime for parse scripts |
 | `mimalloc` | mimalloc global allocator (**on by default**) |

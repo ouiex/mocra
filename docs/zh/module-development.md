@@ -8,7 +8,7 @@
 
 ```toml
 [dependencies]
-mocra = { version = "0.5", features = ["store"] }   # `store` 解锁下文的 DB 支撑模型
+mocra = { version = "0.6", features = ["store"] }   # `store` 解锁下文的 DB 支撑模型
 async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }
 tokio = { version = "1", features = ["full"] }
@@ -297,7 +297,7 @@ async fn generate(
 }
 ```
 
-**`store` 特性**解锁 DB 支撑的**账号 × 平台 × 模块**模型(来自 `mocra-store` crate 的 sea-orm 实体),登录与多租户模块用它来持久化凭据与各租户关系。它需要带数据库 URL 的 TOML 配置(`.from_toml(..)` / `State::try_new(..)`);见[配置](configuration.md)。
+**`store` 特性**解锁 DB 支撑的**账号 × 平台 × 模块**模型(`mocra::common::model::entity` 中的 sea-orm 实体),登录与多租户模块用它来持久化凭据与各租户关系。它需要带数据库 URL 的 TOML 配置(`.from_toml(..)` / `State::try_new(..)`);见[配置](configuration.md)。
 
 ## Cron 调度
 

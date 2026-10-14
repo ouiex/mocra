@@ -1,6 +1,6 @@
 # 代理与下载器
 
-适用于显式代理、代理池选择与失败反馈、替换 HTTP 下载器或对接浏览器。先确认任务需要固定代理、引擎自动轮换，还是独立使用 `mocra-proxy`。
+适用于显式代理、代理池选择与失败反馈、替换 HTTP 下载器或对接浏览器。先确认任务需要固定代理、引擎自动轮换，还是直接使用 `mocra::proxy`。
 
 ## 三种代理用法
 
@@ -21,12 +21,12 @@ url = "http://127.0.0.1:8080"
 health_check_interval_secs = 300
 ```
 
-传给独立 `ProxyManager::from_config` 的 TOML 根节点使用 `[[direct]]`，不是 `[[proxy.direct]]`。具体字段及默认值见 `docs/configuration.md` 的 `[proxy]` 部分和 `crates/mocra-proxy/src/proxy_pool.rs`。
+传给独立 `ProxyManager::from_config` 的 TOML 根节点使用 `[[direct]]`，不是 `[[proxy.direct]]`。具体字段及默认值见 `docs/configuration.md` 的 `[proxy]` 部分和 `src/proxy/proxy_pool.rs`。
 引擎仅在启动时构建代理池；文件监听更新不会重建它。回答运行中修改代理配置的问题前，请查看 `docs/zh/proxies-and-downloaders.md`。
 
 ## 代理尝试与反馈
 
-独立管理器的调用顺序是：`get_proxy_for_attempt(excluded)` 选取代理；真正开始发送前 `begin_proxy_attempt(&proxy)`；按结果调用 `report_success(&proxy, latency)` 或 `report_failure(&proxy)`。一次请求重试时可将失败代理传给下一次 `get_proxy_for_attempt(Some(&failed))`。选中代理并不等于已发起下载，不应据此扣限额或报告失败。引擎中的对应流程在 `crates/mocra-core/src/engine/chain/proxy_attempt.rs`；配置值和选择结果均需沿下载链传递。
+独立管理器的调用顺序是：`get_proxy_for_attempt(excluded)` 选取代理；真正开始发送前 `begin_proxy_attempt(&proxy)`；按结果调用 `report_success(&proxy, latency)` 或 `report_failure(&proxy)`。一次请求重试时可将失败代理传给下一次 `get_proxy_for_attempt(Some(&failed))`。选中代理并不等于已发起下载，不应据此扣限额或报告失败。引擎中的对应流程在 `src/engine/chain/proxy_attempt.rs`；配置值和选择结果均需沿下载链传递。
 
 运行 `cargo run --example proxy_pool` 可以离线检查 API 调用顺序；示例的失败与成功均为模拟。`examples/explicit_proxy.rs` 需要真实代理，可用 `MOCRA_PROXY_URL=... cargo run --example explicit_proxy` 启动。
 

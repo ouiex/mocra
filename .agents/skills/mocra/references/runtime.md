@@ -1,6 +1,6 @@
 # Runtime, extension points, and validation
 
-Use this reference for queues, DAGs, modules, clusters, configuration, performance, or documentation changes. Locate the stage in `docs/architecture.md`, then inspect its source and tests. The `mocra` root crate is a facade; most runtime code is in `crates/mocra-core`. `mocra-proxy`, `mocra-dag`, `mocra-cluster`, and `mocra-store` are reusable subsystem crates.
+Use this reference for queues, DAGs, modules, clusters, configuration, performance, or documentation changes. Locate the stage in `docs/architecture.md`, then inspect its source and tests. The project publishes one `mocra` package. The facade and runtime live under `src/`; proxy, DAG, cluster, and store entities live in `src/proxy/`, `src/schedule/dag/`, `src/cluster/`, and `src/common/model/entity/`.
 
 ## Choose the API layer
 
@@ -25,8 +25,8 @@ A task passes through task/generate, request/download, and response/parse stages
 | Change | Useful checks |
 | --- | --- |
 | `Spider` or facade | `cargo test -p mocra --lib`; `cargo check --examples`; run the relevant offline example |
-| `mocra-core` events, download, or parse chain | `cargo test -p mocra-core --lib`; cover affected request fields and failure paths |
-| Proxy pool | `cargo test -p mocra-proxy --lib`; `cargo run --example proxy_pool` |
+| Runtime events, download, or parse chain | `cargo test --lib`; cover affected request fields and failure paths |
+| Proxy pool | `cargo test --lib proxy::`; `cargo run --example proxy_pool` |
 | Dashboard or cluster | `cargo check --examples --features dashboard,cluster-embedded`; run the relevant example if needed |
 | Docs or examples | `cargo fmt --all -- --check`, `git diff --check`; execute key documented commands |
 

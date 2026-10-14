@@ -1,6 +1,6 @@
 # 运行时、扩展点与验证
 
-适用于修改队列、DAG、模块、集群、配置、性能或文档。先从 `docs/architecture.md` 找到阶段，再看相应源码与测试。主包 `mocra` 是 facade；主要运行时在 `crates/mocra-core`；`mocra-proxy`、`mocra-dag`、`mocra-cluster`、`mocra-store` 是可复用子 crate。
+适用于修改队列、DAG、模块、集群、配置、性能或文档。先从 `docs/architecture.md` 找到阶段，再看相应源码与测试。项目只发布一个 `mocra` 包。facade 和运行时都在 `src/`；代理、DAG、集群和存储实体分别位于 `src/proxy/`、`src/schedule/dag/`、`src/cluster/` 和 `src/common/model/entity/`。
 
 ## 路径选择
 
@@ -25,8 +25,8 @@
 | 变更 | 有意义的检查 |
 | --- | --- |
 | `Spider` 或 facade | `cargo test -p mocra --lib`；`cargo check --examples`；运行相关离线示例 |
-| `mocra-core` 事件、下载或解析链 | `cargo test -p mocra-core --lib`；覆盖受影响的请求字段与失败路径 |
-| 代理池 | `cargo test -p mocra-proxy --lib`；`cargo run --example proxy_pool` |
+| 运行时事件、下载或解析链 | `cargo test --lib`；覆盖受影响的请求字段与失败路径 |
+| 代理池 | `cargo test --lib proxy::`；`cargo run --example proxy_pool` |
 | dashboard / 集群 | `cargo check --examples --features dashboard,cluster-embedded`；必要时运行对应示例 |
 | 文档或示例 | `cargo fmt --all -- --check`、`git diff --check`；复制执行文档中的关键命令 |
 

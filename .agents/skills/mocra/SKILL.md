@@ -12,8 +12,8 @@ The [Chinese version](../mocra-zh/SKILL.md) covers the same workflows. This skil
 | Task | Read first | Source or example |
 | --- | --- | --- |
 | Build or fix a `Spider`, parsing, pagination, or output | [Spider and request flow](references/spider.md) | `src/facade.rs`, `examples/spider_quickstart.rs`, `examples/follow_request.rs` |
-| Proxy selection, failure rotation, custom or browser downloader | [Proxies and downloaders](references/network.md) | `crates/mocra-proxy/`, `crates/mocra-core/src/engine/chain/proxy_attempt.rs`, `examples/custom_downloader.rs` |
-| Modules, DAGs, queues, clusters, configuration, or runtime performance | [Runtime and validation](references/runtime.md) | `crates/mocra-core/`, `docs/architecture.md`, `docs/configuration.md` |
+| Proxy selection, failure rotation, custom or browser downloader | [Proxies and downloaders](references/network.md) | `src/proxy/`, `src/engine/chain/proxy_attempt.rs`, `examples/custom_downloader.rs` |
+| Modules, DAGs, queues, clusters, configuration, or runtime performance | [Runtime and validation](references/runtime.md) | `src/`, `docs/architecture.md`, `docs/configuration.md` |
 
 Read multiple references only when the task crosses those paths. `docs/README.md` indexes the project documentation, including the [follow-up request](../../../docs/follow-up-requests.md), [proxy/downloader](../../../docs/proxies-and-downloaders.md), and [runtime tuning](../../../docs/runtime-tuning.md) guides. `examples/README.md` lists runnable examples and prerequisites. If docs disagree with the code, verify the current type definitions, call path, and tests, then correct the affected docs.
 
@@ -27,4 +27,4 @@ Read multiple references only when the task crosses those paths. `docs/README.md
 
 ## Validate the outcome
 
-Choose checks that match the change: `cargo fmt --all -- --check`, relevant crate tests, `cargo check --examples`, and checks for affected features. For a new crawler, confirm output using a small live target or local response. If network access is unavailable, state whether verification was compilation-only or offline. Examples requiring a real proxy, external site, or distributed service are not offline tests.
+Choose checks that match the change: `cargo fmt --all -- --check`, relevant module tests, `cargo check --examples`, and checks for affected features. For a new crawler, confirm output using a small live target or local response. If network access is unavailable, state whether verification was compilation-only or offline. Examples requiring a real proxy, external site, or distributed service are not offline tests.

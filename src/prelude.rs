@@ -16,10 +16,10 @@
 
 // High-level Spider facade (refactor Phase 1)
 #[cfg(feature = "cluster-embedded")]
+pub use crate::cluster::RaftTuning;
+#[cfg(feature = "cluster-embedded")]
 pub use crate::facade::ClusterConfig;
 pub use crate::facade::{ChannelSink, Ctx, DataSink, Mocra, MocraBuilder, Seeds, Spider, on_item};
-#[cfg(feature = "cluster-embedded")]
-pub use mocra_cluster::RaftTuning;
 
 // Common Traits and Structs
 pub use crate::common::interface::{
@@ -120,14 +120,4 @@ pub mod cacheable {
 }
 
 #[cfg(feature = "polars")]
-pub mod polars {
-    pub mod polars {
-        pub use ::polars::*;
-    }
-    pub mod polars_lazy {
-        pub use ::polars_lazy::*;
-    }
-    pub mod polars_ops {
-        pub use ::polars_ops::*;
-    }
-}
+pub use crate::polars;

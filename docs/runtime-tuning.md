@@ -25,9 +25,9 @@ The default proxy Client cache capacity is 1000. Set `download_config.proxy_clie
 
 ## Standalone DAG scheduler
 
-The `mocra-dag` scheduler waits for node completion events rather than polling. When using its `DagRunStateStore`, `.with_run_state_store(store, run_key)` defaults to a full checkpoint after every 16 successful nodes. `.with_run_state_checkpoint_interval(1)` restores per-node saves; call it **after** `.with_run_state_store`. A process loss between checkpoints may cause up to 15 successful nodes to run again at the default interval, so make those effects safe to repeat or choose a smaller interval. Handled errors save a failure snapshot.
+The `mocra::schedule::dag` scheduler waits for node completion events rather than polling. When using its `DagRunStateStore`, `.with_run_state_store(store, run_key)` defaults to a full checkpoint after every 16 successful nodes. `.with_run_state_checkpoint_interval(1)` restores per-node saves; call it **after** `.with_run_state_store`. A process loss between checkpoints may cause up to 15 successful nodes to run again at the default interval, so make those effects safe to repeat or choose a smaller interval. Handled errors save a failure snapshot.
 
-This is a `mocra-dag` scheduler setting, not a `Spider` or engine TOML option. See the [checkpoint measurement](../benchmarks/dag-checkpoints.md) for the local copy-cost comparison and recovery tradeoff. Those microbenchmarks do not measure full crawler throughput.
+This is a `mocra::schedule::dag` scheduler setting, not a `Spider` or engine TOML option. See the [checkpoint measurement](../benchmarks/dag-checkpoints.md) for the local copy-cost comparison and recovery tradeoff. Those microbenchmarks do not measure full crawler throughput.
 
 ## Acceptance boundary
 

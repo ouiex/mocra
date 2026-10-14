@@ -39,8 +39,10 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let target =
         std::env::var("MOCRA_TARGET_URL").unwrap_or_else(|_| "https://example.org/".to_string());
 
-    let mut pool_config = PoolConfig::default();
-    pool_config.health_check_interval_secs = 0;
+    let pool_config = PoolConfig {
+        health_check_interval_secs: 0,
+        ..Default::default()
+    };
     let config = ProxyConfig {
         direct: Some(vec![DirectProxy {
             name: Some("chosen-proxy".into()),

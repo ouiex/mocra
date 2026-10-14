@@ -38,4 +38,4 @@ If you implement a custom `Downloader`, copy the request's correlation fields in
 
 ## Verify a flow
 
-`cargo run --example follow_request` uses a local echo downloader. It starts with a GET, schedules a POST, and prints the method, header, body, cookie, and timeout received by the downloader. It makes no network request. When changing the queue handoff, also run `cargo test -p mocra --lib follow_request`; the tests cover serialized task metadata and the actual downloader path.
+`cargo run --example follow_request` uses a local echo downloader. It starts with a GET, schedules a POST, and prints the method, header, body, cookie, and timeout received by the downloader. It makes no network request. When changing the queue handoff, also run `cargo test --lib follow_request`; the tests cover serialized task metadata and the actual downloader path.

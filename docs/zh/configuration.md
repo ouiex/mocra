@@ -4,7 +4,7 @@
 
 > 架构、流程内幕与分布式部署,见 [docs/README.md](README.md)。
 
-配置采用 TOML。下表每个键都对照配置结构体核对过:`crates/mocra-core/src/common/model/config.rs`(以及 `logger_config.rs`、`policy.rs` 和 `mocra-proxy`)。推荐使用 **URL + 少量必要字段**,而非把每个选项都罗列出来。
+配置采用 TOML。下表每个键都对照配置结构体核对过:`src/common/model/config.rs`(以及 `logger_config.rs`、`policy.rs` 和 `mocra::proxy`)。推荐使用 **URL + 少量必要字段**,而非把每个选项都罗列出来。
 
 ## 什么时候才需要配置文件?
 
@@ -18,7 +18,7 @@ Mocra::builder()
     .await?;
 ```
 
-在 `Cargo.toml` 中加入 `mocra = "0.5"`。只有当你需要**进阶 / 分布式**路径时才需要 TOML 文件 —— 数据库驱动的任务模型、Kafka/NATS 数据面队列、dashboard/可观测 HTTP API、Cron 调度、代理池,或自定义错误策略。用以下方式加载:
+在 `Cargo.toml` 中加入 `mocra = "0.6"`。只有当你需要**进阶 / 分布式**路径时才需要 TOML 文件 —— 数据库驱动的任务模型、Kafka/NATS 数据面队列、dashboard/可观测 HTTP API、Cron 调度、代理池,或自定义错误策略。用以下方式加载:
 
 ```rust
 Mocra::builder()
@@ -39,7 +39,7 @@ Mocra::builder()
 
 ## 特性开关 (Feature flags)
 
-除非驱动某配置键的运行时代码被编译进来,否则该键无效。用 `mocra = { version = "0.5", features = ["…"] }` 开启。
+除非驱动某配置键的运行时代码被编译进来,否则该键无效。用 `mocra = { version = "0.6", features = ["…"] }` 开启。
 
 | 特性 | 用于 |
 |---|---|
@@ -536,4 +536,4 @@ enabled = true
 ## 配置样例
 
 - [本地监控配置](../../monitoring/local_engine.toml) —— 包含 dashboard 端点与 SQLite URL；部署时按需修改路径及特性开关。
-- [配置反序列化测试](../../crates/mocra-core/src/common/model/config.rs) —— 与模型一起维护的最小 schema 样例。
+- [配置反序列化测试](../../src/common/model/config.rs) —— 与模型一起维护的最小 schema 样例。

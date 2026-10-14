@@ -38,4 +38,4 @@ cx.follow(next);
 
 ## 验证流程
 
-`cargo run --example follow_request` 使用本地回显下载器：从 GET 开始，安排 POST，最后打印下载器收到的方法、请求头、body、Cookie 与超时；整个流程不访问网络。修改队列交接逻辑时，再运行 `cargo test -p mocra --lib follow_request`，覆盖序列化后的任务元数据和实际下载路径。
+`cargo run --example follow_request` 使用本地回显下载器：从 GET 开始，安排 POST，最后打印下载器收到的方法、请求头、body、Cookie 与超时；整个流程不访问网络。修改队列交接逻辑时，再运行 `cargo test --lib follow_request`，覆盖序列化后的任务元数据和实际下载路径。

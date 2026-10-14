@@ -1,6 +1,6 @@
 # Proxies and downloaders
 
-Use this reference for explicit proxies, proxy-pool selection and feedback, replacing the HTTP downloader, or integrating a browser. First identify whether the task needs a fixed proxy, engine-managed rotation, or standalone `mocra-proxy` usage.
+Use this reference for explicit proxies, proxy-pool selection and feedback, replacing the HTTP downloader, or integrating a browser. First identify whether the task needs a fixed proxy, engine-managed rotation, or direct `mocra::proxy` usage.
 
 ## Three proxy paths
 
@@ -21,12 +21,12 @@ url = "http://127.0.0.1:8080"
 health_check_interval_secs = 300
 ```
 
-A standalone TOML string passed to `ProxyManager::from_config` uses root-level `[[direct]]`, not `[[proxy.direct]]`. See the `[proxy]` section in `docs/configuration.md` and `crates/mocra-proxy/src/proxy_pool.rs` for fields and defaults.
+A standalone TOML string passed to `ProxyManager::from_config` uses root-level `[[direct]]`, not `[[proxy.direct]]`. See the `[proxy]` section in `docs/configuration.md` and `src/proxy/proxy_pool.rs` for fields and defaults.
 The engine creates its pool at startup; file-watch updates do not rebuild it. See `docs/proxies-and-downloaders.md` before promising live proxy changes.
 
 ## Attempts and feedback
 
-With a standalone manager, call `get_proxy_for_attempt(excluded)` to select a proxy, `begin_proxy_attempt(&proxy)` immediately before sending, then `report_success(&proxy, latency)` or `report_failure(&proxy)` according to the actual outcome. A retry may pass the failed proxy to `get_proxy_for_attempt(Some(&failed))`. Selection alone is not an attempt: do not charge a rate limit or report failure before download starts. The engine path is in `crates/mocra-core/src/engine/chain/proxy_attempt.rs`; trace configuration and selection through the download chain when changing it.
+With a standalone manager, call `get_proxy_for_attempt(excluded)` to select a proxy, `begin_proxy_attempt(&proxy)` immediately before sending, then `report_success(&proxy, latency)` or `report_failure(&proxy)` according to the actual outcome. A retry may pass the failed proxy to `get_proxy_for_attempt(Some(&failed))`. Selection alone is not an attempt: do not charge a rate limit or report failure before download starts. The engine path is in `src/engine/chain/proxy_attempt.rs`; trace configuration and selection through the download chain when changing it.
 
 `cargo run --example proxy_pool` checks the API sequence offline; its outcomes are simulated. `examples/explicit_proxy.rs` needs a real proxy: run it with `MOCRA_PROXY_URL=... cargo run --example explicit_proxy`.
 

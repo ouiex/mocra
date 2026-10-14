@@ -37,34 +37,18 @@ jobs:
 
       - name: Check minimum supported Rust version
         run: |
-          rustup toolchain install 1.85.0 --profile minimal
-          cargo +1.85.0 check -p mocra-store --lib
-          rustup toolchain install 1.88.0 --profile minimal
-          cargo +1.88.0 check -p mocra-cluster -p mocra-dag -p mocra-proxy --lib
           rustup toolchain install 1.95.0 --profile minimal
-          cargo +1.95.0 check -p mocra --lib --features store,dashboard,cluster-embedded,queue-nats,polars,excel
+          cargo +1.95.0 check --lib --features store,dashboard,cluster-embedded,queue-nats,polars,excel
 
       - name: Build (default features)
         run: cargo build --lib
 
       - name: Test (default features)
-        run: cargo test --lib
+        run: cargo test
 
       # Compile-check the public-API doc examples (crate root quick-start etc.).
       - name: Doc-tests
         run: cargo test --doc
-
-      - name: Test embedded cluster crate
-        run: cargo test -p mocra-cluster
-
-      - name: Test proxy crate
-        run: cargo test -p mocra-proxy
-
-      - name: Test dag crate
-        run: cargo test --lib dag_tests
-
-      - name: Build store crate
-        run: cargo build -p mocra-store
 
       - name: Test (cluster-embedded)
         run: cargo test --lib --features cluster-embedded
@@ -98,7 +82,7 @@ jobs:
           done
 
       - name: Test (queue-nats integration, real NATS)
-        run: cargo test -p mocra-core --lib --features queue-nats -- --ignored nats_
+        run: cargo test --lib --features queue-nats -- --ignored nats_
         env:
           MOCRA_NATS_URL: nats://127.0.0.1:4222
 
@@ -119,27 +103,7 @@ jobs:
           cargo clippy --lib --features queue-kafka -- -D warnings
           cargo clippy --lib --features polars,excel -- -D warnings
 
-      - name: Clippy (mocra-cluster, deny warnings)
-        run: cargo clippy -p mocra-cluster -- -D warnings
-
-      - name: Clippy (mocra-proxy, deny warnings)
-        run: cargo clippy -p mocra-proxy -- -D warnings
-
-      - name: Clippy (mocra-dag, deny warnings)
-        run: cargo clippy -p mocra-dag -- -D warnings
-
-      - name: Clippy (mocra-store, deny warnings)
-        run: cargo clippy -p mocra-store -- -D warnings
-
-      - name: Test + Clippy (mocra-core, deny warnings)
-        run: |
-          cargo test -p mocra-core
-          cargo clippy -p mocra-core -- -D warnings
-          cargo clippy -p mocra-core --features store -- -D warnings
-          cargo clippy -p mocra-core --features polars,excel -- -D warnings
-          cargo clippy -p mocra-core --features dashboard -- -D warnings
-
-      - name: Docs (workspace crates, deny warnings)
-        run: cargo doc --no-deps -p mocra-cluster -p mocra-proxy -p mocra-dag -p mocra-store -p mocra-core -p mocra
+      - name: Docs (public features, deny warnings)
+        run: cargo doc --no-deps --features store,dashboard,cluster-embedded,queue-nats,polars,excel
         env:
           RUSTDOCFLAGS: "-D warnings"

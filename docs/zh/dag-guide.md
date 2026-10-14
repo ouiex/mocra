@@ -62,8 +62,8 @@ async fn dag_definition(&self) -> Option<ModuleDagDefinition> {
 |---|---|---|
 | `node_id` | `String` | 模块内唯一标识 |
 | `node` | `Arc<dyn ModuleNodeTrait>` | 节点实现 |
-| `placement_override` | `Option<NodePlacement>` | 分布式模式下的节点放置提示(来自 `mocra_dag`) |
-| `policy_override` | `Option<DagNodeExecutionPolicy>` | 单节点的重试 / 超时 / 熔断策略(来自 `mocra_dag`) |
+| `placement_override` | `Option<NodePlacement>` | 分布式模式下的节点放置提示(来自 `mocra::schedule::dag`) |
+| `policy_override` | `Option<DagNodeExecutionPolicy>` | 单节点的重试 / 超时 / 熔断策略(来自 `mocra::schedule::dag`) |
 | `tags` | `Vec<String>` | 元数据标签 |
 
 构造方式:`ModuleDagNodeDef::new(node)` 从节点的 `stable_node_key()` 推导 `node_id`(为空则用 UUID);`.with_id("..")` 显式覆盖(当你需要同一节点类型在一个 DAG 中出现两次时用它)。

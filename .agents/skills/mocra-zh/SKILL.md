@@ -14,8 +14,8 @@ description: 中文版 mocra 开发指南。用于中文请求中的 Spider、�
 | 任务 | 先读 | 关键源码或示例 |
 | --- | --- | --- |
 | 新建或修复 `Spider`、解析、翻页、数据输出 | [Spider 与请求流](references/spider.md) | `src/facade.rs`、`examples/spider_quickstart.rs`、`examples/follow_request.rs` |
-| 代理选择、失败轮换、自定义下载器、浏览器下载 | [代理与下载器](references/network.md) | `crates/mocra-proxy/`、`crates/mocra-core/src/engine/chain/proxy_attempt.rs`、`examples/custom_downloader.rs` |
-| 模块、DAG、队列、集群、配置或内部性能问题 | [运行时与验证](references/runtime.md) | `crates/mocra-core/`、`docs/architecture.md`、`docs/configuration.md` |
+| 代理选择、失败轮换、自定义下载器、浏览器下载 | [代理与下载器](references/network.md) | `src/proxy/`、`src/engine/chain/proxy_attempt.rs`、`examples/custom_downloader.rs` |
+| 模块、DAG、队列、集群、配置或内部性能问题 | [运行时与验证](references/runtime.md) | `src/`、`docs/architecture.md`、`docs/configuration.md` |
 
 若任务跨越多个入口，按实际触及的部分读取。`docs/zh/README.md` 汇总了[后续请求](../../../docs/zh/follow-up-requests.md)、[代理与下载器](../../../docs/zh/proxies-and-downloaders.md)及[运行时调优](../../../docs/zh/runtime-tuning.md)等指南；`examples/README.md` 列出运行命令与前置条件。代码与文档不一致时，以当前类型定义、调用路径及测试为准，并修正受影响的文档。
 
@@ -29,4 +29,4 @@ description: 中文版 mocra 开发指南。用于中文请求中的 Spider、�
 
 ## 验证结果
 
-依据修改范围运行最小而有意义的检查：`cargo fmt --all -- --check`、相关 crate 的测试、`cargo check --examples`，以及对应特性的示例检查。新爬虫至少用少量真实或本地响应确认输出；网络不可用时明确说明只完成了编译或离线验证。不要用要求真实代理、外站或分布式服务的示例充当离线测试。
+依据修改范围运行最小而有意义的检查：`cargo fmt --all -- --check`、相关模块的测试、`cargo check --examples`，以及对应特性的示例检查。新爬虫至少用少量真实或本地响应确认输出；网络不可用时明确说明只完成了编译或离线验证。不要用要求真实代理、外站或分布式服务的示例充当离线测试。

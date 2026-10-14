@@ -1,7 +1,7 @@
 use crate::js_v8::v8::{JsReturn, V8Engine};
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{Arc, mpsc};
 use tokio::sync::oneshot;
 
 /// A job submitted to the single-threaded JS worker.
@@ -59,7 +59,7 @@ impl JsWorkerPool {
 /// Safe to clone and share; communicates via channels only.
 #[derive(Clone)]
 pub struct JsWorker {
-    tx: Arc<Mutex<mpsc::Sender<JsJob>>>,
+    tx: mpsc::Sender<JsJob>,
 }
 
 impl JsWorker {
@@ -93,16 +93,14 @@ impl JsWorker {
                 let _ = ready_tx.send(Ok(()));
 
                 while let Ok(job) = rx.recv() {
-                    let res = Self::call_engine(&mut engine, &job.func, &job.args).map_err(|e| e);
+                    let res = Self::call_engine(&mut engine, &job.func, &job.args);
                     let _ = job.reply.send(res);
                 }
             })
             .map_err(|e| format!("spawn worker failed: {e}"))?;
 
         match ready_rx.recv() {
-            Ok(Ok(())) => Ok(Self {
-                tx: Arc::new(Mutex::new(tx)),
-            }),
+            Ok(Ok(())) => Ok(Self { tx }),
             Ok(Err(e)) => Err(e),
             Err(e) => Err(format!("worker init channel closed: {e}")),
         }
@@ -117,8 +115,6 @@ impl JsWorker {
             reply: reply_tx,
         };
         self.tx
-            .lock()
-            .map_err(|_| "worker sender poisoned".to_string())?
             .send(job)
             .map_err(|e| format!("send job failed: {e}"))?;
         reply_rx
@@ -186,5 +182,39 @@ mod tests {
             let (i, res) = handle.await.unwrap();
             assert_eq!(res.unwrap(), (i + 10).to_string());
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn cloned_workers_deliver_concurrent_replies() {
+        let worker = JsWorker::new_with_source(
+            "function echo(value) { return value; } function fail() { throw new Error('failed'); }"
+                .into(),
+        )
+        .unwrap();
+        let mut calls = Vec::new();
+        for index in 0..64 {
+            let worker = worker.clone();
+            calls.push(tokio::spawn(async move {
+                let value = index.to_string();
+                assert_eq!(
+                    worker.call_js("echo", vec![value.clone()]).await.unwrap(),
+                    value
+                );
+            }));
+        }
+        for call in calls {
+            call.await.unwrap();
+        }
+        assert_eq!(
+            worker.call_js("fail", vec![]).await.unwrap_err(),
+            "call_function error: function call failed"
+        );
+        assert_eq!(
+            worker
+                .call_js("echo", vec!["after error".into()])
+                .await
+                .unwrap(),
+            "after error"
+        );
     }
 }

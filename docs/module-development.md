@@ -12,7 +12,7 @@ Install (advanced features are opt-in):
 
 ```toml
 [dependencies]
-mocra = { version = "0.5", features = ["store"] }   # `store` unlocks the DB-backed model (below)
+mocra = { version = "0.6", features = ["store"] }   # `store` unlocks the DB-backed model (below)
 async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }
 tokio = { version = "1", features = ["full"] }
@@ -331,7 +331,7 @@ async fn generate(
 ```
 
 The **`store` feature** unlocks the DB-backed **account × platform × module** model (sea-orm
-entities from the `mocra-store` crate) that login and multi-tenant modules use to persist
+entities in `mocra::common::model::entity`) that login and multi-tenant modules use to persist
 credentials and per-tenant relations. It requires a TOML config with a database URL
 (`.from_toml(..)` / `State::try_new(..)`); see [Configuration](configuration.md).
 

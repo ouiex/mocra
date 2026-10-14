@@ -20,7 +20,7 @@ Add mocra to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-mocra = "0.5"
+mocra = "0.6"
 async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }
 tokio = { version = "1", features = ["full"] }
@@ -176,7 +176,7 @@ Or implement `DataSink<Item>` yourself for full control.
 ## Optional features
 
 All are off by default; enable per need, e.g.
-`mocra = { version = "0.5", features = ["dashboard"] }`.
+`mocra = { version = "0.6", features = ["dashboard"] }`.
 
 | Feature | Unlocks |
 |---|---|

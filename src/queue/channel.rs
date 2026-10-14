@@ -1,0 +1,138 @@
+use crate::common::model::message::TaskEvent;
+use crate::common::model::message::{TaskErrorEvent, TaskParserEvent};
+use crate::common::model::{Request, Response};
+use crate::queue::QueuedItem;
+use crate::utils::logger::LogModel;
+use std::sync::Arc;
+use tokio::sync::Mutex;
+use tokio::sync::mpsc::{Receiver, Sender, channel};
+
+/// Message queue channel manager.
+///
+/// Data flow:
+/// 1. Task Flow: watch TaskModel -> produce Request
+/// 2. Request Flow: watch Request -> download -> produce Response
+/// 3. Response Flow: watch Response -> parse -> finish, or produce a new Request
+#[derive(Clone)]
+pub struct Channel {
+    // --- 1. Initial task queue (Task Queue) ---
+    // Producer: external API / seed generator
+    // Consumer: task processor (TaskProcessor) -> produces Request
+    pub task_sender: Sender<QueuedItem<TaskEvent>>,
+    pub task_receiver: Arc<Mutex<Receiver<QueuedItem<TaskEvent>>>>,
+
+    // --- 2. Request queue (Request Queue) ---
+    // Producer: task processor / response processor (parse results)
+    // Consumer: downloader (Downloader) -> performs the download -> produces Response
+    pub request_sender: Sender<QueuedItem<Request>>,
+    pub request_receiver: Arc<Mutex<Receiver<QueuedItem<Request>>>>,
+
+    // (Optional) download-only queue, distinguishing requests before and after scheduling
+    pub download_request_sender: Sender<QueuedItem<Request>>,
+    pub download_request_receiver: Arc<Mutex<Receiver<QueuedItem<Request>>>>,
+
+    // --- 3. Response queue (Response Queue) ---
+    // Producer: downloader (Downloader)
+    // Consumer: response processor (ResponseProcessor) -> parses data -> (store / produce a new
+    // Request)
+    pub response_sender: Sender<QueuedItem<Response>>,
+    pub response_receiver: Arc<Mutex<Receiver<QueuedItem<Response>>>>,
+
+    // --- 4. Auxiliary Queues ---
+
+    // Error handling
+    pub error_sender: Sender<QueuedItem<TaskErrorEvent>>,
+    pub error_receiver: Arc<Mutex<Receiver<QueuedItem<TaskErrorEvent>>>>,
+
+    // Log handling
+    pub log_sender: Sender<QueuedItem<LogModel>>,
+    pub log_receiver: Arc<Mutex<Receiver<QueuedItem<LogModel>>>>,
+
+    // --- 5. Other / extension queues (Others) ---
+
+    // Parser task queue (when parsing is decoupled from response handling)
+    pub parser_task_sender: Sender<QueuedItem<TaskParserEvent>>,
+    pub parser_task_receiver: Arc<Mutex<Receiver<QueuedItem<TaskParserEvent>>>>,
+
+    // Remote / distributed node communication queues
+    pub remote_response_sender: Sender<QueuedItem<Response>>,
+    pub remote_response_receiver: Arc<Mutex<Receiver<QueuedItem<Response>>>>,
+
+    pub remote_parser_task_sender: Sender<QueuedItem<TaskParserEvent>>,
+    pub remote_parser_task_receiver: Arc<Mutex<Receiver<QueuedItem<TaskParserEvent>>>>,
+
+    pub remote_error_sender: Sender<QueuedItem<TaskErrorEvent>>,
+    pub remote_error_receiver: Arc<Mutex<Receiver<QueuedItem<TaskErrorEvent>>>>,
+
+    // Distributed Task Queue (Outbound)
+    pub remote_task_sender: Sender<QueuedItem<TaskEvent>>,
+    pub remote_task_receiver: Arc<Mutex<Receiver<QueuedItem<TaskEvent>>>>,
+}
+impl Channel {
+    pub fn new(capacity: usize) -> Self {
+        assert!(capacity > 0, "channel capacity must be positive");
+        let (task_sender, task_receiver) = channel(capacity);
+        let (request_sender, request_receiver) = channel(capacity);
+        let (download_request_sender, download_request_receiver) = channel(capacity);
+        let (response_sender, response_receiver) = channel(capacity);
+        let (error_sender, error_receiver) = channel(capacity);
+        let (log_sender, log_receiver) = channel(capacity);
+
+        let (parser_task_sender, parser_task_receiver) = channel(capacity);
+
+        // Remote channels
+        let (remote_response_sender, remote_response_receiver) = channel(capacity);
+        let (remote_parser_task_sender, remote_parser_task_receiver) = channel(capacity);
+        let (remote_error_sender, remote_error_receiver) = channel(capacity);
+        let (remote_task_sender, remote_task_receiver) = channel(capacity);
+
+        Channel {
+            task_sender,
+            task_receiver: Arc::new(Mutex::new(task_receiver)),
+
+            request_sender,
+            request_receiver: Arc::new(Mutex::new(request_receiver)),
+
+            download_request_sender,
+            download_request_receiver: Arc::new(Mutex::new(download_request_receiver)),
+
+            response_sender,
+            response_receiver: Arc::new(Mutex::new(response_receiver)),
+
+            error_sender,
+            error_receiver: Arc::new(Mutex::new(error_receiver)),
+
+            log_sender,
+            log_receiver: Arc::new(Mutex::new(log_receiver)),
+
+            parser_task_sender,
+            parser_task_receiver: Arc::new(Mutex::new(parser_task_receiver)),
+
+            remote_response_sender,
+            remote_response_receiver: Arc::new(Mutex::new(remote_response_receiver)),
+
+            remote_parser_task_sender,
+            remote_parser_task_receiver: Arc::new(Mutex::new(remote_parser_task_receiver)),
+
+            remote_error_sender,
+            remote_error_receiver: Arc::new(Mutex::new(remote_error_receiver)),
+
+            remote_task_sender,
+            remote_task_receiver: Arc::new(Mutex::new(remote_task_receiver)),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Channel;
+
+    #[test]
+    fn configured_capacity_applies_to_all_local_channels() {
+        let channels = Channel::new(3);
+        assert_eq!(channels.task_sender.max_capacity(), 3);
+        assert_eq!(channels.request_sender.max_capacity(), 3);
+        assert_eq!(channels.log_sender.max_capacity(), 3);
+        assert_eq!(channels.remote_task_sender.max_capacity(), 3);
+    }
+}

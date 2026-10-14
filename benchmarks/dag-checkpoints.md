@@ -2,7 +2,7 @@
 
 ## Event-driven short chains
 
-Run `cargo test -p mocra-dag --lib --release short_chain_workload -- --ignored --nocapture`.
+Run `cargo test --lib --release short_chain_workload -- --ignored --nocapture`.
 Five release-build runs on the local arm64 host produced the following medians:
 
 | Zero-work chain | Earlier polling probe | Event-driven scheduler |
@@ -25,7 +25,7 @@ configurable; setting it to 1 restores per-node persistence.
 
 ## Copy workload
 
-Run `cargo test -p mocra-dag --lib snapshot_copy_workload -- --ignored --nocapture`.
+Run `cargo test --lib snapshot_copy_workload -- --ignored --nocapture`.
 The test builds payloads in memory, repeats each strategy five times on one machine,
 and reports the median. It excludes storage latency and serialization. The incremental
 column models copying one completed payload into an append record; it is a candidate,

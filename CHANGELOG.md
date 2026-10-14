@@ -4,7 +4,37 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project aims to follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.6.0] — Unreleased
+
+### Changed
+
+- Consolidate the runtime, DAG, embedded cluster, proxy pool, and store entities into the single
+  `mocra` package. Remove the Cargo workspace and internal crate dependencies; retain existing
+  `mocra` imports and feature names. Subsystems remain available through `mocra::schedule`,
+  `mocra::cluster`, `mocra::proxy`, and `mocra::common::model::entity` modules.
+- Reuse queue decoding, proxy loading, cache serialization, middleware hooks, HTTP shutdown,
+  DataFrame type inference, and V8 value conversion. Remove unused private processors, state,
+  and orphan code.
+- Use standard-library lazy initialization and existing futures exports; keep `tempfile`
+  as a test-only dependency.
+- Build, test, document, and publish only the `mocra` package in CI and release tooling;
+  update examples and English/Chinese documentation for version `0.6` and the new source layout.
+
+### Removed
+
+- Remove the separate `mocra-core`, `mocra-dag`, `mocra-proxy`, `mocra-cluster`, and
+  `mocra-store` packages. Code that depended on them directly must now use `mocra`'s runtime,
+  `schedule::dag`, `proxy`, `cluster`, or `common::model::entity` modules; enable
+  `cluster-embedded` or `store` for the corresponding optional modules. The unified package
+  requires Rust `1.95`; the former standalone packages' lower minimum Rust versions no longer apply.
+
+### Fixed
+
+- Recalculate request hashes after public identity fields or fluent setters change.
+- Release an acquired DAG run guard when its fencing token is missing.
+- Preserve input order and the successful prefix before an error in parallel vector processing.
+- Reset the proxy pool's average success rate when the pool becomes empty.
+- Reject invalid `DRY_RUN` values before publishing or changing Cargo mirror settings.
 
 ## [0.5.2] — 2026-10-13
 
@@ -211,8 +241,8 @@ Cargo workspace. No backward compatibility with `0.2.x` internals.
 
 - Cross-node pub/sub message loss and duplicate seed-task injection in cluster mode.
 
-[`mocra-cluster`]: crates/mocra-cluster
-[`mocra-dag`]: crates/mocra-dag
-[`mocra-proxy`]: crates/mocra-proxy
-[`mocra-store`]: crates/mocra-store
+[`mocra-cluster`]: src/cluster
+[`mocra-dag`]: src/schedule/dag
+[`mocra-proxy`]: src/proxy
+[`mocra-store`]: src/common/model/entity
 [`examples/dashboard.rs`]: examples/dashboard.rs

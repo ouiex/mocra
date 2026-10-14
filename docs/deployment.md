@@ -26,7 +26,7 @@ Depend on mocra and run a spider — that is the whole deployment:
 
 ```toml
 [dependencies]
-mocra = "0.5"
+mocra = "0.6"
 ```
 
 ```rust
@@ -64,7 +64,7 @@ election, fenced distributed locks, membership, and partition ownership with **n
 coordinator**.
 
 ```toml
-mocra = { version = "0.5", features = ["cluster-embedded"] }
+mocra = { version = "0.6", features = ["cluster-embedded"] }
 ```
 
 ### Registering nodes
@@ -238,7 +238,7 @@ observability HTTP API **and** a built-in single-file web UI — open the port i
 **metrics / logs / tasks / performance**, no frontend build required:
 
 ```toml
-mocra = { version = "0.5", features = ["dashboard"] }
+mocra = { version = "0.6", features = ["dashboard"] }
 ```
 
 ```rust
@@ -314,7 +314,7 @@ With `.dashboard(...)`, recent logs are also captured into an in-memory ring buf
 
 ## Related guides
 
-- [Architecture](architecture.md) — control plane vs data plane, workspace layout
+- [Architecture](architecture.md) — control plane vs data plane, package layout
 - [Configuration](configuration.md) — full TOML reference (`[cache]`, `[channel_config]`, `[api]`)
 - [API Reference](api-reference.md) — HTTP control plane and metrics
 - [Getting Started](getting-started.md) — installation and first spider

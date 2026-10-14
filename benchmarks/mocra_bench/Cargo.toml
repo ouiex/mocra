@@ -13,6 +13,6 @@ scraper = "0.20"
 [profile.release]
 opt-level = 3
 
-# Standalone workspace: keep this benchmark crate out of the main mocra workspace so it never
+# Standalone workspace: keep this benchmark crate separate from the mocra package so it never
 # affects `cargo build/clippy/fmt` (and CI) at the repo root.
 [workspace]

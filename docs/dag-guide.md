@@ -70,8 +70,8 @@ implements `Clone` but **not** `Default` — build each node with `ModuleDagNode
 |---|---|---|
 | `node_id` | `String` | Unique identifier within the module |
 | `node` | `Arc<dyn ModuleNodeTrait>` | The node implementation |
-| `placement_override` | `Option<NodePlacement>` | Node placement hint for distributed mode (from `mocra_dag`) |
-| `policy_override` | `Option<DagNodeExecutionPolicy>` | Per-node retry / timeout / circuit-breaker policy (from `mocra_dag`) |
+| `placement_override` | `Option<NodePlacement>` | Node placement hint for distributed mode (from `mocra::schedule::dag`) |
+| `policy_override` | `Option<DagNodeExecutionPolicy>` | Per-node retry / timeout / circuit-breaker policy (from `mocra::schedule::dag`) |
 | `tags` | `Vec<String>` | Metadata tags |
 
 Constructors: `ModuleDagNodeDef::new(node)` derives `node_id` from the node's

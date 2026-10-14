@@ -18,7 +18,7 @@
 
 ```toml
 [dependencies]
-mocra = "0.5"
+mocra = "0.6"
 async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }
 tokio = { version = "1", features = ["full"] }
@@ -171,7 +171,7 @@ engine.await.ok();
 ## 可选特性
 
 默认全部关闭，按需开启，例如
-`mocra = { version = "0.5", features = ["dashboard"] }`。
+`mocra = { version = "0.6", features = ["dashboard"] }`。
 
 | 特性 | 解锁 |
 |---|---|

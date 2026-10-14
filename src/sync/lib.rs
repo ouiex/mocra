@@ -1,7 +1,14 @@
-//! The coordination / sync subsystem has been extracted into the `sync` module of the standalone
-//! [`mocra_core`] crate.
-//!
-//! This module remains as a re-export shim so that existing `crate::sync::*` references keep
-//! working (zero-change migration); new code can use `mocra_core::sync::...` directly.
+pub mod backend;
+pub mod distributed;
+pub mod leader;
+#[cfg(feature = "cluster-embedded")]
+pub mod raft_backend;
 
-pub use mocra_core::sync::*;
+pub use backend::{ClusterStatusView, CoordinationBackend};
+pub use distributed::{DistributedSync, SyncAble, SyncService};
+pub use leader::LeaderElector;
+#[cfg(feature = "cluster-embedded")]
+pub use raft_backend::RaftCoordinationBackend;
+
+#[cfg(test)]
+mod tests;

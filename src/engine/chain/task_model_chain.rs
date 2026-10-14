@@ -1,0 +1,1766 @@
+use crate::common::status_tracker::ErrorDecision;
+use crate::engine::events::{
+    EventBus, EventEnvelope, EventPhase, EventType, ModuleGenerateEvent, ParserTaskModelEvent,
+    RequestEvent, TaskModelEvent,
+};
+use crate::engine::processors::event_processor::{EventAwareTypedChain, EventProcessorTrait};
+use log::info;
+
+use crate::common::context::PipelineContext;
+use crate::common::model::chain_key;
+use crate::common::model::message::{TaskErrorEvent, TaskEvent, TaskParserEvent, UnifiedTaskInput};
+use crate::common::model::{ModuleConfig, Request};
+use crate::errors::{Error, ModuleError, Result};
+use async_trait::async_trait;
+
+use crate::common::processors::processor::{
+    ProcessorContext, ProcessorResult, ProcessorTrait, RetryPolicy,
+};
+use crate::common::processors::processor_chain::ErrorStrategy;
+use crate::queue::{QueueManager, QueuedItem};
+use futures::stream::StreamExt;
+use log::{debug, error, warn};
+use metrics::counter;
+use serde_json::json;
+use std::marker::PhantomData;
+use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
+use uuid::Uuid;
+
+use crate::engine::chain::backpressure::{BackpressureSendState, send_with_backpressure};
+
+/// High-level action produced by threshold checks in ingress chains.
+#[derive(Debug, Clone)]
+pub enum ChainDecision {
+    /// Continue processing without side effects.
+    Continue,
+    /// Retry current path after delay.
+    RetryAfter {
+        delay: std::time::Duration,
+        action_applied: bool,
+    },
+    /// Stop processing for the current module scope.
+    TerminateModule {
+        reason: String,
+        action_applied: bool,
+    },
+    /// Stop processing for the current task scope.
+    TerminateTask {
+        reason: String,
+        action_applied: bool,
+    },
+}
+
+#[async_trait]
+/// Abstraction for threshold and termination decisions.
+pub trait ThresholdDecisionService: Send + Sync {
+    /// Performs preflight validation before task expansion.
+    async fn task_precheck(&self, task_id: &str) -> ChainDecision;
+    /// Decides how to handle an `ErrorTaskModel` path.
+    async fn error_task_decide(&self, input: &TaskErrorEvent) -> ChainDecision;
+}
+
+/// Default threshold decision service backed by `StatusTracker`.
+#[derive(Clone)]
+pub struct StatusTrackerThresholdDecisionService {
+    state: Arc<PipelineContext>,
+}
+
+impl StatusTrackerThresholdDecisionService {
+    /// Creates a threshold decision service backed by `StatusTracker`.
+    pub fn new(state: Arc<PipelineContext>) -> Self {
+        Self { state }
+    }
+}
+
+#[async_trait]
+impl ThresholdDecisionService for StatusTrackerThresholdDecisionService {
+    async fn task_precheck(&self, task_id: &str) -> ChainDecision {
+        match self
+            .state
+            .status_tracker
+            .should_task_continue(task_id)
+            .await
+        {
+            Ok(ErrorDecision::Continue) => ChainDecision::Continue,
+            Ok(ErrorDecision::Terminate(reason)) => ChainDecision::TerminateTask {
+                reason,
+                action_applied: false,
+            },
+            Err(err) => {
+                warn!(
+                    "[ThresholdDecisionService] task precheck failed: task_id={} error={}, fallback=continue",
+                    task_id, err
+                );
+                ChainDecision::Continue
+            }
+            _ => ChainDecision::Continue,
+        }
+    }
+
+    async fn error_task_decide(&self, input: &TaskErrorEvent) -> ChainDecision {
+        let task_id = chain_key::task_runtime_id(
+            &input.account_task.platform,
+            &input.account_task.account,
+            input.run_id,
+        );
+
+        let parse_error: Error = ModuleError::ModuleNotFound(input.error_msg.clone().into()).into();
+        let mut retry_after: Option<std::time::Duration> = None;
+
+        if let Some(modules) = &input.account_task.module {
+            for module_name in modules {
+                let module_id = chain_key::module_runtime_id(
+                    &input.account_task.account,
+                    &input.account_task.platform,
+                    module_name,
+                );
+                // Run-scoped module ID for StatusTracker error isolation across runs
+                let module_id_scoped = format!("{}-{}", module_id, input.run_id);
+
+                if input.prefix_request != Uuid::nil() {
+                    match self
+                        .state
+                        .status_tracker
+                        .record_parse_error(
+                            &task_id,
+                            &module_id_scoped,
+                            &input.prefix_request.to_string(),
+                            &parse_error,
+                        )
+                        .await
+                    {
+                        Ok(ErrorDecision::RetryAfter(delay)) => {
+                            retry_after = Some(delay);
+                        }
+                        Ok(_) => {}
+                        Err(err) => {
+                            warn!(
+                                "[ThresholdDecisionService] record_parse_error failed: task_id={} module_id={} error={}",
+                                task_id, module_id_scoped, err
+                            );
+                        }
+                    }
+                }
+
+                match self
+                    .state
+                    .status_tracker
+                    .should_module_continue(&module_id_scoped)
+                    .await
+                {
+                    Ok(ErrorDecision::Terminate(reason)) => {
+                        return ChainDecision::TerminateModule {
+                            reason,
+                            action_applied: false,
+                        };
+                    }
+                    Ok(_) => {}
+                    Err(err) => {
+                        warn!(
+                            "[ThresholdDecisionService] module precheck failed: module_id={} error={}",
+                            module_id, err
+                        );
+                    }
+                }
+            }
+        }
+
+        match self.task_precheck(&task_id).await {
+            ChainDecision::TerminateTask { reason, .. } => ChainDecision::TerminateTask {
+                reason,
+                action_applied: false,
+            },
+            _ => retry_after
+                .map(|delay| ChainDecision::RetryAfter {
+                    delay,
+                    action_applied: false,
+                })
+                .unwrap_or(ChainDecision::Continue),
+        }
+    }
+}
+
+/// First ingress processor for `TaskModel` and `ParserTaskModel` variants.
+///
+/// Responsibilities:
+/// - pre-check task thresholds,
+/// - load/construct `Task`,
+/// - handle error-task retry/terminate decisions,
+/// - emit semantic events for observability.
+pub struct TaskModelProcessor {
+    task_manager: Arc<TaskManager>,
+    state: Arc<PipelineContext>,
+    queue_manager: Arc<QueueManager>,
+    event_bus: Option<Arc<EventBus>>,
+    threshold_decision_service: Arc<dyn ThresholdDecisionService>,
+}
+
+impl TaskModelProcessor {
+    async fn task_precheck(&self, task_id: &str) -> ChainDecision {
+        self.threshold_decision_service.task_precheck(task_id).await
+    }
+
+    async fn error_task_decide(&self, input: &TaskErrorEvent) -> ChainDecision {
+        self.threshold_decision_service
+            .error_task_decide(input)
+            .await
+    }
+
+    async fn persist_error_retry_schedule(
+        &self,
+        input: &TaskErrorEvent,
+        delay: std::time::Duration,
+    ) {
+        let task_id = chain_key::task_runtime_id(
+            &input.account_task.platform,
+            &input.account_task.account,
+            input.run_id,
+        );
+        let module_id = input
+            .context
+            .module_id
+            .clone()
+            .or_else(|| {
+                input.account_task.module.as_ref().and_then(|m| {
+                    m.first().map(|name| {
+                        chain_key::module_runtime_id(
+                            &input.account_task.account,
+                            &input.account_task.platform,
+                            name,
+                        )
+                    })
+                })
+            })
+            .unwrap_or_else(|| {
+                chain_key::module_runtime_id(
+                    &input.account_task.account,
+                    &input.account_task.platform,
+                    "unknown",
+                )
+            });
+        let retry_key = chain_key::error_retry_schedule_key(&task_id);
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as f64;
+        let score = now_ms + delay.as_millis() as f64;
+        let member = format!("{}:{}:{}", task_id, module_id, input.prefix_request);
+
+        if let Err(err) = self
+            .state
+            .cache_service
+            .zadd(&retry_key, score, member.as_bytes())
+            .await
+        {
+            warn!(
+                "[TaskModelProcessor<ErrorTaskModel>] failed to persist retry schedule: key={} error={}",
+                retry_key, err
+            );
+        }
+    }
+
+    async fn persist_terminate_mark(
+        &self,
+        input: &TaskErrorEvent,
+        terminate_module: Option<&str>,
+        reason: &str,
+    ) {
+        let task_id = chain_key::task_runtime_id(
+            &input.account_task.platform,
+            &input.account_task.account,
+            input.run_id,
+        );
+        let terminate_key = if let Some(module_id) = terminate_module {
+            chain_key::terminate_module_key(&task_id, module_id)
+        } else {
+            chain_key::terminate_task_key(&task_id)
+        };
+
+        let ttl_secs = {
+            let cfg = self.state.config.read().await;
+            cfg.cache.ttl
+        };
+        let payload = json!({
+            "reason": reason,
+            "task_id": task_id,
+            "module_id": terminate_module,
+            "prefix_request": input.prefix_request.to_string(),
+        })
+        .to_string();
+        if let Err(err) = self
+            .state
+            .cache_service
+            .set_nx(
+                &terminate_key,
+                payload.as_bytes(),
+                Some(std::time::Duration::from_secs(ttl_secs)),
+            )
+            .await
+        {
+            warn!(
+                "[TaskModelProcessor<ErrorTaskModel>] failed to persist terminate mark: key={} error={}",
+                terminate_key, err
+            );
+        }
+    }
+
+    async fn emit_threshold_terminated_event(
+        &self,
+        input: &TaskErrorEvent,
+        decision: &str,
+        reason: &str,
+    ) {
+        let Some(event_bus) = &self.event_bus else {
+            return;
+        };
+
+        let payload = json!({
+            "run_id": input.run_id.to_string(),
+            "account": input.account_task.account,
+            "platform": input.account_task.platform,
+            "module_id": input.context.module_id,
+            "step_idx": input.context.step_idx,
+            "prefix_request": input.prefix_request.to_string(),
+            "decision": decision,
+            "reason": reason,
+        });
+
+        if let Err(err) = event_bus
+            .publish(EventEnvelope::engine(
+                EventType::TaskTerminatedByThreshold,
+                EventPhase::Completed,
+                payload,
+            ))
+            .await
+        {
+            warn!(
+                "[TaskModelProcessor<ErrorTaskModel>] failed to publish threshold termination event: {}",
+                err
+            );
+        }
+    }
+}
+#[async_trait]
+impl ProcessorTrait<TaskEvent, Task> for TaskModelProcessor {
+    fn name(&self) -> &'static str {
+        "TaskModelProcessor"
+    }
+
+    async fn process(&self, input: TaskEvent, context: ProcessorContext) -> ProcessorResult<Task> {
+        debug!(
+            "[TaskModelProcessor] Processing Task: account={} platform={} modules={:?} retry={}",
+            input.account,
+            input.platform,
+            input.module,
+            context
+                .retry_policy
+                .as_ref()
+                .map(|r| r.current_retry)
+                .unwrap_or(0)
+        );
+
+        let task_id = chain_key::task_runtime_id(&input.platform, &input.account, input.run_id);
+        match self.task_precheck(&task_id).await {
+            ChainDecision::Continue => {}
+            ChainDecision::TerminateTask { reason, .. } => {
+                error!(
+                    "[TaskModelProcessor<TaskModel>] task terminated (pre-check): task_id={} reason={}",
+                    task_id, reason
+                );
+                if let Err(e) = self
+                    .queue_manager
+                    .send_to_dlq("task", &input, &reason)
+                    .await
+                {
+                    error!(
+                        "[TaskModelProcessor<TaskModel>] failed to send to DLQ: {}",
+                        e
+                    );
+                }
+                return ProcessorResult::FatalFailure(
+                    ModuleError::TaskMaxError(reason.into()).into(),
+                );
+            }
+            _ => {}
+        }
+
+        let task = self.task_manager.load_with_model(&input).await;
+        debug!(
+            "[TaskModelProcessor] load_with_model result: {:?}",
+            task.as_ref().map(|t| t.id())
+        );
+
+        match task {
+            Ok(task) => {
+                if task.is_empty() {
+                    return ProcessorResult::FatalFailure(
+                        ModuleError::ModuleNotFound(
+                            format!(
+                                "No modules found for the given TaskModel, task_model: {input:?}"
+                            )
+                            .into(),
+                        )
+                        .into(),
+                    );
+                }
+                let default_locker_ttl = self.state.config.read().await.crawler.module_locker_ttl;
+                let mut all_locked = true;
+                for m in task.modules.iter() {
+                    if !self
+                        .state
+                        .status_tracker
+                        .is_module_locker(m.id().as_ref(), default_locker_ttl)
+                        .await
+                    {
+                        all_locked = false;
+                        break;
+                    }
+                }
+                if all_locked {
+                    warn!(
+                        "[TaskModelProcessor<TaskModel>] all target modules locked, defer via retry policy: account={} platform={} run_id={}",
+                        input.account, input.platform, input.run_id
+                    );
+                    // Avoid duplicate amplification: this branch used to both
+                    // push back into `task-normal` and return RetryableFailure,
+                    // which could multiply the same TaskModel exponentially.
+                    // Keep a single retry path (executor-managed retry only).
+                    return ProcessorResult::RetryableFailure(
+                        context
+                            .retry_policy
+                            .unwrap_or_default()
+                            .with_reason("all target modules locked".to_string()),
+                    );
+                }
+
+                info!(
+                    "[TaskModelProcessor] Successfully converted TaskModel to Task. Task ID: {}, Modules count: {}",
+                    task.id(),
+                    task.modules.len()
+                );
+
+                ProcessorResult::Success(task)
+            }
+            Err(e) => {
+                debug!(
+                    "[TaskModelProcessor] load_with_model failed: account={} platform={} run_id={} error={e}",
+                    input.account, input.platform, input.run_id
+                );
+                warn!(
+                    "[TaskModelProcessor<TaskModel>] load_with_model failed, will retry: account={} platform={} run_id={} error={e}",
+                    input.account, input.platform, input.run_id
+                );
+                ProcessorResult::RetryableFailure(
+                    context
+                        .retry_policy
+                        .unwrap_or(RetryPolicy::default().with_reason(e.to_string())),
+                )
+            }
+        }
+    }
+    async fn handle_error(
+        &self,
+        input: &TaskEvent,
+        error: Error,
+        _context: &ProcessorContext,
+    ) -> ProcessorResult<Task> {
+        let sender = self.queue_manager.get_error_push_channel();
+        let error_msg = TaskErrorEvent {
+            id: Default::default(),
+            account_task: input.clone(),
+            error_msg: error.to_string(),
+            timestamp: chrono::Utc::now().timestamp_millis() as u64,
+            metadata: Default::default(),
+            context: Default::default(),
+            run_id: input.run_id,
+            prefix_request: Uuid::nil(),
+        };
+        if let Err(e) = sender.send(QueuedItem::new(error_msg)).await {
+            error!("[TaskModelProcessor<TaskModel>] failed to enqueue ErrorTaskModel: {e}");
+        }
+        ProcessorResult::FatalFailure(
+            ModuleError::ModuleNotFound("Failed to load task, re-queued".into()).into(),
+        )
+    }
+}
+#[async_trait]
+impl EventProcessorTrait<TaskEvent, Task> for TaskModelProcessor {
+    fn pre_status(&self, input: &TaskEvent) -> Option<EventEnvelope> {
+        Some(EventEnvelope::engine(
+            EventType::TaskModel,
+            EventPhase::Started,
+            TaskModelEvent::from(input),
+        ))
+    }
+
+    fn finish_status(&self, input: &TaskEvent, output: &Task) -> Option<EventEnvelope> {
+        let mut task_model_event: TaskModelEvent = input.into();
+        task_model_event.modules = Some(output.get_module_names());
+        Some(EventEnvelope::engine(
+            EventType::TaskModel,
+            EventPhase::Completed,
+            task_model_event,
+        ))
+    }
+
+    fn working_status(&self, input: &TaskEvent) -> Option<EventEnvelope> {
+        self.pre_status(input)
+    }
+
+    fn error_status(&self, input: &TaskEvent, error: &Error) -> Option<EventEnvelope> {
+        Some(EventEnvelope::engine_error(
+            EventType::TaskModel,
+            EventPhase::Failed,
+            TaskModelEvent::from(input),
+            error,
+        ))
+    }
+
+    fn retry_status(&self, input: &TaskEvent, retry_policy: &RetryPolicy) -> Option<EventEnvelope> {
+        Some(EventEnvelope::engine(
+            EventType::TaskModel,
+            EventPhase::Retry,
+            json!({
+                "data": TaskModelEvent::from(input),
+                "retry_count": retry_policy.current_retry,
+                "reason": retry_policy.reason.clone().unwrap_or_default(),
+            }),
+        ))
+    }
+}
+#[async_trait]
+impl ProcessorTrait<TaskParserEvent, Task> for TaskModelProcessor {
+    fn name(&self) -> &'static str {
+        "TaskModelProcessor"
+    }
+
+    async fn process(
+        &self,
+        input: TaskParserEvent,
+        context: ProcessorContext,
+    ) -> ProcessorResult<Task> {
+        debug!(
+            "[TaskModelProcessor<ParserTaskModel>] start: account={} platform={} crawler={:?} retry_count={}",
+            input.account_task.account,
+            input.account_task.platform,
+            input.account_task.module,
+            context
+                .retry_policy
+                .as_ref()
+                .map(|r| r.current_retry)
+                .unwrap_or(0)
+        );
+
+        // Check whether this task scope has already been terminated.
+        let task_id = chain_key::task_runtime_id(
+            &input.account_task.platform,
+            &input.account_task.account,
+            input.run_id,
+        );
+        match self.task_precheck(&task_id).await {
+            ChainDecision::Continue => {
+                debug!(
+                    "[TaskModelProcessor<ParserTaskModel>] task can continue: task_id={}",
+                    task_id
+                );
+            }
+            ChainDecision::TerminateTask { reason, .. } => {
+                error!(
+                    "[TaskModelProcessor<ParserTaskModel>] task terminated (pre-check): task_id={} reason={}",
+                    task_id, reason
+                );
+                return ProcessorResult::FatalFailure(
+                    ModuleError::TaskMaxError(reason.into()).into(),
+                );
+            }
+            _ => {}
+        }
+
+        let task = self.task_manager.load_parser(&input).await;
+        match task {
+            Ok(task) => ProcessorResult::Success(task),
+            Err(e) => {
+                warn!(
+                    "[TaskModelProcessor<ParserTaskModel>] load_parser failed, will retry: account={} platform={} run_id={} error={e}",
+                    input.account_task.account, input.account_task.platform, input.run_id
+                );
+                ProcessorResult::RetryableFailure(
+                    context
+                        .retry_policy
+                        .unwrap_or(RetryPolicy::default().with_reason(e.to_string())),
+                )
+            }
+        }
+    }
+    async fn handle_error(
+        &self,
+        input: &TaskParserEvent,
+        error: Error,
+        _context: &ProcessorContext,
+    ) -> ProcessorResult<Task> {
+        let sender = self.queue_manager.get_error_push_channel();
+        let error_msg = TaskErrorEvent {
+            id: Default::default(),
+            account_task: input.account_task.clone(),
+            error_msg: error.to_string(),
+            timestamp: chrono::Utc::now().timestamp_millis() as u64,
+            metadata: Default::default(),
+            context: Default::default(),
+            run_id: input.run_id,
+            prefix_request: input.prefix_request,
+        };
+        if let Err(e) = sender.send(QueuedItem::new(error_msg)).await {
+            error!("[TaskModelProcessor<ParserTaskModel>] failed to enqueue ErrorTaskModel: {e}");
+        }
+        ProcessorResult::FatalFailure(
+            ModuleError::ModuleNotFound("Failed to load task, re-queued".into()).into(),
+        )
+    }
+}
+#[async_trait]
+impl EventProcessorTrait<TaskParserEvent, Task> for TaskModelProcessor {
+    fn pre_status(&self, input: &TaskParserEvent) -> Option<EventEnvelope> {
+        Some(EventEnvelope::engine(
+            EventType::ParserTaskModel,
+            EventPhase::Started,
+            ParserTaskModelEvent::from(input),
+        ))
+    }
+
+    fn finish_status(&self, input: &TaskParserEvent, output: &Task) -> Option<EventEnvelope> {
+        let mut evt: ParserTaskModelEvent = input.into();
+        evt.modules = Some(output.get_module_names());
+        Some(EventEnvelope::engine(
+            EventType::ParserTaskModel,
+            EventPhase::Completed,
+            evt,
+        ))
+    }
+
+    fn working_status(&self, input: &TaskParserEvent) -> Option<EventEnvelope> {
+        self.pre_status(input)
+    }
+
+    fn error_status(&self, input: &TaskParserEvent, err: &Error) -> Option<EventEnvelope> {
+        Some(EventEnvelope::engine_error(
+            EventType::ParserTaskModel,
+            EventPhase::Failed,
+            ParserTaskModelEvent::from(input),
+            err,
+        ))
+    }
+
+    fn retry_status(
+        &self,
+        input: &TaskParserEvent,
+        retry_policy: &RetryPolicy,
+    ) -> Option<EventEnvelope> {
+        Some(EventEnvelope::engine(
+            EventType::ParserTaskModel,
+            EventPhase::Retry,
+            json!({
+                "data": ParserTaskModelEvent::from(input),
+                "retry_count": retry_policy.current_retry,
+                "reason": retry_policy.reason.clone().unwrap_or_default(),
+            }),
+        ))
+    }
+}
+#[async_trait]
+impl ProcessorTrait<TaskErrorEvent, Task> for TaskModelProcessor {
+    fn name(&self) -> &'static str {
+        "TaskModelProcessor"
+    }
+
+    async fn process(
+        &self,
+        input: TaskErrorEvent,
+        context: ProcessorContext,
+    ) -> ProcessorResult<Task> {
+        debug!(
+            "[TaskModelProcessor<ErrorTaskModel>] start: account={} platform={} crawler={:?} retry_count={}",
+            input.account_task.account,
+            input.account_task.platform,
+            input.account_task.module,
+            context
+                .retry_policy
+                .as_ref()
+                .map(|r| r.current_retry)
+                .unwrap_or(0)
+        );
+
+        let task_id = chain_key::task_runtime_id(
+            &input.account_task.platform,
+            &input.account_task.account,
+            input.run_id,
+        );
+        match self.error_task_decide(&input).await {
+            ChainDecision::Continue => {
+                counter!("mocra_error_task_threshold_decision_total", "decision" => "continue")
+                    .increment(1);
+                debug!(
+                    "[TaskModelProcessor<ErrorTaskModel>] task can continue: task_id={}",
+                    task_id
+                );
+            }
+            ChainDecision::RetryAfter {
+                delay,
+                action_applied,
+            } => {
+                counter!("mocra_error_task_threshold_decision_total", "decision" => "retry_after")
+                    .increment(1);
+                if !action_applied {
+                    self.persist_error_retry_schedule(&input, delay).await;
+                }
+                let mut retry_policy = context.retry_policy.unwrap_or_default();
+                retry_policy.retry_delay = std::cmp::max(delay.as_millis() as u64, 1);
+                retry_policy.reason = Some(format!(
+                    "error task retry after {}ms",
+                    retry_policy.retry_delay
+                ));
+                return ProcessorResult::RetryableFailure(retry_policy);
+            }
+            ChainDecision::TerminateModule {
+                reason,
+                action_applied,
+            } => {
+                counter!("mocra_error_task_threshold_decision_total", "decision" => "terminate_module").increment(1);
+                let module_id = input
+                    .context
+                    .module_id
+                    .clone()
+                    .or_else(|| {
+                        input.account_task.module.as_ref().and_then(|m| {
+                            m.first().map(|name| {
+                                chain_key::module_runtime_id(
+                                    &input.account_task.account,
+                                    &input.account_task.platform,
+                                    name,
+                                )
+                            })
+                        })
+                    })
+                    .unwrap_or_else(|| {
+                        chain_key::module_runtime_id(
+                            &input.account_task.account,
+                            &input.account_task.platform,
+                            "unknown",
+                        )
+                    });
+                if !action_applied {
+                    self.persist_terminate_mark(&input, Some(&module_id), &reason)
+                        .await;
+                }
+                self.emit_threshold_terminated_event(&input, "terminate_module", &reason)
+                    .await;
+                warn!(
+                    "[TaskModelProcessor<ErrorTaskModel>] module terminated by threshold: task_id={} reason={}",
+                    task_id, reason
+                );
+                return ProcessorResult::FatalFailure(
+                    ModuleError::ModuleMaxError(reason.into()).into(),
+                );
+            }
+            ChainDecision::TerminateTask {
+                reason,
+                action_applied,
+            } => {
+                counter!("mocra_error_task_threshold_decision_total", "decision" => "terminate_task").increment(1);
+                if !action_applied {
+                    self.persist_terminate_mark(&input, None, &reason).await;
+                }
+                self.emit_threshold_terminated_event(&input, "terminate_task", &reason)
+                    .await;
+                error!(
+                    "[TaskModelProcessor<ErrorTaskModel>] task terminated (pre-check): task_id={} reason={}",
+                    task_id, reason
+                );
+                if let Err(e) = self
+                    .queue_manager
+                    .send_to_dlq("error_task", &input, &reason)
+                    .await
+                {
+                    error!(
+                        "[TaskModelProcessor<ErrorTaskModel>] failed to send to DLQ: {}",
+                        e
+                    );
+                }
+                return ProcessorResult::FatalFailure(
+                    ModuleError::TaskMaxError(reason.into()).into(),
+                );
+            }
+        }
+
+        let task = self.task_manager.load_error(&input).await;
+        match task {
+            Ok(task) => ProcessorResult::Success(task),
+            Err(e) => {
+                warn!(
+                    "[TaskModelProcessor<ErrorTaskModel>] load_error failed, will retry: account={} platform={} run_id={} error={e}",
+                    input.account_task.account, input.account_task.platform, input.run_id
+                );
+                ProcessorResult::RetryableFailure(
+                    context
+                        .retry_policy
+                        .unwrap_or(RetryPolicy::default().with_reason(e.to_string())),
+                )
+            }
+        }
+    }
+}
+#[async_trait]
+impl EventProcessorTrait<TaskErrorEvent, Task> for TaskModelProcessor {
+    fn pre_status(&self, input: &TaskErrorEvent) -> Option<EventEnvelope> {
+        Some(EventEnvelope::engine(
+            EventType::ParserTaskModel,
+            EventPhase::Started,
+            ParserTaskModelEvent::from(input),
+        ))
+    }
+
+    fn finish_status(&self, input: &TaskErrorEvent, output: &Task) -> Option<EventEnvelope> {
+        let mut evt: ParserTaskModelEvent = input.into();
+        evt.modules = Some(output.get_module_names());
+        Some(EventEnvelope::engine(
+            EventType::ParserTaskModel,
+            EventPhase::Completed,
+            evt,
+        ))
+    }
+
+    fn working_status(&self, input: &TaskErrorEvent) -> Option<EventEnvelope> {
+        self.pre_status(input)
+    }
+
+    fn error_status(&self, input: &TaskErrorEvent, err: &Error) -> Option<EventEnvelope> {
+        Some(EventEnvelope::engine_error(
+            EventType::ParserTaskModel,
+            EventPhase::Failed,
+            ParserTaskModelEvent::from(input),
+            err,
+        ))
+    }
+
+    fn retry_status(
+        &self,
+        input: &TaskErrorEvent,
+        retry_policy: &RetryPolicy,
+    ) -> Option<EventEnvelope> {
+        Some(EventEnvelope::engine(
+            EventType::ParserTaskModel,
+            EventPhase::Retry,
+            json!({
+                "data": ParserTaskModelEvent::from(input),
+                "retry_count": retry_policy.current_retry,
+                "reason": retry_policy.reason.clone().unwrap_or_default(),
+            }),
+        ))
+    }
+}
+
+pub struct TaskModuleProcessor {
+    state: Arc<PipelineContext>,
+}
+#[async_trait]
+impl ProcessorTrait<Task, Vec<Module>> for TaskModuleProcessor {
+    fn name(&self) -> &'static str {
+        "TaskModuleProcessor"
+    }
+
+    async fn process(
+        &self,
+        input: Task,
+        _context: ProcessorContext,
+    ) -> ProcessorResult<Vec<Module>> {
+        debug!(
+            "[TaskModuleProcessor] start: task_id={} module_count={}",
+            input.id(),
+            input.modules.len()
+        );
+        let metadata = input.metadata.clone();
+        let login_info = input.login_info.clone();
+        let mut modules: Vec<Module> = Vec::new();
+        let default_locker_ttl = self.state.config.read().await.crawler.module_locker_ttl;
+        for mut module in input.modules {
+            // Check module-level threshold before generating requests.
+            match self
+                .state
+                .status_tracker
+                .should_module_continue(&module.id())
+                .await
+            {
+                Ok(ErrorDecision::Continue) => {
+                    debug!(
+                        "[TaskModuleProcessor] module can continue: module_id={}",
+                        module.id()
+                    );
+                }
+                Ok(ErrorDecision::Terminate(reason)) => {
+                    // Module reached threshold; skip it and continue with others.
+                    error!(
+                        "[TaskModuleProcessor] skip terminated module: module_id={} reason={}",
+                        module.id(),
+                        reason
+                    );
+                    // Skip only this module; keep pipeline alive.
+                    continue;
+                }
+                Err(e) => {
+                    warn!(
+                        "[TaskModuleProcessor] error tracker check failed for module: module_id={} error={}, continue anyway",
+                        module.id(),
+                        e
+                    );
+                }
+                _ => {}
+            }
+
+            module.locker_ttl = module
+                .config
+                .get_config_value("module_locker_ttl")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(default_locker_ttl);
+            module.bind_task_context(metadata.clone(), login_info.clone());
+            modules.push(module);
+        }
+
+        ProcessorResult::Success(modules)
+    }
+}
+
+#[async_trait]
+impl EventProcessorTrait<Task, Vec<Module>> for TaskModuleProcessor {
+    fn pre_status(&self, _input: &Task) -> Option<EventEnvelope> {
+        None
+    }
+
+    fn finish_status(&self, _input: &Task, _output: &Vec<Module>) -> Option<EventEnvelope> {
+        None
+    }
+
+    fn working_status(&self, _input: &Task) -> Option<EventEnvelope> {
+        None
+    }
+
+    fn error_status(&self, _input: &Task, _err: &Error) -> Option<EventEnvelope> {
+        None
+    }
+
+    fn retry_status(&self, _input: &Task, _retry_policy: &RetryPolicy) -> Option<EventEnvelope> {
+        None
+    }
+}
+
+pub struct TaskProcessor;
+#[async_trait]
+impl ProcessorTrait<Module, SyncBoxStream<'static, Request>> for TaskProcessor {
+    fn name(&self) -> &'static str {
+        "TaskProcessor"
+    }
+
+    async fn process(
+        &self,
+        input: Module,
+        context: ProcessorContext,
+    ) -> ProcessorResult<SyncBoxStream<'static, Request>> {
+        debug!(
+            "[TaskProcessor] start generate: module_id={} module_name={}",
+            input.id(),
+            input.module.name()
+        );
+
+        let (meta, login_info) = input.runtime_task_context();
+
+        // Context propagation path:
+        // `TaskParserEvent.meta -> Task.metadata -> Module.bind_task_context -> Module.generate`.
+        let requests: SyncBoxStream<'static, Request> = match input.generate(meta, login_info).await
+        {
+            Ok(stream) => stream,
+            Err(e) => {
+                warn!("[TaskProcessor] generate error, will retry: {e}");
+                return ProcessorResult::RetryableFailure(
+                    context
+                        .retry_policy
+                        .unwrap_or(RetryPolicy::default().with_reason(e.to_string())),
+                );
+            }
+        };
+        ProcessorResult::Success(requests)
+    }
+}
+#[async_trait]
+impl EventProcessorTrait<Module, SyncBoxStream<'static, Request>> for TaskProcessor {
+    fn pre_status(&self, input: &Module) -> Option<EventEnvelope> {
+        Some(EventEnvelope::engine(
+            EventType::ModuleGenerate,
+            EventPhase::Started,
+            ModuleGenerateEvent::from(input),
+        ))
+    }
+
+    fn finish_status(
+        &self,
+        input: &Module,
+        _output: &SyncBoxStream<'static, Request>,
+    ) -> Option<EventEnvelope> {
+        Some(EventEnvelope::engine(
+            EventType::ModuleGenerate,
+            EventPhase::Completed,
+            ModuleGenerateEvent::from(input),
+        ))
+    }
+
+    fn working_status(&self, input: &Module) -> Option<EventEnvelope> {
+        self.pre_status(input)
+    }
+
+    fn error_status(&self, input: &Module, err: &Error) -> Option<EventEnvelope> {
+        Some(EventEnvelope::engine_error(
+            EventType::ModuleGenerate,
+            EventPhase::Failed,
+            ModuleGenerateEvent::from(input),
+            err,
+        ))
+    }
+
+    fn retry_status(&self, input: &Module, retry_policy: &RetryPolicy) -> Option<EventEnvelope> {
+        Some(EventEnvelope::engine(
+            EventType::ModuleGenerate,
+            EventPhase::Retry,
+            json!({
+                "data": ModuleGenerateEvent::from(input),
+                "retry_count": retry_policy.current_retry,
+                "reason": retry_policy.reason.clone().unwrap_or_default(),
+            }),
+        ))
+    }
+}
+pub struct RequestPublish {
+    queue_manager: Arc<QueueManager>,
+    state: Arc<PipelineContext>,
+}
+
+#[async_trait]
+impl ProcessorTrait<Request, ()> for RequestPublish {
+    fn name(&self) -> &'static str {
+        "RequestPublish"
+    }
+
+    async fn process(&self, input: Request, context: ProcessorContext) -> ProcessorResult<()> {
+        let request_id = input.id;
+        let module_id = input.module_id();
+        let backpressure_retry_delay_ms = {
+            let cfg = self.state.config.read().await;
+            cfg.crawler.backpressure_retry_delay_ms
+        };
+
+        info!(
+            "[RequestPublish] publish request: request_id={} module_id={}",
+            request_id, module_id
+        );
+
+        // Persist request for downstream fallback/recovery.
+        let id = input.id.to_string();
+
+        // Fire-and-forget cache persistence to avoid blocking hot stream path.
+        let cache_service = self.state.cache_service.clone();
+        let request_clone = input.clone();
+
+        tokio::spawn(async move {
+            if let Err(e) = request_clone.send(&id, &cache_service).await {
+                // Log at debug level to avoid spamming warns if cache is just busy
+                debug!("[RequestPublish] persist failed (background): {e}");
+            }
+        });
+
+        let tx = self.queue_manager.get_request_push_channel();
+        match send_with_backpressure(&tx, QueuedItem::new(input)).await {
+            Ok(BackpressureSendState::Direct) => {}
+            Ok(BackpressureSendState::RecoveredFromFull) => {
+                counter!("mocra_request_publish_backpressure_total", "reason" => "queue_full")
+                    .increment(1);
+                warn!(
+                    "[RequestPublish] queue full, falling back to awaited send: request_id={} module_id={} remaining_capacity={}",
+                    request_id,
+                    module_id,
+                    tx.capacity()
+                );
+            }
+            Err(err) => {
+                if err.after_full {
+                    counter!("mocra_request_publish_backpressure_total", "reason" => "queue_full")
+                        .increment(1);
+                    warn!(
+                        "[RequestPublish] queue full before close: request_id={} module_id={} remaining_capacity={}",
+                        request_id,
+                        module_id,
+                        tx.capacity()
+                    );
+                }
+                counter!("mocra_request_publish_backpressure_total", "reason" => "queue_closed")
+                    .increment(1);
+                let retry_reason = format!(
+                    "request queue closed: request_id={} module_id={}",
+                    err.item.inner.id,
+                    err.item.inner.module_id()
+                );
+                error!("[RequestPublish] {retry_reason}");
+                let mut retry_policy = context.retry_policy.unwrap_or_default();
+                if let Some(delay_ms) = backpressure_retry_delay_ms {
+                    retry_policy.retry_delay = delay_ms.max(1);
+                }
+                retry_policy.reason = Some(retry_reason);
+                return ProcessorResult::RetryableFailure(retry_policy);
+            }
+        }
+        ProcessorResult::Success(())
+    }
+    async fn handle_error(
+        &self,
+        input: &Request,
+        error: Error,
+        _context: &ProcessorContext,
+    ) -> ProcessorResult<()> {
+        // If we can't publish the request after retries, release the module lock
+        // to avoid locking out future runs of this module.
+        self.state
+            .status_tracker
+            .release_module_locker(&input.module_runtime_id())
+            .await;
+        ProcessorResult::FatalFailure(error)
+    }
+}
+#[async_trait]
+impl EventProcessorTrait<Request, ()> for RequestPublish {
+    fn pre_status(&self, input: &Request) -> Option<EventEnvelope> {
+        Some(EventEnvelope::engine(
+            EventType::RequestPublish,
+            EventPhase::Started,
+            RequestEvent::from(input),
+        ))
+    }
+
+    fn finish_status(&self, input: &Request, _output: &()) -> Option<EventEnvelope> {
+        Some(EventEnvelope::engine(
+            EventType::RequestPublish,
+            EventPhase::Completed,
+            RequestEvent::from(input),
+        ))
+    }
+
+    fn working_status(&self, input: &Request) -> Option<EventEnvelope> {
+        self.pre_status(input)
+    }
+
+    fn error_status(&self, input: &Request, err: &Error) -> Option<EventEnvelope> {
+        Some(EventEnvelope::engine_error(
+            EventType::RequestPublish,
+            EventPhase::Failed,
+            RequestEvent::from(input),
+            err,
+        ))
+    }
+
+    fn retry_status(&self, input: &Request, retry_policy: &RetryPolicy) -> Option<EventEnvelope> {
+        Some(EventEnvelope::engine(
+            EventType::RequestPublish,
+            EventPhase::Retry,
+            json!({
+                "data": RequestEvent::from(input),
+                "retry_count": retry_policy.current_retry,
+                "reason": retry_policy.reason.clone().unwrap_or_default(),
+            }),
+        ))
+    }
+}
+pub struct ConfigProcessor {
+    pub state: Arc<PipelineContext>,
+}
+#[async_trait]
+impl ProcessorTrait<Request, (Request, Option<ModuleConfig>)> for ConfigProcessor {
+    fn name(&self) -> &'static str {
+        "ConfigProcessor"
+    }
+
+    async fn process(
+        &self,
+        input: Request,
+        context: ProcessorContext,
+    ) -> ProcessorResult<(Request, Option<ModuleConfig>)> {
+        // ModuleConfig is persisted by loader flow keyed by `module_id`; read-through here.
+        match ModuleConfig::sync(&input.module_id(), &self.state.cache_service).await {
+            Ok(Some(config)) => ProcessorResult::Success((input, Some(config))),
+            Ok(None) => ProcessorResult::Success((input, None)),
+            Err(e) => {
+                error!(
+                    "Failed to fetch config for module {}: {}",
+                    input.task_id(),
+                    e
+                );
+                ProcessorResult::RetryableFailure(
+                    context
+                        .retry_policy
+                        .unwrap_or(RetryPolicy::default().with_reason(e.to_string())),
+                )
+            }
+        }
+    }
+    async fn pre_process(&self, _input: &Request, _context: &ProcessorContext) -> Result<()> {
+        self.state
+            .status_tracker
+            .lock_module(&_input.module_runtime_id())
+            .await;
+        Ok(())
+    }
+    async fn handle_error(
+        &self,
+        _input: &Request,
+        _error: Error,
+        _context: &ProcessorContext,
+    ) -> ProcessorResult<(Request, Option<ModuleConfig>)> {
+        ProcessorResult::Success((_input.clone(), None))
+    }
+}
+#[async_trait]
+impl EventProcessorTrait<Request, (Request, Option<ModuleConfig>)> for ConfigProcessor {
+    fn pre_status(&self, _input: &Request) -> Option<EventEnvelope> {
+        None
+    }
+
+    fn finish_status(
+        &self,
+        _input: &Request,
+        _out: &(Request, Option<ModuleConfig>),
+    ) -> Option<EventEnvelope> {
+        None
+    }
+
+    fn working_status(&self, _input: &Request) -> Option<EventEnvelope> {
+        None
+    }
+
+    fn error_status(&self, _input: &Request, _err: &Error) -> Option<EventEnvelope> {
+        None
+    }
+
+    fn retry_status(&self, _input: &Request, _retry_policy: &RetryPolicy) -> Option<EventEnvelope> {
+        None
+    }
+}
+
+use crate::cacheable::CacheAble;
+pub use crate::common::interface::SyncBoxStream;
+use crate::engine::task::module::Module;
+use crate::engine::task::{Task, TaskManager};
+
+/// Converts a vector into a boxed stream for stream-native chain stages.
+pub struct VecToStreamProcessor<T> {
+    _marker: PhantomData<T>,
+}
+
+impl<T> Default for VecToStreamProcessor<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<T> VecToStreamProcessor<T> {
+    pub fn new() -> Self {
+        Self {
+            _marker: PhantomData,
+        }
+    }
+}
+
+#[async_trait]
+impl<T: Send + Sync + 'static> ProcessorTrait<Vec<T>, SyncBoxStream<'static, T>>
+    for VecToStreamProcessor<T>
+{
+    fn name(&self) -> &'static str {
+        "VecToStreamProcessor"
+    }
+
+    async fn process(
+        &self,
+        input: Vec<T>,
+        _context: ProcessorContext,
+    ) -> ProcessorResult<SyncBoxStream<'static, T>> {
+        let stream = futures::stream::iter(input);
+        let boxed: SyncBoxStream<'static, T> = Box::pin(stream);
+        ProcessorResult::Success(boxed)
+    }
+}
+
+#[async_trait]
+impl<T: Send + Sync + 'static> EventProcessorTrait<Vec<T>, SyncBoxStream<'static, T>>
+    for VecToStreamProcessor<T>
+{
+    fn pre_status(&self, _input: &Vec<T>) -> Option<EventEnvelope> {
+        None
+    }
+    fn finish_status(
+        &self,
+        _input: &Vec<T>,
+        _output: &SyncBoxStream<'static, T>,
+    ) -> Option<EventEnvelope> {
+        None
+    }
+    fn working_status(&self, _input: &Vec<T>) -> Option<EventEnvelope> {
+        None
+    }
+    fn error_status(&self, _input: &Vec<T>, _err: &Error) -> Option<EventEnvelope> {
+        None
+    }
+    fn retry_status(&self, _input: &Vec<T>, _retry_policy: &RetryPolicy) -> Option<EventEnvelope> {
+        None
+    }
+}
+
+pub struct FlattenStreamVecProcessor<T> {
+    _marker: PhantomData<T>,
+    #[allow(clippy::type_complexity)]
+    logger: Option<Arc<dyn Fn(&T) + Send + Sync>>,
+}
+
+impl<T> Default for FlattenStreamVecProcessor<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<T> FlattenStreamVecProcessor<T> {
+    pub fn new() -> Self {
+        Self {
+            _marker: PhantomData,
+            logger: None,
+        }
+    }
+    pub fn with_logger<F>(mut self, logger: F) -> Self
+    where
+        F: Fn(&T) + Send + Sync + 'static,
+    {
+        self.logger = Some(Arc::new(logger));
+        self
+    }
+}
+
+#[async_trait]
+impl<T: Send + Sync + 'static>
+    ProcessorTrait<SyncBoxStream<'static, Vec<T>>, SyncBoxStream<'static, T>>
+    for FlattenStreamVecProcessor<T>
+{
+    fn name(&self) -> &'static str {
+        "FlattenStreamVecProcessor"
+    }
+
+    async fn process(
+        &self,
+        input: SyncBoxStream<'static, Vec<T>>,
+        _context: ProcessorContext,
+    ) -> ProcessorResult<SyncBoxStream<'static, T>> {
+        let logger = self.logger.clone();
+        let stream = input.flat_map(move |v| {
+            let logger = logger.clone();
+            let iter = v.into_iter().inspect(move |item| {
+                if let Some(l) = &logger {
+                    l(item);
+                }
+            });
+            futures::stream::iter(iter)
+        });
+        let boxed: SyncBoxStream<'static, T> = Box::pin(stream);
+        ProcessorResult::Success(boxed)
+    }
+}
+
+#[async_trait]
+impl<T: Send + Sync + 'static>
+    EventProcessorTrait<SyncBoxStream<'static, Vec<T>>, SyncBoxStream<'static, T>>
+    for FlattenStreamVecProcessor<T>
+{
+    fn pre_status(&self, _input: &SyncBoxStream<'static, Vec<T>>) -> Option<EventEnvelope> {
+        None
+    }
+    fn finish_status(
+        &self,
+        _input: &SyncBoxStream<'static, Vec<T>>,
+        _output: &SyncBoxStream<'static, T>,
+    ) -> Option<EventEnvelope> {
+        None
+    }
+    fn working_status(&self, _input: &SyncBoxStream<'static, Vec<T>>) -> Option<EventEnvelope> {
+        None
+    }
+    fn error_status(
+        &self,
+        _input: &SyncBoxStream<'static, Vec<T>>,
+        _err: &Error,
+    ) -> Option<EventEnvelope> {
+        None
+    }
+    fn retry_status(
+        &self,
+        _input: &SyncBoxStream<'static, Vec<T>>,
+        _retry_policy: &RetryPolicy,
+    ) -> Option<EventEnvelope> {
+        None
+    }
+}
+
+pub struct StreamLoggerProcessor<T> {
+    _marker: PhantomData<T>,
+    #[allow(clippy::type_complexity)]
+    logger: Option<Arc<dyn Fn(&T) + Send + Sync>>,
+}
+
+impl<T> StreamLoggerProcessor<T> {
+    pub fn new(_name: &str) -> Self {
+        Self {
+            _marker: PhantomData,
+            logger: None,
+        }
+    }
+    pub fn with_logger<F>(mut self, logger: F) -> Self
+    where
+        F: Fn(&T) + Send + Sync + 'static,
+    {
+        self.logger = Some(Arc::new(logger));
+        self
+    }
+}
+
+#[async_trait]
+impl<T: Send + Sync + 'static> ProcessorTrait<SyncBoxStream<'static, T>, SyncBoxStream<'static, T>>
+    for StreamLoggerProcessor<T>
+{
+    fn name(&self) -> &'static str {
+        "StreamLoggerProcessor"
+    }
+
+    async fn process(
+        &self,
+        input: SyncBoxStream<'static, T>,
+        _context: ProcessorContext,
+    ) -> ProcessorResult<SyncBoxStream<'static, T>> {
+        let logger = self.logger.clone();
+        let stream = input.map(move |item| {
+            if let Some(l) = &logger {
+                l(&item);
+            }
+            item
+        });
+        let boxed: SyncBoxStream<'static, T> = Box::pin(stream);
+        ProcessorResult::Success(boxed)
+    }
+}
+
+#[async_trait]
+impl<T: Send + Sync + 'static>
+    EventProcessorTrait<SyncBoxStream<'static, T>, SyncBoxStream<'static, T>>
+    for StreamLoggerProcessor<T>
+{
+    fn pre_status(&self, _input: &SyncBoxStream<'static, T>) -> Option<EventEnvelope> {
+        None
+    }
+    fn finish_status(
+        &self,
+        _input: &SyncBoxStream<'static, T>,
+        _output: &SyncBoxStream<'static, T>,
+    ) -> Option<EventEnvelope> {
+        None
+    }
+    fn working_status(&self, _input: &SyncBoxStream<'static, T>) -> Option<EventEnvelope> {
+        None
+    }
+    fn error_status(
+        &self,
+        _input: &SyncBoxStream<'static, T>,
+        _err: &Error,
+    ) -> Option<EventEnvelope> {
+        None
+    }
+    fn retry_status(
+        &self,
+        _input: &SyncBoxStream<'static, T>,
+        _retry_policy: &RetryPolicy,
+    ) -> Option<EventEnvelope> {
+        None
+    }
+}
+
+pub struct FlattenStreamProcessor<T> {
+    _marker: PhantomData<T>,
+}
+
+impl<T> Default for FlattenStreamProcessor<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<T> FlattenStreamProcessor<T> {
+    pub fn new() -> Self {
+        Self {
+            _marker: PhantomData,
+        }
+    }
+}
+
+#[async_trait]
+impl<T: Send + Sync + 'static>
+    ProcessorTrait<SyncBoxStream<'static, SyncBoxStream<'static, T>>, SyncBoxStream<'static, T>>
+    for FlattenStreamProcessor<T>
+{
+    fn name(&self) -> &'static str {
+        "FlattenStreamProcessor"
+    }
+
+    async fn process(
+        &self,
+        input: SyncBoxStream<'static, SyncBoxStream<'static, T>>,
+        _context: ProcessorContext,
+    ) -> ProcessorResult<SyncBoxStream<'static, T>> {
+        let stream = input.flatten();
+        let boxed: SyncBoxStream<'static, T> = Box::pin(stream);
+        ProcessorResult::Success(boxed)
+    }
+}
+
+#[async_trait]
+impl<T: Send + Sync + 'static>
+    EventProcessorTrait<
+        SyncBoxStream<'static, SyncBoxStream<'static, T>>,
+        SyncBoxStream<'static, T>,
+    > for FlattenStreamProcessor<T>
+{
+    fn pre_status(
+        &self,
+        _input: &SyncBoxStream<'static, SyncBoxStream<'static, T>>,
+    ) -> Option<EventEnvelope> {
+        None
+    }
+    fn finish_status(
+        &self,
+        _input: &SyncBoxStream<'static, SyncBoxStream<'static, T>>,
+        _output: &SyncBoxStream<'static, T>,
+    ) -> Option<EventEnvelope> {
+        None
+    }
+    fn working_status(
+        &self,
+        _input: &SyncBoxStream<'static, SyncBoxStream<'static, T>>,
+    ) -> Option<EventEnvelope> {
+        None
+    }
+    fn error_status(
+        &self,
+        _input: &SyncBoxStream<'static, SyncBoxStream<'static, T>>,
+        _err: &Error,
+    ) -> Option<EventEnvelope> {
+        None
+    }
+    fn retry_status(
+        &self,
+        _input: &SyncBoxStream<'static, SyncBoxStream<'static, T>>,
+        _retry_policy: &RetryPolicy,
+    ) -> Option<EventEnvelope> {
+        None
+    }
+}
+
+pub struct UnifiedTaskIngressChain {
+    /// Ingress chain for standard task creation path.
+    task_chain: Arc<EventAwareTypedChain<TaskEvent, SyncBoxStream<'static, ()>>>,
+    /// Ingress chain for parser-produced follow-up tasks.
+    parser_chain: Arc<EventAwareTypedChain<TaskParserEvent, SyncBoxStream<'static, ()>>>,
+    /// Ingress chain for error-task retries/termination path.
+    error_chain: Arc<EventAwareTypedChain<TaskErrorEvent, SyncBoxStream<'static, ()>>>,
+}
+
+impl UnifiedTaskIngressChain {
+    /// Constructs a multiplexer over three ingress typed chains.
+    pub fn new(
+        task_chain: Arc<EventAwareTypedChain<TaskEvent, SyncBoxStream<'static, ()>>>,
+        parser_chain: Arc<EventAwareTypedChain<TaskParserEvent, SyncBoxStream<'static, ()>>>,
+        error_chain: Arc<EventAwareTypedChain<TaskErrorEvent, SyncBoxStream<'static, ()>>>,
+    ) -> Self {
+        Self {
+            task_chain,
+            parser_chain,
+            error_chain,
+        }
+    }
+
+    pub async fn execute(
+        &self,
+        input: UnifiedTaskInput,
+        context: ProcessorContext,
+    ) -> ProcessorResult<SyncBoxStream<'static, ()>> {
+        match input {
+            UnifiedTaskInput::Task(task) => self.task_chain.execute(task, context).await,
+            UnifiedTaskInput::ParserTask(task) => self.parser_chain.execute(task, context).await,
+            UnifiedTaskInput::ErrorTask(task) => self.error_chain.execute(task, context).await,
+        }
+    }
+}
+
+/// Builds the unified ingress chain graph used by task workers.
+///
+/// The resulting chain set handles three inputs:
+/// - `TaskModel` (initial tasks),
+/// - `ParserTaskModel` (parser-produced tasks),
+/// - `ErrorTaskModel` (retry/threshold-controlled tasks).
+pub async fn create_unified_task_ingress_chain(
+    task_manager: Arc<TaskManager>,
+    queue_manager: Arc<QueueManager>,
+    event_bus: Option<Arc<EventBus>>,
+    state: Arc<PipelineContext>,
+) -> UnifiedTaskIngressChain {
+    let task_concurrency = state
+        .config
+        .read()
+        .await
+        .crawler
+        .task_concurrency
+        .unwrap_or(1024);
+    let parser_concurrency = {
+        let cfg = state.config.read().await;
+        cfg.crawler
+            .parser_concurrency
+            .or(cfg.crawler.task_concurrency)
+            .unwrap_or(256)
+    };
+    let error_task_concurrency = {
+        let cfg = state.config.read().await;
+        cfg.crawler
+            .error_task_concurrency
+            .or(cfg.crawler.parser_concurrency)
+            .or(cfg.crawler.task_concurrency)
+            .unwrap_or(4)
+    };
+    let task_publish_concurrency = state
+        .config
+        .read()
+        .await
+        .crawler
+        .publish_concurrency
+        .unwrap_or(1024);
+    let parser_publish_concurrency = state
+        .config
+        .read()
+        .await
+        .crawler
+        .publish_concurrency
+        .unwrap_or(256);
+    let error_publish_concurrency = state
+        .config
+        .read()
+        .await
+        .crawler
+        .publish_concurrency
+        .unwrap_or(32);
+
+    let task_chain = Arc::new(
+        EventAwareTypedChain::<TaskEvent, TaskEvent>::new(event_bus.clone())
+            .then::<Task, _>(TaskModelProcessor {
+                task_manager: task_manager.clone(),
+                state: state.clone(),
+                queue_manager: queue_manager.clone(),
+                event_bus: event_bus.clone(),
+                threshold_decision_service: Arc::new(StatusTrackerThresholdDecisionService::new(
+                    state.clone(),
+                )),
+            })
+            .then::<Vec<Module>, _>(TaskModuleProcessor {
+                state: state.clone(),
+            })
+            .then(VecToStreamProcessor::new())
+            .then_map_stream_in_with_strategy::<SyncBoxStream<'static, Request>, _>(
+                TaskProcessor,
+                task_concurrency,
+                ErrorStrategy::Skip,
+            )
+            .then_one_shot(FlattenStreamProcessor::new())
+            .then_one_shot(StreamLoggerProcessor::new("AfterFlatten").with_logger(
+                |req: &Request| {
+                    info!(
+                        "[FlattenStreamProcessor] yielding request: request_id={}",
+                        req.id
+                    );
+                },
+            ))
+            .then_map_stream_in_with_strategy::<(), _>(
+                RequestPublish {
+                    queue_manager: queue_manager.clone(),
+                    state: state.clone(),
+                },
+                task_publish_concurrency,
+                ErrorStrategy::Skip,
+            ),
+    );
+
+    let parser_chain = Arc::new(
+        EventAwareTypedChain::<TaskParserEvent, TaskParserEvent>::new(event_bus.clone())
+            .then::<Task, _>(TaskModelProcessor {
+                task_manager: task_manager.clone(),
+                state: state.clone(),
+                queue_manager: queue_manager.clone(),
+                event_bus: event_bus.clone(),
+                threshold_decision_service: Arc::new(StatusTrackerThresholdDecisionService::new(
+                    state.clone(),
+                )),
+            })
+            .then::<Vec<Module>, _>(TaskModuleProcessor {
+                state: state.clone(),
+            })
+            .then(VecToStreamProcessor::new())
+            .then_map_stream_in_with_strategy::<SyncBoxStream<'static, Request>, _>(
+                TaskProcessor,
+                parser_concurrency,
+                ErrorStrategy::Skip,
+            )
+            .then_one_shot(FlattenStreamProcessor::new())
+            .then_map_stream_in_with_strategy::<(), _>(
+                RequestPublish {
+                    queue_manager: queue_manager.clone(),
+                    state: state.clone(),
+                },
+                parser_publish_concurrency,
+                ErrorStrategy::Skip,
+            ),
+    );
+
+    let error_chain = Arc::new(
+        EventAwareTypedChain::<TaskErrorEvent, TaskErrorEvent>::new(event_bus)
+            .then::<Task, _>(TaskModelProcessor {
+                task_manager: task_manager.clone(),
+                state: state.clone(),
+                queue_manager: queue_manager.clone(),
+                event_bus: None,
+                threshold_decision_service: Arc::new(StatusTrackerThresholdDecisionService::new(
+                    state.clone(),
+                )),
+            })
+            .then::<Vec<Module>, _>(TaskModuleProcessor {
+                state: state.clone(),
+            })
+            .then(VecToStreamProcessor::new())
+            .then_map_stream_in_with_strategy::<SyncBoxStream<'static, Request>, _>(
+                TaskProcessor,
+                error_task_concurrency,
+                ErrorStrategy::Skip,
+            )
+            .then_one_shot(FlattenStreamProcessor::new())
+            .then_map_stream_in_with_strategy::<(), _>(
+                RequestPublish {
+                    queue_manager,
+                    state,
+                },
+                error_publish_concurrency,
+                ErrorStrategy::Skip,
+            ),
+    );
+
+    UnifiedTaskIngressChain::new(task_chain, parser_chain, error_chain)
+}

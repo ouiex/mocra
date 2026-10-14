@@ -1,7 +1,25 @@
-//! The utility library has been extracted into the `utils` module of the standalone
-//! [`mocra_core`] crate.
-//!
-//! This module remains as a re-export shim so that existing `crate::utils::*` references keep
-//! working (zero-change migration); new code can use `mocra_core::utils::...` directly.
-
-pub use mocra_core::utils::*;
+pub mod batch_buffer;
+pub mod connector;
+pub mod coordination;
+pub mod date_utils;
+pub mod device_info;
+pub mod distributed_rate_limit;
+pub mod encrypt;
+#[cfg(feature = "excel")]
+pub mod excel_dataframe;
+pub mod lock;
+pub mod logger;
+#[cfg(feature = "polars")]
+pub mod polars_utils {}
+pub mod priority;
+#[deprecated(note = "Use distributed_rate_limit; it also supports local mode")]
+pub mod rate_limit;
+#[cfg(any(feature = "dashboard", feature = "cluster-embedded"))]
+pub(crate) mod shutdown_listener;
+pub mod storage;
+pub mod string_case;
+pub mod to_numeric;
+#[cfg(feature = "store")]
+pub mod txn;
+#[cfg(feature = "excel")]
+pub mod type_convert;

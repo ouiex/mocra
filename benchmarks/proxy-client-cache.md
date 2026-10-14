@@ -3,7 +3,7 @@
 Run the ignored local workload with:
 
 ```bash
-cargo test -p mocra-core --lib proxy_client_cache_workload -- --ignored --nocapture
+cargo test --lib proxy_client_cache_workload -- --ignored --nocapture
 ```
 
 The workload starts 16 local keep-alive HTTP proxies and sends three sequential

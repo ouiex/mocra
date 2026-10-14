@@ -1,6 +1,6 @@
 # Architecture
 
-This document describes how mocra is put together: the workspace layout, the queue-driven
+This document describes how mocra is put together: the package layout, the queue-driven
 pipeline, where the high-level facade sits relative to the lower-level engine, and how the same
 code scales from a single process to a distributed cluster.
 
@@ -14,31 +14,27 @@ pipeline runs unchanged whether the queues are in-process Tokio channels (single
 distributed message broker (Kafka / NATS JetStream). Scaling out is a
 configuration/builder concern, not a rewrite.
 
-## Workspace layout
+## Package layout
 
-mocra is a Cargo workspace. The entire runtime lives in `mocra-core`; the `mocra` crate you
-depend on is a **thin facade** over it. Reusable subsystems ship as standalone crates with a
-single, **acyclic** dependency direction — the facade depends on the core, the core depends on the
-subsystem crates, and the subsystem crates never depend back:
+mocra is a single Cargo package. The high-level facade, full runtime, and subsystems live under
+`src/` and are published together as `mocra`. Existing `mocra` imports and feature names are
+preserved; the former internal crates are source modules:
 
-```
-mocra  ──▶  mocra-core  ──▶  { mocra-cluster, mocra-dag, mocra-proxy, mocra-store }
-(facade)     (runtime)              (reusable subsystems, no back-edges)
-```
-
-| Crate | What it is |
+| Module | What it is |
 |---|---|
-| [`mocra`](..) | **Thin facade** — the `Spider` trait, the `Mocra` builder, the prelude, and default data sinks. The only crate most users import. |
-| [`mocra-core`](../crates/mocra-core) | The full runtime: domain models, downloader, queue, coordination (`sync`), scheduler, engine, and the observability/admin HTTP API. |
-| [`mocra-cluster`](../crates/mocra-cluster) | Embedded control plane: Raft + redb — leader election, fenced distributed locks, membership, and partition ownership, with **no external coordinator**. |
-| [`mocra-dag`](../crates/mocra-dag) | Generic distributed DAG execution engine, with zero crawler coupling. |
-| [`mocra-proxy`](../crates/mocra-proxy) | Configuration-driven proxy pool / manager (standalone). |
-| [`mocra-store`](../crates/mocra-store) | Multi-tenant sea-orm entity models (account × platform × module), behind the `store` feature. |
+| [`mocra::facade`](../src/facade.rs) / [`mocra::prelude`](../src/prelude.rs) | The `Spider` trait, the `Mocra` builder, the prelude, and default data sinks. |
+| [`mocra::engine`](../src/engine) and other runtime modules | Domain models, downloader, queue, coordination (`sync`), scheduler, engine, and the observability/admin HTTP API. |
+| [`mocra::cluster`](../src/cluster) | Embedded control plane: Raft + redb — leader election, fenced distributed locks, membership, and partition ownership, with **no external coordinator**. |
+| [`mocra::schedule::dag`](../src/schedule/dag) | Generic distributed DAG execution engine, also re-exported by `mocra::schedule`. |
+| [`mocra::proxy`](../src/proxy) | Configuration-driven proxy pool / manager. |
+| [`mocra::common::model::entity`](../src/common/model/entity) | Multi-tenant sea-orm entity models (account × platform × module), behind the `store` feature. |
 
-`mocra-core` pulls in `mocra-proxy` and `mocra-dag` unconditionally, and `mocra-store` /
-`mocra-cluster` only when the `store` / `cluster-embedded` features are enabled. Because the
-subsystem crates have no dependency back on the core, each can be understood, tested, and reused on
-its own.
+The proxy pool and DAG modules are always available. Entity models and the embedded cluster are
+compiled only when `store` and `cluster-embedded`, respectively, are enabled.
+
+When migrating code that directly depended on an internal crate, remove that dependency and use
+the corresponding `mocra` module above. For the former core crate, replace `mocra_core::` with
+`mocra::`; its runtime modules remain at the same paths inside `mocra`.
 
 ## The facade and the engine
 
@@ -50,7 +46,7 @@ There are two ways into the runtime, and they compile down to the same engine:
   [`DataSink`](../src/facade.rs) — a closure via `on_item(...)`, a channel via `ChannelSink::new(tx)`,
   or your own `impl DataSink`. Everything you need is re-exported from `mocra::prelude`.
 
-- **The lower-level engine** — `ModuleTrait` / `ModuleNodeTrait` in `mocra-core`. This is the
+- **The lower-level engine** — `ModuleTrait` / `ModuleNodeTrait` in `mocra::common::interface`. This is the
   advanced path for multi-node pipelines with login, pagination, custom middleware, and hand-built
   DAGs. Enable the `store` feature for the account × platform × module model.
 

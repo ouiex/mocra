@@ -23,7 +23,7 @@ mocra 沿两条相互独立的轴扩展——**控制面**（协调）与**数�
 
 ```toml
 [dependencies]
-mocra = "0.5"
+mocra = "0.6"
 ```
 
 ```rust
@@ -60,7 +60,7 @@ cargo run --release
 成员管理与分区归属，**无需外部协调器**。
 
 ```toml
-mocra = { version = "0.5", features = ["cluster-embedded"] }
+mocra = { version = "0.6", features = ["cluster-embedded"] }
 ```
 
 ### 注册节点
@@ -217,7 +217,7 @@ cargo run --release --features "cluster-embedded queue-kafka"
 单文件 Web UI——浏览器打开该端口即见 **指标 / 日志 / 任务 / 性能**，无需任何前端构建：
 
 ```toml
-mocra = { version = "0.5", features = ["dashboard"] }
+mocra = { version = "0.6", features = ["dashboard"] }
 ```
 
 ```rust
@@ -289,7 +289,7 @@ RUST_LOG=mocra=info cargo run          # 或 mocra=debug 获取更多细节
 
 ## 相关指南
 
-- [系统架构](architecture.md)——控制面 vs 数据面、工作区布局
+- [系统架构](architecture.md)——控制面 vs 数据面、单包布局
 - [配置参考](configuration.md)——完整 TOML 参考（`[cache]`、`[channel_config]`、`[api]`）
 - [API 参考](api-reference.md)——HTTP 控制面与指标
 - [快速上手](getting-started.md)——安装与第一个 spider

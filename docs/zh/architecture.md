@@ -1,6 +1,6 @@
 # 系统架构
 
-本文档介绍 mocra 的组织方式：工作区（workspace）布局、队列驱动的流水线、高层门面（facade）
+本文档介绍 mocra 的组织方式：单包布局、队列驱动的流水线、高层门面（facade）
 相对于底层引擎的位置，以及同一份代码如何从单进程扩展到分布式集群。
 
 > **English version：** [docs/architecture.md](../architecture.md)
@@ -12,29 +12,24 @@ mocra 将数据采集建模为一组由 **DAG 执行引擎**编排的**队列驱
 （Kafka / NATS JetStream），同一条流水线都原样运行。横向扩展是配置 / 构建器层面
 的事，而非重写。
 
-## 工作区布局
+## 单包布局
 
-mocra 是一个 Cargo 工作区。整个运行时都在 `mocra-core` 中；你所依赖的 `mocra` crate 只是它之上的
-一层**薄门面**。可复用的子系统以独立 crate 发布，依赖方向单一且**无环**——门面依赖核心，核心依赖
-各子系统 crate，而子系统 crate 从不反向依赖：
+mocra 是一个 Cargo 单包。高层门面、完整运行时与各子系统统一位于 `src/` 下，随 `mocra`
+一起发布。已有的 `mocra` 导入路径与特性名称保持不变，原来的内部 crate 现在作为源码模块组织：
 
-```
-mocra  ──▶  mocra-core  ──▶  { mocra-cluster, mocra-dag, mocra-proxy, mocra-store }
-（门面）      （运行时）              （可复用子系统，无反向依赖）
-```
-
-| Crate | 是什么 |
+| 模块 | 是什么 |
 |---|---|
-| [`mocra`](../..) | **薄门面**——`Spider` trait、`Mocra` 构建器、prelude、默认数据出口（sink）。多数用户唯一需要引入的 crate。 |
-| [`mocra-core`](../../crates/mocra-core) | 完整运行时：领域模型、下载器、队列、协调（`sync`）、调度器、引擎，以及可观测 / 后台管理 HTTP API。 |
-| [`mocra-cluster`](../../crates/mocra-cluster) | 内嵌控制面：Raft + redb——选主、带栅栏（fencing）的分布式锁、成员管理、分区归属，**无需外部协调器**。 |
-| [`mocra-dag`](../../crates/mocra-dag) | 通用分布式 DAG 执行引擎，与爬虫零耦合。 |
-| [`mocra-proxy`](../../crates/mocra-proxy) | 配置驱动的代理池 / 管理器（独立可用）。 |
-| [`mocra-store`](../../crates/mocra-store) | 多租户 sea-orm 实体模型（账号 × 平台 × 模块），位于 `store` 特性之后。 |
+| [`mocra::facade`](../../src/facade.rs) / [`mocra::prelude`](../../src/prelude.rs) | `Spider` trait、`Mocra` 构建器、prelude、默认数据出口（sink）。 |
+| [`mocra::engine`](../../src/engine) 等运行时模块 | 领域模型、下载器、队列、协调（`sync`）、调度器、引擎，以及可观测 / 后台管理 HTTP API。 |
+| [`mocra::cluster`](../../src/cluster) | 内嵌控制面：Raft + redb——选主、带栅栏（fencing）的分布式锁、成员管理、分区归属，**无需外部协调器**。 |
+| [`mocra::schedule::dag`](../../src/schedule/dag) | 通用分布式 DAG 执行引擎，也由 `mocra::schedule` 重导出。 |
+| [`mocra::proxy`](../../src/proxy) | 配置驱动的代理池 / 管理器。 |
+| [`mocra::common::model::entity`](../../src/common/model/entity) | 多租户 sea-orm 实体模型（账号 × 平台 × 模块），由 `store` 特性启用。 |
 
-`mocra-core` 无条件引入 `mocra-proxy` 与 `mocra-dag`，仅在启用 `store` / `cluster-embedded` 特性时
-才引入 `mocra-store` / `mocra-cluster`。由于各子系统 crate 不反向依赖核心，每一个都可以独立理解、
-测试与复用。
+代理池与 DAG 模块始终可用。实体模型与内嵌集群分别在启用 `store` 与 `cluster-embedded` 特性时编译。
+
+如果原来直接依赖内部 crate，迁移时删除该依赖，改用上表对应的 `mocra` 模块。原核心包的
+`mocra_core::` 导入改为 `mocra::`，运行时模块在 `mocra` 内的原有路径保持不变。
 
 ## 门面与引擎
 
@@ -46,7 +41,7 @@ mocra  ──▶  mocra-core  ──▶  { mocra-cluster, mocra-dag, mocra-proxy
   [`DataSink`](../../src/facade.rs) 交付到你的代码——用 `on_item(...)` 传闭包、用
   `ChannelSink::new(tx)` 传 channel，或自行 `impl DataSink`。所需一切都从 `mocra::prelude` 重导出。
 
-- **底层引擎**——`mocra-core` 中的 `ModuleTrait` / `ModuleNodeTrait`。这是进阶路径，用于带登录、
+- **底层引擎**——`mocra::common::interface` 中的 `ModuleTrait` / `ModuleNodeTrait`。这是进阶路径，用于带登录、
   分页、自定义中间件与手写 DAG 的多节点流水线。启用 `store` 特性即可使用账号 × 平台 × 模块模型。
 
 在内部，一个 `Spider` 会被适配成**单节点模块**，并编译进进阶路径所用的同一个引擎：`Spider::start`
