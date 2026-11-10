@@ -4,6 +4,14 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project aims to follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.1] — 2026-11-10
+
+### Fixed
+
+- Count DAG node parse failures once per attempt, including when the predecessor request ID is
+  empty. Stop retries at task or module error thresholds and retain the underlying parse error.
+- Apply run-scoped module termination checks before generating queued requests.
+
 ## [0.6.0] — 2026-10-14
 
 ### Added

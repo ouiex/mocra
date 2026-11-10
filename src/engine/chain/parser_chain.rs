@@ -10,7 +10,7 @@ use crate::engine::events::{
 };
 use crate::engine::processors::event_processor::{EventAwareTypedChain, EventProcessorTrait};
 use crate::engine::task::TaskManager;
-use crate::errors::{DataMiddlewareError, Error, Result};
+use crate::errors::{DataMiddlewareError, Error, ErrorKind, ModuleError, ParserError, Result};
 use async_trait::async_trait;
 
 use crate::cacheable::{CacheAble, CacheService};
@@ -260,6 +260,37 @@ pub struct ResponseParserProcessor {
 }
 
 impl ResponseParserProcessor {
+    async fn parse_termination(
+        &self,
+        task_id: &str,
+        module_id: &str,
+        parse_error: &Error,
+    ) -> Result<Option<Error>> {
+        if let ErrorDecision::Terminate(reason) = self
+            .state
+            .status_tracker
+            .should_task_continue(task_id)
+            .await?
+        {
+            return Ok(Some(
+                ModuleError::TaskMaxError(format!("{reason}; last error: {parse_error}").into())
+                    .into(),
+            ));
+        }
+        if let ErrorDecision::Terminate(reason) = self
+            .state
+            .status_tracker
+            .should_module_continue(module_id)
+            .await?
+        {
+            return Ok(Some(
+                ModuleError::ModuleMaxError(format!("{reason}; last error: {parse_error}").into())
+                    .into(),
+            ));
+        }
+        Ok(None)
+    }
+
     async fn emit_semantic_event(&self, event_type: EventType, payload: serde_json::Value) {
         if let Some(event_bus) = &self.event_bus {
             let _ = event_bus
@@ -378,12 +409,48 @@ impl ProcessorTrait<(Response, Arc<Module>, Arc<ModuleConfig>, Option<LoginInfo>
                     has_error
                 );
 
-                // Record parser success metrics/state.
-                self.state
-                    .status_tracker
-                    .record_parse_success(&request_id)
-                    .await
-                    .ok();
+                if let Some(error_task) = &d.error_task {
+                    // DAG node errors are returned as output, so record them here, at the
+                    // same stage as errors returned directly by module.parser().
+                    let parse_error: Error =
+                        ParserError::ParseError(error_task.error_msg.clone().into()).into();
+                    if let Err(err) = self
+                        .state
+                        .status_tracker
+                        .record_parse_error(&task_id, &module_id, &request_id, &parse_error)
+                        .await
+                    {
+                        return ProcessorResult::FatalFailure(Error::with_message(
+                            ErrorKind::CacheService,
+                            format!(
+                                "failed to record parse error for request {request_id}: {parse_error}"
+                            ),
+                            Some(err),
+                        ));
+                    }
+                    match self
+                        .parse_termination(&task_id, &module_id, &parse_error)
+                        .await
+                    {
+                        Ok(Some(err)) => return ProcessorResult::FatalFailure(err),
+                        Ok(None) => {}
+                        Err(err) => {
+                            return ProcessorResult::FatalFailure(Error::with_message(
+                                ErrorKind::CacheService,
+                                format!(
+                                    "failed to check parse error thresholds for request {request_id}: {parse_error}"
+                                ),
+                                Some(err),
+                            ));
+                        }
+                    }
+                } else {
+                    self.state
+                        .status_tracker
+                        .record_parse_success(&request_id)
+                        .await
+                        .ok();
+                }
 
                 d
             }
@@ -394,13 +461,36 @@ impl ProcessorTrait<(Response, Arc<Module>, Arc<ModuleConfig>, Option<LoginInfo>
                 );
 
                 // Record parser error and retrieve threshold decision.
-                match self
+                let decision = match self
                     .state
                     .status_tracker
                     .record_parse_error(&task_id, &module_id, &request_id, &e)
                     .await
                 {
-                    Ok(ErrorDecision::Continue) | Ok(ErrorDecision::RetryAfter(_)) => {
+                    Ok(decision) => decision,
+                    Err(err) => {
+                        return ProcessorResult::FatalFailure(Error::with_message(
+                            ErrorKind::CacheService,
+                            format!("failed to record parse error for request {request_id}: {e}"),
+                            Some(err),
+                        ));
+                    }
+                };
+                match self.parse_termination(&task_id, &module_id, &e).await {
+                    Ok(Some(err)) => return ProcessorResult::FatalFailure(err),
+                    Ok(None) => {}
+                    Err(err) => {
+                        return ProcessorResult::FatalFailure(Error::with_message(
+                            ErrorKind::CacheService,
+                            format!(
+                                "failed to check parse error thresholds for request {request_id}: {e}"
+                            ),
+                            Some(err),
+                        ));
+                    }
+                }
+                match decision {
+                    ErrorDecision::Continue | ErrorDecision::RetryAfter(_) => {
                         debug!(
                             "[ResponseParserProcessor] will retry parsing: request_id={}",
                             request_id
@@ -411,7 +501,7 @@ impl ProcessorTrait<(Response, Arc<Module>, Arc<ModuleConfig>, Option<LoginInfo>
                                 .unwrap_or(RetryPolicy::default().with_reason(e.to_string())),
                         );
                     }
-                    Ok(ErrorDecision::Skip) => {
+                    ErrorDecision::Skip => {
                         warn!(
                             "[ResponseParserProcessor] skip parse after max retries: request_id={}",
                             request_id
@@ -419,13 +509,14 @@ impl ProcessorTrait<(Response, Arc<Module>, Arc<ModuleConfig>, Option<LoginInfo>
                         // Skip this parse attempt and return empty output.
                         return ProcessorResult::Success(vec![]);
                     }
-                    Ok(ErrorDecision::Terminate(reason)) => {
+                    ErrorDecision::Terminate(reason) => {
                         error!("[ResponseParserProcessor] terminate: {}", reason);
-                        return ProcessorResult::FatalFailure(e);
-                    }
-                    Err(err) => {
-                        error!("[ResponseParserProcessor] error tracker failed: {}", err);
-                        return ProcessorResult::FatalFailure(e);
+                        return ProcessorResult::FatalFailure(
+                            ModuleError::ModuleMaxError(
+                                format!("{reason}; last error: {e}").into(),
+                            )
+                            .into(),
+                        );
                     }
                 }
             }
@@ -651,8 +742,7 @@ impl ProcessorTrait<(Response, Arc<Module>, Arc<ModuleConfig>, Option<LoginInfo>
                 .await;
             }
 
-            // Legacy `record_response_error` is no longer used.
-            // Errors are already tracked via `error_tracker`.
+            // Error accounting is performed above, before the event is queued.
         }
 
         data.data.iter_mut().for_each(|x| {
@@ -708,6 +798,23 @@ impl ProcessorTrait<(Response, Arc<Module>, Arc<ModuleConfig>, Option<LoginInfo>
             input.0.module_id(),
             error
         );
+
+        // A reached threshold or unavailable tracker must not enqueue another retry.
+        let threshold_reached = error.inner.source.as_ref().is_some_and(|source| {
+            matches!(
+                source.downcast_ref::<ModuleError>(),
+                Some(ModuleError::TaskMaxError(_) | ModuleError::ModuleMaxError(_))
+            )
+        });
+        if threshold_reached || matches!(error.kind(), ErrorKind::CacheService) {
+            if self.state.config.read().await.download_config.enable_locker {
+                self.state
+                    .status_tracker
+                    .release_module_locker(&input.0.module_runtime_id())
+                    .await;
+            }
+            return ProcessorResult::FatalFailure(error);
+        }
 
         // Error has already been tracked in `process()` via `error_tracker`.
         // Here we only need to build and enqueue `ErrorTaskModel`.
@@ -1128,4 +1235,446 @@ pub async fn create_parser_chain(
             64,
             ErrorStrategy::Skip,
         )
+}
+
+#[cfg(test)]
+mod parse_error_tests {
+    use super::*;
+    use crate::common::config::ConfigProvider;
+    use crate::common::interface::{ModuleNodeTrait, ModuleTrait, SyncBoxStream, ToSyncBoxStream};
+    use crate::common::model::config::Config;
+    use crate::common::model::message::TaskOutputEvent;
+    use crate::common::model::{Request, meta::MetaData};
+    use crate::common::state::State;
+    use crate::engine::chain::task_model_chain::{
+        ChainDecision, StatusTrackerThresholdDecisionService, ThresholdDecisionService,
+        create_unified_task_ingress_chain,
+    };
+    use crate::errors::ParserError;
+    use serde_json::Map;
+    use tokio::sync::watch;
+    use uuid::Uuid;
+
+    struct StaticConfig(Config);
+
+    #[async_trait]
+    impl ConfigProvider for StaticConfig {
+        async fn load_config(&self) -> std::result::Result<Config, String> {
+            Ok(self.0.clone())
+        }
+
+        async fn watch(&self) -> std::result::Result<watch::Receiver<Config>, String> {
+            Ok(watch::channel(self.0.clone()).1)
+        }
+    }
+
+    struct FailingModule {
+        fail_post: bool,
+    }
+
+    #[async_trait]
+    impl ModuleTrait for FailingModule {
+        fn name(&self) -> String {
+            "failing".into()
+        }
+
+        fn version(&self) -> i32 {
+            1
+        }
+
+        fn should_login(&self) -> bool {
+            false
+        }
+
+        fn default_arc() -> Arc<dyn ModuleTrait> {
+            Arc::new(Self { fail_post: false })
+        }
+
+        async fn add_step(&self) -> Vec<Arc<dyn ModuleNodeTrait>> {
+            vec![Arc::new(FailingNode)]
+        }
+
+        async fn post_process(&self, _config: Option<Arc<ModuleConfig>>) -> Result<()> {
+            if self.fail_post {
+                return Err(ParserError::ParseError("post-processing failed".into()).into());
+            }
+            Ok(())
+        }
+    }
+
+    struct FailingNode;
+
+    #[async_trait]
+    impl ModuleNodeTrait for FailingNode {
+        async fn generate(
+            &self,
+            _config: Arc<ModuleConfig>,
+            _params: Map<String, serde_json::Value>,
+            _login_info: Option<LoginInfo>,
+        ) -> Result<SyncBoxStream<'static, Request>> {
+            Ok(vec![Request::new("https://example.test/category", "GET")].to_stream())
+        }
+
+        async fn parser(
+            &self,
+            response: Response,
+            _config: Option<Arc<ModuleConfig>>,
+        ) -> Result<TaskOutputEvent> {
+            #[derive(serde::Deserialize)]
+            struct CategoryResponse {
+                #[serde(rename = "Data")]
+                _data: serde_json::Value,
+            }
+
+            let _: CategoryResponse = response.json()?;
+            Ok(TaskOutputEvent::default())
+        }
+
+        fn stable_node_key(&self) -> &'static str {
+            "category"
+        }
+    }
+
+    fn response(request: Request) -> Response {
+        Response {
+            id: request.id,
+            platform: request.platform,
+            account: request.account,
+            module: request.module,
+            status_code: 200,
+            cookies: Default::default(),
+            content: b"{}".to_vec(),
+            storage_path: None,
+            headers: vec![],
+            task_retry_times: 0,
+            metadata: MetaData::default(),
+            download_middleware: vec![],
+            data_middleware: vec![],
+            task_finished: false,
+            context: request.context,
+            run_id: request.run_id,
+            prefix_request: request.prefix_request,
+            request_hash: None,
+            priority: request.priority,
+        }
+    }
+
+    fn config(task_limit: usize, module_limit: usize) -> Config {
+        toml::from_str(&format!(
+            r#"
+            name = "parse_error_test"
+            [db]
+            database_schema = "public"
+            [download_config]
+            downloader_expire = 3600
+            timeout = 5
+            rate_limit = 0.0
+            enable_session = false
+            enable_locker = false
+            enable_rate_limit = false
+            cache_ttl = 60
+            wss_timeout = 5
+            [cache]
+            ttl = 60
+            [crawler]
+            request_max_retries = 3
+            task_max_errors = {task_limit}
+            module_max_errors = {module_limit}
+            module_locker_ttl = 5
+            [channel_config]
+            minid_time = 0
+            capacity = 10
+            "#
+        ))
+        .unwrap()
+    }
+
+    async fn parse_errors_stop_at_threshold(prefix: Uuid, task_limit: usize, module_limit: usize) {
+        let state =
+            State::try_new_with_provider(Box::new(StaticConfig(config(task_limit, module_limit))))
+                .await
+                .unwrap();
+        let pipeline = state.pipeline_ctx();
+        let manager = Arc::new(TaskManager::new(
+            &state.db,
+            state.cache_service.clone(),
+            state.cookie_service.clone(),
+            state.config.clone(),
+        ));
+        manager
+            .add_module(Arc::new(FailingModule { fail_post: false }))
+            .await;
+        let queue = Arc::new(QueueManager::new(None, 10));
+        let parser = ResponseParserProcessor {
+            queue_manager: queue.clone(),
+            state: pipeline.clone(),
+            cache_service: state.cache_service.clone(),
+            event_bus: None,
+        };
+        let decision = StatusTrackerThresholdDecisionService::new(pipeline.clone());
+        let ingress =
+            create_unified_task_ingress_chain(manager.clone(), queue.clone(), None, pipeline).await;
+        let run_id = Uuid::now_v7();
+        let task = manager
+            .load_with_model(&TaskEvent {
+                account: "account".into(),
+                platform: "platform".into(),
+                module: Some(vec!["failing".into()]),
+                priority: Default::default(),
+                run_id,
+            })
+            .await
+            .unwrap();
+        let mut module = task.modules.into_iter().next().unwrap();
+        module.prefix_request = prefix;
+        let mut request = module
+            .generate(Map::new(), None)
+            .await
+            .unwrap()
+            .next()
+            .await
+            .unwrap();
+        let limit = task_limit.min(module_limit);
+
+        for attempt in 1..=limit {
+            let resp = response(request);
+            let task_key = format!("task:{}:total:total_errors", resp.task_runtime_id());
+            let module_key = format!("module:{}:parse:total_errors", resp.module_runtime_id());
+            let request_key = format!("request:{}:parse:total_errors", resp.id);
+            let input = (resp, Arc::new(module.clone()), module.config.clone(), None);
+            let result = parser
+                .process(input.clone(), ProcessorContext::default())
+                .await;
+            for (key, expected) in [
+                (&task_key, attempt),
+                (&module_key, attempt),
+                (&request_key, 1),
+            ] {
+                let count = state.cache_service.get(key).await.unwrap().unwrap();
+                assert_eq!(
+                    String::from_utf8(count).unwrap(),
+                    expected.to_string(),
+                    "{key}"
+                );
+            }
+            if attempt == limit {
+                match result {
+                    ProcessorResult::FatalFailure(error) => {
+                        let message = error.to_string();
+                        assert!(message.contains("errors"), "{message}");
+                        assert!(message.contains("missing field `Data`"), "{message}");
+                        assert!(matches!(
+                            parser
+                                .handle_error(&input, error, &ProcessorContext::default())
+                                .await,
+                            ProcessorResult::FatalFailure(_)
+                        ));
+                    }
+                    _ => panic!("error threshold should terminate the task"),
+                }
+                assert!(
+                    queue
+                        .get_error_pop_channel()
+                        .lock()
+                        .await
+                        .try_recv()
+                        .is_err()
+                );
+                assert!(
+                    queue
+                        .get_request_pop_channel()
+                        .lock()
+                        .await
+                        .try_recv()
+                        .is_err()
+                );
+                if module_limit < task_limit {
+                    let task_event = TaskEvent {
+                        account: "account".into(),
+                        platform: "platform".into(),
+                        module: Some(vec!["failing".into()]),
+                        priority: Default::default(),
+                        run_id,
+                    };
+                    let result = ingress
+                        .execute(task_event.clone().into(), ProcessorContext::default())
+                        .await;
+                    if let ProcessorResult::Success(stream) = result {
+                        stream.collect::<Vec<_>>().await;
+                    } else {
+                        panic!("task should skip the terminated module");
+                    }
+                    assert!(
+                        queue
+                            .get_request_pop_channel()
+                            .lock()
+                            .await
+                            .try_recv()
+                            .is_err()
+                    );
+
+                    let next_run = TaskEvent {
+                        run_id: Uuid::now_v7(),
+                        ..task_event
+                    };
+                    let result = ingress
+                        .execute(next_run.into(), ProcessorContext::default())
+                        .await;
+                    if let ProcessorResult::Success(stream) = result {
+                        stream.collect::<Vec<_>>().await;
+                    } else {
+                        panic!("a new run should remain eligible to generate requests");
+                    }
+                    assert!(
+                        queue
+                            .get_request_pop_channel()
+                            .lock()
+                            .await
+                            .try_recv()
+                            .is_ok()
+                    );
+                }
+                return;
+            }
+            assert!(matches!(result, ProcessorResult::Success(_)));
+            let event = queue
+                .get_error_pop_channel()
+                .lock()
+                .await
+                .try_recv()
+                .unwrap()
+                .inner;
+            assert!(event.error_msg.contains("missing field `Data`"));
+            assert_eq!(event.prefix_request, prefix);
+            for _ in 0..2 {
+                let result = decision.error_task_decide(&event).await;
+                assert!(matches!(result, ChainDecision::Continue));
+            }
+            for (key, expected) in [
+                (&task_key, attempt),
+                (&module_key, attempt),
+                (&request_key, 1),
+            ] {
+                let count = state.cache_service.get(key).await.unwrap().unwrap();
+                assert_eq!(
+                    String::from_utf8(count).unwrap(),
+                    expected.to_string(),
+                    "{key}"
+                );
+            }
+            let result = ingress
+                .execute(event.into(), ProcessorContext::default())
+                .await;
+            match result {
+                ProcessorResult::Success(stream) => {
+                    stream.collect::<Vec<_>>().await;
+                }
+                _ => panic!("node should be retried before reaching the threshold"),
+            }
+            request = queue
+                .get_request_pop_channel()
+                .lock()
+                .await
+                .try_recv()
+                .unwrap()
+                .inner;
+            assert_eq!(request.context.node_id.as_deref(), Some("category"));
+            assert_eq!(request.prefix_request, prefix);
+        }
+    }
+
+    #[tokio::test]
+    async fn dag_parse_errors_count_once_and_stop_at_module_threshold() {
+        for prefix in [Uuid::nil(), Uuid::now_v7()] {
+            parse_errors_stop_at_threshold(prefix, 10, 3).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn dag_parse_errors_stop_at_task_threshold() {
+        parse_errors_stop_at_threshold(Uuid::nil(), 2, 10).await;
+    }
+
+    #[tokio::test]
+    async fn already_recorded_direct_parse_error_is_not_counted_again() {
+        for prefix in [Uuid::nil(), Uuid::now_v7()] {
+            let state = State::try_new_with_provider(Box::new(StaticConfig(config(10, 10))))
+                .await
+                .unwrap();
+            let manager = TaskManager::new(
+                &state.db,
+                state.cache_service.clone(),
+                state.cookie_service.clone(),
+                state.config.clone(),
+            );
+            manager
+                .add_module(Arc::new(FailingModule { fail_post: true }))
+                .await;
+            let task = manager
+                .load_with_model(&TaskEvent {
+                    account: "account".into(),
+                    platform: "platform".into(),
+                    module: Some(vec!["failing".into()]),
+                    priority: Default::default(),
+                    run_id: Uuid::now_v7(),
+                })
+                .await
+                .unwrap();
+            let mut module = task.modules.into_iter().next().unwrap();
+            module.prefix_request = prefix;
+            let request = module
+                .generate(Map::new(), None)
+                .await
+                .unwrap()
+                .next()
+                .await
+                .unwrap();
+            let resp = response(request);
+            let task_key = format!("task:{}:total:total_errors", resp.task_runtime_id());
+            let module_key = format!("module:{}:parse:total_errors", resp.module_runtime_id());
+            let queue = Arc::new(QueueManager::new(None, 10));
+            let pipeline = state.pipeline_ctx();
+            let parser = ResponseParserProcessor {
+                queue_manager: queue.clone(),
+                state: pipeline.clone(),
+                cache_service: state.cache_service.clone(),
+                event_bus: None,
+            };
+            let input = (resp, Arc::new(module.clone()), module.config.clone(), None);
+            assert!(matches!(
+                parser
+                    .process(input.clone(), ProcessorContext::default())
+                    .await,
+                ProcessorResult::RetryableFailure(_)
+            ));
+            let error: Error = ParserError::ParseError("post-processing failed".into()).into();
+            assert!(matches!(
+                parser
+                    .handle_error(&input, error, &ProcessorContext::default())
+                    .await,
+                ProcessorResult::FatalFailure(_)
+            ));
+            let event = queue
+                .get_error_pop_channel()
+                .lock()
+                .await
+                .try_recv()
+                .unwrap()
+                .inner;
+            let decision = StatusTrackerThresholdDecisionService::new(pipeline);
+            for _ in 0..2 {
+                assert!(matches!(
+                    decision.error_task_decide(&event).await,
+                    ChainDecision::Continue
+                ));
+            }
+            for key in [&task_key, &module_key] {
+                assert_eq!(
+                    state.cache_service.get(key).await.unwrap().unwrap(),
+                    b"1",
+                    "{key}"
+                );
+            }
+        }
+    }
 }

@@ -105,9 +105,6 @@ impl ThresholdDecisionService for StatusTrackerThresholdDecisionService {
             input.run_id,
         );
 
-        let parse_error: Error = ModuleError::ModuleNotFound(input.error_msg.clone().into()).into();
-        let mut retry_after: Option<std::time::Duration> = None;
-
         if let Some(modules) = &input.account_task.module {
             for module_name in modules {
                 let module_id = chain_key::module_runtime_id(
@@ -117,31 +114,6 @@ impl ThresholdDecisionService for StatusTrackerThresholdDecisionService {
                 );
                 // Run-scoped module ID for StatusTracker error isolation across runs
                 let module_id_scoped = format!("{}-{}", module_id, input.run_id);
-
-                if input.prefix_request != Uuid::nil() {
-                    match self
-                        .state
-                        .status_tracker
-                        .record_parse_error(
-                            &task_id,
-                            &module_id_scoped,
-                            &input.prefix_request.to_string(),
-                            &parse_error,
-                        )
-                        .await
-                    {
-                        Ok(ErrorDecision::RetryAfter(delay)) => {
-                            retry_after = Some(delay);
-                        }
-                        Ok(_) => {}
-                        Err(err) => {
-                            warn!(
-                                "[ThresholdDecisionService] record_parse_error failed: task_id={} module_id={} error={}",
-                                task_id, module_id_scoped, err
-                            );
-                        }
-                    }
-                }
 
                 match self
                     .state
@@ -171,12 +143,7 @@ impl ThresholdDecisionService for StatusTrackerThresholdDecisionService {
                 reason,
                 action_applied: false,
             },
-            _ => retry_after
-                .map(|delay| ChainDecision::RetryAfter {
-                    delay,
-                    action_applied: false,
-                })
-                .unwrap_or(ChainDecision::Continue),
+            _ => ChainDecision::Continue,
         }
     }
 }
@@ -725,6 +692,7 @@ impl ProcessorTrait<TaskErrorEvent, Task> for TaskModelProcessor {
                 reason,
                 action_applied,
             } => {
+                let reason = format!("{}; last error: {}", reason, input.error_msg);
                 counter!("mocra_error_task_threshold_decision_total", "decision" => "terminate_module").increment(1);
                 let module_id = input
                     .context
@@ -766,6 +734,7 @@ impl ProcessorTrait<TaskErrorEvent, Task> for TaskModelProcessor {
                 reason,
                 action_applied,
             } => {
+                let reason = format!("{}; last error: {}", reason, input.error_msg);
                 counter!("mocra_error_task_threshold_decision_total", "decision" => "terminate_task").increment(1);
                 if !action_applied {
                     self.persist_terminate_mark(&input, None, &reason).await;
@@ -884,10 +853,11 @@ impl ProcessorTrait<Task, Vec<Module>> for TaskModuleProcessor {
         let default_locker_ttl = self.state.config.read().await.crawler.module_locker_ttl;
         for mut module in input.modules {
             // Check module-level threshold before generating requests.
+            let module_id_scoped = format!("{}-{}", module.id(), module.run_id);
             match self
                 .state
                 .status_tracker
-                .should_module_continue(&module.id())
+                .should_module_continue(&module_id_scoped)
                 .await
             {
                 Ok(ErrorDecision::Continue) => {
