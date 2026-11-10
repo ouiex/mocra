@@ -335,16 +335,6 @@ impl ProcessorTrait<TaskEvent, Task> for TaskModelProcessor {
                     "[TaskModelProcessor<TaskModel>] task terminated (pre-check): task_id={} reason={}",
                     task_id, reason
                 );
-                if let Err(e) = self
-                    .queue_manager
-                    .send_to_dlq("task", &input, &reason)
-                    .await
-                {
-                    error!(
-                        "[TaskModelProcessor<TaskModel>] failed to send to DLQ: {}",
-                        e
-                    );
-                }
                 return ProcessorResult::FatalFailure(
                     ModuleError::TaskMaxError(reason.into()).into(),
                 );
@@ -432,6 +422,9 @@ impl ProcessorTrait<TaskEvent, Task> for TaskModelProcessor {
         error: Error,
         _context: &ProcessorContext,
     ) -> ProcessorResult<Task> {
+        if error.is_threshold_termination() {
+            return ProcessorResult::FatalFailure(error);
+        }
         let sender = self.queue_manager.get_error_push_channel();
         let error_msg = TaskErrorEvent {
             id: Default::default(),
@@ -566,6 +559,9 @@ impl ProcessorTrait<TaskParserEvent, Task> for TaskModelProcessor {
         error: Error,
         _context: &ProcessorContext,
     ) -> ProcessorResult<Task> {
+        if error.is_threshold_termination() {
+            return ProcessorResult::FatalFailure(error);
+        }
         let sender = self.queue_manager.get_error_push_channel();
         let error_msg = TaskErrorEvent {
             id: Default::default(),
@@ -745,16 +741,6 @@ impl ProcessorTrait<TaskErrorEvent, Task> for TaskModelProcessor {
                     "[TaskModelProcessor<ErrorTaskModel>] task terminated (pre-check): task_id={} reason={}",
                     task_id, reason
                 );
-                if let Err(e) = self
-                    .queue_manager
-                    .send_to_dlq("error_task", &input, &reason)
-                    .await
-                {
-                    error!(
-                        "[TaskModelProcessor<ErrorTaskModel>] failed to send to DLQ: {}",
-                        e
-                    );
-                }
                 return ProcessorResult::FatalFailure(
                     ModuleError::TaskMaxError(reason.into()).into(),
                 );

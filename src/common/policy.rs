@@ -1,4 +1,4 @@
-use crate::errors::{Error, ErrorKind, ModuleError};
+use crate::errors::{Error, ErrorKind};
 use serde::{Deserialize, Serialize};
 
 /// Retry backoff strategy used by a resolved policy.
@@ -131,12 +131,7 @@ impl PolicyResolver {
         err: &Error,
     ) -> Decision {
         let mut decision = self.resolve_with_kind(domain, event_type, phase, err.kind().clone());
-        if err.inner.source.as_ref().is_some_and(|source| {
-            matches!(
-                source.downcast_ref::<ModuleError>(),
-                Some(ModuleError::TaskMaxError(_) | ModuleError::ModuleMaxError(_))
-            )
-        }) {
+        if err.is_threshold_termination() {
             // Error thresholds are terminal even when a generic policy allows retries.
             decision.policy.retryable = false;
         }

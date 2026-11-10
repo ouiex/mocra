@@ -97,6 +97,15 @@ impl Error {
         &self.inner.kind
     }
 
+    pub(crate) fn is_threshold_termination(&self) -> bool {
+        self.inner.source.as_ref().is_some_and(|source| {
+            matches!(
+                source.downcast_ref::<ModuleError>(),
+                Some(ModuleError::TaskMaxError(_) | ModuleError::ModuleMaxError(_))
+            )
+        })
+    }
+
     pub fn is_request(&self) -> bool {
         matches!(self.inner.kind, ErrorKind::Request)
     }

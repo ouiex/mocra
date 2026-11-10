@@ -800,13 +800,7 @@ impl ProcessorTrait<(Response, Arc<Module>, Arc<ModuleConfig>, Option<LoginInfo>
         );
 
         // A reached threshold or unavailable tracker must not enqueue another retry.
-        let threshold_reached = error.inner.source.as_ref().is_some_and(|source| {
-            matches!(
-                source.downcast_ref::<ModuleError>(),
-                Some(ModuleError::TaskMaxError(_) | ModuleError::ModuleMaxError(_))
-            )
-        });
-        if threshold_reached || matches!(error.kind(), ErrorKind::CacheService) {
+        if error.is_threshold_termination() || matches!(error.kind(), ErrorKind::CacheService) {
             if self.state.config.read().await.download_config.enable_locker {
                 self.state
                     .status_tracker
@@ -1243,7 +1237,7 @@ mod parse_error_tests {
     use crate::common::config::ConfigProvider;
     use crate::common::interface::{ModuleNodeTrait, ModuleTrait, SyncBoxStream, ToSyncBoxStream};
     use crate::common::model::config::Config;
-    use crate::common::model::message::TaskOutputEvent;
+    use crate::common::model::message::{TaskOutputEvent, TaskParserEvent};
     use crate::common::model::{Request, meta::MetaData};
     use crate::common::state::State;
     use crate::engine::chain::task_model_chain::{
@@ -1543,6 +1537,41 @@ mod parse_error_tests {
                             .await
                             .try_recv()
                             .is_ok()
+                    );
+                } else if task_limit < module_limit {
+                    let task_event = TaskEvent {
+                        account: "account".into(),
+                        platform: "platform".into(),
+                        module: Some(vec!["failing".into()]),
+                        priority: Default::default(),
+                        run_id,
+                    };
+                    for queued in [task_event.into(), TaskParserEvent::from(&input.0).into()] {
+                        match ingress.execute(queued, ProcessorContext::default()).await {
+                            ProcessorResult::FatalFailure(error) => {
+                                assert!(error.to_string().contains("Task "), "{error}");
+                                assert!(
+                                    !crate::common::policy::PolicyResolver::new(None)
+                                        .resolve_with_error(
+                                            "engine",
+                                            Some("task_model"),
+                                            Some("failed"),
+                                            &error
+                                        )
+                                        .policy
+                                        .retryable
+                                );
+                            }
+                            _ => panic!("a terminated task should not be re-queued"),
+                        }
+                    }
+                    assert!(
+                        queue
+                            .get_error_pop_channel()
+                            .lock()
+                            .await
+                            .try_recv()
+                            .is_err()
                     );
                 }
                 return;
