@@ -1463,6 +1463,17 @@ mod parse_error_tests {
                         let message = error.to_string();
                         assert!(message.contains("errors"), "{message}");
                         assert!(message.contains("missing field `Data`"), "{message}");
+                        assert!(
+                            !crate::common::policy::PolicyResolver::new(None)
+                                .resolve_with_error(
+                                    "engine",
+                                    Some("parser"),
+                                    Some("failed"),
+                                    &error,
+                                )
+                                .policy
+                                .retryable
+                        );
                         assert!(matches!(
                             parser
                                 .handle_error(&input, error, &ProcessorContext::default())

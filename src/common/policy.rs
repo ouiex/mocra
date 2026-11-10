@@ -1,4 +1,4 @@
-use crate::errors::{Error, ErrorKind};
+use crate::errors::{Error, ErrorKind, ModuleError};
 use serde::{Deserialize, Serialize};
 
 /// Retry backoff strategy used by a resolved policy.
@@ -130,7 +130,17 @@ impl PolicyResolver {
         phase: Option<&str>,
         err: &Error,
     ) -> Decision {
-        self.resolve_with_kind(domain, event_type, phase, err.kind().clone())
+        let mut decision = self.resolve_with_kind(domain, event_type, phase, err.kind().clone());
+        if err.inner.source.as_ref().is_some_and(|source| {
+            matches!(
+                source.downcast_ref::<ModuleError>(),
+                Some(ModuleError::TaskMaxError(_) | ModuleError::ModuleMaxError(_))
+            )
+        }) {
+            // Error thresholds are terminal even when a generic policy allows retries.
+            decision.policy.retryable = false;
+        }
+        decision
     }
 
     /// Resolves a policy from a known [`ErrorKind`].
@@ -346,6 +356,59 @@ mod tests {
             resolver.resolve_with_kind("engine", Some("parser"), Some("failed"), ErrorKind::Parser);
         assert!(!decision.policy.retryable);
         assert_eq!(decision.policy.dlq, DlqPolicy::Always);
+    }
+
+    #[test]
+    fn reached_error_thresholds_remain_terminal() {
+        use crate::errors::ModuleError;
+
+        let config = PolicyConfig {
+            overrides: vec![PolicyOverride {
+                domain: Some("engine".into()),
+                event_type: Some("parser".into()),
+                phase: Some("failed".into()),
+                kind: ErrorKind::Module,
+                retryable: Some(true),
+                backoff: None,
+                dlq: Some(DlqPolicy::Never),
+                alert: None,
+                max_retries: None,
+                backoff_ms: None,
+            }],
+        };
+        for resolver in [
+            PolicyResolver::new(None),
+            PolicyResolver::new(Some(&config)),
+        ] {
+            for error in [
+                ModuleError::TaskMaxError("task error limit reached".into()),
+                ModuleError::ModuleMaxError("module error limit reached".into()),
+            ] {
+                let decision = resolver.resolve_with_error(
+                    "engine",
+                    Some("parser"),
+                    Some("failed"),
+                    &error.into(),
+                );
+                assert!(!decision.policy.retryable);
+            }
+        }
+
+        let error: Error = ModuleError::ModuleNotFound("missing module".into()).into();
+        assert!(
+            PolicyResolver::new(Some(&config))
+                .resolve_with_error("engine", Some("parser"), Some("failed"), &error)
+                .policy
+                .retryable
+        );
+        let error: Error = ModuleError::ModuleMaxError("module error limit reached".into()).into();
+        assert_eq!(
+            PolicyResolver::new(Some(&config))
+                .resolve_with_error("engine", Some("parser"), Some("failed"), &error)
+                .policy
+                .dlq,
+            DlqPolicy::Never
+        );
     }
 
     #[test]

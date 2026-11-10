@@ -11,6 +11,8 @@ All notable changes to this project are documented here. The format is based on
 - Count DAG node parse failures once per attempt, including when the predecessor request ID is
   empty. Stop retries at task or module error thresholds and retain the underlying parse error.
 - Apply run-scoped module termination checks before generating queued requests.
+- Treat reached error thresholds as terminal even when generic retry policies are enabled;
+  configured dead-letter handling is preserved.
 
 ## [0.6.0] — 2026-10-14
 
